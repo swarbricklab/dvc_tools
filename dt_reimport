@@ -1,0 +1,63 @@
+#! /usr/bin/env python
+
+import os
+import shutil
+import yaml
+import click
+
+@click.command()
+@click.argument('dvc_file', type=click.Path(exists=True))
+def main(dvc_file):
+    """Re-imports data from a specified DVC file at the same rev_lock, with backups."""
+    
+    def parse_dvc_file(dvc_file):
+        with open(dvc_file, 'r') as file:
+            data = yaml.safe_load(file)
+        out_path = data['outs'][0]['path']
+        repo_path= data['deps'][0]['path']
+        url  = data['deps'][0]['repo']['url']
+        rev_lock = data['deps'][0]['repo']['rev_lock']
+        return out_path, repo_path, url, rev_lock
+
+    def backup_file(file_path):
+        backup_path = f"{file_path}_bk"
+        if os.path.isdir(file_path):
+            shutil.copytree(file_path, backup_path)
+        else:
+            shutil.copy2(file_path, backup_path)
+        return backup_path
+
+    def remove_gitignore_entry(path):
+        gitignore_path = '.gitignore'
+        with open(gitignore_path, 'r') as file:
+            lines = file.readlines()
+        with open(gitignore_path, 'w') as file:
+            for line in lines:
+                if line.strip('\n') != path:
+                    file.write(line)
+
+    def reimport_data(url, rev_lock, repo_path, out_path):
+        os.system(f"dvc import --rev {rev_lock} {url} {repo_path} -o {out_path}")
+
+    out_path, repo_path, url, rev_lock = parse_dvc_file(dvc_file)
+    
+    # Backup .dvc file and data
+    backup_dvc = backup_file(dvc_file)
+    if os.path.exists(out_path):
+        backup_data = backup_file(out_path)
+        click.echo(f"Backed up data to: {backup_data}")
+    else:
+        click.echo(f"No backup created for data_path '{out_path}' as it does not exist.")
+    
+
+    # Remove the entry in .gitignore
+    remove_gitignore_entry(out_path)
+    
+    # Re-import the data at the same rev_lock
+    reimport_data(url, rev_lock, repo_path, out_path)
+    
+    click.echo(f"Backed up .dvc file to: {backup_dvc}")
+
+if __name__ == "__main__":
+    main()
+

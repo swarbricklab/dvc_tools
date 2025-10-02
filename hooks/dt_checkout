@@ -1,0 +1,5 @@
+#! /bin/bash
+
+dt_index pull
+dvc git-hook post-checkout $@
+dt_index push

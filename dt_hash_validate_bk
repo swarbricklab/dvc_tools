@@ -1,0 +1,33 @@
+#!/bin/bash
+set -e
+
+# This script takes a hash as an argument and validates that the checksum of the corresponding file in the DVC cache matches the expected hash.
+# Usage: ./dt_hash_validate.sh <file_hash>
+# Example: ./dt_hash_validate.sh abcd1234
+
+file_hash="$1"
+if [ -z "$file_hash" ]; then
+    echo "Usage: $0 <file_hash>"
+    exit 1
+fi
+
+# Get the DVC cache directory
+dvc_cache_dir=$(dvc cache dir)
+
+# Construct the path to the file in the DVC cache
+file_path="$dvc_cache_dir/files/md5/${file_hash:0:2}/${file_hash:2}"
+
+# Check if the file exists
+if [ ! -f "$file_path" ]; then
+    echo "Error: File with hash '$file_hash' does not exist in DVC cache."
+    exit 1
+fi
+
+# Validate the file's checksum
+observed_hash=$(md5sum "$file_path" | awk '{ print $1 }')
+if [ "$observed_hash" != "$file_hash" ]; then
+    echo "Error: File with hash '$file_hash' has unexpected checksum."
+    exit 1
+fi
+
+echo "File with hash '$file_hash' is valid."

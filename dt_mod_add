@@ -1,0 +1,18 @@
+#! /bin/bash
+
+set -e
+
+dt_repo_check
+
+module=$1
+mod_name=${module##*/}
+mod_name=${mod_name%.git}
+
+mkdir -p modules
+git submodule add $module modules/$mod_name
+
+if [[ -f "modules/$mod_name/.dt_export" ]]; then
+    dt_export modules/$mod_name/.dt_export
+fi
+
+echo "Finished adding $mod_name module"

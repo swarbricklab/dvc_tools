@@ -1,0 +1,14 @@
+#! /bin/bash
+set -e
+# This script exits successfully if the specified .dvc file contains
+# a reference to the specified .dir file
+
+dvc_file=$1   # the .dvc file to check
+dir_file=$2   # the .dir file to check for
+
+if grep -q $dir_file $dvc_file; then
+    echo $dvc_file
+    exit 0
+else
+    exit 1
+fi
