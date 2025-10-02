@@ -1,0 +1,29 @@
+#! /bin/bash
+
+set -e
+
+# Get parameters -- all other parameters will be passed thru to git worktree below
+if [ "$1" == "-b" ]; then
+    new_branch="-b"
+else
+    new_branch=""
+fi
+shift
+branch=$1; shift
+path=$1; shift
+
+# Get current cache
+cache=$(dvc cache dir)
+
+# Create worktree
+git worktree add $new_branch $branch $path $@
+
+# Switch to worktree
+cd $path
+
+# Set up 
+dvc cache dir --local $cache
+git submodule update --init --recursive
+
+# Return to original directory
+cd -

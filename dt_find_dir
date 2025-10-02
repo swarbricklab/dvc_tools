@@ -1,0 +1,7 @@
+#! /bin/bash
+set -e
+
+path=$1
+md5=$2
+
+find $path -name "*.dir" -execdir dt_dir_lookup {} . $md5 \;

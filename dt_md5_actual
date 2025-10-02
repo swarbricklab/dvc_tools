@@ -1,0 +1,9 @@
+#! /bin/bash
+
+set -e
+
+# This script returns the md5 checksum of the given file
+
+file=$1 # Input file
+
+md5sum $file | awk '{print $1}'

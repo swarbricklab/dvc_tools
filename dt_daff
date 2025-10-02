@@ -1,0 +1,76 @@
+#!/usr/bin/env python
+"""
+dvc_daff [OPTIONS] <path/to/csv> -- [DAFF_OPTIONS]
+
+Compare two revisions of a DVC-tracked CSV using **daff**.
+
+┏━━━━━━━━━━━━━━━━━━━━━━━┓
+┃  Revision semantics   ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━┛
+• OLD defaults to  **HEAD**  (last commit on current branch).  
+• NEW defaults to  **workspace**  (your working tree, even if dirty).
+
+┏━━━━━━━━━━━━━━━━━━━━━━━┓
+┃  Passing daff flags   ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━┛
+Everything after the first “--” is forwarded verbatim to *daff*.  
+Example (Markdown side-by-side diff):
+
+    ./dvc_daff data/table.csv -- -s md
+
+Examples
+────────
+1. Compare HEAD vs workspace (default behaviour):
+   $ dvc_daff data/table.csv --
+
+2. Specify an older commit as OLD:
+   $ dvc_daff data/table.csv -o HEAD~3 --
+
+3. Compare two explicit commits and ask daff for a Markdown report:
+   $ dvc_daff data/table.csv -o v1.0 -n v2.0 -- -s md
+"""
+
+import subprocess
+import tempfile
+import pathlib
+import click
+import dvc.api
+import sys
+
+def _save(repo, rev, relpath, tmpdir):
+    """Stream one revision to a temp file and return its path."""
+    name = (rev or "workspace").replace("/", "_")
+    out  = pathlib.Path(tmpdir) / f"{name}.csv"
+    with dvc.api.open(relpath, repo=repo, rev=rev, mode="r") as src, open(out, "w") as dst:
+        dst.write(src.read())
+    return str(out)
+
+@click.command(context_settings={"ignore_unknown_options": True,
+                                 "help_option_names": ["-h", "--help"]})
+@click.argument("csv_path", metavar="<path/to/csv>")
+@click.option("-o", "--old-rev", default="HEAD",
+              help="Git revision for *old* side (default: HEAD).")
+@click.option("-n", "--new-rev", default=None,
+              help="Git revision for *new* side (default: workspace).")
+@click.option("--repo", metavar="<repo>", default=".",
+              type=click.Path(exists=True, file_okay=False),
+              show_default=True, help="Path to the DVC-Git repository.")
+@click.argument("daff_args", nargs=-1, type=click.UNPROCESSED,
+                metavar="-- [DAFF_OPTIONS]")
+def cli(csv_path, old_rev, new_rev, repo, daff_args):
+    """Run daff diff OLD-vs-NEW for a DVC-tracked CSV."""
+    with tempfile.TemporaryDirectory() as tmp:
+        old_file = _save(repo, old_rev, csv_path, tmp)
+        new_file = _save(repo, new_rev, csv_path, tmp)
+        cmd = ["daff", "diff", *daff_args, old_file, new_file]
+        try:
+            subprocess.run(cmd, check=True)
+        except FileNotFoundError:
+            click.echo("Error: daff executable not found in PATH.", err=True)
+            sys.exit(127)
+        except subprocess.CalledProcessError as e:
+            sys.exit(e.returncode)
+
+if __name__ == "__main__":
+    cli()
+

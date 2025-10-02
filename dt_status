@@ -1,0 +1,17 @@
+#! /bin/bash
+
+# This tool reports the cache and remote directories for the current repo.
+
+yellow_start="\033[33m"
+yellow_end="\033[0m"
+
+if [ ! -d .dvc ]; then
+    echo "Not at the top of a DVC repo"
+    exit 1
+fi
+
+echo -e "${yellow_start}Cache: $yellow_end"
+dvc cache dir
+
+echo -e "${yellow_start}Remote(s): $yellow_end"
+dvc remote list

@@ -1,0 +1,10 @@
+#! /bin/bash
+
+# This script displays the content of a DVC-tracked directory tree, but without symlink targets
+# This layout is easier to read. Results are piped through less
+
+# Parameters
+
+# All parameters passed to this script are passed on to 'tree'
+
+tree $@ | sed 's/->.*//g' | less 

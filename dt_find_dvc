@@ -1,0 +1,6 @@
+#! /bin/bash
+set -e
+
+dir=$1
+
+find -type f -name "*.dvc" -exec dt_dir_match {} $dir \;

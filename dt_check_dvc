@@ -1,0 +1,9 @@
+#! /bin/bash
+
+# This script checks if DVC is available and fails otherwise
+
+# Check if DVC is available
+if [[ ! $(which dvc 2>/dev/null) ]]; then
+    echo "Error: DVC not found. Exiting"
+    exit 1
+fi
