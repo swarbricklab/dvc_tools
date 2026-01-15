@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dvc-tools"
+version = "0.1.0"
+description = "Convenient tools for working with DVC in HPC environments"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Swarbrick Lab"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Filesystems",
+]
+dependencies = [
+    "click>=8.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/swarbricklab/dvc_tools"
+Repository = "https://github.com/swarbricklab/dvc_tools"
+Documentation = "https://github.com/swarbricklab/dvc_tools/blob/main/README.md"
+Issues = "https://github.com/swarbricklab/dvc_tools/issues"
+
+[project.scripts]
+dt = "dt.cli:cli"
+
+[tool.setuptools]
+packages = ["dt"]
