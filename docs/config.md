@@ -2,6 +2,31 @@
 
 The `config` command is used to view and modify configuration settings that control the behavior of the `dt` tool. Configuration follows a hierarchical scope system similar to git and dvc, allowing for flexible management of settings across different levels.
 
+## Configuration Format
+
+Configuration files use **YAML** format for consistency with DVC (`dvc.yaml`) and Snakemake. Files are named `config.yaml` at each scope level.
+
+Example configuration file:
+
+```yaml
+# dt config.yaml
+org: "swarbricklab"
+platform: "nci"
+
+cache:
+  root: "/scratch/a56/dvc/cache"
+  permissions: "ug+rw"
+
+remote:
+  root: "/g/data/a56/dvc/analysis"
+  permissions: "ug+rw"
+
+ssh:
+  host: "gadi-dm.nci.org.au"
+```
+
+> **Note**: Always quote strings that could be misinterpreted by YAML (e.g., `"on"`, `"yes"`, `"1.10"`).
+
 ## Usage
 
 ```bash
@@ -29,12 +54,25 @@ dt config --unset --local <key>
 
 There are four levels of config, with scopes mirroring the levels used by git and dvc:
 
-- **local**: only affects the current instance of the current repo (stored in `.dt` directory within repo but ignored by git)
-- **project**: affects all clones of the current repo (stored in `.dt` directory within repo and tracked by git)
-- **user**: affects all clones of all repos used by the current user (stored outside repo in `~/.config/dt`)
-- **system**: affects all users in all repos (stored outside repo in central location determined by `XDG_CONFIG_DIRS`)
+| Scope | Location | Tracked by git | Use case |
+|-------|----------|----------------|----------|
+| **local** | `.dt/config.local.yaml` | No (gitignored) | Current workspace only |
+| **project** | `.dt/config.yaml` | Yes | All clones of this repo |
+| **user** | `~/.config/dt/config.yaml` | N/A | All repos for current user |
+| **system** | `$XDG_CONFIG_DIRS/dt/config.yaml` | N/A | All users (team defaults) |
 
 Configuration values are resolved in order of precedence: local > project > user > system.
+
+### System Configuration Location
+
+The system-level configuration is found by searching `XDG_CONFIG_DIRS` (colon-separated list of directories, defaulting to `/etc/xdg`). For shared team configuration on NCI:
+
+```bash
+# Add to your environment (e.g., module file or .bashrc)
+export XDG_CONFIG_DIRS="/g/data/a56/config/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
+```
+
+This allows the team config at `/g/data/a56/config/xdg/dt/config.yaml` to be found automatically.
 
 ## Examples
 
@@ -78,15 +116,23 @@ dt config cache.root
 
 ## Swarbrick Lab Defaults
 
-For the Swarbrick Lab on NCI, most users can fall back on sensible defaults specified at the "system" level:
+For the Swarbrick Lab on NCI, team defaults are provided at the system level via `/g/data/a56/config/xdg/dt/config.yaml`:
 
-```bash
-# System-level defaults (pre-configured)
-dt config --system org swarbricklab
-dt config --system cache.root /scratch/a56/dvc/cache
-dt config --system remote.root /g/data/a56/dvc/analysis
-dt config --system ssh.host gadi-dm.nci.org.au
-dt config --system platform nci
+```yaml
+# System-level defaults (pre-configured for Swarbrick Lab)
+org: "swarbricklab"
+platform: "nci"
+
+cache:
+  root: "/scratch/a56/dvc/cache"
+  permissions: "ug+rw"
+
+remote:
+  root: "/g/data/a56/dvc/analysis"
+  permissions: "ug+rw"
+
+ssh:
+  host: "gadi-dm.nci.org.au"
 ```
 
 These defaults can be overridden at user or project level as needed.
@@ -97,3 +143,4 @@ These defaults can be overridden at user or project level as needed.
 2. **Use project scope for repository-specific settings**: Custom cache locations, specific remote configurations
 3. **Use local scope sparingly**: Only for workspace-specific overrides that shouldn't be shared
 4. **Check effective configuration**: Run `dt config` regularly to see what settings are active
+5. **Quote ambiguous YAML values**: Strings like `"yes"`, `"no"`, `"on"`, `"off"`, or version numbers like `"1.10"` should be quoted
