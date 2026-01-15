@@ -18,7 +18,7 @@ dt clone [options] <repository_url> [path]
 - `--no-init`: Skip running `dt init` after cloning
 - `--no-submodules`: Skip cloning git submodules
 - `--cache-name <name>`: Override cache directory name (defaults to repository name)
-- `--remoe-name <name>`: Override remote directory name (defaults to repository name)
+- `--remote-name <name>`: Override remote directory name (defaults to repository name)
 - `--shallow`: Perform a shallow clone (only recent history)
 
 ## What it does
