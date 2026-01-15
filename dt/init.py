@@ -3,7 +3,6 @@
 Handles complete DVC project setup including git, DVC, cache, and remote configuration.
 """
 
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -11,6 +10,7 @@ from typing import Optional
 from . import config as cfg
 from . import cache as cache_mod
 from . import remote as remote_mod
+from . import utils
 
 
 class InitError(Exception):
@@ -28,27 +28,13 @@ def check_dependencies(require_dvc: bool = True, require_git: bool = True) -> No
     Raises:
         InitError: If required tools are not found
     """
-    if require_git and not shutil.which('git'):
-        raise InitError(
-            "git command not found.\n"
-            "Please ensure git is installed and in your PATH."
-        )
-    
-    if require_dvc and not shutil.which('dvc'):
-        raise InitError(
-            "dvc command not found.\n"
-            "Please ensure DVC is installed and in your PATH.\n"
-            "  pip install dvc"
-        )
-
-
-def get_project_name() -> str:
-    """Get the project name from the current directory.
-    
-    Returns:
-        Name of the current directory
-    """
-    return Path.cwd().name
+    try:
+        if require_git:
+            utils.check_git()
+        if require_dvc:
+            utils.check_dvc()
+    except utils.DependencyError as e:
+        raise InitError(str(e))
 
 
 def init_git(repo_path: Path, verbose: bool = True) -> bool:
@@ -213,7 +199,7 @@ def init_project(
     check_dependencies(require_dvc=not no_dvc, require_git=not no_git)
     
     repo_path = repo_path or Path.cwd()
-    project_name = name or get_project_name()
+    project_name = name or utils.get_project_name()
     
     result = {
         'name': project_name,

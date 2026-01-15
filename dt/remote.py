@@ -3,41 +3,17 @@
 Handles DVC remote setup with SSH and local access methods for HPC environments.
 """
 
-import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
 
 from . import config as cfg
+from . import utils
 
 
 class RemoteError(Exception):
     """Raised when remote operations fail."""
     pass
-
-
-def check_dvc() -> None:
-    """Check that DVC is available.
-    
-    Raises:
-        RemoteError: If DVC is not found
-    """
-    if not shutil.which('dvc'):
-        raise RemoteError(
-            "dvc command not found.\n"
-            "Please ensure DVC is installed and in your PATH.\n"
-            "  pip install dvc"
-        )
-
-
-def get_project_name() -> str:
-    """Get the project name from the current directory.
-    
-    Returns:
-        Name of the current directory
-    """
-    return Path.cwd().name
 
 
 def resolve_remote_path(
@@ -75,7 +51,7 @@ def resolve_remote_path(
         )
     
     # Get project name
-    project_name = name or get_project_name()
+    project_name = name or utils.get_project_name()
     
     return Path(root) / project_name
 
@@ -94,26 +70,10 @@ def init_remote_structure(remote_dir: Path, verbose: bool = True) -> None:
         print(f"Initializing remote structure at {remote_dir}")
     
     remote_dir.mkdir(parents=True, exist_ok=True)
+    utils.set_group_writable(remote_dir)
     
-    # Create files/md5 structure for DVC v3
-    files_md5 = remote_dir / "files" / "md5"
-    files_md5.mkdir(parents=True, exist_ok=True)
-    
-    # Set permissions on main directories
-    for d in [remote_dir, files_md5]:
-        try:
-            os.chmod(d, 0o2775)
-        except PermissionError:
-            pass
-    
-    # Create subdirectories 00-ff under files/md5 with proper permissions
-    for i in range(256):
-        subdir = files_md5 / f"{i:02x}"
-        subdir.mkdir(exist_ok=True)
-        try:
-            os.chmod(subdir, 0o2775)
-        except PermissionError:
-            pass
+    # Create files/md5 structure with 00-ff subdirectories
+    utils.create_md5_subdirs(remote_dir, verbose=verbose)
 
 
 def configure_dvc_remote(
@@ -197,7 +157,10 @@ def init_remote(
     Raises:
         RemoteError: If remote initialization fails
     """
-    check_dvc()
+    try:
+        utils.check_dvc()
+    except utils.DependencyError as e:
+        raise RemoteError(str(e))
     
     repo_path = repo_path or Path.cwd()
     remote_dir = resolve_remote_path(name, remote_root, remote_path)

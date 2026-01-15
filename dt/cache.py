@@ -3,41 +3,17 @@
 Handles external shared cache setup and configuration for HPC environments.
 """
 
-import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
 
 from . import config as cfg
+from . import utils
 
 
 class CacheError(Exception):
     """Raised when cache operations fail."""
     pass
-
-
-def check_dvc() -> None:
-    """Check that DVC is available.
-    
-    Raises:
-        CacheError: If DVC is not found
-    """
-    if not shutil.which('dvc'):
-        raise CacheError(
-            "dvc command not found.\n"
-            "Please ensure DVC is installed and in your PATH.\n"
-            "  pip install dvc"
-        )
-
-
-def get_project_name() -> str:
-    """Get the project name from the current directory.
-    
-    Returns:
-        Name of the current directory
-    """
-    return Path.cwd().name
 
 
 def resolve_cache_path(
@@ -75,7 +51,7 @@ def resolve_cache_path(
         )
     
     # Get project name
-    project_name = name or get_project_name()
+    project_name = name or utils.get_project_name()
     
     return Path(root) / project_name
 
@@ -94,30 +70,15 @@ def init_cache_structure(cache_dir: Path, verbose: bool = True) -> None:
         print(f"Initializing cache structure at {cache_dir}")
     
     cache_dir.mkdir(parents=True, exist_ok=True)
+    utils.set_group_writable(cache_dir)
     
     # Create runs directory for DVC run cache
     runs_dir = cache_dir / "runs"
     runs_dir.mkdir(exist_ok=True)
+    utils.set_group_writable(runs_dir)
     
-    # Create files/md5 structure for DVC v3
-    files_md5 = cache_dir / "files" / "md5"
-    files_md5.mkdir(parents=True, exist_ok=True)
-    
-    # Set permissions on main directories
-    for d in [cache_dir, runs_dir, files_md5]:
-        try:
-            os.chmod(d, 0o2775)
-        except PermissionError:
-            pass
-    
-    # Create subdirectories 00-ff under files/md5 with proper permissions
-    for i in range(256):
-        subdir = files_md5 / f"{i:02x}"
-        subdir.mkdir(exist_ok=True)
-        try:
-            os.chmod(subdir, 0o2775)
-        except PermissionError:
-            pass
+    # Create files/md5 structure with 00-ff subdirectories
+    utils.create_md5_subdirs(cache_dir, verbose=verbose)
 
 
 def configure_dvc_cache(repo_path: Path, cache_dir: Path, verbose: bool = True) -> None:
@@ -169,7 +130,10 @@ def init_cache(
     Raises:
         CacheError: If cache initialization fails
     """
-    check_dvc()
+    try:
+        utils.check_dvc()
+    except utils.DependencyError as e:
+        raise CacheError(str(e))
     
     repo_path = repo_path or Path.cwd()
     cache_dir = resolve_cache_path(name, cache_root, cache_path)
