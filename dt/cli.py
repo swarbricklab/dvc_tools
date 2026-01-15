@@ -108,7 +108,8 @@ def _count_scope_flags(local: bool, project: bool, user: bool, system: bool) -> 
 @click.option('--project', is_flag=True, help='List project configuration')
 @click.option('--user', is_flag=True, help='List user configuration')
 @click.option('--system', is_flag=True, help='List system configuration')
-def config_list(local, project, user, system):
+@click.option('--show-origin', is_flag=True, help='Show which scope each value comes from')
+def config_list(local, project, user, system, show_origin):
     """List configuration values."""
     if _count_scope_flags(local, project, user, system) > 1:
         raise click.UsageError("Only one scope flag can be specified.")
@@ -118,14 +119,25 @@ def config_list(local, project, user, system):
         config_values = cfg.list_config(scope)
         paths = cfg.get_config_paths()
         click.echo(f"# {scope}: {paths[scope]}")
+        if config_values:
+            for key, value in sorted(config_values.items()):
+                click.echo(f"{key}={value}")
+        else:
+            click.echo("No configuration in this scope.")
+    elif show_origin:
+        config_values = cfg.list_config_with_sources()
+        if config_values:
+            for key, value, scope in config_values:
+                click.echo(f"{scope}\t{key}={value}")
+        else:
+            click.echo("No configuration set.")
     else:
         config_values = cfg.list_config()
-    
-    if config_values:
-        for key, value in sorted(config_values.items()):
-            click.echo(f"{key}={value}")
-    elif any([local, project, user, system]):
-        click.echo("No configuration in this scope.")
+        if config_values:
+            for key, value in sorted(config_values.items()):
+                click.echo(f"{key}={value}")
+        else:
+            click.echo("No configuration set.")
 
 
 @config.command('get')
