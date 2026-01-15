@@ -13,7 +13,7 @@ my-project/
 │   ├── config            # DVC settings
 │   └── ...
 ├── .dt/                  # dt tool configuration (git-ignored)
-|    └── config            # Local dt settings
+|    └── config.local     # Local dt settings
 ├── .gitignore            # Updated with DVC patterns
 ── README.md             # Basic project README
 ```
