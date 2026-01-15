@@ -2,6 +2,8 @@
 
 import click
 
+from . import config as cfg
+
 
 @click.group()
 @click.version_option(package_name='dvc-tools')
@@ -64,14 +66,41 @@ def clone(repository_url, path, no_init, no_submodules, cache_name, remote_name,
     click.echo(f"  shallow: {shallow}")
 
 
-@cli.group()
-def config():
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def config(ctx):
     """View and modify configuration settings.
     
     Configuration follows a hierarchical scope system:
     local > project > user > system
+    
+    Run without arguments to list all effective configuration.
     """
-    pass
+    if ctx.invoked_subcommand is None:
+        # Default behavior: list all config with sources
+        config_values = cfg.list_config_with_sources()
+        if config_values:
+            for key, value, scope in config_values:
+                click.echo(f"{key}={value}  ({scope})")
+        else:
+            click.echo("No configuration set.")
+
+
+def _get_scope(local: bool, project: bool, user: bool, system: bool) -> str:
+    """Determine which scope to use from flags."""
+    if local:
+        return 'local'
+    elif project:
+        return 'project'
+    elif system:
+        return 'system'
+    else:
+        return 'user'  # default
+
+
+def _count_scope_flags(local: bool, project: bool, user: bool, system: bool) -> int:
+    """Count how many scope flags are set."""
+    return sum([local, project, user, system])
 
 
 @config.command('list')
@@ -81,19 +110,33 @@ def config():
 @click.option('--system', is_flag=True, help='List system configuration')
 def config_list(local, project, user, system):
     """List configuration values."""
-    click.echo("dt config list command - not yet implemented")
-    click.echo(f"  local: {local}")
-    click.echo(f"  project: {project}")
-    click.echo(f"  user: {user}")
-    click.echo(f"  system: {system}")
+    if _count_scope_flags(local, project, user, system) > 1:
+        raise click.UsageError("Only one scope flag can be specified.")
+    
+    if any([local, project, user, system]):
+        scope = _get_scope(local, project, user, system)
+        config_values = cfg.list_config(scope)
+        paths = cfg.get_config_paths()
+        click.echo(f"# {scope}: {paths[scope]}")
+    else:
+        config_values = cfg.list_config()
+    
+    if config_values:
+        for key, value in sorted(config_values.items()):
+            click.echo(f"{key}={value}")
+    elif any([local, project, user, system]):
+        click.echo("No configuration in this scope.")
 
 
 @config.command('get')
 @click.argument('key')
 def config_get(key):
     """Get a configuration value."""
-    click.echo("dt config get command - not yet implemented")
-    click.echo(f"  key: {key}")
+    value = cfg.get_value(key)
+    if value is not None:
+        click.echo(value)
+    else:
+        raise click.ClickException(f"Key '{key}' not found in configuration.")
 
 
 @config.command('set')
@@ -101,33 +144,58 @@ def config_get(key):
 @click.argument('value')
 @click.option('--local', is_flag=True, help='Set in local scope')
 @click.option('--project', is_flag=True, help='Set in project scope')
-@click.option('--user', is_flag=True, help='Set in user scope')
+@click.option('--user', is_flag=True, help='Set in user scope (default)')
 @click.option('--system', is_flag=True, help='Set in system scope')
 def config_set(key, value, local, project, user, system):
     """Set a configuration value."""
-    click.echo("dt config set command - not yet implemented")
-    click.echo(f"  key: {key}")
-    click.echo(f"  value: {value}")
-    click.echo(f"  local: {local}")
-    click.echo(f"  project: {project}")
-    click.echo(f"  user: {user}")
-    click.echo(f"  system: {system}")
+    if _count_scope_flags(local, project, user, system) > 1:
+        raise click.UsageError("Only one scope flag can be specified.")
+    
+    scope = _get_scope(local, project, user, system)
+    cfg.set_value(key, value, scope)
+    click.echo(f"Set {key}={value} in {scope} config.")
 
 
 @config.command('unset')
 @click.argument('key')
 @click.option('--local', is_flag=True, help='Unset in local scope')
 @click.option('--project', is_flag=True, help='Unset in project scope')
-@click.option('--user', is_flag=True, help='Unset in user scope')
+@click.option('--user', is_flag=True, help='Unset in user scope (default)')
 @click.option('--system', is_flag=True, help='Unset in system scope')
 def config_unset(key, local, project, user, system):
     """Unset a configuration value."""
-    click.echo("dt config unset command - not yet implemented")
-    click.echo(f"  key: {key}")
-    click.echo(f"  local: {local}")
-    click.echo(f"  project: {project}")
-    click.echo(f"  user: {user}")
-    click.echo(f"  system: {system}")
+    if _count_scope_flags(local, project, user, system) > 1:
+        raise click.UsageError("Only one scope flag can be specified.")
+    
+    scope = _get_scope(local, project, user, system)
+    if cfg.unset_value(key, scope):
+        click.echo(f"Unset {key} from {scope} config.")
+    else:
+        raise click.ClickException(f"Key '{key}' not found in {scope} configuration.")
+
+
+@config.command('path')
+@click.option('--local', is_flag=True, help='Show local config path')
+@click.option('--project', is_flag=True, help='Show project config path')
+@click.option('--user', is_flag=True, help='Show user config path')
+@click.option('--system', is_flag=True, help='Show system config path')
+def config_path(local, project, user, system):
+    """Show configuration file paths."""
+    paths = cfg.get_config_paths()
+    
+    if _count_scope_flags(local, project, user, system) > 1:
+        raise click.UsageError("Only one scope flag can be specified.")
+    
+    if any([local, project, user, system]):
+        scope = _get_scope(local, project, user, system)
+        path = paths[scope]
+        exists = "✓" if path.exists() else "✗"
+        click.echo(f"{path} [{exists}]")
+    else:
+        for scope in cfg.SCOPES:
+            path = paths[scope]
+            exists = "✓" if path.exists() else "✗"
+            click.echo(f"{scope}: {path} [{exists}]")
 
 
 @cli.group()
