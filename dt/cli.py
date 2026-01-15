@@ -4,7 +4,7 @@ import click
 
 
 @click.group()
-@click.version_option()
+@click.version_option(package_name='dvc-tools')
 def cli():
     """DVC Tools - Convenient tools for working with DVC in HPC environments.
     
