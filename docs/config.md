@@ -97,6 +97,7 @@ dt config cache.root
 
 ### GitHub Integration
 - `org`: Default GitHub organization for repository operations
+- `team`: GitHub team to grant access when creating new repositories
 - `github.token`: GitHub personal access token for API operations
 
 ### Cache Settings

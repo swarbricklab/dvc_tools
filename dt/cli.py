@@ -3,6 +3,10 @@
 import click
 
 from . import config as cfg
+from . import clone as clone_mod
+from . import init as init_mod
+from . import cache as cache_mod
+from . import remote as remote_mod
 
 
 @click.group()
@@ -31,39 +35,64 @@ def init(name, org, cache_root, remote_root, no_git, no_dvc, no_cache, no_remote
     This command creates a complete DVC project with git, DVC, external cache,
     and remote storage properly configured for HPC environments.
     """
-    click.echo("dt init command - not yet implemented")
-    click.echo(f"  name: {name}")
-    click.echo(f"  org: {org}")
-    click.echo(f"  cache_root: {cache_root}")
-    click.echo(f"  remote_root: {remote_root}")
-    click.echo(f"  no_git: {no_git}")
-    click.echo(f"  no_dvc: {no_dvc}")
-    click.echo(f"  no_cache: {no_cache}")
-    click.echo(f"  no_remote: {no_remote}")
+    try:
+        init_mod.init_project(
+            name=name,
+            org=org,
+            cache_root=cache_root,
+            remote_root=remote_root,
+            no_git=no_git,
+            no_dvc=no_dvc,
+            no_cache=no_cache,
+            no_remote=no_remote,
+        )
+    except init_mod.InitError as e:
+        raise click.ClickException(str(e))
 
 
 @cli.command()
-@click.argument('repository_url')
+@click.argument('repository', metavar='REPOSITORY')
 @click.argument('path', required=False)
+@click.option('--org', help='Override the GitHub organization for short names')
 @click.option('--no-init', is_flag=True, help='Skip running dt init after cloning')
 @click.option('--no-submodules', is_flag=True, help='Skip cloning git submodules')
 @click.option('--cache-name', help='Override cache directory name')
 @click.option('--remote-name', help='Override remote directory name')
 @click.option('--shallow', is_flag=True, help='Perform a shallow clone')
-def clone(repository_url, path, no_init, no_submodules, cache_name, remote_name, shallow):
+def clone(repository, path, org, no_init, no_submodules, cache_name, remote_name, shallow):
     """Clone an existing DVC project from GitHub.
+    
+    REPOSITORY can be either:
+    
+    \b
+    - A full URL: git@github.com:org/repo.git
+    - A short name: repo (requires org to be configured)
+    
+    When org is configured, you can use short names:
+    
+    \b
+        dt clone neochemo
+    
+    is equivalent to:
+    
+    \b
+        dt clone git@github.com:swarbricklab/neochemo.git
     
     This command clones a repository and configures it for the local platform
     with proper cache and remote setup.
     """
-    click.echo("dt clone command - not yet implemented")
-    click.echo(f"  repository_url: {repository_url}")
-    click.echo(f"  path: {path}")
-    click.echo(f"  no_init: {no_init}")
-    click.echo(f"  no_submodules: {no_submodules}")
-    click.echo(f"  cache_name: {cache_name}")
-    click.echo(f"  remote_name: {remote_name}")
-    click.echo(f"  shallow: {shallow}")
+    try:
+        clone_mod.clone_repository(
+            repository=repository,
+            path=path,
+            org=org,
+            no_submodules=no_submodules,
+            cache_name=cache_name,
+            remote_name=remote_name,
+            shallow=shallow,
+        )
+    except clone_mod.CloneError as e:
+        raise click.ClickException(str(e))
 
 
 @cli.group(invoke_without_command=True)
@@ -222,12 +251,23 @@ def cache():
 @click.option('--cache-root', help='Override cache root directory')
 @click.option('--cache-path', help='Override complete cache path')
 def cache_init(project_name, name, cache_root, cache_path):
-    """Set up an external shared cache with proper permissions."""
-    click.echo("dt cache init command - not yet implemented")
-    click.echo(f"  project_name: {project_name}")
-    click.echo(f"  name: {name}")
-    click.echo(f"  cache_root: {cache_root}")
-    click.echo(f"  cache_path: {cache_path}")
+    """Set up an external shared cache with proper permissions.
+    
+    Creates the cache directory structure with group write permissions
+    and configures DVC to use it.
+    """
+    # Use project_name as name if --name not specified
+    effective_name = name or project_name
+    
+    try:
+        cache_dir = cache_mod.init_cache(
+            name=effective_name,
+            cache_root=cache_root,
+            cache_path=cache_path,
+        )
+        click.echo(f"Cache initialized at {cache_dir}")
+    except cache_mod.CacheError as e:
+        raise click.ClickException(str(e))
 
 
 @cli.group()
@@ -242,12 +282,23 @@ def remote():
 @click.option('--remote-root', help='Override remote root directory')
 @click.option('--remote-path', help='Override complete remote path')
 def remote_init(project_name, name, remote_root, remote_path):
-    """Set up remote storage with SSH and local access."""
-    click.echo("dt remote init command - not yet implemented")
-    click.echo(f"  project_name: {project_name}")
-    click.echo(f"  name: {name}")
-    click.echo(f"  remote_root: {remote_root}")
-    click.echo(f"  remote_path: {remote_path}")
+    """Set up remote storage with SSH and local access.
+    
+    Creates the remote directory structure with proper permissions
+    and configures DVC with SSH and local remotes.
+    """
+    # Use project_name as name if --name not specified
+    effective_name = name or project_name
+    
+    try:
+        remote_dir = remote_mod.init_remote(
+            name=effective_name,
+            remote_root=remote_root,
+            remote_path=remote_path,
+        )
+        click.echo(f"Remote initialized at {remote_dir}")
+    except remote_mod.RemoteError as e:
+        raise click.ClickException(str(e))
 
 
 if __name__ == '__main__':

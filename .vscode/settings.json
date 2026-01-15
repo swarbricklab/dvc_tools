@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^source \\.venv/bin/activate && dt config list$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
