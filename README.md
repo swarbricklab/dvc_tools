@@ -4,6 +4,18 @@ This package provides convenient tools for working with DVC in a HPC environment
 
 These tools are currently used by Swarbrick Lab on NCI.
 
+## Installation
+
+Install the package using pip:
+
+```bash
+# Install from source (development)
+pip install -e .
+
+# Or install from PyPI (when published)
+pip install dvc-tools
+```
+
 ## Quick Start
 
 ```bash
