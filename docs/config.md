@@ -10,19 +10,19 @@ Example configuration file:
 
 ```yaml
 # dt config.yaml
-org: "swarbricklab"
-platform: "nci"
+org: "myorg"
+platform: "hpc"
 
 cache:
-  root: "/scratch/a56/dvc/cache"
+  root: "/shared/cache"
   permissions: "ug+rw"
 
 remote:
-  root: "/g/data/a56/dvc/analysis"
+  root: "/shared/remote"
   permissions: "ug+rw"
 
 ssh:
-  host: "gadi-dm.nci.org.au"
+  host: "login.example.org"
 ```
 
 > **Note**: Always quote strings that could be misinterpreted by YAML (e.g., `"on"`, `"yes"`, `"1.10"`).
@@ -65,26 +65,26 @@ Configuration values are resolved in order of precedence: local > project > user
 
 ### System Configuration Location
 
-The system-level configuration is found by searching `XDG_CONFIG_DIRS` (colon-separated list of directories, defaulting to `/etc/xdg`). For shared team configuration on NCI:
+The system-level configuration is found by searching `XDG_CONFIG_DIRS` (colon-separated list of directories, defaulting to `/etc/xdg`). To use a shared team configuration:
 
 ```bash
 # Add to your environment (e.g., module file or .bashrc)
-export XDG_CONFIG_DIRS="/g/data/a56/config/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
+export XDG_CONFIG_DIRS="/path/to/team/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
 ```
 
-This allows the team config at `/g/data/a56/config/xdg/dt/config.yaml` to be found automatically.
+This allows the team config at `/path/to/team/xdg/dt/config.yaml` to be found automatically.
 
 ## Examples
 
 ```bash
 # Set your organization for GitHub integration
-dt config --user org swarbricklab
+dt config --user org myorg
 
 # Set project-specific cache root that applies to all clones
-dt config --project cache.root /scratch/a56/dvc/cache
+dt config --project cache.root /shared/cache
 
 # Set local SSH host for current workspace only
-dt config --local ssh.host gadi-dm.nci.org.au
+dt config --local ssh.host login.example.org
 
 # View current effective configuration
 dt config
@@ -114,28 +114,9 @@ dt config cache.root
 ### Platform Settings
 - `platform`: Platform identifier (e.g., `nci`, `local`) - affects remote naming
 
-## Swarbrick Lab Defaults
+## Team Configuration
 
-For the Swarbrick Lab on NCI, team defaults are provided at the system level via `/g/data/a56/config/xdg/dt/config.yaml`:
-
-```yaml
-# System-level defaults (pre-configured for Swarbrick Lab)
-org: "swarbricklab"
-platform: "nci"
-
-cache:
-  root: "/scratch/a56/dvc/cache"
-  permissions: "ug+rw"
-
-remote:
-  root: "/g/data/a56/dvc/analysis"
-  permissions: "ug+rw"
-
-ssh:
-  host: "gadi-dm.nci.org.au"
-```
-
-These defaults can be overridden at user or project level as needed.
+For team-wide defaults, use the **system** scope via `XDG_CONFIG_DIRS`. See [swarbricklab/team_config](https://github.com/swarbricklab/team_config) for an example of managing shared team configuration.
 
 ## Best Practices
 
