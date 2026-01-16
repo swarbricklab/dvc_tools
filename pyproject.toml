@@ -39,8 +39,18 @@ Repository = "https://github.com/swarbricklab/dvc_tools"
 Documentation = "https://github.com/swarbricklab/dvc_tools/blob/main/README.md"
 Issues = "https://github.com/swarbricklab/dvc_tools/issues"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
 [project.scripts]
 dt = "dt.cli:cli"
 
 [tool.setuptools]
 packages = ["dt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"

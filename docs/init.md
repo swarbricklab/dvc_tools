@@ -10,12 +10,11 @@ After running `dt init`, your project will have:
 my-project/
 ├── .git/                 # Git repository
 ├── .dvc/                 # DVC configuration
-│   ├── config            # DVC settings
+│   ├── config            # DVC settings (tracked)
+│   ├── config.local      # Local DVC settings (not tracked)
 │   └── ...
-├── .dt/                  # dt tool configuration (git-ignored)
-|    └── config.local     # Local dt settings
-├── .gitignore            # Updated with DVC patterns
-── README.md             # Basic project README
+├── .dvcignore            # DVC ignore patterns
+└── .gitignore            # Updated with DVC patterns
 ```
 
 ## Usage
@@ -40,13 +39,14 @@ dt init [options]
 
 The `dt init` command orchestrates the following initialization steps:
 
-1. **Git Setup**: Runs `dt git init` to initialize git repository and link to GitHub
-2. **DVC Setup**: Runs `dt dvc init` to initialize DVC in the repository
+1. **Git Setup**: Initializes git repository with `git init`
+2. **DVC Setup**: Initializes DVC with `dvc init`
 3. **Cache Setup**: Runs `dt cache init` to configure shared external cache
 4. **Remote Setup**: Runs `dt remote init` to set up remote storage
 5. **Git Hooks**: Runs `dvc install` to set up git hooks
+6. **GitHub Check**: Checks for GitHub remote and suggests `gh repo create` if missing
 
-Each of these steps can also be run independently for testing or incremental setup.
+Each cache and remote step can also be run independently for testing or incremental setup.
 
 ## Complete Initialization Example
 
@@ -69,17 +69,17 @@ dt init
 For testing or troubleshooting, you can run initialization steps independently:
 
 ```bash
-# Set up git and GitHub integration first
-dt git init my-project
+# Initialize git first
+git init
 
-# Add DVC to existing git repo
-dt dvc init
+# Initialize DVC
+dvc init
 
 # Set up shared cache
-dt cache init my-project
+dt cache init
 
 # Set up remote storage
-dt remote init my-project
+dt remote init
 ```
 
 ## Configuration
@@ -96,8 +96,6 @@ The project will be configured with:
 
 ## Related Commands
 
-- [`dt git init`](git.md) - Git and GitHub setup
-- [`dt dvc init`](dvc.md) - DVC initialization  
 - [`dt cache init`](cache.md#init) - Cache setup
 - [`dt remote init`](remote.md#init) - Remote storage setup
 - [`dt config`](config.md) - Configuration management
