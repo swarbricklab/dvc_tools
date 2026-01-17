@@ -1,12 +1,14 @@
 # Configuration Options
 
-Reference for all `dt` configuration options. See [dt config](config.md) for how to view and set these values.
+Reference for all `dt` configuration options. 
+
+See [dt config](config.md) for command usage and [Configuration Scopes](config_scopes.md) for understanding scope hierarchy.
 
 ## All Options
 
 | Option | Description | Example |
 |--------|-------------|---------|
-| `org` | Default GitHub organization for [short repository names](clone.md#short-name-feature) | `swarbricklab` |
+| `owner` | Default GitHub owner (user or org) for [short repository names](clone.md#short-name-feature) | `swarbricklab` |
 | `team` | GitHub team for [`gh repo create --team`](https://cli.github.com/manual/gh_repo_create) | `analysts` |
 | `cache.root` | Root directory for [shared external caches](cache.md) | `/g/data/a56/dvc_cache` |
 | `remote.root` | Root directory for [DVC remote storage](remote.md) | `/g/data/a56/dvc_remote` |
@@ -14,13 +16,17 @@ Reference for all `dt` configuration options. See [dt config](config.md) for how
 
 ## Option Details
 
-### `org`
+### `owner`
 
-Enables short repository names with `dt clone`. When set, `dt clone neochemo` expands to `git@github.com:swarbricklab/neochemo.git`.
+The GitHub owner (user or organization) used for short repository names with `dt clone`. When set, `dt clone neochemo` expands to `git@github.com:swarbricklab/neochemo.git`.
+
+This can be a personal GitHub username or an organization name—GitHub uses "owner" as the generic term for repository ownership.
 
 ### `team`
 
 Used by `dt init` when suggesting the `gh repo create` command. If set, adds `--team=<value>` to the suggested command.
+
+> **Note:** The `--team` option only applies when `owner` is a GitHub organization. If `owner` is a personal GitHub account, the team setting is ignored.
 
 ### `cache.root`
 
@@ -38,16 +44,3 @@ The remote is the authoritative store for DVC-tracked files, accessed via SSH fr
 
 Hostname used when configuring SSH remotes. This allows DVC to push/pull data from external machines.
 
-## Recommended Setup (NCI Gadi)
-
-```yaml
-# ~/.config/dt/config.yaml
-org: swarbricklab
-team: analysts
-cache:
-  root: /g/data/a56/dvc_cache
-remote:
-  root: /g/data/a56/dvc_remote
-ssh:
-  host: gadi-dm.nci.org.au
-```

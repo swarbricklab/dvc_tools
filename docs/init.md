@@ -27,7 +27,7 @@ dt init [options]
 ## Options
 
 - `--name <name>`: Override the project name (defaults to current directory name)
-- `--org <organization>`: Override the GitHub organization (defaults to config value)
+- `--owner <owner>`: Override the GitHub owner (user or organization)
 - `--cache-root <path>`: Override the cache root directory (defaults to config value)
 - `--remote-root <path>`: Override the remote root directory (defaults to config value)
 - `--no-git`: Skip git initialization
