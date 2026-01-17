@@ -70,14 +70,14 @@ def init_git(repo_path: Path, verbose: bool = True) -> bool:
     return True
 
 
-def check_github_remote(repo_path: Path, project_name: str, org: str = None, team: str = None, verbose: bool = True) -> bool:
+def check_github_remote(repo_path: Path, project_name: str, owner: str = None, team: str = None, verbose: bool = True) -> bool:
     """Check if a GitHub remote exists for the repository.
     
     Args:
         repo_path: Path to the repository
         project_name: Name of the project
-        org: GitHub organization
-        team: GitHub team to grant access
+        owner: GitHub owner (user or organization)
+        team: GitHub team to grant access (only valid if owner is an org)
         verbose: Print suggestion if remote doesn't exist
         
     Returns:
@@ -93,10 +93,10 @@ def check_github_remote(repo_path: Path, project_name: str, org: str = None, tea
     if result.returncode != 0:
         if verbose:
             print("\nNo GitHub remote configured.")
-            org_part = org if org else "<org>"
+            owner_part = owner if owner else "<owner>"
             team_opt = f" --team={team}" if team else ""
             print(f"Create one with:")
-            print(f"  gh repo create {org_part}/{project_name} --source=. --remote=origin --private{team_opt}")
+            print(f"  gh repo create {owner_part}/{project_name} --source=. --remote=origin --private{team_opt}")
         return False
     
     return True
@@ -158,7 +158,7 @@ def install_dvc_hooks(repo_path: Path, verbose: bool = True) -> None:
 
 def init_project(
     name: Optional[str] = None,
-    org: Optional[str] = None,
+    owner: Optional[str] = None,
     cache_root: Optional[str] = None,
     remote_root: Optional[str] = None,
     no_git: bool = False,
@@ -179,7 +179,7 @@ def init_project(
     
     Args:
         name: Project name (defaults to current directory name)
-        org: GitHub organization
+        owner: GitHub owner (user or organization)
         cache_root: Root directory for caches
         remote_root: Root directory for remotes
         no_git: Skip git initialization
@@ -259,10 +259,10 @@ def init_project(
     
     # Step 6: Check for GitHub remote
     if not no_git:
-        # Get org and team from argument or config
-        effective_org = org or cfg.get_value('org')
+        # Get owner and team from argument or config
+        effective_owner = owner or cfg.get_value('owner')
         effective_team = cfg.get_value('team')
-        check_github_remote(repo_path, project_name, org=effective_org, team=effective_team, verbose=verbose)
+        check_github_remote(repo_path, project_name, owner=effective_owner, team=effective_team, verbose=verbose)
     
     if verbose:
         print()
