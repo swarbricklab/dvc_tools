@@ -7,6 +7,7 @@ from . import clone as clone_mod
 from . import init as init_mod
 from . import cache as cache_mod
 from . import remote as remote_mod
+from . import doctor as doctor_mod
 
 
 @click.group()
@@ -299,6 +300,60 @@ def remote_init(project_name, name, remote_root, remote_path):
         click.echo(f"Remote initialized at {remote_dir}")
     except remote_mod.RemoteError as e:
         raise click.ClickException(str(e))
+
+
+@cli.command()
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed output including dvc doctor and config')
+def doctor(verbose):
+    """Diagnose common setup issues and verify environment configuration.
+    
+    Checks for:
+    - Git and DVC installation
+    - GitHub CLI availability
+    - SSH key setup and GitHub authentication
+    - Cache and remote root configuration
+    
+    Use -v for verbose output including dvc doctor results.
+    """
+    # Print dt version header
+    dt_version = doctor_mod.get_dt_version()
+    click.echo(f"DVC Tools version: {dt_version}")
+    click.echo()
+    
+    # Run diagnostics
+    results = doctor_mod.run_diagnostics(verbose=verbose)
+    
+    passed = 0
+    failed = 0
+    
+    for result in results:
+        click.echo(str(result))
+        if result.passed:
+            passed += 1
+        else:
+            failed += 1
+    
+    click.echo()
+    if failed == 0:
+        click.echo(f"All {passed} checks passed.")
+    else:
+        click.echo(f"{passed} passed, {failed} failed.")
+    
+    # Verbose output
+    if verbose:
+        click.echo()
+        click.echo("--- Configuration (with sources) ---")
+        config_values = doctor_mod.get_config_with_sources()
+        if config_values:
+            for key, value, scope in config_values:
+                click.echo(f"{scope}\t{key}={value}")
+        else:
+            click.echo("No configuration set.")
+        
+        click.echo()
+        click.echo("--- DVC Doctor ---")
+        dvc_output = doctor_mod.run_dvc_doctor()
+        click.echo(dvc_output)
 
 
 if __name__ == '__main__':
