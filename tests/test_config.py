@@ -88,11 +88,11 @@ class TestDTConfigGet:
         config_dir = Path(isolated_config['home']) / '.config' / 'dt'
         config_dir.mkdir(parents=True)
         config_file = config_dir / 'config.yaml'
-        config_file.write_text(yaml.dump({'org': 'testorg'}))
+        config_file.write_text(yaml.dump({'owner': 'testowner'}))
         
-        result = runner.invoke(cli, ['config', 'get', 'org'])
+        result = runner.invoke(cli, ['config', 'get', 'owner'])
         assert result.exit_code == 0
-        assert 'testorg' in result.output
+        assert 'testowner' in result.output
     
     def test_get_nested_key(self, runner, isolated_config):
         """Getting nested key with dot notation works."""
@@ -113,7 +113,7 @@ class TestDTConfigSet:
     
     def test_set_user_config(self, runner, isolated_config):
         """Setting user config creates file and stores value."""
-        result = runner.invoke(cli, ['config', 'set', '--user', 'org', 'myorg'])
+        result = runner.invoke(cli, ['config', 'set', '--user', 'owner', 'myowner'])
         assert result.exit_code == 0
         
         # Verify file was created
@@ -123,7 +123,7 @@ class TestDTConfigSet:
         # Verify content
         with open(config_file) as f:
             data = yaml.safe_load(f)
-        assert data['org'] == 'myorg'
+        assert data['owner'] == 'myowner'
     
     def test_set_nested_key(self, runner, isolated_config):
         """Setting nested key creates proper structure."""
@@ -157,21 +157,21 @@ class TestDTConfigSet:
     
     def test_set_overwrites_existing(self, runner, isolated_config):
         """Setting existing key overwrites value."""
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'first'])
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'second'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'first'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'second'])
         
-        result = runner.invoke(cli, ['config', 'get', 'org'])
+        result = runner.invoke(cli, ['config', 'get', 'owner'])
         assert 'second' in result.output
     
     def test_set_preserves_other_keys(self, runner, isolated_config):
         """Setting a key preserves other existing keys."""
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'myorg'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'myowner'])
         runner.invoke(cli, ['config', 'set', '--user', 'platform', 'test'])
         
         config_file = Path(isolated_config['home']) / '.config' / 'dt' / 'config.yaml'
         with open(config_file) as f:
             data = yaml.safe_load(f)
-        assert data['org'] == 'myorg'
+        assert data['owner'] == 'myowner'
         assert data['platform'] == 'test'
 
 
@@ -180,14 +180,14 @@ class TestDTConfigUnset:
     
     def test_unset_removes_key(self, runner, isolated_config):
         """Unsetting a key removes it from config."""
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'myorg'])
-        result = runner.invoke(cli, ['config', 'unset', '--user', 'org'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'myowner'])
+        result = runner.invoke(cli, ['config', 'unset', '--user', 'owner'])
         assert result.exit_code == 0
         
         config_file = Path(isolated_config['home']) / '.config' / 'dt' / 'config.yaml'
         with open(config_file) as f:
             data = yaml.safe_load(f)
-        assert data is None or 'org' not in data
+        assert data is None or 'owner' not in data
     
     def test_unset_nested_key(self, runner, isolated_config):
         """Unsetting nested key removes only that key."""
@@ -220,33 +220,33 @@ class TestDTConfigList:
     
     def test_list_shows_all_values(self, runner, isolated_config):
         """Listing shows all configured values."""
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'myorg'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'myowner'])
         runner.invoke(cli, ['config', 'set', '--user', 'platform', 'test'])
         
         result = runner.invoke(cli, ['config', 'list'])
         assert result.exit_code == 0
-        assert 'org=myorg' in result.output
+        assert 'owner=myowner' in result.output
         assert 'platform=test' in result.output
     
     def test_list_user_scope_only(self, runner, isolated_config):
         """Listing with --user shows only user config."""
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'userorg'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'userowner'])
         runner.invoke(cli, ['config', 'set', '--project', 'platform', 'projplatform'])
         
         result = runner.invoke(cli, ['config', 'list', '--user'])
         assert result.exit_code == 0
-        assert 'userorg' in result.output
+        assert 'userowner' in result.output
         assert 'projplatform' not in result.output
     
     def test_list_project_scope_only(self, runner, isolated_config):
         """Listing with --project shows only project config."""
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'userorg'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'userowner'])
         runner.invoke(cli, ['config', 'set', '--project', 'platform', 'projplatform'])
         
         result = runner.invoke(cli, ['config', 'list', '--project'])
         assert result.exit_code == 0
         assert 'projplatform' in result.output
-        assert 'userorg' not in result.output
+        assert 'userowner' not in result.output
 
 
 class TestDTConfigListShowOrigin:
@@ -254,23 +254,23 @@ class TestDTConfigListShowOrigin:
     
     def test_show_origin_displays_scope(self, runner, isolated_config):
         """--show-origin shows which scope each value comes from."""
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'myorg'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'myowner'])
         
         result = runner.invoke(cli, ['config', 'list', '--show-origin'])
         assert result.exit_code == 0
         assert 'user' in result.output
-        assert 'org=myorg' in result.output
+        assert 'owner=myowner' in result.output
     
     def test_show_origin_with_system_config(self, runner, isolated_config):
         """--show-origin correctly identifies system scope."""
         system_config_dir = Path(isolated_config['system']) / 'dt'
         system_config_dir.mkdir(parents=True)
-        (system_config_dir / 'config.yaml').write_text(yaml.dump({'org': 'sysorg'}))
+        (system_config_dir / 'config.yaml').write_text(yaml.dump({'owner': 'sysowner'}))
         
         result = runner.invoke(cli, ['config', 'list', '--show-origin'])
         assert result.exit_code == 0
         assert 'system' in result.output
-        assert 'org=sysorg' in result.output
+        assert 'owner=sysowner' in result.output
     
     def test_show_origin_override_shows_higher_scope(self, runner, isolated_config):
         """--show-origin shows the scope that won when values are overridden."""
@@ -278,21 +278,21 @@ class TestDTConfigListShowOrigin:
         system_config_dir = Path(isolated_config['system']) / 'dt'
         system_config_dir.mkdir(parents=True)
         (system_config_dir / 'config.yaml').write_text(yaml.dump({
-            'org': 'sysorg',
+            'owner': 'sysowner',
             'platform': 'sysplatform'
         }))
         
-        # Override org at user level
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'userorg'])
+        # Override owner at user level
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'userowner'])
         
         result = runner.invoke(cli, ['config', 'list', '--show-origin'])
         assert result.exit_code == 0
-        # org should show as user (the override)
-        assert 'user' in result.output and 'org=userorg' in result.output
+        # owner should show as user (the override)
+        assert 'user' in result.output and 'owner=userowner' in result.output
         # platform should show as system (no override)
         assert 'system' in result.output and 'platform=sysplatform' in result.output
-        # sysorg should NOT appear (it was overridden)
-        assert 'sysorg' not in result.output
+        # sysowner should NOT appear (it was overridden)
+        assert 'sysowner' not in result.output
     
     def test_show_origin_all_scopes(self, runner, isolated_config):
         """--show-origin works with values from all scopes."""
@@ -351,31 +351,31 @@ class TestDTConfigListShowOrigin:
     
     def test_local_overrides_project(self, runner, isolated_config):
         """Local config takes precedence over project."""
-        runner.invoke(cli, ['config', 'set', '--project', 'org', 'project-org'])
-        runner.invoke(cli, ['config', 'set', '--local', 'org', 'local-org'])
+        runner.invoke(cli, ['config', 'set', '--project', 'owner', 'project-owner'])
+        runner.invoke(cli, ['config', 'set', '--local', 'owner', 'local-owner'])
         
-        result = runner.invoke(cli, ['config', 'get', 'org'])
-        assert 'local-org' in result.output
+        result = runner.invoke(cli, ['config', 'get', 'owner'])
+        assert 'local-owner' in result.output
     
     def test_project_overrides_user(self, runner, isolated_config):
         """Project config takes precedence over user."""
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'user-org'])
-        runner.invoke(cli, ['config', 'set', '--project', 'org', 'project-org'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'user-owner'])
+        runner.invoke(cli, ['config', 'set', '--project', 'owner', 'project-owner'])
         
-        result = runner.invoke(cli, ['config', 'get', 'org'])
-        assert 'project-org' in result.output
+        result = runner.invoke(cli, ['config', 'get', 'owner'])
+        assert 'project-owner' in result.output
     
     def test_user_overrides_system(self, runner, isolated_config):
         """User config takes precedence over system."""
         # Set up system config
         system_config_dir = Path(isolated_config['system']) / 'dt'
         system_config_dir.mkdir(parents=True)
-        (system_config_dir / 'config.yaml').write_text(yaml.dump({'org': 'system-org'}))
+        (system_config_dir / 'config.yaml').write_text(yaml.dump({'owner': 'system-owner'}))
         
-        runner.invoke(cli, ['config', 'set', '--user', 'org', 'user-org'])
+        runner.invoke(cli, ['config', 'set', '--user', 'owner', 'user-owner'])
         
-        result = runner.invoke(cli, ['config', 'get', 'org'])
-        assert 'user-org' in result.output
+        result = runner.invoke(cli, ['config', 'get', 'owner'])
+        assert 'user-owner' in result.output
     
     def test_full_precedence_chain(self, runner, isolated_config):
         """Full precedence: local > project > user > system."""
@@ -451,7 +451,7 @@ class TestDTConfigSystemScope:
         """System config cannot be modified without proper permissions."""
         # This depends on implementation - might succeed if we have write access
         # or fail gracefully if we don't
-        result = runner.invoke(cli, ['config', 'set', '--system', 'org', 'neworg'])
+        result = runner.invoke(cli, ['config', 'set', '--system', 'owner', 'newowner'])
         # Just check it doesn't crash unexpectedly
         assert result.exit_code in [0, 1, 2]
     
@@ -459,9 +459,9 @@ class TestDTConfigSystemScope:
         """System config is read from XDG_CONFIG_DIRS."""
         system_config_dir = Path(isolated_config['system']) / 'dt'
         system_config_dir.mkdir(parents=True)
-        (system_config_dir / 'config.yaml').write_text(yaml.dump({'org': 'from-xdg'}))
+        (system_config_dir / 'config.yaml').write_text(yaml.dump({'owner': 'from-xdg'}))
         
-        result = runner.invoke(cli, ['config', 'get', 'org'])
+        result = runner.invoke(cli, ['config', 'get', 'owner'])
         assert result.exit_code == 0
         assert 'from-xdg' in result.output
 

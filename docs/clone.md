@@ -12,12 +12,12 @@ dt clone [options] <repository> [path]
 
 - `<repository>`: Either a full GitHub URL or a short repository name
   - Full URL: `git@github.com:swarbricklab/neochemo.git`
-  - Short name: `neochemo` (requires `org` to be configured)
+  - Short name: `neochemo` (requires `owner` to be configured)
 - `[path]`: Optional path to the directory name for the clone (defaults to repository name in current directory)
 
 ## Options
 
-- `--org <name>`: Override the GitHub organization for short names
+- `--owner <name>`: Override the GitHub owner for short names
 - `--no-init`: Skip running `dt init` after cloning
 - `--no-submodules`: Skip cloning git submodules
 - `--cache-name <name>`: Override cache directory name (defaults to repository name)
@@ -26,11 +26,11 @@ dt clone [options] <repository> [path]
 
 ## Short Name Feature
 
-When the `org` configuration is set, you can use repository short names instead of full URLs:
+When the `owner` configuration is set, you can use repository short names instead of full URLs:
 
 ```bash
-# Set your default organization once
-dt config set org swarbricklab
+# Set your default owner once (can be user or org)
+dt config set owner swarbricklab
 
 # Then clone using just the repository name
 dt clone neochemo
@@ -39,16 +39,16 @@ dt clone neochemo
 dt clone git@github.com:swarbricklab/neochemo.git
 ```
 
-You can also override the organization for a single clone:
+You can also override the owner for a single clone:
 
 ```bash
-# Clone from a different organization
-dt clone --org other-org some-repo
+# Clone from a different owner
+dt clone --owner other-user some-repo
 ```
 
 The command automatically detects whether you've provided a full URL or a short name:
 - If the argument contains `:` or `/`, it's treated as a full URL
-- Otherwise, it's treated as a short name and combined with the configured `org`
+- Otherwise, it's treated as a short name and combined with the configured `owner`
 
 ## What it does
 
@@ -63,8 +63,8 @@ This operation includes the following steps:
 ### Using short names (recommended)
 
 ```bash
-# First, set your default organization
-dt config set org swarbricklab
+# First, set your default owner
+dt config set owner swarbricklab
 
 # Clone using just the repository name
 dt clone neochemo
@@ -72,8 +72,8 @@ dt clone neochemo
 # Clone to a specific directory
 dt clone neochemo my-local-copy
 
-# Clone from a different organization
-dt clone --org other-lab their-analysis
+# Clone from a different owner
+dt clone --owner other-lab their-analysis
 ```
 
 ### Using full URLs
@@ -101,8 +101,8 @@ dt clone --no-submodules --shallow git@github.com:swarbricklab/my-analysis.git
 # Navigate to your workspace
 cd /scratch/a56/$USER/
 
-# Set up your organization (one-time)
-dt config set org swarbricklab
+# Set up your owner (one-time)
+dt config set owner swarbricklab
 
 # Clone an existing analysis using short name
 dt clone single-cell-analysis

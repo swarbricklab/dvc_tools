@@ -16,38 +16,38 @@ class CloneError(Exception):
     pass
 
 
-def resolve_repository_url(repo: str, org: Optional[str] = None) -> str:
+def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:
     """Resolve a repository specification to a full URL.
     
     If repo looks like a URL (contains : or /), return as-is.
-    Otherwise, treat as a short name and construct URL using org.
+    Otherwise, treat as a short name and construct URL using owner.
     
     Args:
         repo: Repository URL or short name
-        org: GitHub organization (required if repo is a short name)
+        owner: GitHub owner (user or organization)
         
     Returns:
         Full repository URL
         
     Raises:
-        CloneError: If org is needed but not configured
+        CloneError: If owner is needed but not configured
     """
     # Check if it looks like a full URL
     if ':' in repo or '/' in repo:
         return repo
     
-    # It's a short name - need org
-    if not org:
-        org = cfg.get_value('org')
+    # It's a short name - need owner
+    if not owner:
+        owner = cfg.get_value('owner')
     
-    if not org:
+    if not owner:
         raise CloneError(
-            f"Repository '{repo}' looks like a short name, but no organization is configured.\n"
-            f"Either use a full URL (e.g., git@github.com:org/{repo}.git) or set the org:\n"
-            f"  dt config set org <your-org>"
+            f"Repository '{repo}' looks like a short name, but no owner is configured.\n"
+            f"Either use a full URL (e.g., git@github.com:owner/{repo}.git) or set the owner:\n"
+            f"  dt config set owner <github-user-or-org>"
         )
     
-    return f"git@github.com:{org}/{repo}.git"
+    return f"git@github.com:{owner}/{repo}.git"
 
 
 def extract_repo_name(repository_url: str) -> str:
@@ -70,7 +70,7 @@ def extract_repo_name(repository_url: str) -> str:
 def clone_repository(
     repository: str,
     path: Optional[str] = None,
-    org: Optional[str] = None,
+    owner: Optional[str] = None,
     no_submodules: bool = False,
     cache_name: Optional[str] = None,
     remote_name: Optional[str] = None,
@@ -82,7 +82,7 @@ def clone_repository(
     Args:
         repository: Repository URL or short name
         path: Target directory (defaults to repo name)
-        org: GitHub organization for short names
+        owner: GitHub owner for short names
         no_submodules: Skip cloning submodules
         cache_name: Override cache directory name
         remote_name: Override remote directory name
@@ -96,7 +96,7 @@ def clone_repository(
         CloneError: If cloning fails
     """
     # Resolve repository URL
-    repository_url = resolve_repository_url(repository, org)
+    repository_url = resolve_repository_url(repository, owner)
     repo_name = extract_repo_name(repository_url)
     
     # Determine target directory

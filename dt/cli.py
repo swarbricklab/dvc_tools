@@ -22,14 +22,14 @@ def cli():
 
 @cli.command()
 @click.option('--name', help='Override the project name (defaults to current directory name)')
-@click.option('--org', help='Override the GitHub organization (defaults to config value)')
+@click.option('--owner', help='Override the GitHub owner (user or organization)')
 @click.option('--cache-root', help='Override the cache root directory')
 @click.option('--remote-root', help='Override the remote root directory')
 @click.option('--no-git', is_flag=True, help='Skip git initialization')
 @click.option('--no-dvc', is_flag=True, help='Skip DVC initialization')
 @click.option('--no-cache', is_flag=True, help='Skip cache setup')
 @click.option('--no-remote', is_flag=True, help='Skip remote setup')
-def init(name, org, cache_root, remote_root, no_git, no_dvc, no_cache, no_remote):
+def init(name, owner, cache_root, remote_root, no_git, no_dvc, no_cache, no_remote):
     """Initialize a new DVC project with proper cache and remote setup.
     
     This command creates a complete DVC project with git, DVC, external cache,
@@ -38,7 +38,7 @@ def init(name, org, cache_root, remote_root, no_git, no_dvc, no_cache, no_remote
     try:
         init_mod.init_project(
             name=name,
-            org=org,
+            owner=owner,
             cache_root=cache_root,
             remote_root=remote_root,
             no_git=no_git,
@@ -53,22 +53,22 @@ def init(name, org, cache_root, remote_root, no_git, no_dvc, no_cache, no_remote
 @cli.command()
 @click.argument('repository', metavar='REPOSITORY')
 @click.argument('path', required=False)
-@click.option('--org', help='Override the GitHub organization for short names')
+@click.option('--owner', help='Override the GitHub owner for short names')
 @click.option('--no-init', is_flag=True, help='Skip running dt init after cloning')
 @click.option('--no-submodules', is_flag=True, help='Skip cloning git submodules')
 @click.option('--cache-name', help='Override cache directory name')
 @click.option('--remote-name', help='Override remote directory name')
 @click.option('--shallow', is_flag=True, help='Perform a shallow clone')
-def clone(repository, path, org, no_init, no_submodules, cache_name, remote_name, shallow):
+def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow):
     """Clone an existing DVC project from GitHub.
     
     REPOSITORY can be either:
     
     \b
-    - A full URL: git@github.com:org/repo.git
-    - A short name: repo (requires org to be configured)
+    - A full URL: git@github.com:owner/repo.git
+    - A short name: repo (requires owner to be configured)
     
-    When org is configured, you can use short names:
+    When owner is configured, you can use short names:
     
     \b
         dt clone neochemo
@@ -85,7 +85,7 @@ def clone(repository, path, org, no_init, no_submodules, cache_name, remote_name
         clone_mod.clone_repository(
             repository=repository,
             path=path,
-            org=org,
+            owner=owner,
             no_submodules=no_submodules,
             cache_name=cache_name,
             remote_name=remote_name,
@@ -119,12 +119,12 @@ def _get_scope(local: bool, project: bool, user: bool, system: bool) -> str:
     """Determine which scope to use from flags."""
     if local:
         return 'local'
-    elif project:
-        return 'project'
+    elif user:
+        return 'user'
     elif system:
         return 'system'
     else:
-        return 'user'  # default
+        return 'project'  # default
 
 
 def _count_scope_flags(local: bool, project: bool, user: bool, system: bool) -> int:
@@ -184,8 +184,8 @@ def config_get(key):
 @click.argument('key')
 @click.argument('value')
 @click.option('--local', is_flag=True, help='Set in local scope')
-@click.option('--project', is_flag=True, help='Set in project scope')
-@click.option('--user', is_flag=True, help='Set in user scope (default)')
+@click.option('--project', is_flag=True, help='Set in project scope (default)')
+@click.option('--user', is_flag=True, help='Set in user scope')
 @click.option('--system', is_flag=True, help='Set in system scope')
 def config_set(key, value, local, project, user, system):
     """Set a configuration value."""
@@ -200,8 +200,8 @@ def config_set(key, value, local, project, user, system):
 @config.command('unset')
 @click.argument('key')
 @click.option('--local', is_flag=True, help='Unset in local scope')
-@click.option('--project', is_flag=True, help='Unset in project scope')
-@click.option('--user', is_flag=True, help='Unset in user scope (default)')
+@click.option('--project', is_flag=True, help='Unset in project scope (default)')
+@click.option('--user', is_flag=True, help='Unset in user scope')
 @click.option('--system', is_flag=True, help='Unset in system scope')
 def config_unset(key, local, project, user, system):
     """Unset a configuration value."""
