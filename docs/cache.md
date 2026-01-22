@@ -54,9 +54,77 @@ The cache location is determined by (in order of precedence):
 
 **Default behavior** (no options): Uses `${cache.root config}/${current directory name}`
 
+## dt cache list
+
+List the primary DVC cache and all configured alternate caches.
+
+```bash
+dt cache list
+```
+
+Example output:
+
+```
+Primary: /scratch/a56/jr9959/.dvc/cache
+
+Alternate caches:
+  /g/data/a56/dvc/neochemo      (local)
+  /g/data/a56/dvc/projectA      (user)
+```
+
+## dt cache add
+
+Add an alternate cache path for multi-cache checkout.
+
+```bash
+dt cache add <path> [--local|--project|--user|--system]
+```
+
+Default scope is **local** (stored in `.dt/config.local`).
+
+```bash
+# Add to local config (default)
+dt cache add /g/data/a56/dvc/neochemo
+
+# Add to user config
+dt cache add /g/data/a56/dvc/shared --user
+```
+
+## dt cache remove
+
+Remove an alternate cache path.
+
+```bash
+dt cache remove <path> [--local|--project|--user|--system]
+```
+
+```bash
+dt cache remove /g/data/a56/dvc/neochemo
+```
+
+## Alternate cache configuration
+
+Alternate caches are stored in dt config under `cache.alt`:
+
+```yaml
+# .dt/config.local
+cache:
+  alt:
+    - /g/data/a56/dvc/neochemo
+    - /g/data/a56/dvc/projectA
+```
+
+Paths from all scopes are merged, with duplicates removed.
+
+Alternate caches allow `dt checkout` to find files across multiple cache locations. This is useful when:
+
+- Importing data from other projects on the same filesystem
+- Sharing caches across related projects
+- Accessing data from a project's remote storage directly (when mounted locally)
 
 ## Related Commands
 
 - [`dt init`](init.md) - Initialize projects with cache setup
+- [`dt checkout`](checkout.md) - Checkout using multiple caches
 - [`dt remote init`](remote.md#init) - Set up remote storage
 - [`dt config`](config.md) - Configure cache settings
