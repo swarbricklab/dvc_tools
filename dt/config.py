@@ -278,3 +278,148 @@ def list_config_with_sources() -> List[tuple]:
             results[key] = (key, value, scope)
     
     return sorted(results.values())
+
+
+def get_list_value(key: str) -> List[tuple]:
+    """Get a list configuration value, merged across all scopes.
+    
+    Returns list items with their source scope for display purposes.
+    Items from higher precedence scopes appear first.
+    Duplicates are removed (keeping highest precedence).
+    
+    Args:
+        key: Dot-separated key path (e.g., 'cache.alt')
+        
+    Returns:
+        List of (item, scope) tuples
+    """
+    seen = set()
+    results = []
+    
+    for scope in SCOPES:  # highest precedence first
+        scope_data = load_scope_config(scope)
+        
+        # Navigate to the key
+        current = scope_data
+        for part in key.split('.'):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                current = None
+                break
+        
+        if isinstance(current, list):
+            for item in current:
+                if item not in seen:
+                    seen.add(item)
+                    results.append((item, scope))
+    
+    return results
+
+
+def add_list_value(key: str, value: str, scope: str = 'local') -> bool:
+    """Add a value to a list configuration key.
+    
+    Args:
+        key: Dot-separated key path (e.g., 'cache.alt')
+        value: Value to add to the list
+        scope: One of 'local', 'project', 'user', 'system'
+        
+    Returns:
+        True if added, False if already exists in that scope
+    """
+    paths = get_config_paths()
+    path = paths[scope]
+    
+    # Load existing config or start fresh
+    if path.exists():
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    else:
+        data = {}
+    
+    # Navigate/create nested structure
+    parts = key.split('.')
+    current = data
+    for part in parts[:-1]:
+        if part not in current or not isinstance(current[part], dict):
+            current[part] = {}
+        current = current[part]
+    
+    # Get or create the list
+    final_key = parts[-1]
+    if final_key not in current:
+        current[final_key] = []
+    elif not isinstance(current[final_key], list):
+        # Convert existing value to list
+        current[final_key] = [current[final_key]]
+    
+    # Check if already in list
+    if value in current[final_key]:
+        return False
+    
+    current[final_key].append(value)
+    
+    # Ensure parent directory exists
+    path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Write back
+    with open(path, 'w') as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+    
+    return True
+
+
+def remove_list_value(key: str, value: str, scope: str = 'local') -> bool:
+    """Remove a value from a list configuration key.
+    
+    Args:
+        key: Dot-separated key path (e.g., 'cache.alt')
+        value: Value to remove from the list
+        scope: One of 'local', 'project', 'user', 'system'
+        
+    Returns:
+        True if removed, False if not found
+    """
+    paths = get_config_paths()
+    path = paths[scope]
+    
+    if not path.exists():
+        return False
+    
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    
+    # Navigate to the key
+    parts = key.split('.')
+    current = data
+    parents = [(data, None)]
+    
+    for part in parts[:-1]:
+        if part not in current or not isinstance(current[part], dict):
+            return False
+        parents.append((current, part))
+        current = current[part]
+    
+    final_key = parts[-1]
+    if final_key not in current or not isinstance(current[final_key], list):
+        return False
+    
+    if value not in current[final_key]:
+        return False
+    
+    current[final_key].remove(value)
+    
+    # Clean up empty list
+    if not current[final_key]:
+        del current[final_key]
+        # Clean up empty parent dicts
+        for parent, key_in_parent in reversed(parents[1:]):
+            if key_in_parent and not parent[key_in_parent]:
+                del parent[key_in_parent]
+    
+    # Write back
+    with open(path, 'w') as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+    
+    return True

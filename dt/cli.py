@@ -9,6 +9,7 @@ from . import cache as cache_mod
 from . import remote as remote_mod
 from . import doctor as doctor_mod
 from . import push as push_mod
+from . import checkout as checkout_mod
 
 
 @click.group()
@@ -247,6 +248,89 @@ def cache():
     pass
 
 
+@cache.command('list')
+def cache_list():
+    """List the primary DVC cache and all alternate caches.
+    
+    Shows the primary cache configured for DVC, plus any alternate
+    caches configured for multi-cache checkout.
+    """
+    import subprocess
+    
+    # Get primary cache from DVC
+    try:
+        result = subprocess.run(
+            ['dvc', 'cache', 'dir'],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            primary = result.stdout.strip()
+        else:
+            primary = "(not configured)"
+    except Exception:
+        primary = "(dvc not available)"
+    
+    click.echo(f"Primary: {primary}")
+    
+    # Get alternate caches from dt config
+    alt_caches = cfg.get_list_value('cache.alt')
+    
+    if alt_caches:
+        click.echo()
+        click.echo("Alternate caches:")
+        for path, scope in alt_caches:
+            click.echo(f"  {path}  ({scope})")
+    else:
+        click.echo()
+        click.echo("No alternate caches configured.")
+
+
+@cache.command('add')
+@click.argument('path')
+@click.option('--local', 'scope', flag_value='local', default=True, help='Add to local config (default)')
+@click.option('--project', 'scope', flag_value='project', help='Add to project config')
+@click.option('--user', 'scope', flag_value='user', help='Add to user config')
+@click.option('--system', 'scope', flag_value='system', help='Add to system config')
+def cache_add(path, scope):
+    """Add an alternate cache path for multi-cache checkout.
+    
+    Alternate caches are searched during `dt checkout` to find
+    cached files from other projects or remotes.
+    """
+    from pathlib import Path
+    
+    # Resolve to absolute path
+    abs_path = str(Path(path).resolve())
+    
+    if cfg.add_list_value('cache.alt', abs_path, scope):
+        click.echo(f"Added {abs_path} to {scope} config.")
+    else:
+        click.echo(f"Path already exists in {scope} config.")
+
+
+@cache.command('remove')
+@click.argument('path')
+@click.option('--local', 'scope', flag_value='local', default=True, help='Remove from local config (default)')
+@click.option('--project', 'scope', flag_value='project', help='Remove from project config')
+@click.option('--user', 'scope', flag_value='user', help='Remove from user config')
+@click.option('--system', 'scope', flag_value='system', help='Remove from system config')
+def cache_remove(path, scope):
+    """Remove an alternate cache path.
+    """
+    from pathlib import Path
+    
+    # Try both as given and resolved
+    abs_path = str(Path(path).resolve())
+    
+    if cfg.remove_list_value('cache.alt', abs_path, scope):
+        click.echo(f"Removed {abs_path} from {scope} config.")
+    elif cfg.remove_list_value('cache.alt', path, scope):
+        click.echo(f"Removed {path} from {scope} config.")
+    else:
+        raise click.ClickException(f"Path not found in {scope} config.")
+
+
 @cache.command('init')
 @click.argument('project_name', required=False)
 @click.option('--name', help='Override project name')
@@ -396,6 +480,74 @@ def push(ctx):
             raise SystemExit(1)
             
     except push_mod.PushError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command(context_settings=dict(
+    ignore_unknown_options=True,
+    allow_extra_args=True,
+))
+@click.argument('targets', nargs=-1, type=click.Path())
+@click.option('-v', '--verbose', is_flag=True, help='Show which cache is being checked')
+@click.pass_context
+def checkout(ctx, targets, verbose):
+    """Checkout DVC-tracked files, searching across multiple caches.
+    
+    Runs `dvc checkout` but searches for cached files across:
+    
+    \b
+    1. The primary DVC cache (from .dvc/config or .dvc/config.local)
+    2. All alternate caches configured via `dt cache add`
+    
+    This enables checking out files that exist in another project's cache
+    or remote storage without copying them to the local cache first.
+    
+    All other options are passed through to `dvc checkout`.
+    Run `dvc checkout --help` for additional options.
+    
+    \b
+    Examples:
+        dt checkout                        # Checkout all tracked files
+        dt checkout data/processed.dvc     # Checkout specific targets
+        dt checkout --force                # Force checkout (overwrite modified)
+        dt checkout -v                     # Show cache search progress
+    """
+    try:
+        results = checkout_mod.checkout(
+            targets=list(targets),
+            extra_args=ctx.args,
+            verbose=verbose,
+        )
+        
+        any_success = False
+        any_failure = False
+        
+        for cache_path, success, output in results:
+            if verbose:
+                status = "✓" if success else "✗"
+                click.echo(f"{status} {cache_path}")
+            
+            if success:
+                any_success = True
+                # Show output only for successful checkouts with content
+                if output and 'M ' in output or 'A ' in output:
+                    for line in output.split('\n'):
+                        if line.strip():
+                            click.echo(line)
+            else:
+                any_failure = True
+                # Show errors only in verbose mode since --allow-missing
+                # is expected to produce some "errors"
+                if verbose and output:
+                    for line in output.split('\n'):
+                        if line.strip():
+                            click.echo(f"  {line}")
+        
+        # Only fail if all caches failed
+        if not any_success and any_failure:
+            raise SystemExit(1)
+            
+    except checkout_mod.CheckoutError as e:
         raise click.ClickException(str(e))
 
 
