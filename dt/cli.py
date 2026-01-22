@@ -9,6 +9,7 @@ from . import cache as cache_mod
 from . import remote as remote_mod
 from . import doctor as doctor_mod
 from . import push as push_mod
+from . import checkout as checkout_mod
 
 
 @click.group()
@@ -479,6 +480,74 @@ def push(ctx):
             raise SystemExit(1)
             
     except push_mod.PushError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command(context_settings=dict(
+    ignore_unknown_options=True,
+    allow_extra_args=True,
+))
+@click.argument('targets', nargs=-1, type=click.Path())
+@click.option('-v', '--verbose', is_flag=True, help='Show which cache is being checked')
+@click.pass_context
+def checkout(ctx, targets, verbose):
+    """Checkout DVC-tracked files, searching across multiple caches.
+    
+    Runs `dvc checkout` but searches for cached files across:
+    
+    \b
+    1. The primary DVC cache (from .dvc/config or .dvc/config.local)
+    2. All alternate caches configured via `dt cache add`
+    
+    This enables checking out files that exist in another project's cache
+    or remote storage without copying them to the local cache first.
+    
+    All other options are passed through to `dvc checkout`.
+    Run `dvc checkout --help` for additional options.
+    
+    \b
+    Examples:
+        dt checkout                        # Checkout all tracked files
+        dt checkout data/processed.dvc     # Checkout specific targets
+        dt checkout --force                # Force checkout (overwrite modified)
+        dt checkout -v                     # Show cache search progress
+    """
+    try:
+        results = checkout_mod.checkout(
+            targets=list(targets),
+            extra_args=ctx.args,
+            verbose=verbose,
+        )
+        
+        any_success = False
+        any_failure = False
+        
+        for cache_path, success, output in results:
+            if verbose:
+                status = "✓" if success else "✗"
+                click.echo(f"{status} {cache_path}")
+            
+            if success:
+                any_success = True
+                # Show output only for successful checkouts with content
+                if output and 'M ' in output or 'A ' in output:
+                    for line in output.split('\n'):
+                        if line.strip():
+                            click.echo(line)
+            else:
+                any_failure = True
+                # Show errors only in verbose mode since --allow-missing
+                # is expected to produce some "errors"
+                if verbose and output:
+                    for line in output.split('\n'):
+                        if line.strip():
+                            click.echo(f"  {line}")
+        
+        # Only fail if all caches failed
+        if not any_success and any_failure:
+            raise SystemExit(1)
+            
+    except checkout_mod.CheckoutError as e:
         raise click.ClickException(str(e))
 
 
