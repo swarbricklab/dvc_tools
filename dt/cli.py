@@ -8,6 +8,7 @@ from . import init as init_mod
 from . import cache as cache_mod
 from . import remote as remote_mod
 from . import doctor as doctor_mod
+from . import push as push_mod
 
 
 @click.group()
@@ -354,6 +355,48 @@ def doctor(verbose):
         click.echo("--- DVC Doctor ---")
         dvc_output = doctor_mod.run_dvc_doctor()
         click.echo(dvc_output)
+
+
+@cli.command(context_settings=dict(
+    ignore_unknown_options=True,
+    allow_extra_args=True,
+))
+@click.pass_context
+def push(ctx):
+    """Push DVC-tracked files to all project-configured remotes.
+    
+    Runs `dvc push` for each remote configured at project or local scope,
+    skipping remotes inherited from user or system config.
+    
+    All options and arguments are passed through to `dvc push`.\n
+    Run `dvc push --help` for additional options than can be passed through.
+    
+    \b
+    Examples:
+        dt push                          # Push to all project remotes
+        dt push data/processed.csv.dvc   # Push specific targets
+        dt push --jobs 8                 # Push using 8 parallel jobs
+    """
+    try:
+        results = push_mod.push_all(ctx.args)
+        
+        all_success = True
+        for remote, success, output in results:
+            status = "✓" if success else "✗"
+            click.echo(f"{status} {remote}")
+            if output:
+                # Indent output lines
+                for line in output.split('\n'):
+                    if line.strip():
+                        click.echo(f"  {line}")
+            if not success:
+                all_success = False
+        
+        if not all_success:
+            raise SystemExit(1)
+            
+    except push_mod.PushError as e:
+        raise click.ClickException(str(e))
 
 
 if __name__ == '__main__':
