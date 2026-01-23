@@ -207,9 +207,11 @@ def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
     default_remote = default_result.stdout.strip() if default_result.returncode == 0 else None
     
     # Parse output - handle wrapped lines where URL may be on next line
-    # DVC outputs: "name\turl" but wraps long lines
+    # DVC outputs: "name\turl" but wraps long lines, sometimes across multiple lines
+    # Also "(default)" can appear on its own line
     remotes = []
     lines = result.stdout.strip().split('\n')
+    
     i = 0
     while i < len(lines):
         line = lines[i].strip()
@@ -217,7 +219,22 @@ def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
             i += 1
             continue
         
-        # Remove (default) marker if present
+        # Skip standalone (default) markers
+        if line == '(default)':
+            i += 1
+            continue
+        
+        # Check if this is a URL (continuation of previous line)
+        if line.startswith(('ssh://', 'http://', 'https://', 's3://', 'gs://', 'azure://')):
+            # This is a URL that was on its own line - attach to previous remote
+            if remotes:
+                prev_name, prev_url, prev_default = remotes[-1]
+                if not prev_url:
+                    remotes[-1] = (prev_name, line, prev_default)
+            i += 1
+            continue
+        
+        # Remove (default) marker if present inline
         line = line.replace('(default)', '').strip()
         
         parts = line.split(None, 1)
@@ -233,12 +250,6 @@ def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
         else:
             # URL might be on next line (wrapped)
             url = ''
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip().replace('(default)', '').strip()
-                # If next line starts with a protocol, it's the URL
-                if next_line.startswith(('ssh://', 'http://', 'https://', 's3://', '/', 'gs://')):
-                    url = next_line
-                    i += 1
         
         is_default = name == default_remote
         remotes.append((name, url, is_default))

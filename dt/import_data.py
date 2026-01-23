@@ -1,12 +1,13 @@
 """Import DVC-tracked data from remote repositories.
 
-Enables importing files and directories from other DVC projects
-without using `dvc import` (which requires network access to remotes).
+Enables importing files and directories (or subsets) from other DVC projects
+by creating our own .dvc and .dir files, then using dt checkout.
 
-Instead, this uses locally-accessible cache paths discovered via
-`dt cache add-from`.
+Unlike dvc import, this does not require network access to the remote storage.
+Instead, it uses locally-accessible cache paths.
 """
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -26,143 +27,181 @@ class ImportError(Exception):
     pass
 
 
-def get_dvc_file_path(repo_path: Path, data_path: str) -> Optional[Path]:
-    """Find the .dvc file for a given data path.
-    
-    Handles both file.txt -> file.txt.dvc and directory -> directory.dvc
+def configure_clone_cache(clone_path: Path, cache_path: str) -> None:
+    """Configure a clone to use a specific cache directory.
     
     Args:
-        repo_path: Path to the repository root.
-        data_path: Path to the data file/directory (relative to repo).
-        
-    Returns:
-        Path to the .dvc file, or None if not found.
+        clone_path: Path to the cloned repository.
+        cache_path: Path to the cache directory.
     """
-    data_path = data_path.rstrip('/')
-    
-    # Try path.dvc (for directories)
-    dvc_path = repo_path / f"{data_path}.dvc"
-    if dvc_path.exists():
-        return dvc_path
-    
-    # Try path (if already ends in .dvc)
-    if data_path.endswith('.dvc'):
-        dvc_path = repo_path / data_path
-        if dvc_path.exists():
-            return dvc_path
-    
-    return None
+    subprocess.run(
+        ['dvc', 'cache', 'dir', '--local', cache_path],
+        cwd=clone_path,
+        capture_output=True,
+        text=True,
+    )
 
 
-def read_dvc_file(dvc_path: Path) -> Dict[str, Any]:
-    """Read and parse a .dvc file.
+def list_files(
+    clone_path: Path,
+    path: str,
+    recursive: bool = True,
+) -> List[Dict[str, Any]]:
+    """List files at a path in a DVC repository.
     
     Args:
-        dvc_path: Path to the .dvc file.
+        clone_path: Path to the cloned repository.
+        path: Path to list (relative to repo root).
+        recursive: Whether to list recursively.
         
     Returns:
-        Parsed YAML content as a dictionary.
+        List of file info dicts with 'path', 'md5', 'isdir' keys.
         
     Raises:
-        ImportError: If file cannot be read or parsed.
+        ImportError: If listing fails.
     """
-    try:
-        with open(dvc_path) as f:
-            return yaml.safe_load(f)
-    except Exception as e:
-        raise ImportError(f"Failed to read {dvc_path}: {e}")
-
-
-def write_dvc_file(dvc_path: Path, content: Dict[str, Any]) -> None:
-    """Write a .dvc file.
+    cmd = ['dvc', 'list', '--json', '--show-hash']
+    if recursive:
+        cmd.append('-R')
+    cmd.extend(['.', path])
     
-    Args:
-        dvc_path: Path to write the .dvc file.
-        content: Dictionary content to write as YAML.
-        
-    Raises:
-        ImportError: If file cannot be written.
-    """
-    try:
-        dvc_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(dvc_path, 'w') as f:
-            yaml.dump(content, f, default_flow_style=False, sort_keys=False)
-    except Exception as e:
-        raise ImportError(f"Failed to write {dvc_path}: {e}")
-
-
-def ensure_cache_from_repo(repository: str, owner: Optional[str] = None) -> Optional[str]:
-    """Ensure we have a cache configured from the given repository.
-    
-    Args:
-        repository: Repository name, alias, or URL.
-        owner: Optional owner override for short names.
-        
-    Returns:
-        Path to the added cache, or None if no local cache found.
-    """
-    # Try to find and add a local remote from the repo
-    result = remote_mod.find_local_remote_from_repo(
-        repo_spec=repository,
-        owner=owner,
+    result = subprocess.run(
+        cmd,
+        cwd=clone_path,
+        capture_output=True,
+        text=True,
     )
     
-    if result:
-        remote_name, cache_path = result
-        # Add to alt caches if not already there
-        cfg.add_list_value('cache.alt', cache_path, 'local')
-        return cache_path
+    if result.returncode != 0:
+        raise ImportError(f"Failed to list {path}: {result.stderr}")
+    
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise ImportError(f"Failed to parse dvc list output: {e}")
+
+
+def get_file_size_from_cache(cache_path: str, md5: str) -> Optional[int]:
+    """Get file size by looking at the cached file.
+    
+    Args:
+        cache_path: Path to the cache directory.
+        md5: MD5 hash of the file.
+        
+    Returns:
+        File size in bytes, or None if not found.
+    """
+    # Handle .dir suffix
+    hash_value = md5.replace('.dir', '')
+    cache_file = Path(cache_path) / 'files' / 'md5' / hash_value[:2] / hash_value[2:]
+    
+    # Check for .dir file
+    if md5.endswith('.dir'):
+        cache_file = Path(str(cache_file) + '.dir')
+    
+    if cache_file.exists():
+        return cache_file.stat().st_size
     
     return None
 
 
-def import_from_dvc_file(
-    source_dvc_path: Path,
-    dest_path: Path,
-    dest_name: Optional[str] = None,
-    verbose: bool = False,
-) -> Path:
-    """Import data by copying a .dvc file and checking out.
+def compute_dir_hash(entries: List[Dict[str, str]]) -> str:
+    """Compute the MD5 hash for a .dir file content.
     
     Args:
-        source_dvc_path: Path to the source .dvc file.
-        dest_path: Destination directory for the imported data.
-        dest_name: Optional name override (default: use source name).
-        verbose: Print progress messages.
+        entries: List of {'md5': ..., 'relpath': ...} dicts.
+        
+    Returns:
+        MD5 hash of the JSON content.
+    """
+    # Sort by relpath for consistent ordering
+    sorted_entries = sorted(entries, key=lambda x: x['relpath'])
+    content = json.dumps(sorted_entries, separators=(',', ':'))
+    return hashlib.md5(content.encode()).hexdigest()
+
+
+def create_dir_file(
+    entries: List[Dict[str, str]],
+    cache_path: str,
+) -> Tuple[str, int]:
+    """Create a .dir file in the cache.
+    
+    Args:
+        entries: List of {'md5': ..., 'relpath': ...} dicts.
+        cache_path: Path to the cache directory.
+        
+    Returns:
+        Tuple of (dir_hash, total_size).
+        
+    Raises:
+        ImportError: If creation fails.
+    """
+    # Sort by relpath for consistent ordering
+    sorted_entries = sorted(entries, key=lambda x: x['relpath'])
+    content = json.dumps(sorted_entries, separators=(',', ':'))
+    
+    # Compute hash
+    dir_hash = hashlib.md5(content.encode()).hexdigest()
+    
+    # Write to cache
+    dir_path = Path(cache_path) / 'files' / 'md5' / dir_hash[:2]
+    dir_path.mkdir(parents=True, exist_ok=True)
+    
+    dir_file = dir_path / f"{dir_hash[2:]}.dir"
+    
+    try:
+        dir_file.write_text(content)
+    except Exception as e:
+        raise ImportError(f"Failed to write .dir file: {e}")
+    
+    return f"{dir_hash}.dir", len(content)
+
+
+def create_dvc_file(
+    dest_path: Path,
+    name: str,
+    md5: str,
+    size: int,
+    nfiles: Optional[int] = None,
+) -> Path:
+    """Create a .dvc file.
+    
+    Args:
+        dest_path: Destination directory for the .dvc file.
+        name: Name of the output (file or directory name).
+        md5: MD5 hash (with .dir suffix for directories).
+        size: Size in bytes.
+        nfiles: Number of files (for directories).
         
     Returns:
         Path to the created .dvc file.
-        
-    Raises:
-        ImportError: If import fails.
     """
-    # Read the source .dvc file
-    dvc_content = read_dvc_file(source_dvc_path)
+    # Build the output entry
+    out = {
+        'md5': md5,
+        'size': size,
+        'hash': 'md5',
+        'path': name,
+    }
     
-    if 'outs' not in dvc_content or not dvc_content['outs']:
-        raise ImportError(f"No outputs defined in {source_dvc_path}")
+    if nfiles is not None:
+        out['nfiles'] = nfiles
     
-    # Get the output info
-    out = dvc_content['outs'][0]
-    original_path = out.get('path', '')
+    content = {'outs': [out]}
     
-    # Determine destination name
-    if dest_name:
-        out['path'] = dest_name
+    # Determine .dvc filename
+    if name.endswith('/'):
+        name = name.rstrip('/')
     
-    # Create the destination .dvc file
-    final_name = out['path']
-    if final_name.endswith('.dvc'):
-        dest_dvc_path = dest_path / final_name
-    else:
-        dest_dvc_path = dest_path / f"{final_name}.dvc"
+    dvc_filename = f"{name}.dvc"
+    dvc_path = dest_path / dvc_filename
     
-    if verbose:
-        print(f"Creating {dest_dvc_path}")
+    dest_path.mkdir(parents=True, exist_ok=True)
     
-    write_dvc_file(dest_dvc_path, dvc_content)
+    with open(dvc_path, 'w') as f:
+        yaml.dump(content, f, default_flow_style=False, sort_keys=False)
     
-    return dest_dvc_path
+    return dvc_path
 
 
 def import_data(
@@ -210,52 +249,127 @@ def import_data(
     if verbose:
         print(f"Using clone at {clone_path}")
     
-    # Step 2: Find the .dvc file in the clone
-    dvc_file = get_dvc_file_path(clone_path, path)
-    
-    if not dvc_file:
-        raise ImportError(
-            f"Could not find .dvc file for '{path}' in {repository}\n"
-            f"Tried: {path}.dvc"
-        )
-    
-    if verbose:
-        print(f"Found {dvc_file.relative_to(clone_path)}")
-    
-    # Step 3: Ensure we have a cache from this repo
+    # Step 2: Find a local cache from this repo
     if verbose:
         print(f"Looking for local cache from {repository}...")
     
-    cache_path = ensure_cache_from_repo(repository, owner=owner)
-    
-    if cache_path:
-        if verbose:
-            print(f"Using cache: {cache_path}")
-    else:
-        if verbose:
-            print("Warning: No local cache found. Checkout may fail.")
-    
-    # Step 4: Copy the .dvc file to destination
-    created_dvc = import_from_dvc_file(
-        source_dvc_path=dvc_file,
-        dest_path=dest_path,
-        dest_name=name,
-        verbose=verbose,
+    result = remote_mod.find_local_remote_from_repo(
+        repo_spec=repository,
+        owner=owner,
     )
     
-    # Step 5: Checkout if requested
+    if not result:
+        raise ImportError(
+            f"No locally-accessible cache found for {repository}.\n"
+            f"Run: dt cache add-from {repository}"
+        )
+    
+    remote_name, cache_path = result
+    
+    if verbose:
+        print(f"Using cache: {cache_path}")
+    
+    # Step 3: Configure the clone to use this cache
+    configure_clone_cache(clone_path, cache_path)
+    
+    # Step 4: List files at the path
+    if verbose:
+        print(f"Listing files at {path}...")
+    
+    files = list_files(clone_path, path, recursive=True)
+    
+    if not files:
+        raise ImportError(f"No files found at {path}")
+    
+    if verbose:
+        print(f"Found {len(files)} file(s)")
+    
+    # Add cache to alt caches for checkout
+    cfg.add_list_value('cache.alt', cache_path, 'local')
+    
+    # Determine output name
+    output_name = name or Path(path.rstrip('/')).name
+    
+    # Step 5: Create .dvc file (and .dir file if needed)
+    if len(files) == 1 and not files[0].get('isdir', False):
+        # Single file import
+        file_info = files[0]
+        md5 = file_info['md5']
+        
+        # Get size from cache
+        size = get_file_size_from_cache(cache_path, md5)
+        if size is None:
+            size = 0  # Fallback
+        
+        if verbose:
+            print(f"Importing single file: {md5} ({size} bytes)")
+        
+        dvc_file = create_dvc_file(
+            dest_path=dest_path,
+            name=output_name,
+            md5=md5,
+            size=size,
+        )
+    else:
+        # Directory import - need to create .dir file
+        if verbose:
+            print(f"Creating .dir file for {len(files)} files...")
+        
+        # Build entries for .dir file
+        entries = []
+        total_size = 0
+        
+        for f in files:
+            if f.get('isdir', False):
+                continue  # Skip directory entries
+            
+            md5 = f['md5']
+            relpath = f['path']
+            
+            entries.append({
+                'md5': md5,
+                'relpath': relpath,
+            })
+            
+            # Get size from cache
+            file_size = get_file_size_from_cache(cache_path, md5)
+            if file_size:
+                total_size += file_size
+        
+        if not entries:
+            raise ImportError(f"No files found in {path}")
+        
+        # Create .dir file in the cache
+        dir_hash, dir_size = create_dir_file(entries, cache_path)
+        
+        if verbose:
+            print(f"Created .dir file: {dir_hash}")
+        
+        # Create .dvc file
+        dvc_file = create_dvc_file(
+            dest_path=dest_path,
+            name=output_name,
+            md5=dir_hash,
+            size=total_size,
+            nfiles=len(entries),
+        )
+    
+    if verbose:
+        print(f"Created {dvc_file}")
+    
+    # Step 6: Checkout if requested
     if checkout:
         if verbose:
-            print(f"Checking out {created_dvc}...")
+            print(f"Checking out {dvc_file}...")
         
         results = checkout_mod.checkout(
-            targets=[str(created_dvc)],
+            targets=[str(dvc_file)],
             verbose=verbose,
         )
         
         # Check if any cache succeeded
         any_success = any(success for _, success, _ in results)
         if not any_success:
-            print(f"Warning: Checkout failed. Run 'dt checkout {created_dvc}' after configuring caches.")
+            print(f"Warning: Checkout failed. Run 'dt checkout {dvc_file}' after configuring caches.")
     
-    return created_dvc, cache_path
+    return dvc_file, cache_path
