@@ -563,8 +563,9 @@ def push(ctx):
 ))
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show which cache is being checked')
+@click.option('-c', '--cache', 'cache_name', help='Use only this cache (by name or path)')
 @click.pass_context
-def checkout(ctx, targets, verbose):
+def checkout(ctx, targets, verbose, cache_name):
     """Checkout DVC-tracked files, searching across multiple caches.
     
     Runs `dvc checkout` but searches for cached files across:
@@ -576,6 +577,9 @@ def checkout(ctx, targets, verbose):
     This enables checking out files that exist in another project's cache
     or remote storage without copying them to the local cache first.
     
+    Use --cache to checkout from a specific cache only. In this mode,
+    checkout will fail if files are not found (no --allow-missing).
+    
     All other options are passed through to `dvc checkout`.
     Run `dvc checkout --help` for additional options.
     
@@ -585,12 +589,14 @@ def checkout(ctx, targets, verbose):
         dt checkout data/processed.dvc     # Checkout specific targets
         dt checkout --force                # Force checkout (overwrite modified)
         dt checkout -v                     # Show cache search progress
+        dt checkout --cache neochemo       # Checkout from specific cache only
     """
     try:
         results = checkout_mod.checkout(
             targets=list(targets),
             extra_args=ctx.args,
             verbose=verbose,
+            cache=cache_name,
         )
         
         any_success = False
