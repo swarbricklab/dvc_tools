@@ -10,6 +10,7 @@ from . import remote as remote_mod
 from . import doctor as doctor_mod
 from . import push as push_mod
 from . import checkout as checkout_mod
+from . import tmp as tmp_mod
 
 
 @click.group()
@@ -548,6 +549,93 @@ def checkout(ctx, targets, verbose):
             raise SystemExit(1)
             
     except checkout_mod.CheckoutError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.group()
+def tmp():
+    """Manage temporary repository clones.
+    
+    Temporary clones are stored in .dt/tmp/ and used to access
+    DVC configuration from remote repositories without full checkout.
+    """
+    pass
+
+
+@tmp.command('clone')
+@click.argument('repository')
+@click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--no-refresh', is_flag=True, help='Use cached clone without refreshing')
+def tmp_clone(repository, owner, no_refresh):
+    """Clone a repository into .dt/tmp/.
+    
+    Creates a sparse clone with only .dvc/ directory checked out.
+    If the clone already exists, it is refreshed by default.
+    
+    \b
+    Examples:
+        dt tmp clone neochemo
+        dt tmp clone git@github.com:swarbricklab/neochemo.git
+        dt tmp clone neochemo --no-refresh
+    """
+    try:
+        repo_path = tmp_mod.clone_repo(
+            repo_spec=repository,
+            owner=owner,
+            refresh=not no_refresh,
+            verbose=True,
+        )
+    except tmp_mod.TmpError as e:
+        raise click.ClickException(str(e))
+
+
+@tmp.command('list')
+def tmp_list():
+    """List cached repository clones.
+    
+    Shows all repositories currently cached in .dt/tmp/.
+    """
+    repos = tmp_mod.list_repos()
+    
+    if not repos:
+        click.echo("No cached repositories in .dt/tmp/")
+        return
+    
+    click.echo(f"Cached repositories in .dt/tmp/:")
+    for repo_id, path in repos:
+        click.echo(f"  {repo_id}")
+
+
+@tmp.command('clean')
+@click.argument('repository', required=False)
+@click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--all', 'clean_all', is_flag=True, help='Remove all cached clones')
+def tmp_clean(repository, owner, clean_all):
+    """Remove cached repository clones.
+    
+    Without arguments, shows help. Use --all to remove all clones,
+    or specify a repository to remove just that one.
+    
+    \b
+    Examples:
+        dt tmp clean neochemo     # Remove specific repo
+        dt tmp clean --all        # Remove all cached repos
+    """
+    if not repository and not clean_all:
+        raise click.UsageError("Specify a repository or use --all to clean all.")
+    
+    try:
+        if clean_all:
+            removed = tmp_mod.clean_repos()
+        else:
+            removed = tmp_mod.clean_repos(repo_spec=repository, owner=owner)
+        
+        if removed:
+            for repo_id in removed:
+                click.echo(f"Removed {repo_id}")
+        else:
+            click.echo("No cached repositories to remove.")
+    except tmp_mod.TmpError as e:
         raise click.ClickException(str(e))
 
 
