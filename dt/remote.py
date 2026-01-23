@@ -5,7 +5,7 @@ Handles DVC remote setup with SSH and local access methods for HPC environments.
 
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from . import config as cfg
 from . import utils
@@ -176,3 +176,109 @@ def init_remote(
     configure_dvc_remote(repo_path, remote_dir, name, verbose=verbose)
     
     return remote_dir
+
+
+def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
+    """Run dvc remote list in a repository and parse output.
+    
+    Args:
+        repo_path: Path to the repository
+        
+    Returns:
+        List of (remote_name, url, is_default) tuples
+    """
+    result = subprocess.run(
+        ['dvc', 'remote', 'list'],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        return []
+    
+    # Get default remote
+    default_result = subprocess.run(
+        ['dvc', 'config', 'core.remote'],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    default_remote = default_result.stdout.strip() if default_result.returncode == 0 else None
+    
+    # Parse output - handle wrapped lines where URL may be on next line
+    # DVC outputs: "name\turl" but wraps long lines
+    remotes = []
+    lines = result.stdout.strip().split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        
+        # Remove (default) marker if present
+        line = line.replace('(default)', '').strip()
+        
+        parts = line.split(None, 1)
+        if not parts:
+            i += 1
+            continue
+        
+        name = parts[0]
+        
+        if len(parts) > 1:
+            # URL on same line
+            url = parts[1].strip()
+        else:
+            # URL might be on next line (wrapped)
+            url = ''
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip().replace('(default)', '').strip()
+                # If next line starts with a protocol, it's the URL
+                if next_line.startswith(('ssh://', 'http://', 'https://', 's3://', '/', 'gs://')):
+                    url = next_line
+                    i += 1
+        
+        is_default = name == default_remote
+        remotes.append((name, url, is_default))
+        i += 1
+    
+    return remotes
+
+
+def list_remotes(repo_path: Optional[Path] = None) -> List[Tuple[str, str, bool]]:
+    """List remotes for a DVC repository.
+    
+    Uses `dvc remote list` to get remotes.
+    
+    Args:
+        repo_path: Path to the repository (defaults to cwd)
+        
+    Returns:
+        List of (remote_name, url, is_default) tuples
+    """
+    repo_path = repo_path or Path.cwd()
+    return _run_dvc_remote_list(repo_path)
+
+
+def list_remotes_from_repo(
+    repo_spec: str,
+    owner: Optional[str] = None,
+) -> List[Tuple[str, str, bool]]:
+    """List remotes for a remote repository.
+    
+    Uses tmp clone infrastructure to clone the repo and run
+    `dvc remote list` within it.
+    
+    Args:
+        repo_spec: Repository URL or short name
+        owner: Optional owner for short names
+        
+    Returns:
+        List of (remote_name, url, is_default) tuples
+    """
+    from . import tmp as tmp_mod
+    
+    repo_path = tmp_mod.clone_repo(repo_spec, owner=owner, refresh=True, verbose=False)
+    return _run_dvc_remote_list(repo_path)

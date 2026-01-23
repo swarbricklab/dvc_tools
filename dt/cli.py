@@ -388,6 +388,40 @@ def remote_init(project_name, name, remote_root, remote_path):
         raise click.ClickException(str(e))
 
 
+@remote.command('list')
+@click.argument('repository', required=False)
+@click.option('--owner', help='Override the GitHub owner for short names')
+def remote_list(repository, owner):
+    """List DVC remotes for a repository.
+    
+    Without arguments, lists remotes for the current repository.
+    With a repository argument, lists remotes for that remote repository.
+    
+    \b
+    Examples:
+        dt remote list                    # List remotes for current repo
+        dt remote list neochemo           # List remotes for another repo
+        dt remote list swarbricklab/other # List with explicit owner
+    """
+    if repository:
+        # List remotes from a remote repository
+        try:
+            remotes = remote_mod.list_remotes_from_repo(repository, owner=owner)
+        except Exception as e:
+            raise click.ClickException(str(e))
+    else:
+        # List remotes for current repository
+        remotes = remote_mod.list_remotes()
+    
+    if not remotes:
+        click.echo("No remotes configured.")
+        return
+    
+    for name, url, is_default in remotes:
+        default_marker = " (default)" if is_default else ""
+        click.echo(f"{name}{default_marker}: {url}")
+
+
 @cli.command()
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed output including dvc doctor and config')
 def doctor(verbose):
