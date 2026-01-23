@@ -357,6 +357,45 @@ def cache_init(project_name, name, cache_root, cache_path):
         raise click.ClickException(str(e))
 
 
+@cache.command('add-from')
+@click.argument('repository')
+@click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--local', 'scope', flag_value='local', default=True, help='Add to local config (default)')
+@click.option('--project', 'scope', flag_value='project', help='Add to project config')
+@click.option('--user', 'scope', flag_value='user', help='Add to user config')
+@click.option('--system', 'scope', flag_value='system', help='Add to system config')
+def cache_add_from(repository, owner, scope):
+    """Add a repository's remote as an alternate cache.
+    
+    Discovers the locally-accessible remote from another repository
+    and adds it as an alternate cache for multi-cache checkout.
+    
+    This is useful for importing data from another project - adding
+    their remote as an alternate cache allows `dt checkout` to find
+    files without copying them to your local cache first.
+    
+    \b
+    Examples:
+        dt cache add-from neochemo
+        dt cache add-from git@github.com:swarbricklab/otherproject.git
+    """
+    result = remote_mod.find_local_remote_from_repo(repository, owner=owner)
+    
+    if not result:
+        raise click.ClickException(
+            f"No locally-accessible remote found for '{repository}'.\n"
+            f"Use 'dt remote list {repository}' to see available remotes."
+        )
+    
+    remote_name, local_path = result
+    
+    if cfg.add_list_value('cache.alt', local_path, scope):
+        click.echo(f"Added {local_path} to {scope} config.")
+        click.echo(f"  (from remote '{remote_name}')")
+    else:
+        click.echo(f"Path already exists in {scope} config: {local_path}")
+
+
 @cli.group()
 def remote():
     """Manage remote storage."""

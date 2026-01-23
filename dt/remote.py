@@ -282,3 +282,81 @@ def list_remotes_from_repo(
     
     repo_path = tmp_mod.clone_repo(repo_spec, owner=owner, refresh=True, verbose=False)
     return _run_dvc_remote_list(repo_path)
+
+
+def extract_local_path(url: str) -> Optional[str]:
+    """Extract the local filesystem path from a remote URL.
+    
+    Handles:
+    - Local paths: /path/to/remote -> /path/to/remote
+    - SSH URLs: ssh://host/path/to/remote -> /path/to/remote
+    - SSH URLs with user: ssh://user@host/path -> /path
+    
+    Args:
+        url: Remote URL
+        
+    Returns:
+        Local path if extractable, None otherwise
+    """
+    import re
+    
+    url = url.strip()
+    
+    # Already a local path
+    if url.startswith('/'):
+        return url
+    
+    # SSH URL format: ssh://[user@]host/path
+    ssh_match = re.match(r'ssh://(?:[^@]+@)?[^/]+(/.*)', url)
+    if ssh_match:
+        return ssh_match.group(1)
+    
+    # Not a local-accessible format (s3://, gs://, https://, etc.)
+    return None
+
+
+def find_local_remote(
+    remotes: List[Tuple[str, str, bool]],
+    check_exists: bool = True,
+) -> Optional[Tuple[str, str]]:
+    """Find a remote that is accessible on the local filesystem.
+    
+    Checks remotes in order, returning the first one whose path
+    exists on the local filesystem.
+    
+    Args:
+        remotes: List of (name, url, is_default) tuples
+        check_exists: If True, verify the path exists (default True)
+        
+    Returns:
+        Tuple of (remote_name, local_path) if found, None otherwise
+    """
+    for name, url, is_default in remotes:
+        local_path = extract_local_path(url)
+        if local_path:
+            if check_exists:
+                if Path(local_path).exists():
+                    return (name, local_path)
+            else:
+                return (name, local_path)
+    
+    return None
+
+
+def find_local_remote_from_repo(
+    repo_spec: str,
+    owner: Optional[str] = None,
+    check_exists: bool = True,
+) -> Optional[Tuple[str, str]]:
+    """Find a locally-accessible remote from a remote repository.
+    
+    Args:
+        repo_spec: Repository URL or short name
+        owner: Optional owner for short names
+        check_exists: If True, verify the path exists (default True)
+        
+    Returns:
+        Tuple of (remote_name, local_path) if found, None otherwise
+    """
+    remotes = list_remotes_from_repo(repo_spec, owner=owner)
+    return find_local_remote(remotes, check_exists=check_exists)
