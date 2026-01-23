@@ -207,8 +207,7 @@ def create_dvc_file(
 def import_data(
     repository: str,
     path: str,
-    dest: Optional[str] = None,
-    name: Optional[str] = None,
+    out: Optional[str] = None,
     owner: Optional[str] = None,
     checkout: bool = True,
     verbose: bool = False,
@@ -218,8 +217,7 @@ def import_data(
     Args:
         repository: Repository name, alias, or URL.
         path: Path to the file/directory in the remote repo.
-        dest: Destination directory (default: current directory).
-        name: Override name for imported data.
+        out: Destination path to download files to (default: basename of path).
         owner: Optional owner override for short names.
         checkout: Whether to run checkout after import.
         verbose: Print progress messages.
@@ -235,7 +233,11 @@ def import_data(
     except utils.DependencyError as e:
         raise ImportError(str(e))
     
-    dest_path = Path(dest) if dest else Path.cwd()
+    # Determine destination path
+    if out:
+        out_path = Path(out)
+    else:
+        out_path = Path(Path(path).name)
     
     # Step 1: Ensure we have a sparse clone of the repo
     if verbose:
@@ -253,18 +255,34 @@ def import_data(
     if verbose:
         print(f"Looking for local cache from {repository}...")
     
+    cache_path = None
+    
+    # First, try to find a local remote in the source repo
     result = remote_mod.find_local_remote_from_repo(
         repo_spec=repository,
         owner=owner,
     )
     
-    if not result:
+    if result:
+        _, cache_path = result
+    else:
+        # Check cache.alt for a cache that matches the repo name
+        # Extract repo name from the spec (last component of repo_id)
+        repo_id = tmp_mod.get_repo_id(repository, owner=owner)
+        repo_name = repo_id.split('/')[-1] if repo_id else ''
+        if repo_name:
+            alt_caches = cfg.get_list_value('cache.alt')
+            for cache in alt_caches:
+                if repo_name in cache and Path(cache).exists():
+                    cache_path = cache
+                    break
+    
+    if not cache_path:
         raise ImportError(
             f"No locally-accessible cache found for {repository}.\n"
-            f"Run: dt cache add-from {repository}"
+            f"Run: dt cache add /path/to/cache  (to add manually)\n"
+            f"  or: dt cache add-from {repository}  (if source has local remote)"
         )
-    
-    remote_name, cache_path = result
     
     if verbose:
         print(f"Using cache: {cache_path}")
@@ -287,9 +305,6 @@ def import_data(
     # Add cache to alt caches for checkout
     cfg.add_list_value('cache.alt', cache_path, 'local')
     
-    # Determine output name
-    output_name = name or Path(path.rstrip('/')).name
-    
     # Step 5: Create .dvc file (and .dir file if needed)
     if len(files) == 1 and not files[0].get('isdir', False):
         # Single file import
@@ -305,8 +320,8 @@ def import_data(
             print(f"Importing single file: {md5} ({size} bytes)")
         
         dvc_file = create_dvc_file(
-            dest_path=dest_path,
-            name=output_name,
+            dest_path=out_path.parent,
+            name=out_path.name,
             md5=md5,
             size=size,
         )
@@ -347,8 +362,8 @@ def import_data(
         
         # Create .dvc file
         dvc_file = create_dvc_file(
-            dest_path=dest_path,
-            name=output_name,
+            dest_path=out_path.parent,
+            name=out_path.name,
             md5=dir_hash,
             size=total_size,
             nfiles=len(entries),

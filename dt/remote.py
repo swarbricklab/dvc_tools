@@ -207,53 +207,29 @@ def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
     default_remote = default_result.stdout.strip() if default_result.returncode == 0 else None
     
     # Parse output - handle wrapped lines where URL may be on next line
-    # DVC outputs: "name\turl" but wraps long lines, sometimes across multiple lines
-    # Also "(default)" can appear on its own line
+    # DVC outputs one line per remote: "name<whitespace>url"
+    # Default remote has "(default)" suffix
+    # When captured via subprocess, there's no terminal wrapping
     remotes = []
-    lines = result.stdout.strip().split('\n')
     
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line:
-            i += 1
+    for line in result.stdout.strip().split('\n'):
+        if not line.strip():
             continue
         
-        # Skip standalone (default) markers
-        if line == '(default)':
-            i += 1
-            continue
-        
-        # Check if this is a URL (continuation of previous line)
-        if line.startswith(('ssh://', 'http://', 'https://', 's3://', 'gs://', 'azure://')):
-            # This is a URL that was on its own line - attach to previous remote
-            if remotes:
-                prev_name, prev_url, prev_default = remotes[-1]
-                if not prev_url:
-                    remotes[-1] = (prev_name, line, prev_default)
-            i += 1
-            continue
-        
-        # Remove (default) marker if present inline
+        # Check for and remove (default) marker
+        is_default_marker = '(default)' in line
         line = line.replace('(default)', '').strip()
         
+        # Split on whitespace: name<whitespace>url
         parts = line.split(None, 1)
-        if not parts:
-            i += 1
-            continue
-        
-        name = parts[0]
-        
-        if len(parts) > 1:
-            # URL on same line
+        if len(parts) >= 2:
+            name = parts[0]
             url = parts[1].strip()
-        else:
-            # URL might be on next line (wrapped)
-            url = ''
-        
-        is_default = name == default_remote
-        remotes.append((name, url, is_default))
-        i += 1
+            is_default = (name == default_remote) or is_default_marker
+            remotes.append((name, url, is_default))
+        elif len(parts) == 1:
+            # Name only, no URL (shouldn't happen but handle gracefully)
+            remotes.append((parts[0], '', parts[0] == default_remote))
     
     return remotes
 
@@ -295,19 +271,23 @@ def list_remotes_from_repo(
     return _run_dvc_remote_list(repo_path)
 
 
-def extract_local_path(url: str) -> Optional[str]:
-    """Extract the local filesystem path from a remote URL.
+def parse_remote_url(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse a remote URL into host and path components.
     
     Handles:
-    - Local paths: /path/to/remote -> /path/to/remote
-    - SSH URLs: ssh://host/path/to/remote -> /path/to/remote
-    - SSH URLs with user: ssh://user@host/path -> /path
+    - Local paths: /path/to/remote -> (None, /path/to/remote)
+    - file:// URLs: file:///path -> (None, /path)
+    - SSH URLs: ssh://host/path -> (host, /path)
+    - SSH URLs with user: ssh://user@host/path -> (host, /path)
+    - SCP-style: user@host:/path -> (host, /path)
+    - S3, GCS, etc: s3://bucket/path -> ('s3', None) - not local
     
     Args:
         url: Remote URL
         
     Returns:
-        Local path if extractable, None otherwise
+        Tuple of (host, path). host is None for local paths,
+        path is None for cloud storage (not locally accessible).
     """
     import re
     
@@ -315,15 +295,121 @@ def extract_local_path(url: str) -> Optional[str]:
     
     # Already a local path
     if url.startswith('/'):
-        return url
+        return (None, url)
+    
+    # file:// URL
+    if url.startswith('file://'):
+        return (None, url[7:])
     
     # SSH URL format: ssh://[user@]host/path
-    ssh_match = re.match(r'ssh://(?:[^@]+@)?[^/]+(/.*)', url)
+    ssh_match = re.match(r'ssh://(?:[^@]+@)?([^/]+)(/.*)', url)
     if ssh_match:
-        return ssh_match.group(1)
+        return (ssh_match.group(1), ssh_match.group(2))
     
-    # Not a local-accessible format (s3://, gs://, https://, etc.)
-    return None
+    # SCP-style: [user@]host:/path
+    scp_match = re.match(r'(?:[^@]+@)?([^:]+):(/.+)', url)
+    if scp_match:
+        return (scp_match.group(1), scp_match.group(2))
+    
+    # Cloud storage (s3://, gs://, https://, etc.) - not locally accessible
+    return (url.split('://')[0] if '://' in url else None, None)
+
+
+def get_local_hosts() -> List[str]:
+    """Get list of hostnames that should be considered 'local'.
+    
+    Returns current hostname plus any configured SSH host.
+    
+    Returns:
+        List of hostnames considered local.
+    """
+    import socket
+    
+    hosts = []
+    
+    # Current hostname (short and FQDN)
+    hostname = socket.gethostname()
+    hosts.append(hostname)
+    
+    # Try to get FQDN
+    try:
+        fqdn = socket.getfqdn()
+        if fqdn and fqdn != hostname:
+            hosts.append(fqdn)
+    except Exception:
+        pass
+    
+    # Configured SSH host (used for remote URLs)
+    ssh_host = cfg.get_value('ssh.host')
+    if ssh_host:
+        hosts.append(ssh_host)
+    
+    return hosts
+
+
+def is_local_host(host: str) -> bool:
+    """Check if a hostname should be considered 'local'.
+    
+    A host is considered local if:
+    - It matches the current hostname
+    - It matches any configured local hosts (core.local_hosts)
+    
+    Args:
+        host: Hostname to check
+        
+    Returns:
+        True if the host is considered local.
+    """
+    if not host:
+        return False
+    
+    local_hosts = get_local_hosts()
+    
+    # Check for exact match
+    if host in local_hosts:
+        return True
+    
+    # Check for partial match (e.g., 'gadi-dm' matches 'gadi-dm.nci.org.au')
+    for local in local_hosts:
+        if host.startswith(local.split('.')[0]) or local.startswith(host.split('.')[0]):
+            # Same short hostname
+            if host.split('.')[0] == local.split('.')[0]:
+                return True
+    
+    return False
+
+
+def extract_local_path(url: str, check_host: bool = True) -> Optional[str]:
+    """Extract the local filesystem path from a remote URL.
+    
+    Handles:
+    - Local paths: /path/to/remote -> /path/to/remote
+    - file:// URLs: file:///path -> /path
+    - SSH URLs: ssh://host/path -> /path (if host is local)
+    - SCP-style: user@host:/path -> /path (if host is local)
+    
+    Args:
+        url: Remote URL
+        check_host: If True (default), verify SSH hosts are local
+        
+    Returns:
+        Local path if extractable, None otherwise
+    """
+    host, path = parse_remote_url(url)
+    
+    if path is None:
+        # Cloud storage or unparseable
+        return None
+    
+    if host is None:
+        # Already a local path
+        return path
+    
+    # SSH remote - check if host is local
+    if check_host and not is_local_host(host):
+        return None
+    
+    return path
 
 
 def find_local_remote(

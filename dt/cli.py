@@ -722,12 +722,11 @@ def tmp_clean(repository, owner, clean_all):
 @cli.command('import')
 @click.argument('repository')
 @click.argument('path')
-@click.option('-o', '--out', 'dest', help='Destination directory (default: current)')
-@click.option('-n', '--name', help='Override name for imported data')
+@click.option('-o', '--out', help='Destination path to download files to')
 @click.option('--owner', help='Override the GitHub owner for short names')
 @click.option('--no-checkout', is_flag=True, help='Skip checkout after import')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def import_cmd(repository, path, dest, name, owner, no_checkout, verbose):
+def import_cmd(repository, path, out, owner, no_checkout, verbose):
     """Import DVC-tracked data from another repository.
     
     Creates a .dvc file pointing to data in REPOSITORY at PATH,
@@ -740,7 +739,7 @@ def import_cmd(repository, path, dest, name, owner, no_checkout, verbose):
     \b
     Examples:
         dt import neochemo data/processed
-        dt import neochemo data/samples.h5ad --name my_samples.h5ad
+        dt import neochemo data/samples.h5ad -o my_samples.h5ad
         dt import git@github.com:lab/project.git results/model
         dt import neochemo data/large --no-checkout
     """
@@ -748,8 +747,7 @@ def import_cmd(repository, path, dest, name, owner, no_checkout, verbose):
         dvc_file, cache_path = import_mod.import_data(
             repository=repository,
             path=path,
-            dest=dest,
-            name=name,
+            out=out,
             owner=owner,
             checkout=not no_checkout,
             verbose=verbose,
