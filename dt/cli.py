@@ -11,6 +11,7 @@ from . import doctor as doctor_mod
 from . import push as push_mod
 from . import checkout as checkout_mod
 from . import tmp as tmp_mod
+from . import import_data as import_mod
 
 
 @click.group()
@@ -715,6 +716,50 @@ def tmp_clean(repository, owner, clean_all):
         else:
             click.echo("No cached repositories to remove.")
     except tmp_mod.TmpError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command('import')
+@click.argument('repository')
+@click.argument('path')
+@click.option('-o', '--out', 'dest', help='Destination directory (default: current)')
+@click.option('-n', '--name', help='Override name for imported data')
+@click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--no-checkout', is_flag=True, help='Skip checkout after import')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def import_cmd(repository, path, dest, name, owner, no_checkout, verbose):
+    """Import DVC-tracked data from another repository.
+    
+    Creates a .dvc file pointing to data in REPOSITORY at PATH,
+    then checks out the data from locally-accessible caches.
+    
+    Unlike `dvc import`, this does not require network access to
+    the remote storage. Instead, it uses cache paths discovered
+    via `dt cache add-from`.
+    
+    \b
+    Examples:
+        dt import neochemo data/processed
+        dt import neochemo data/samples.h5ad --name my_samples.h5ad
+        dt import git@github.com:lab/project.git results/model
+        dt import neochemo data/large --no-checkout
+    """
+    try:
+        dvc_file, cache_path = import_mod.import_data(
+            repository=repository,
+            path=path,
+            dest=dest,
+            name=name,
+            owner=owner,
+            checkout=not no_checkout,
+            verbose=verbose,
+        )
+        
+        click.echo(f"Created {dvc_file}")
+        if cache_path:
+            click.echo(f"Using cache: {cache_path}")
+            
+    except import_mod.ImportError as e:
         raise click.ClickException(str(e))
 
 

@@ -191,9 +191,10 @@ def clone_repo(
     if result.returncode != 0:
         raise TmpError(f"Failed to clone repository: {result.stderr}")
     
-    # Set up sparse checkout for .dvc/ only
+    # Set up sparse checkout for .dvc/ directory and all *.dvc files
+    # Use --no-cone mode to allow patterns (not just directories)
     result = subprocess.run(
-        ['git', 'sparse-checkout', 'set', '.dvc'],
+        ['git', 'sparse-checkout', 'set', '--no-cone', '/.dvc/', '*.dvc'],
         cwd=repo_path,
         capture_output=True,
         text=True,
