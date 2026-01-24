@@ -1,12 +1,8 @@
 # DVC Tools
 
-This package provides convenient tools for working with DVC in a HPC environment with shared external caches and SSH remotes on the same HPC.
-
-These tools are currently used by Swarbrick Lab on NCI.
+Convenient tools for working with DVC in HPC environments with shared external caches and SSH remotes.
 
 ## Installation
-
-Install the package using pip:
 
 ```bash
 # Install from source (development)
@@ -24,51 +20,51 @@ mkdir my-analysis && cd my-analysis
 dt init my-analysis
 
 # Or clone an existing project  
-dt clone git@github.com/swarbricklab/existing-project.git
+dt clone git@github.com:myorg/existing-project.git
 
 # Check configuration
-dt config
+dt doctor
 ```
-
-## Background Resources
-
-For background information on DVC, see:
-- [DVC Basics](docs/DVC_basics.md)
-- [Official docs](https://dvc.org/doc)
-- [Official YouTube channel](https://www.youtube.com/playlist?list=PL7WG7YrwYcnDa_V8jmtnm_CTh4ny0Mm8M)
-- [Discord Server](https://discordapp.com/invite/dvwXA2N)
-
-## Architecture
-
-On NCI, the Swarbrick Lab typically uses the following pattern:
-- workspaces are on scratch (usually `/scratch/${PROJECT}/${USER}/`)
-- external shared caches are on scratch (usually `/scratch/)${PROJECT}/dvc/cache/${REPO}`)
-- remotes are on gdata (usually `/g/data/${PROJECT}/dvc/${REPO_TYPE}/${REPO})
-- remotes are defined as SSH hosts via `gadi-dm.nci.org.au`
 
 ## Commands
 
-This package provides the `dt` command with subcommands for working with DVC projects in HPC environments:
+This package provides the `dt` command with subcommands for working with DVC projects:
 
-### Core Commands
-- **[config](docs/config.md)** - View and modify configuration settings with hierarchical scopes
-- **[init](docs/init.md)** - Initialize new DVC projects with proper cache and remote setup  
-- **[clone](docs/clone.md)** - Clone existing DVC projects from GitHub with automatic configuration
+| Command | Description |
+|---------|-------------|
+| `dt init` | Initialize a new DVC project with cache and remote |
+| `dt clone` | Clone an existing DVC project with local configuration |
+| `dt checkout` | Checkout files, searching across multiple caches |
+| `dt push` | Push files to all configured remotes |
+| `dt import` | Import data from other repositories using local caches |
+| `dt cache` | Manage external shared caches |
+| `dt remote` | Manage remote storage |
+| `dt tmp` | Manage temporary repository clones |
+| `dt config` | View and modify configuration settings |
+| `dt doctor` | Diagnose common setup issues |
 
-### Cache & Remote Management
-- **[cache](docs/cache.md)** - Set up and manage external shared caches
-- **[remote](docs/remote.md)** - Configure remote storage with SSH and local access
+See the [Command Reference](docs/commands.md) for full documentation.
 
-Each command includes help documentation accessible via `dt <command> --help`.
+Each command includes help via `dt <command> --help`.
 
-## Quick Command Reference
+## Architecture
 
-**config** - Manage configuration settings with hierarchical scopes (local > project > user > system). See [docs/config.md](docs/config.md).
+On HPC systems, `dt` supports the following pattern:
 
-**init** - Initialize new DVC projects with complete setup including git, DVC, cache, and remote configuration. See [docs/init.md](docs/init.md).
+- **Workspaces** on fast scratch storage (e.g., `/scratch/${PROJECT}/${USER}/`)
+- **Shared caches** on scratch for team collaboration (e.g., `/scratch/${PROJECT}/dvc/cache/`)
+- **Remotes** on persistent storage (e.g., `/g/data/${PROJECT}/dvc/`)
+- **SSH access** to remotes from external systems
 
-**clone** - Clone existing DVC projects from GitHub with automatic platform-specific configuration and shared cache setup. See [docs/clone.md](docs/clone.md).
+## Documentation
 
-**cache** - Set up external shared caches with proper group permissions for team collaboration. See [docs/cache.md](docs/cache.md).
+- [Command Reference](docs/commands.md) - All commands and options
+- [Configuration](docs/config.md) - Configuration system and scopes
+- [DVC Basics](docs/DVC_basics.md) - Background on DVC concepts
 
-**remote** - Configure remote storage with both SSH (for external access) and local (for efficiency) remotes. See [docs/remote.md](docs/remote.md).
+## External Resources
+
+- [DVC Official Docs](https://dvc.org/doc)
+- [DVC YouTube Channel](https://www.youtube.com/playlist?list=PL7WG7YrwYcnDa_V8jmtnm_CTh4ny0Mm8M)
+- [DVC Discord](https://discordapp.com/invite/dvwXA2N)
+

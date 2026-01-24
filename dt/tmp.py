@@ -65,9 +65,9 @@ def get_repo_id(repo_spec: str, owner: Optional[str] = None) -> str:
     """Convert a repository URL or name to a path-like directory structure.
     
     Examples:
-        git@github.com:swarbricklab/neochemo.git -> github.com/swarbricklab/neochemo
-        https://github.com/swarbricklab/neochemo -> github.com/swarbricklab/neochemo
-        neochemo (with owner=swarbricklab) -> github.com/swarbricklab/neochemo
+        git@github.com:myorg/myproject.git -> github.com/myorg/myproject
+        https://github.com/myorg/myproject -> github.com/myorg/myproject
+        myproject (with owner=myorg) -> github.com/myorg/myproject
     
     Args:
         repo_spec: Repository URL, SSH path, or short name

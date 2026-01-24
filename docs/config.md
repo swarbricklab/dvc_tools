@@ -29,7 +29,7 @@ dt config set cache.root /g/data/a56/dvc_cache
 dt config set remote.root /g/data/a56/dvc_remote
 
 # Set personal settings (user scope)
-dt config set --user owner swarbricklab
+dt config set --user owner myorg
 dt config set --user team analysts
 
 # View current configuration

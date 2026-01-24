@@ -76,12 +76,12 @@ def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_na
     When owner is configured, you can use short names:
     
     \b
-        dt clone neochemo
+        dt clone myproject
     
     is equivalent to:
     
     \b
-        dt clone git@github.com:swarbricklab/neochemo.git
+        dt clone git@github.com:myorg/myproject.git
     
     This command clones a repository and configures it for the local platform
     with proper cache and remote setup.
@@ -377,8 +377,8 @@ def cache_add_from(repository, owner, scope):
     
     \b
     Examples:
-        dt cache add-from neochemo
-        dt cache add-from git@github.com:swarbricklab/otherproject.git
+        dt cache add-from otherproject
+        dt cache add-from git@github.com:myorg/otherproject.git
     """
     result = remote_mod.find_local_remote_from_repo(repository, owner=owner)
     
@@ -440,8 +440,8 @@ def remote_list(repository, owner):
     \b
     Examples:
         dt remote list                    # List remotes for current repo
-        dt remote list neochemo           # List remotes for another repo
-        dt remote list swarbricklab/other # List with explicit owner
+        dt remote list otherproject       # List remotes for another repo
+        dt remote list myorg/otherproject # List with explicit owner
     """
     if repository:
         # List remotes from a remote repository
@@ -657,9 +657,9 @@ def tmp_clone(repository, owner, no_refresh):
     
     \b
     Examples:
-        dt tmp clone neochemo
-        dt tmp clone git@github.com:swarbricklab/neochemo.git
-        dt tmp clone neochemo --no-refresh
+        dt tmp clone otherproject
+        dt tmp clone git@github.com:myorg/otherproject.git
+        dt tmp clone otherproject --no-refresh
     """
     try:
         repo_path = tmp_mod.clone_repo(
