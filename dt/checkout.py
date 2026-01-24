@@ -5,11 +5,16 @@ without copying them to the local cache first.
 
 Strategy: Temporarily swap the local cache config for each cache directory,
 run dvc checkout with --allow-missing, then restore the original config.
+
+Also handles import .dvc files (those with a deps section) by cloning the
+source repository and finding a locally-accessible cache.
 """
 
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 
 from . import config as cfg
 from . import utils
@@ -18,6 +23,67 @@ from . import utils
 class CheckoutError(Exception):
     """Raised when checkout operations fail."""
     pass
+
+
+def parse_dvc_file(dvc_path: Path) -> Dict[str, Any]:
+    """Parse a .dvc file and return its contents.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        
+    Returns:
+        Dictionary with the .dvc file contents.
+        
+    Raises:
+        CheckoutError: If the file cannot be parsed.
+    """
+    try:
+        with open(dvc_path) as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        raise CheckoutError(f"Failed to parse {dvc_path}: {e}")
+
+
+def is_import_dvc(dvc_data: Dict[str, Any]) -> bool:
+    """Check if a .dvc file represents an import (has deps section).
+    
+    Args:
+        dvc_data: Parsed .dvc file contents.
+        
+    Returns:
+        True if this is an import .dvc file.
+    """
+    deps = dvc_data.get('deps', [])
+    if not deps:
+        return False
+    
+    # Check for repo section in deps
+    for dep in deps:
+        if 'repo' in dep:
+            return True
+    
+    return False
+
+
+def get_import_info(dvc_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract import information from a .dvc file.
+    
+    Args:
+        dvc_data: Parsed .dvc file contents.
+        
+    Returns:
+        Dictionary with 'url', 'rev', and 'path' keys, or None if not an import.
+    """
+    deps = dvc_data.get('deps', [])
+    for dep in deps:
+        repo = dep.get('repo', {})
+        if repo:
+            return {
+                'url': repo.get('url'),
+                'rev': repo.get('rev_lock') or repo.get('rev'),
+                'path': dep.get('path'),
+            }
+    return None
 
 
 def get_primary_cache() -> Optional[str]:
@@ -283,3 +349,269 @@ def checkout(
         results.append((cache_dir, success, output))
     
     return results
+
+
+def smart_checkout(
+    targets: Optional[List[str]] = None,
+    extra_args: Optional[List[str]] = None,
+    verbose: bool = False,
+    cache: Optional[str] = None,
+) -> List[Tuple[str, bool, str]]:
+    """Checkout DVC-tracked files, automatically handling imports.
+    
+    This is the main entry point for dt checkout. It:
+    1. Detects if any targets are import .dvc files (have deps section)
+    2. For imports, clones the source repo and finds a local cache
+    3. For regular files, uses the standard multi-cache checkout
+    
+    Args:
+        targets: DVC targets to checkout (None for all).
+        extra_args: Additional arguments to pass to dvc checkout.
+        verbose: Print progress messages.
+        cache: Specific cache name/path to use (exclusive mode).
+        
+    Returns:
+        List of (cache_path, success, output) tuples.
+        
+    Raises:
+        CheckoutError: If checkout fails.
+    """
+    try:
+        utils.check_dvc()
+    except utils.DependencyError as e:
+        raise CheckoutError(str(e))
+    
+    targets = targets or []
+    extra_args = extra_args or []
+    
+    # Separate import targets from regular targets
+    import_targets = []
+    regular_targets = []
+    
+    for target in targets:
+        target_path = Path(target)
+        
+        # Only check .dvc files that exist
+        if target_path.suffix == '.dvc' and target_path.exists():
+            try:
+                dvc_data = parse_dvc_file(target_path)
+                if is_import_dvc(dvc_data):
+                    import_targets.append((target_path, dvc_data))
+                    continue
+            except CheckoutError:
+                pass  # Fall through to regular checkout
+        
+        regular_targets.append(target)
+    
+    all_results = []
+    
+    # Handle import targets
+    for dvc_path, dvc_data in import_targets:
+        if verbose:
+            print(f"Detected import: {dvc_path}")
+        
+        try:
+            results = checkout_import(
+                dvc_path=dvc_path,
+                dvc_data=dvc_data,
+                extra_args=extra_args,
+                verbose=verbose,
+            )
+            all_results.extend(results)
+        except CheckoutError as e:
+            # Report as failure but continue with other targets
+            all_results.append((str(dvc_path), False, str(e)))
+    
+    # Handle regular targets (or all if no specific targets)
+    if regular_targets or not targets:
+        results = checkout(
+            targets=regular_targets if regular_targets else None,
+            extra_args=extra_args,
+            verbose=verbose,
+            cache=cache,
+        )
+        all_results.extend(results)
+    
+    return all_results
+
+
+def checkout_import(
+    dvc_path: Path,
+    dvc_data: Dict[str, Any],
+    extra_args: Optional[List[str]] = None,
+    verbose: bool = False,
+) -> List[Tuple[str, bool, str]]:
+    """Checkout an import .dvc file by finding the source cache.
+    
+    This handles .dvc files created by `dvc import` without assuming
+    dt import setup (no pre-existing alt cache or temporary clone).
+    
+    The process:
+    1. Parse the deps section to get the source repo URL and path
+    2. Clone the source repo (sparsely) to find its DVC config
+    3. Find a locally-accessible remote from the source repo
+    4. Add that cache to cache.alt and run checkout
+    5. Optionally populate the primary cache
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        dvc_data: Parsed contents of the .dvc file.
+        extra_args: Additional arguments to pass to dvc checkout.
+        verbose: Print progress messages.
+        
+    Returns:
+        List of (cache_path, success, output) tuples.
+        
+    Raises:
+        CheckoutError: If checkout fails.
+    """
+    # Import here to avoid circular imports
+    from . import remote as remote_mod
+    from . import tmp as tmp_mod
+    
+    import_info = get_import_info(dvc_data)
+    if not import_info:
+        raise CheckoutError(f"Not an import .dvc file: {dvc_path}")
+    
+    source_url = import_info['url']
+    if not source_url:
+        raise CheckoutError(f"No source URL in import: {dvc_path}")
+    
+    if verbose:
+        print(f"Import from: {source_url}")
+        if import_info.get('path'):
+            print(f"  Path: {import_info['path']}")
+    
+    # Step 1: Clone the source repo to access its DVC config
+    if verbose:
+        print(f"Cloning source repository...")
+    
+    try:
+        clone_path = tmp_mod.clone_repo(source_url, refresh=True, verbose=verbose)
+    except tmp_mod.TmpError as e:
+        raise CheckoutError(f"Failed to clone source repository: {e}")
+    
+    # Step 2: Find a local remote from the source repo
+    if verbose:
+        print(f"Looking for local cache...")
+    
+    result = remote_mod.find_local_remote_from_repo(repo_spec=source_url)
+    
+    if not result:
+        # Also check if any existing alt cache might work
+        # (e.g., user manually configured it)
+        alt_caches = cfg.get_list_value('cache.alt')
+        available_caches = [c for c, _ in alt_caches if Path(c).exists()]
+        
+        if available_caches:
+            if verbose:
+                print(f"No local remote found, trying existing alt caches...")
+            
+            # Try checkout with existing caches
+            return checkout(
+                targets=[str(dvc_path)],
+                extra_args=extra_args,
+                verbose=verbose,
+            )
+        
+        raise CheckoutError(
+            f"No locally-accessible cache found for {source_url}.\n"
+            f"Options:\n"
+            f"  1. Run: dt cache add-from <repo>  (if source has local remote)\n"
+            f"  2. Run: dt cache add /path/to/cache  (if you know the cache path)\n"
+            f"  3. Run: dt import {source_url} <path>  (to re-import with dt)"
+        )
+    
+    remote_name, cache_path = result
+    
+    if verbose:
+        print(f"Found local cache: {cache_path} (from remote '{remote_name}')")
+    
+    # Step 3: Add to alt caches if not already there
+    cfg.add_list_value('cache.alt', cache_path, 'local')
+    
+    # Step 4: Run checkout with this cache
+    results = checkout(
+        targets=[str(dvc_path)],
+        extra_args=extra_args,
+        verbose=verbose,
+    )
+    
+    # Step 5: Populate primary cache if checkout succeeded
+    any_success = any(success for _, success, _ in results)
+    if any_success:
+        _populate_cache_from_dvc(dvc_path, dvc_data, cache_path, verbose)
+    
+    return results
+
+
+def _populate_cache_from_dvc(
+    dvc_path: Path,
+    dvc_data: Dict[str, Any],
+    source_cache: str,
+    verbose: bool = False,
+) -> None:
+    """Populate the primary cache after checking out an import.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        dvc_data: Parsed contents of the .dvc file.
+        source_cache: Path to the cache used for checkout.
+        verbose: Print progress messages.
+    """
+    # Import here to avoid circular imports
+    from . import import_data as import_mod
+    
+    primary_cache = get_primary_cache()
+    if not primary_cache:
+        return
+    
+    if verbose:
+        print(f"Populating primary cache...")
+    
+    outs = dvc_data.get('outs', [])
+    if not outs:
+        return
+    
+    out = outs[0]
+    md5 = out.get('md5', '')
+    out_path = dvc_path.parent / out.get('path', '')
+    
+    # Handle the root hash (.dir file or single file)
+    if md5:
+        import_mod.populate_cache_file(
+            md5=md5,
+            source_cache=source_cache,
+            dest_cache=primary_cache,
+            verbose=verbose,
+        )
+    
+    # For directories, also populate individual files
+    if md5.endswith('.dir') and out_path.exists():
+        # Read the .dir file to get individual file hashes
+        dir_hash = md5[:-4]  # Remove .dir suffix
+        dir_file = Path(source_cache) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+        
+        if dir_file.exists():
+            try:
+                import json
+                entries = json.loads(dir_file.read_text())
+                
+                files = [
+                    {'md5': e['md5'], 'path': e['relpath']}
+                    for e in entries
+                ]
+                
+                count = import_mod.populate_primary_cache(
+                    files=files,
+                    workspace_path=out_path,
+                    primary_cache=primary_cache,
+                    verbose=verbose,
+                )
+                
+                if verbose and count > 0:
+                    print(f"Added {count} file(s) to primary cache")
+                    
+            except (json.JSONDecodeError, KeyError) as e:
+                if verbose:
+                    print(f"Warning: Could not parse .dir file: {e}")

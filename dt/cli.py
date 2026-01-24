@@ -578,6 +578,9 @@ def checkout(ctx, targets, verbose, cache_name):
     This enables checking out files that exist in another project's cache
     or remote storage without copying them to the local cache first.
     
+    For import .dvc files (created by `dvc import`), automatically clones
+    the source repository to find a locally-accessible cache.
+    
     Use --cache to checkout from a specific cache only. In this mode,
     checkout will fail if files are not found (no --allow-missing).
     
@@ -593,7 +596,7 @@ def checkout(ctx, targets, verbose, cache_name):
         dt checkout --cache neochemo       # Checkout from specific cache only
     """
     try:
-        results = checkout_mod.checkout(
+        results = checkout_mod.smart_checkout(
             targets=list(targets),
             extra_args=ctx.args,
             verbose=verbose,
