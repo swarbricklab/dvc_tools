@@ -10,6 +10,8 @@ from . import remote as remote_mod
 from . import doctor as doctor_mod
 from . import push as push_mod
 from . import checkout as checkout_mod
+from . import tmp as tmp_mod
+from . import import_data as import_mod
 
 
 @click.group()
@@ -356,6 +358,45 @@ def cache_init(project_name, name, cache_root, cache_path):
         raise click.ClickException(str(e))
 
 
+@cache.command('add-from')
+@click.argument('repository')
+@click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--local', 'scope', flag_value='local', default=True, help='Add to local config (default)')
+@click.option('--project', 'scope', flag_value='project', help='Add to project config')
+@click.option('--user', 'scope', flag_value='user', help='Add to user config')
+@click.option('--system', 'scope', flag_value='system', help='Add to system config')
+def cache_add_from(repository, owner, scope):
+    """Add a repository's remote as an alternate cache.
+    
+    Discovers the locally-accessible remote from another repository
+    and adds it as an alternate cache for multi-cache checkout.
+    
+    This is useful for importing data from another project - adding
+    their remote as an alternate cache allows `dt checkout` to find
+    files without copying them to your local cache first.
+    
+    \b
+    Examples:
+        dt cache add-from neochemo
+        dt cache add-from git@github.com:swarbricklab/otherproject.git
+    """
+    result = remote_mod.find_local_remote_from_repo(repository, owner=owner)
+    
+    if not result:
+        raise click.ClickException(
+            f"No locally-accessible remote found for '{repository}'.\n"
+            f"Use 'dt remote list {repository}' to see available remotes."
+        )
+    
+    remote_name, local_path = result
+    
+    if cfg.add_list_value('cache.alt', local_path, scope):
+        click.echo(f"Added {local_path} to {scope} config.")
+        click.echo(f"  (from remote '{remote_name}')")
+    else:
+        click.echo(f"Path already exists in {scope} config: {local_path}")
+
+
 @cli.group()
 def remote():
     """Manage remote storage."""
@@ -385,6 +426,40 @@ def remote_init(project_name, name, remote_root, remote_path):
         click.echo(f"Remote initialized at {remote_dir}")
     except remote_mod.RemoteError as e:
         raise click.ClickException(str(e))
+
+
+@remote.command('list')
+@click.argument('repository', required=False)
+@click.option('--owner', help='Override the GitHub owner for short names')
+def remote_list(repository, owner):
+    """List DVC remotes for a repository.
+    
+    Without arguments, lists remotes for the current repository.
+    With a repository argument, lists remotes for that remote repository.
+    
+    \b
+    Examples:
+        dt remote list                    # List remotes for current repo
+        dt remote list neochemo           # List remotes for another repo
+        dt remote list swarbricklab/other # List with explicit owner
+    """
+    if repository:
+        # List remotes from a remote repository
+        try:
+            remotes = remote_mod.list_remotes_from_repo(repository, owner=owner)
+        except Exception as e:
+            raise click.ClickException(str(e))
+    else:
+        # List remotes for current repository
+        remotes = remote_mod.list_remotes()
+    
+    if not remotes:
+        click.echo("No remotes configured.")
+        return
+    
+    for name, url, is_default in remotes:
+        default_marker = " (default)" if is_default else ""
+        click.echo(f"{name}{default_marker}: {url}")
 
 
 @cli.command()
@@ -489,8 +564,9 @@ def push(ctx):
 ))
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show which cache is being checked')
+@click.option('-c', '--cache', 'cache_name', help='Use only this cache (by name or path)')
 @click.pass_context
-def checkout(ctx, targets, verbose):
+def checkout(ctx, targets, verbose, cache_name):
     """Checkout DVC-tracked files, searching across multiple caches.
     
     Runs `dvc checkout` but searches for cached files across:
@@ -502,6 +578,12 @@ def checkout(ctx, targets, verbose):
     This enables checking out files that exist in another project's cache
     or remote storage without copying them to the local cache first.
     
+    For import .dvc files (created by `dvc import`), automatically clones
+    the source repository to find a locally-accessible cache.
+    
+    Use --cache to checkout from a specific cache only. In this mode,
+    checkout will fail if files are not found (no --allow-missing).
+    
     All other options are passed through to `dvc checkout`.
     Run `dvc checkout --help` for additional options.
     
@@ -511,12 +593,14 @@ def checkout(ctx, targets, verbose):
         dt checkout data/processed.dvc     # Checkout specific targets
         dt checkout --force                # Force checkout (overwrite modified)
         dt checkout -v                     # Show cache search progress
+        dt checkout --cache neochemo       # Checkout from specific cache only
     """
     try:
-        results = checkout_mod.checkout(
+        results = checkout_mod.smart_checkout(
             targets=list(targets),
             extra_args=ctx.args,
             verbose=verbose,
+            cache=cache_name,
         )
         
         any_success = False
@@ -548,6 +632,135 @@ def checkout(ctx, targets, verbose):
             raise SystemExit(1)
             
     except checkout_mod.CheckoutError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.group()
+def tmp():
+    """Manage temporary repository clones.
+    
+    Temporary clones are stored in .dt/tmp/ and used to access
+    DVC configuration from remote repositories without full checkout.
+    """
+    pass
+
+
+@tmp.command('clone')
+@click.argument('repository')
+@click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--no-refresh', is_flag=True, help='Use cached clone without refreshing')
+def tmp_clone(repository, owner, no_refresh):
+    """Clone a repository into .dt/tmp/.
+    
+    Creates a sparse clone with only .dvc/ directory checked out.
+    If the clone already exists, it is refreshed by default.
+    
+    \b
+    Examples:
+        dt tmp clone neochemo
+        dt tmp clone git@github.com:swarbricklab/neochemo.git
+        dt tmp clone neochemo --no-refresh
+    """
+    try:
+        repo_path = tmp_mod.clone_repo(
+            repo_spec=repository,
+            owner=owner,
+            refresh=not no_refresh,
+            verbose=True,
+        )
+    except tmp_mod.TmpError as e:
+        raise click.ClickException(str(e))
+
+
+@tmp.command('list')
+def tmp_list():
+    """List cached repository clones.
+    
+    Shows all repositories currently cached in .dt/tmp/.
+    """
+    repos = tmp_mod.list_repos()
+    
+    if not repos:
+        click.echo("No cached repositories in .dt/tmp/")
+        return
+    
+    click.echo(f"Cached repositories in .dt/tmp/:")
+    for repo_id, path in repos:
+        click.echo(f"  {repo_id}")
+
+
+@tmp.command('clean')
+@click.argument('repository', required=False)
+@click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--all', 'clean_all', is_flag=True, help='Remove all cached clones')
+def tmp_clean(repository, owner, clean_all):
+    """Remove cached repository clones.
+    
+    Without arguments, shows help. Use --all to remove all clones,
+    or specify a repository to remove just that one.
+    
+    \b
+    Examples:
+        dt tmp clean neochemo     # Remove specific repo
+        dt tmp clean --all        # Remove all cached repos
+    """
+    if not repository and not clean_all:
+        raise click.UsageError("Specify a repository or use --all to clean all.")
+    
+    try:
+        if clean_all:
+            removed = tmp_mod.clean_repos()
+        else:
+            removed = tmp_mod.clean_repos(repo_spec=repository, owner=owner)
+        
+        if removed:
+            for repo_id in removed:
+                click.echo(f"Removed {repo_id}")
+        else:
+            click.echo("No cached repositories to remove.")
+    except tmp_mod.TmpError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command('import')
+@click.argument('repository')
+@click.argument('path')
+@click.option('-o', '--out', help='Destination path to download files to')
+@click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--no-checkout', is_flag=True, help='Skip checkout after import')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def import_cmd(repository, path, out, owner, no_checkout, verbose):
+    """Import DVC-tracked data from another repository.
+    
+    Creates a .dvc file pointing to data in REPOSITORY at PATH,
+    then checks out the data from locally-accessible caches.
+    
+    Unlike `dvc import`, this does not require network access to
+    the remote storage. Instead, it uses cache paths discovered
+    via `dt cache add-from`.
+    
+    \b
+    Examples:
+        dt import neochemo data/processed
+        dt import neochemo data/samples.h5ad -o my_samples.h5ad
+        dt import git@github.com:lab/project.git results/model
+        dt import neochemo data/large --no-checkout
+    """
+    try:
+        dvc_file, cache_path = import_mod.import_data(
+            repository=repository,
+            path=path,
+            out=out,
+            owner=owner,
+            checkout=not no_checkout,
+            verbose=verbose,
+        )
+        
+        click.echo(f"Created {dvc_file}")
+        if cache_path:
+            click.echo(f"Using cache: {cache_path}")
+            
+    except import_mod.ImportError as e:
         raise click.ClickException(str(e))
 
 
