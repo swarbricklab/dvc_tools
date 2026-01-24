@@ -79,10 +79,10 @@ dt remote list [repository] [--owner <owner>]
 dt remote list
 
 # List remotes from a remote repository
-dt remote list git@github.com:swarbricklab/demo_study.git
+dt remote list git@github.com:myorg/otherproject.git
 
 # Using short name
-dt remote list demo_study --owner swarbricklab
+dt remote list otherproject --owner myorg
 ```
 
 ### Output
