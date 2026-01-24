@@ -11,8 +11,8 @@ dt clone [options] <repository> [path]
 ## Arguments
 
 - `<repository>`: Either a full GitHub URL or a short repository name
-  - Full URL: `git@github.com:swarbricklab/neochemo.git`
-  - Short name: `neochemo` (requires `owner` to be configured)
+  - Full URL: `git@github.com:myorg/myproject.git`
+  - Short name: `myproject` (requires `owner` to be configured)
 - `[path]`: Optional path to the directory name for the clone (defaults to repository name in current directory)
 
 ## Options
@@ -30,13 +30,13 @@ When the `owner` configuration is set, you can use repository short names instea
 
 ```bash
 # Set your default owner once (can be user or org)
-dt config set owner swarbricklab
+dt config set owner myorg
 
 # Then clone using just the repository name
-dt clone neochemo
+dt clone myproject
 
 # This is equivalent to:
-dt clone git@github.com:swarbricklab/neochemo.git
+dt clone git@github.com:myorg/myproject.git
 ```
 
 You can also override the owner for a single clone:
@@ -64,13 +64,13 @@ This operation includes the following steps:
 
 ```bash
 # First, set your default owner
-dt config set owner swarbricklab
+dt config set owner myorg
 
 # Clone using just the repository name
-dt clone neochemo
+dt clone myproject
 
 # Clone to a specific directory
-dt clone neochemo my-local-copy
+dt clone myproject my-local-copy
 
 # Clone from a different owner
 dt clone --owner other-lab their-analysis
@@ -80,29 +80,29 @@ dt clone --owner other-lab their-analysis
 
 ```bash
 # Clone a repository with default settings
-dt clone git@github.com:swarbricklab/my-analysis.git
+dt clone git@github.com:myorg/my-analysis.git
 
 # Clone to a specific directory
-dt clone git@github.com:swarbricklab/my-analysis.git my-local-copy
+dt clone git@github.com:myorg/my-analysis.git my-local-copy
 
 # Clone without automatic initialization (manual setup later)
-dt clone --no-init git@github.com:swarbricklab/my-analysis.git
+dt clone --no-init git@github.com:myorg/my-analysis.git
 
 # Clone with custom cache name
-dt clone --cache-name shared-analysis git@github.com:swarbricklab/my-analysis.git
+dt clone --cache-name shared-analysis git@github.com:myorg/my-analysis.git
 
 # Quick clone without submodules for inspection
-dt clone --no-submodules --shallow git@github.com:swarbricklab/my-analysis.git
+dt clone --no-submodules --shallow git@github.com:myorg/my-analysis.git
 ```
 
 ## Typical Workflow
 
 ```bash
 # Navigate to your workspace
-cd /scratch/a56/$USER/
+cd /scratch/$PROJECT/$USER/
 
 # Set up your owner (one-time)
-dt config set owner swarbricklab
+dt config set owner myorg
 
 # Clone an existing analysis using short name
 dt clone single-cell-analysis
@@ -125,13 +125,13 @@ The clone command automatically configures the local workspace to use a shared c
 
 ```bash
 # First clone downloads all data
-dt clone git@github.com/swarbricklab/large-dataset.git
+dt clone git@github.com:myorg/large-dataset.git
 cd large-dataset
 dvc pull  # Downloads 10GB of data to shared cache
 
 # Second clone reuses cached data
 cd ..
-dt clone git@github.com/swarbricklab/large-dataset.git analysis-copy
+dt clone git@github.com:myorg/large-dataset.git analysis-copy
 cd analysis-copy
 dvc pull  # Instant - links to existing cache
 ```

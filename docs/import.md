@@ -31,10 +31,10 @@ Unlike `dvc import`, this does **not** require network access to the remote stor
 
 ```bash
 # Import a directory from another repository
-dt import git@github.com:swarbricklab/neochemo.git data/processed
+dt import git@github.com:myorg/otherproject.git data/processed
 
 # Import with custom output name
-dt import neochemo data/samples --out my_samples
+dt import otherproject data/samples --out my_samples
 
 # Import without checking out (just create .dvc file)
 dt import neochemo data/large_dataset --no-checkout

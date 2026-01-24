@@ -27,16 +27,16 @@ dt tmp clone <repository> [options]
 
 ```bash
 # Clone using full URL
-dt tmp clone git@github.com:swarbricklab/neochemo.git
+dt tmp clone git@github.com:myorg/otherproject.git
 
 # Clone using short name (requires git.owner config)
-dt tmp clone neochemo
+dt tmp clone otherproject
 
 # Clone with owner override
-dt tmp clone neochemo --owner swarbricklab
+dt tmp clone otherproject --owner myorg
 
 # Use existing clone without fetching updates
-dt tmp clone neochemo --no-refresh
+dt tmp clone otherproject --no-refresh
 ```
 
 ### What it creates
@@ -45,8 +45,8 @@ dt tmp clone neochemo --no-refresh
 .dt/
 └── tmp/
     └── github.com/
-        └── swarbricklab/
-            └── neochemo/
+        └── myorg/
+            └── otherproject/
                 ├── .dvc/
                 │   ├── config
                 │   └── ...
@@ -67,8 +67,8 @@ dt tmp list
 
 ```
 Temporary clones in .dt/tmp/:
-  github.com/swarbricklab/neochemo
-  github.com/swarbricklab/dt-test-fixtures
+  github.com/myorg/project-a
+  github.com/myorg/project-b
 ```
 
 ## dt tmp remove
@@ -85,10 +85,10 @@ dt tmp remove <repository> [--owner <owner>]
 
 ```bash
 # Remove by full URL
-dt tmp remove git@github.com:swarbricklab/neochemo.git
+dt tmp remove git@github.com:myorg/otherproject.git
 
 # Remove by short name
-dt tmp remove neochemo --owner swarbricklab
+dt tmp remove otherproject --owner myorg
 ```
 
 ## Repository Resolution
@@ -102,10 +102,10 @@ Short names are resolved using the `git.owner` configuration:
 
 ```bash
 # Set default owner
-dt config set git.owner swarbricklab
+dt config set git.owner myorg
 
 # Now short names work
-dt tmp clone neochemo  # → git@github.com:swarbricklab/neochemo.git
+dt tmp clone otherproject  # → git@github.com:myorg/otherproject.git
 ```
 
 ## Sparse Checkout

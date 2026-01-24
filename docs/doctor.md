@@ -76,7 +76,7 @@ DVC Tools version: 0.1.0
 All 7 checks passed.
 
 --- Configuration (with sources) ---
-user    owner=swarbricklab
+user    owner=myorg
 project cache.root=/g/data/a56/dvc_cache
 project remote.root=/g/data/a56/dvc_remote
 

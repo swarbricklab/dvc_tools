@@ -42,7 +42,7 @@ Use for: temporary overrides, testing, machine-specific paths.
 Personal settings that apply to all repositories for the current user.
 
 ```bash
-dt config set --user owner swarbricklab
+dt config set --user owner myorg
 dt config set --user team analysts
 ```
 

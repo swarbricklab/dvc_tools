@@ -120,13 +120,13 @@ This command:
 
 ```bash
 # Add cache from a GitHub repository
-dt cache add-from git@github.com:swarbricklab/neochemo.git
+dt cache add-from git@github.com:myorg/otherproject.git
 
 # Using short name (requires git.owner config)
-dt cache add-from neochemo
+dt cache add-from otherproject
 
 # With owner override
-dt cache add-from neochemo --owner swarbricklab
+dt cache add-from otherproject --owner myorg
 ```
 
 ### How it works
