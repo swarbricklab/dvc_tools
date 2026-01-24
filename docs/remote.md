@@ -62,8 +62,42 @@ Two remotes are configured:
 - **Local remote**: Named "local", provides direct filesystem access within the same platform
 - SSH host determined by `ssh.host` config item (typically `gadi-dm.nci.org.au` on NCI)
 
+## dt remote list
+
+List DVC remotes from a repository (local or remote).
+
+### Usage
+
+```bash
+dt remote list [repository] [--owner <owner>]
+```
+
+### Examples
+
+```bash
+# List remotes from current repository
+dt remote list
+
+# List remotes from a remote repository
+dt remote list git@github.com:swarbricklab/neochemo.git
+
+# Using short name
+dt remote list neochemo --owner swarbricklab
+```
+
+### Output
+
+```
+storage    ssh://gadi-dm.nci.org.au/g/data/a56/dvc/neochemo (default)
+local      /g/data/a56/dvc/neochemo [local]
+```
+
+The `[local]` marker indicates paths accessible on the local filesystem.
+
 ## Related Commands
 
 - [`dt init`](init.md) - Initialize projects with remote setup
 - [`dt cache init`](cache.md#init) - Set up local cache
+- [`dt cache add-from`](cache.md#dt-cache-add-from) - Add cache from remote repo
 - [`dt config`](config.md) - Configure remote settings
+- [`dt tmp`](tmp.md) - Manage temporary repository clones

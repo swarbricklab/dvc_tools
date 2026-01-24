@@ -102,6 +102,41 @@ dt cache remove <path> [--local|--project|--user|--system]
 dt cache remove /g/data/a56/dvc/neochemo
 ```
 
+## dt cache add-from
+
+Discover and add a cache from a remote repository's DVC configuration.
+
+```bash
+dt cache add-from <repository> [--owner <owner>]
+```
+
+This command:
+1. Clones the repository (sparsely) to access its DVC configuration
+2. Lists its configured remotes
+3. Finds a locally-accessible remote (filesystem path)
+4. Adds that path as an alternate cache
+
+### Examples
+
+```bash
+# Add cache from a GitHub repository
+dt cache add-from git@github.com:swarbricklab/neochemo.git
+
+# Using short name (requires git.owner config)
+dt cache add-from neochemo
+
+# With owner override
+dt cache add-from neochemo --owner swarbricklab
+```
+
+### How it works
+
+The command looks for remotes with URLs that resolve to local filesystem paths:
+- Direct paths: `/g/data/a56/dvc/project`
+- SSH URLs with local host: `ssh://gadi-dm.nci.org.au/g/data/...`
+
+The `ssh.host` config value is used to determine if an SSH URL points to the local system.
+
 ## Alternate cache configuration
 
 Alternate caches are stored in dt config under `cache.alt`:
@@ -126,5 +161,7 @@ Alternate caches allow `dt checkout` to find files across multiple cache locatio
 
 - [`dt init`](init.md) - Initialize projects with cache setup
 - [`dt checkout`](checkout.md) - Checkout using multiple caches
+- [`dt import`](import.md) - Import data from other repositories
 - [`dt remote init`](remote.md#init) - Set up remote storage
+- [`dt tmp`](tmp.md) - Manage temporary repository clones
 - [`dt config`](config.md) - Configure cache settings
