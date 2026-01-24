@@ -9,6 +9,7 @@ Instead, it uses locally-accessible cache paths.
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
@@ -25,6 +26,155 @@ from . import utils
 class ImportError(Exception):
     """Raised when import operations fail."""
     pass
+
+
+def populate_primary_cache(
+    files: List[Dict[str, Any]],
+    workspace_path: Path,
+    primary_cache: str,
+    verbose: bool = False,
+) -> int:
+    """Hardlink workspace symlinks to the primary cache.
+    
+    After dt checkout creates symlinks in the workspace pointing to an alt cache,
+    this function creates hardlinks to those symlinks in the primary cache.
+    This allows regular DVC operations (dvc checkout, dvc status) to work
+    transparently by finding files in the primary cache location.
+    
+    If hardlinking fails (e.g., cross-device), falls back to creating symlinks
+    in the cache that point to the same target as the workspace symlinks.
+    
+    Args:
+        files: List of file info dicts with 'md5' and 'path' keys.
+        workspace_path: Path to the workspace directory/file that was checked out.
+        primary_cache: Path to the primary DVC cache.
+        verbose: Print progress messages.
+        
+    Returns:
+        Number of files added to cache.
+    """
+    count = 0
+    cache_base = Path(primary_cache) / 'files' / 'md5'
+    
+    for f in files:
+        if f.get('isdir', False):
+            continue
+        
+        md5 = f.get('md5')
+        relpath = f.get('path', '')
+        
+        if not md5:
+            continue
+        
+        # Workspace file location
+        if relpath:
+            workspace_file = workspace_path / relpath
+        else:
+            workspace_file = workspace_path
+        
+        # Only process if it's a symlink (created by dt checkout)
+        if not workspace_file.is_symlink():
+            continue
+        
+        # Cache file location (hash-based)
+        cache_file = cache_base / md5[:2] / md5[2:]
+        
+        # Skip if already exists in cache
+        if cache_file.exists():
+            continue
+        
+        # Create parent directory if needed
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Try to hardlink the workspace symlink to the cache
+            # This creates a new directory entry pointing to the same symlink inode
+            os.link(workspace_file, cache_file)
+            count += 1
+            if verbose:
+                print(f"  Cached: {md5[:8]}... ({relpath or workspace_path.name})")
+        except OSError as e:
+            if e.errno == 18:  # EXDEV: Invalid cross-device link
+                # Fall back to creating a symlink with the same target
+                try:
+                    target = os.readlink(workspace_file)
+                    os.symlink(target, cache_file)
+                    count += 1
+                    if verbose:
+                        print(f"  Cached (symlink): {md5[:8]}... ({relpath or workspace_path.name})")
+                except OSError as e2:
+                    if verbose:
+                        print(f"  Warning: Failed to cache {md5[:8]}...: {e2}")
+            else:
+                if verbose:
+                    print(f"  Warning: Failed to cache {md5[:8]}...: {e}")
+    
+    return count
+
+
+def populate_cache_file(
+    md5: str,
+    source_cache: str,
+    dest_cache: str,
+    verbose: bool = False,
+) -> bool:
+    """Copy or link a single file from source cache to destination cache.
+    
+    Used for .dir files and single file imports where we need to ensure
+    the file exists in the primary cache.
+    
+    Args:
+        md5: The MD5 hash (with optional .dir suffix).
+        source_cache: Path to the source cache (alt cache).
+        dest_cache: Path to the destination cache (primary cache).
+        verbose: Print progress messages.
+        
+    Returns:
+        True if file was added to cache, False otherwise.
+    """
+    # Handle .dir suffix
+    if md5.endswith('.dir'):
+        hash_only = md5[:-4]
+        filename = hash_only[2:] + '.dir'
+    else:
+        hash_only = md5
+        filename = hash_only[2:]
+    
+    source_file = Path(source_cache) / 'files' / 'md5' / hash_only[:2] / filename
+    dest_file = Path(dest_cache) / 'files' / 'md5' / hash_only[:2] / filename
+    
+    if dest_file.exists():
+        return False
+    
+    if not source_file.exists():
+        if verbose:
+            print(f"  Warning: Source file not found: {md5[:8]}...")
+        return False
+    
+    dest_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Try hardlink first
+        os.link(source_file, dest_file)
+        if verbose:
+            print(f"  Cached: {md5[:12]}...")
+        return True
+    except OSError as e:
+        if e.errno == 18:  # EXDEV: Invalid cross-device link
+            # Fall back to symlink
+            try:
+                os.symlink(source_file.resolve(), dest_file)
+                if verbose:
+                    print(f"  Cached (symlink): {md5[:12]}...")
+                return True
+            except OSError as e2:
+                if verbose:
+                    print(f"  Warning: Failed to cache {md5[:12]}...: {e2}")
+        else:
+            if verbose:
+                print(f"  Warning: Failed to cache {md5[:12]}...: {e}")
+    
+    return False
 
 
 def configure_clone_cache(clone_path: Path, cache_path: str) -> None:
@@ -305,24 +455,28 @@ def import_data(
     # Add cache to alt caches for checkout
     cfg.add_list_value('cache.alt', cache_path, 'local')
     
+    # Track whether this is a directory or single file import
+    is_directory = not (len(files) == 1 and not files[0].get('isdir', False))
+    root_hash = None  # Will be set to dir_hash or single file md5
+    
     # Step 5: Create .dvc file (and .dir file if needed)
-    if len(files) == 1 and not files[0].get('isdir', False):
+    if not is_directory:
         # Single file import
         file_info = files[0]
-        md5 = file_info['md5']
+        root_hash = file_info['md5']
         
         # Get size from cache
-        size = get_file_size_from_cache(cache_path, md5)
+        size = get_file_size_from_cache(cache_path, root_hash)
         if size is None:
             size = 0  # Fallback
         
         if verbose:
-            print(f"Importing single file: {md5} ({size} bytes)")
+            print(f"Importing single file: {root_hash} ({size} bytes)")
         
         dvc_file = create_dvc_file(
             dest_path=out_path.parent,
             name=out_path.name,
-            md5=md5,
+            md5=root_hash,
             size=size,
         )
     else:
@@ -356,6 +510,7 @@ def import_data(
         
         # Create .dir file in the cache
         dir_hash, dir_size = create_dir_file(entries, cache_path)
+        root_hash = dir_hash  # Already includes .dir suffix
         
         if verbose:
             print(f"Created .dir file: {dir_hash}")
@@ -386,5 +541,40 @@ def import_data(
         any_success = any(success for _, success, _ in results)
         if not any_success:
             print(f"Warning: Checkout failed. Run 'dt checkout {dvc_file}' after configuring caches.")
+        else:
+            # Step 7: Populate primary cache with hardlinks to workspace symlinks
+            primary_cache = checkout_mod.get_primary_cache()
+            if primary_cache:
+                if verbose:
+                    print(f"Populating primary cache...")
+                
+                # First, add the .dir file or single file hash to primary cache
+                if root_hash:
+                    populate_cache_file(
+                        md5=root_hash,
+                        source_cache=cache_path,
+                        dest_cache=primary_cache,
+                        verbose=verbose,
+                    )
+                
+                # Then, add individual files from workspace symlinks
+                cache_files = []
+                for f in files:
+                    if f.get('isdir', False):
+                        continue
+                    cache_files.append({
+                        'md5': f['md5'],
+                        'path': f.get('path', ''),
+                    })
+                
+                count = populate_primary_cache(
+                    files=cache_files,
+                    workspace_path=out_path,
+                    primary_cache=primary_cache,
+                    verbose=verbose,
+                )
+                
+                if verbose and count > 0:
+                    print(f"Added {count} file(s) to primary cache")
     
     return dvc_file, cache_path

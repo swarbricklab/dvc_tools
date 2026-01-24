@@ -3,6 +3,7 @@
 Handles DVC remote setup with SSH and local access methods for HPC environments.
 """
 
+import os
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -187,11 +188,16 @@ def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
     Returns:
         List of (remote_name, url, is_default) tuples
     """
+    # Set COLUMNS to prevent DVC from wrapping output
+    env = os.environ.copy()
+    env['COLUMNS'] = '1000'
+    
     result = subprocess.run(
         ['dvc', 'remote', 'list'],
         cwd=repo_path,
         capture_output=True,
         text=True,
+        env=env,
     )
     
     if result.returncode != 0:
@@ -206,10 +212,8 @@ def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
     )
     default_remote = default_result.stdout.strip() if default_result.returncode == 0 else None
     
-    # Parse output - handle wrapped lines where URL may be on next line
     # DVC outputs one line per remote: "name<whitespace>url"
     # Default remote has "(default)" suffix
-    # When captured via subprocess, there's no terminal wrapping
     remotes = []
     
     for line in result.stdout.strip().split('\n'):
