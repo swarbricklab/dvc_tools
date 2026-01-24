@@ -3,9 +3,10 @@
 Handles DVC remote setup with SSH and local access methods for HPC environments.
 """
 
+import os
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from . import config as cfg
 from . import utils
@@ -176,3 +177,287 @@ def init_remote(
     configure_dvc_remote(repo_path, remote_dir, name, verbose=verbose)
     
     return remote_dir
+
+
+def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
+    """Run dvc remote list in a repository and parse output.
+    
+    Args:
+        repo_path: Path to the repository
+        
+    Returns:
+        List of (remote_name, url, is_default) tuples
+    """
+    # Set COLUMNS to prevent DVC from wrapping output
+    env = os.environ.copy()
+    env['COLUMNS'] = '1000'
+    
+    result = subprocess.run(
+        ['dvc', 'remote', 'list'],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    
+    if result.returncode != 0:
+        return []
+    
+    # Get default remote
+    default_result = subprocess.run(
+        ['dvc', 'config', 'core.remote'],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    default_remote = default_result.stdout.strip() if default_result.returncode == 0 else None
+    
+    # DVC outputs one line per remote: "name<whitespace>url"
+    # Default remote has "(default)" suffix
+    remotes = []
+    
+    for line in result.stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        
+        # Check for and remove (default) marker
+        is_default_marker = '(default)' in line
+        line = line.replace('(default)', '').strip()
+        
+        # Split on whitespace: name<whitespace>url
+        parts = line.split(None, 1)
+        if len(parts) >= 2:
+            name = parts[0]
+            url = parts[1].strip()
+            is_default = (name == default_remote) or is_default_marker
+            remotes.append((name, url, is_default))
+        elif len(parts) == 1:
+            # Name only, no URL (shouldn't happen but handle gracefully)
+            remotes.append((parts[0], '', parts[0] == default_remote))
+    
+    return remotes
+
+
+def list_remotes(repo_path: Optional[Path] = None) -> List[Tuple[str, str, bool]]:
+    """List remotes for a DVC repository.
+    
+    Uses `dvc remote list` to get remotes.
+    
+    Args:
+        repo_path: Path to the repository (defaults to cwd)
+        
+    Returns:
+        List of (remote_name, url, is_default) tuples
+    """
+    repo_path = repo_path or Path.cwd()
+    return _run_dvc_remote_list(repo_path)
+
+
+def list_remotes_from_repo(
+    repo_spec: str,
+    owner: Optional[str] = None,
+) -> List[Tuple[str, str, bool]]:
+    """List remotes for a remote repository.
+    
+    Uses tmp clone infrastructure to clone the repo and run
+    `dvc remote list` within it.
+    
+    Args:
+        repo_spec: Repository URL or short name
+        owner: Optional owner for short names
+        
+    Returns:
+        List of (remote_name, url, is_default) tuples
+    """
+    from . import tmp as tmp_mod
+    
+    repo_path = tmp_mod.clone_repo(repo_spec, owner=owner, refresh=True, verbose=False)
+    return _run_dvc_remote_list(repo_path)
+
+
+def parse_remote_url(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse a remote URL into host and path components.
+    
+    Handles:
+    - Local paths: /path/to/remote -> (None, /path/to/remote)
+    - file:// URLs: file:///path -> (None, /path)
+    - SSH URLs: ssh://host/path -> (host, /path)
+    - SSH URLs with user: ssh://user@host/path -> (host, /path)
+    - SCP-style: user@host:/path -> (host, /path)
+    - S3, GCS, etc: s3://bucket/path -> ('s3', None) - not local
+    
+    Args:
+        url: Remote URL
+        
+    Returns:
+        Tuple of (host, path). host is None for local paths,
+        path is None for cloud storage (not locally accessible).
+    """
+    import re
+    
+    url = url.strip()
+    
+    # Already a local path
+    if url.startswith('/'):
+        return (None, url)
+    
+    # file:// URL
+    if url.startswith('file://'):
+        return (None, url[7:])
+    
+    # SSH URL format: ssh://[user@]host/path
+    ssh_match = re.match(r'ssh://(?:[^@]+@)?([^/]+)(/.*)', url)
+    if ssh_match:
+        return (ssh_match.group(1), ssh_match.group(2))
+    
+    # SCP-style: [user@]host:/path
+    scp_match = re.match(r'(?:[^@]+@)?([^:]+):(/.+)', url)
+    if scp_match:
+        return (scp_match.group(1), scp_match.group(2))
+    
+    # Cloud storage (s3://, gs://, https://, etc.) - not locally accessible
+    return (url.split('://')[0] if '://' in url else None, None)
+
+
+def get_local_hosts() -> List[str]:
+    """Get list of hostnames that should be considered 'local'.
+    
+    Returns current hostname plus any configured SSH host.
+    
+    Returns:
+        List of hostnames considered local.
+    """
+    import socket
+    
+    hosts = []
+    
+    # Current hostname (short and FQDN)
+    hostname = socket.gethostname()
+    hosts.append(hostname)
+    
+    # Try to get FQDN
+    try:
+        fqdn = socket.getfqdn()
+        if fqdn and fqdn != hostname:
+            hosts.append(fqdn)
+    except Exception:
+        pass
+    
+    # Configured SSH host (used for remote URLs)
+    ssh_host = cfg.get_value('ssh.host')
+    if ssh_host:
+        hosts.append(ssh_host)
+    
+    return hosts
+
+
+def is_local_host(host: str) -> bool:
+    """Check if a hostname should be considered 'local'.
+    
+    A host is considered local if:
+    - It matches the current hostname
+    - It matches any configured local hosts (core.local_hosts)
+    
+    Args:
+        host: Hostname to check
+        
+    Returns:
+        True if the host is considered local.
+    """
+    if not host:
+        return False
+    
+    local_hosts = get_local_hosts()
+    
+    # Check for exact match
+    if host in local_hosts:
+        return True
+    
+    # Check for partial match (e.g., 'gadi-dm' matches 'gadi-dm.nci.org.au')
+    for local in local_hosts:
+        if host.startswith(local.split('.')[0]) or local.startswith(host.split('.')[0]):
+            # Same short hostname
+            if host.split('.')[0] == local.split('.')[0]:
+                return True
+    
+    return False
+
+
+def extract_local_path(url: str, check_host: bool = True) -> Optional[str]:
+    """Extract the local filesystem path from a remote URL.
+    
+    Handles:
+    - Local paths: /path/to/remote -> /path/to/remote
+    - file:// URLs: file:///path -> /path
+    - SSH URLs: ssh://host/path -> /path (if host is local)
+    - SCP-style: user@host:/path -> /path (if host is local)
+    
+    Args:
+        url: Remote URL
+        check_host: If True (default), verify SSH hosts are local
+        
+    Returns:
+        Local path if extractable, None otherwise
+    """
+    host, path = parse_remote_url(url)
+    
+    if path is None:
+        # Cloud storage or unparseable
+        return None
+    
+    if host is None:
+        # Already a local path
+        return path
+    
+    # SSH remote - check if host is local
+    if check_host and not is_local_host(host):
+        return None
+    
+    return path
+
+
+def find_local_remote(
+    remotes: List[Tuple[str, str, bool]],
+    check_exists: bool = True,
+) -> Optional[Tuple[str, str]]:
+    """Find a remote that is accessible on the local filesystem.
+    
+    Checks remotes in order, returning the first one whose path
+    exists on the local filesystem.
+    
+    Args:
+        remotes: List of (name, url, is_default) tuples
+        check_exists: If True, verify the path exists (default True)
+        
+    Returns:
+        Tuple of (remote_name, local_path) if found, None otherwise
+    """
+    for name, url, is_default in remotes:
+        local_path = extract_local_path(url)
+        if local_path:
+            if check_exists:
+                if Path(local_path).exists():
+                    return (name, local_path)
+            else:
+                return (name, local_path)
+    
+    return None
+
+
+def find_local_remote_from_repo(
+    repo_spec: str,
+    owner: Optional[str] = None,
+    check_exists: bool = True,
+) -> Optional[Tuple[str, str]]:
+    """Find a locally-accessible remote from a remote repository.
+    
+    Args:
+        repo_spec: Repository URL or short name
+        owner: Optional owner for short names
+        check_exists: If True, verify the path exists (default True)
+        
+    Returns:
+        Tuple of (remote_name, local_path) if found, None otherwise
+    """
+    remotes = list_remotes_from_repo(repo_spec, owner=owner)
+    return find_local_remote(remotes, check_exists=check_exists)
