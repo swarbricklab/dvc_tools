@@ -12,6 +12,7 @@ from . import push as push_mod
 from . import checkout as checkout_mod
 from . import tmp as tmp_mod
 from . import import_data as import_mod
+from . import pull as pull_mod
 
 
 @click.group()
@@ -632,6 +633,48 @@ def checkout(ctx, targets, verbose, cache_name):
             raise SystemExit(1)
             
     except checkout_mod.CheckoutError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command(context_settings=dict(
+    ignore_unknown_options=True,
+    allow_extra_args=True,
+))
+@click.argument('targets', nargs=-1, type=click.Path())
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.pass_context
+def pull(ctx, targets, verbose):
+    """Pull DVC-tracked files, handling imports automatically.
+    
+    For targets tracked by import .dvc files (those with deps.repo),
+    uses dt checkout to fetch from the source repository's cache.
+    For other targets, uses regular dvc pull.
+    
+    \b
+    Target resolution:
+      - data.dvc        → check if data.dvc is an import
+      - data/           → resolve to data.dvc if it exists
+      - data/file.txt   → resolve to parent .dvc file if any
+    
+    All other options are passed through to `dvc pull`.
+    Run `dvc pull --help` for additional options.
+    
+    \b
+    Examples:
+        dt pull                            # Pull all tracked files
+        dt pull data/                      # Pull specific target
+        dt pull -v                         # Show detailed progress
+        dt pull --jobs 4                   # Parallel pull (passed to dvc)
+    """
+    try:
+        success = pull_mod.pull(
+            targets=list(targets) if targets else None,
+            verbose=verbose,
+            dvc_args=ctx.args if ctx.args else None,
+        )
+        if not success:
+            raise SystemExit(1)
+    except pull_mod.CheckoutError as e:
         raise click.ClickException(str(e))
 
 
