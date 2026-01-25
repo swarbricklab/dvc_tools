@@ -9,6 +9,7 @@
 | [`dt init`](#dt-init) | Initialize a new DVC project with external cache and remote |
 | [`dt clone`](#dt-clone) | Clone an existing DVC project and set up local configuration |
 | [`dt checkout`](#dt-checkout) | Checkout DVC-tracked files, searching across multiple caches |
+| [`dt pull`](#dt-pull) | Pull DVC-tracked files, handling imports automatically |
 | [`dt push`](#dt-push) | Push DVC-tracked files to all configured remotes |
 | [`dt import`](#dt-import) | Import DVC-tracked data from other repositories |
 | [`dt cache`](#dt-cache) | Manage external shared caches |
@@ -52,6 +53,18 @@ dt checkout [targets...] [-v] [-c <cache>]
 ```
 
 Searches primary and alternate caches for files. Automatically handles import `.dvc` files by cloning source repos. [Full documentation →](checkout.md)
+
+---
+
+## dt pull
+
+Pull DVC-tracked files, handling imports automatically.
+
+```bash
+dt pull [targets...] [-v]
+```
+
+Resolves targets to their tracking `.dvc` files. For imports (`.dvc` with `deps.repo`), uses `dt checkout`. For regular files, uses `dvc pull`. [Full documentation →](pull.md)
 
 ---
 
