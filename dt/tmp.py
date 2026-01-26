@@ -106,27 +106,7 @@ def ensure_gitignore() -> bool:
     Returns:
         True if .gitignore was modified, False if already contains pattern.
     """
-    gitignore_path = Path.cwd() / ".gitignore"
-    pattern = ".dt/tmp/"
-    
-    # Check if already present
-    if gitignore_path.exists():
-        content = gitignore_path.read_text()
-        # Check for exact pattern or equivalent
-        for line in content.splitlines():
-            line = line.strip()
-            if line in (".dt/tmp", ".dt/tmp/", ".dt/"):
-                return False
-    else:
-        content = ""
-    
-    # Add pattern
-    if content and not content.endswith('\n'):
-        content += '\n'
-    content += f"{pattern}\n"
-    
-    gitignore_path.write_text(content)
-    return True
+    return utils.update_gitignore(".dt/tmp/")
 
 
 def clone_repo(

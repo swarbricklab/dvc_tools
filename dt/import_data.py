@@ -529,7 +529,14 @@ def import_data(
     if verbose:
         print(f"Created {dvc_file}")
     
-    # Step 6: Checkout if requested
+    # Step 6: Update .gitignore to exclude the data file/directory
+    # This matches DVC's behavior for dvc add and dvc import
+    gitignore_pattern = f"/{out_path.name}"
+    if utils.update_gitignore(gitignore_pattern):
+        if verbose:
+            print(f"Added {gitignore_pattern} to .gitignore")
+    
+    # Step 7: Checkout if requested
     if checkout:
         if verbose:
             print(f"Checking out {dvc_file}...")
@@ -544,7 +551,7 @@ def import_data(
         if not any_success:
             print(f"Warning: Checkout failed. Run 'dt checkout {dvc_file}' after configuring caches.")
         else:
-            # Step 7: Populate primary cache with hardlinks to workspace symlinks
+            # Step 8: Populate primary cache with hardlinks to workspace symlinks
             primary_cache = checkout_mod.get_primary_cache()
             if primary_cache:
                 if verbose:
