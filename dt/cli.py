@@ -13,6 +13,7 @@ from . import checkout as checkout_mod
 from . import tmp as tmp_mod
 from . import import_data as import_mod
 from . import pull as pull_mod
+from . import offline as offline_mod
 
 
 @click.group()
@@ -813,6 +814,162 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
             click.echo(f"Using cache: {cache_path}")
             
     except import_mod.ImportError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.group()
+def offline():
+    """Manage offline mode for compute nodes without internet.
+    
+    Offline mode redirects Git URL lookups to local temporary clones,
+    enabling DVC operations on compute nodes without internet access.
+    
+    \b
+    Typical workflow:
+        # On login node (has internet)
+        dt tmp clone source-repo
+        dt offline enable
+        
+        # Submit job to compute node - git operations use local clones
+        
+        # Later, refresh clones if needed
+        dt offline disable
+        dt tmp refresh --all
+        dt offline enable
+    """
+    pass
+
+
+@offline.command('enable')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def offline_enable(verbose):
+    """Enable offline mode for Git repos and DVC remotes.
+    
+    Sets up:
+    - Git config to redirect remote repository URLs to local temp clones
+    - DVC config to use local paths for SSH-based remotes
+    
+    After enabling, DVC operations that would normally require
+    internet access will use local clones and paths.
+    
+    \b
+    Examples:
+        dt offline enable
+        dt offline enable -v
+    """
+    try:
+        enabled_repos, enabled_remotes = offline_mod.enable(verbose=verbose)
+        
+        total = len(enabled_repos) + len(enabled_remotes)
+        
+        if total > 0:
+            click.echo(f"Offline mode enabled")
+            if enabled_repos:
+                click.echo(f"  Git redirects: {len(enabled_repos)} repo(s)")
+                if not verbose:
+                    for repo_id in enabled_repos:
+                        click.echo(f"    {repo_id}")
+            if enabled_remotes:
+                click.echo(f"  DVC remotes: {len(enabled_remotes)} remote(s)")
+                if not verbose:
+                    for name in enabled_remotes:
+                        click.echo(f"    {name}")
+        else:
+            click.echo("No repos or remotes to enable")
+            
+    except offline_mod.OfflineError as e:
+        raise click.ClickException(str(e))
+
+
+@offline.command('disable')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def offline_disable(verbose):
+    """Disable offline mode for Git repos and DVC remotes.
+    
+    Removes:
+    - Git config entries that redirect URLs to local clones
+    - DVC config entries that override SSH remotes with local paths
+    
+    After disabling, Git and DVC operations will use original remote URLs.
+    
+    \b
+    Examples:
+        dt offline disable
+        dt offline disable -v
+    """
+    try:
+        disabled_repos, disabled_remotes = offline_mod.disable(verbose=verbose)
+        
+        total = len(disabled_repos) + len(disabled_remotes)
+        
+        if total > 0:
+            click.echo(f"Offline mode disabled")
+            if disabled_repos:
+                click.echo(f"  Git redirects: {len(disabled_repos)} repo(s)")
+            if disabled_remotes:
+                click.echo(f"  DVC remotes: {len(disabled_remotes)} remote(s)")
+        else:
+            click.echo("Offline mode was not enabled")
+            
+    except offline_mod.OfflineError as e:
+        raise click.ClickException(str(e))
+
+
+@offline.command('status')
+def offline_status():
+    """Show offline mode status.
+    
+    Displays:
+    - Temporary clones available and their redirect status
+    - DVC remotes that can use local paths
+    
+    \b
+    Examples:
+        dt offline status
+    """
+    try:
+        info = offline_mod.status()
+        
+        if info['enabled']:
+            click.echo("Offline mode: ENABLED")
+        else:
+            click.echo("Offline mode: DISABLED")
+        
+        # Git clone section
+        click.echo()
+        if info['clones']:
+            click.echo("Git redirects (temp clones):")
+            for repo_id in info['clones']:
+                if repo_id in info['active']:
+                    click.echo(f"  ✓ {repo_id}")
+                else:
+                    click.echo(f"  ○ {repo_id}")
+        else:
+            click.echo("Git redirects: none available")
+            click.echo("  Use 'dt tmp clone <repo>' to create temp clones.")
+        
+        # DVC remote section
+        click.echo()
+        remote_info = info.get('remotes', {})
+        available = remote_info.get('available', [])
+        active = remote_info.get('active', [])
+        
+        if available:
+            click.echo("DVC remotes (SSH → local):")
+            for name in available:
+                if name in active:
+                    click.echo(f"  ✓ {name}")
+                else:
+                    click.echo(f"  ○ {name}")
+        else:
+            click.echo("DVC remotes: no SSH remotes with local paths")
+        
+        # Hints
+        if info['missing'] or (available and set(available) - set(active)):
+            click.echo()
+            click.echo("Run 'dt offline enable' to enable all available.")
+            
+    except offline_mod.OfflineError as e:
         raise click.ClickException(str(e))
 
 
