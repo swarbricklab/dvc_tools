@@ -13,6 +13,7 @@ from . import checkout as checkout_mod
 from . import tmp as tmp_mod
 from . import import_data as import_mod
 from . import pull as pull_mod
+from . import offline as offline_mod
 
 
 @click.group()
@@ -813,6 +814,124 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
             click.echo(f"Using cache: {cache_path}")
             
     except import_mod.ImportError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.group()
+def offline():
+    """Manage offline mode for compute nodes without internet.
+    
+    Offline mode redirects Git URL lookups to local temporary clones,
+    enabling DVC operations on compute nodes without internet access.
+    
+    \b
+    Typical workflow:
+        # On login node (has internet)
+        dt tmp clone source-repo
+        dt offline enable
+        
+        # Submit job to compute node - git operations use local clones
+        
+        # Later, refresh clones if needed
+        dt offline disable
+        dt tmp refresh --all
+        dt offline enable
+    """
+    pass
+
+
+@offline.command('enable')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def offline_enable(verbose):
+    """Enable offline mode by redirecting Git URLs to temp clones.
+    
+    Sets up git config to redirect remote repository URLs to local
+    temporary clones. After enabling, DVC operations that would
+    normally require internet access will use the local clones.
+    
+    \b
+    Examples:
+        dt offline enable
+        dt offline enable -v
+    """
+    try:
+        enabled = offline_mod.enable(verbose=verbose)
+        
+        if enabled:
+            click.echo(f"Offline mode enabled for {len(enabled)} repo(s)")
+            if not verbose:
+                for repo_id in enabled:
+                    click.echo(f"  {repo_id}")
+        else:
+            click.echo("No repos to enable")
+            
+    except offline_mod.OfflineError as e:
+        raise click.ClickException(str(e))
+
+
+@offline.command('disable')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def offline_disable(verbose):
+    """Disable offline mode by removing Git URL redirects.
+    
+    Removes the git config entries that redirect URLs to local clones.
+    After disabling, Git operations will use the original remote URLs.
+    
+    \b
+    Examples:
+        dt offline disable
+        dt offline disable -v
+    """
+    try:
+        disabled = offline_mod.disable(verbose=verbose)
+        
+        if disabled:
+            click.echo(f"Offline mode disabled for {len(disabled)} repo(s)")
+        else:
+            click.echo("Offline mode was not enabled")
+            
+    except offline_mod.OfflineError as e:
+        raise click.ClickException(str(e))
+
+
+@offline.command('status')
+def offline_status():
+    """Show offline mode status.
+    
+    Displays which temporary clones are available and which
+    have active URL redirects enabled.
+    
+    \b
+    Examples:
+        dt offline status
+    """
+    try:
+        info = offline_mod.status()
+        
+        if info['enabled']:
+            click.echo("Offline mode: ENABLED")
+        else:
+            click.echo("Offline mode: DISABLED")
+        
+        click.echo()
+        
+        if info['clones']:
+            click.echo("Available temp clones:")
+            for repo_id in info['clones']:
+                if repo_id in info['active']:
+                    click.echo(f"  ✓ {repo_id} (active)")
+                else:
+                    click.echo(f"  ○ {repo_id}")
+        else:
+            click.echo("No temp clones available.")
+            click.echo("Use 'dt tmp clone <repo>' to create one.")
+        
+        if info['missing'] and info['enabled']:
+            click.echo()
+            click.echo("Note: Some clones don't have active redirects.")
+            click.echo("Run 'dt offline enable' to enable all.")
+            
+    except offline_mod.OfflineError as e:
         raise click.ClickException(str(e))
 
 
