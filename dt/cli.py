@@ -777,8 +777,9 @@ def tmp_clean(repository, owner, clean_all):
 @click.option('-o', '--out', help='Destination path to download files to')
 @click.option('--owner', help='Override the GitHub owner for short names')
 @click.option('--no-checkout', is_flag=True, help='Skip checkout after import')
+@click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clone (for offline use)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def import_cmd(repository, path, out, owner, no_checkout, verbose):
+def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
     """Import DVC-tracked data from another repository.
     
     Creates a .dvc file pointing to data in REPOSITORY at PATH,
@@ -794,6 +795,7 @@ def import_cmd(repository, path, out, owner, no_checkout, verbose):
         dt import neochemo data/samples.h5ad -o my_samples.h5ad
         dt import git@github.com:lab/project.git results/model
         dt import neochemo data/large --no-checkout
+        dt import neochemo data/file --no-refresh
     """
     try:
         dvc_file, cache_path = import_mod.import_data(
@@ -803,6 +805,7 @@ def import_cmd(repository, path, out, owner, no_checkout, verbose):
             owner=owner,
             checkout=not no_checkout,
             verbose=verbose,
+            refresh=not no_refresh,
         )
         
         click.echo(f"Created {dvc_file}")

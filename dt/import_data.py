@@ -361,6 +361,7 @@ def import_data(
     owner: Optional[str] = None,
     checkout: bool = True,
     verbose: bool = False,
+    refresh: bool = True,
 ) -> Tuple[Path, Optional[str]]:
     """Import DVC-tracked data from a remote repository.
     
@@ -371,6 +372,7 @@ def import_data(
         owner: Optional owner override for short names.
         checkout: Whether to run checkout after import.
         verbose: Print progress messages.
+        refresh: Whether to refresh temp clone (default True).
         
     Returns:
         Tuple of (dvc_file_path, cache_path used).
@@ -394,7 +396,7 @@ def import_data(
         print(f"Ensuring clone of {repository}...")
     
     try:
-        clone_path = tmp_mod.clone_repo(repository, owner=owner, refresh=True)
+        clone_path = tmp_mod.clone_repo(repository, owner=owner, refresh=refresh)
     except tmp_mod.TmpError as e:
         raise ImportError(f"Failed to clone repository: {e}")
     
