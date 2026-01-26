@@ -58,6 +58,45 @@ def check_git() -> None:
     check_command('git')
 
 
+def update_gitignore(pattern: str, gitignore_path: Optional[Path] = None) -> bool:
+    """Add a pattern to .gitignore if not already present.
+    
+    Appends the pattern to .gitignore, matching DVC's behavior for
+    dvc add and dvc import. Creates .gitignore if it doesn't exist.
+    
+    Args:
+        pattern: The pattern to add (e.g., '/data.txt' or '.dt/tmp/').
+        gitignore_path: Path to .gitignore file. Defaults to .gitignore
+            in the current directory.
+    
+    Returns:
+        True if .gitignore was modified, False if pattern already present.
+    """
+    if gitignore_path is None:
+        gitignore_path = Path.cwd() / ".gitignore"
+    
+    # Normalize pattern for comparison
+    pattern_normalized = pattern.rstrip('/')
+    
+    # Check if already present
+    if gitignore_path.exists():
+        content = gitignore_path.read_text()
+        for line in content.splitlines():
+            line_normalized = line.strip().rstrip('/')
+            if line_normalized == pattern_normalized:
+                return False
+    else:
+        content = ""
+    
+    # Append pattern
+    if content and not content.endswith('\n'):
+        content += '\n'
+    content += f"{pattern}\n"
+    
+    gitignore_path.write_text(content)
+    return True
+
+
 def set_group_writable(path: Path, setgid: bool = True) -> None:
     """Set group write permissions on a path.
     
