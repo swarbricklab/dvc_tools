@@ -148,6 +148,7 @@ def pull(
     targets: Optional[List[str]] = None,
     verbose: bool = False,
     dvc_args: Optional[List[str]] = None,
+    refresh: bool = True,
 ) -> bool:
     """Pull DVC-tracked files, handling imports automatically.
     
@@ -155,6 +156,7 @@ def pull(
         targets: Specific targets to pull. If None, pulls all.
         verbose: Print detailed progress.
         dvc_args: Additional arguments to pass to dvc pull.
+        refresh: Whether to refresh temp clones (default True).
         
     Returns:
         True if all operations succeeded.
@@ -195,6 +197,7 @@ def pull(
                         targets=[str(dvc_file)],
                         cache=None,
                         verbose=verbose,
+                        refresh=refresh,
                     )
             except CheckoutError as e:
                 print(f"Error checking out {target}: {e}")
