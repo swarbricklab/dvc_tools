@@ -566,8 +566,9 @@ def push(ctx):
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show which cache is being checked')
 @click.option('-c', '--cache', 'cache_name', help='Use only this cache (by name or path)')
+@click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
 @click.pass_context
-def checkout(ctx, targets, verbose, cache_name):
+def checkout(ctx, targets, verbose, cache_name, no_refresh):
     """Checkout DVC-tracked files, searching across multiple caches.
     
     Runs `dvc checkout` but searches for cached files across:
@@ -595,6 +596,7 @@ def checkout(ctx, targets, verbose, cache_name):
         dt checkout --force                # Force checkout (overwrite modified)
         dt checkout -v                     # Show cache search progress
         dt checkout --cache neochemo       # Checkout from specific cache only
+        dt checkout --no-refresh           # Skip refreshing temp clones
     """
     try:
         results = checkout_mod.smart_checkout(
@@ -602,6 +604,7 @@ def checkout(ctx, targets, verbose, cache_name):
             extra_args=ctx.args,
             verbose=verbose,
             cache=cache_name,
+            refresh=not no_refresh,
         )
         
         any_success = False
@@ -642,8 +645,9 @@ def checkout(ctx, targets, verbose, cache_name):
 ))
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
 @click.pass_context
-def pull(ctx, targets, verbose):
+def pull(ctx, targets, verbose, no_refresh):
     """Pull DVC-tracked files, handling imports automatically.
     
     For targets tracked by import .dvc files (those with deps.repo),
@@ -665,12 +669,14 @@ def pull(ctx, targets, verbose):
         dt pull data/                      # Pull specific target
         dt pull -v                         # Show detailed progress
         dt pull --jobs 4                   # Parallel pull (passed to dvc)
+        dt pull --no-refresh               # Skip refreshing temp clones
     """
     try:
         success = pull_mod.pull(
             targets=list(targets) if targets else None,
             verbose=verbose,
             dvc_args=ctx.args if ctx.args else None,
+            refresh=not no_refresh,
         )
         if not success:
             raise SystemExit(1)

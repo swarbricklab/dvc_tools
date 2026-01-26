@@ -356,6 +356,7 @@ def smart_checkout(
     extra_args: Optional[List[str]] = None,
     verbose: bool = False,
     cache: Optional[str] = None,
+    refresh: bool = True,
 ) -> List[Tuple[str, bool, str]]:
     """Checkout DVC-tracked files, automatically handling imports.
     
@@ -369,6 +370,7 @@ def smart_checkout(
         extra_args: Additional arguments to pass to dvc checkout.
         verbose: Print progress messages.
         cache: Specific cache name/path to use (exclusive mode).
+        refresh: Whether to refresh temp clones (default True).
         
     Returns:
         List of (cache_path, success, output) tuples.
@@ -416,6 +418,7 @@ def smart_checkout(
                 dvc_data=dvc_data,
                 extra_args=extra_args,
                 verbose=verbose,
+                refresh=refresh,
             )
             all_results.extend(results)
         except CheckoutError as e:
@@ -440,11 +443,19 @@ def checkout_import(
     dvc_data: Dict[str, Any],
     extra_args: Optional[List[str]] = None,
     verbose: bool = False,
+    refresh: bool = True,
 ) -> List[Tuple[str, bool, str]]:
     """Checkout an import .dvc file by finding the source cache.
     
     This handles .dvc files created by `dvc import` without assuming
     dt import setup (no pre-existing alt cache or temporary clone).
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        dvc_data: Parsed .dvc file contents.
+        extra_args: Additional arguments to pass to dvc checkout.
+        verbose: Print progress messages.
+        refresh: Whether to refresh the temp clone (default True).
     
     The process:
     1. Parse the deps section to get the source repo URL and path
@@ -487,7 +498,7 @@ def checkout_import(
         print(f"Cloning source repository...")
     
     try:
-        clone_path = tmp_mod.clone_repo(source_url, refresh=True, verbose=verbose)
+        clone_path = tmp_mod.clone_repo(source_url, refresh=refresh, verbose=verbose)
     except tmp_mod.TmpError as e:
         raise CheckoutError(f"Failed to clone source repository: {e}")
     
