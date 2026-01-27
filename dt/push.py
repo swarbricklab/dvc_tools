@@ -255,6 +255,8 @@ def build_manifest(
         from dvc.repo import Repo
         from dvc.repo.fetch import _collect_indexes
         from dvc_data.index.fetch import collect
+        from dvc_data.index import ObjectStorage
+        from dvc_data.hashfile.status import compare_status
         from fsspec.utils import tokenize
     except ImportError as e:
         raise PushError(f"DVC internals not available: {e}")
@@ -298,7 +300,7 @@ def build_manifest(
         tokenize(sorted(idx.data_tree.hash_info.value for idx in indexes.values())),
     )
     
-    # Collect files that need pushing (compares cache vs remote)
+    # Collect files that could potentially need pushing
     data = collect(
         [idx.data['repo'] for idx in indexes.values()],
         'remote',
@@ -307,14 +309,38 @@ def build_manifest(
         push=True,
     )
     
-    # Extract file hashes from the collected data
+    # Filter to only files that actually need pushing (not already on remote)
     files = []
     for fs_idx in data:
-        for key, entry in fs_idx.items():
-            if entry.hash_info and entry.hash_info.value:
-                # key is like ('cf', '7bfcb23f8c0b12518d8c07675891f9')
-                # We store the full hash
-                files.append(entry.hash_info.value)
+        storage = fs_idx.storage_map[()]
+        cache = storage.cache
+        remote_storage = storage.data
+        
+        if isinstance(cache, ObjectStorage) and isinstance(remote_storage, ObjectStorage):
+            cache_odb = cache.odb
+            remote_odb = remote_storage.odb
+            
+            # Get all hash_info objects
+            obj_ids = [entry.hash_info for _, entry in fs_idx.iteritems() if entry.hash_info]
+            
+            if obj_ids:
+                # Compare with remote to see what's actually new
+                status = compare_status(
+                    cache_odb,
+                    remote_odb,
+                    obj_ids,
+                    check_deleted=False,
+                    shallow=True,
+                )
+                
+                # Only include files that are new (not on remote)
+                for hash_info in status.new:
+                    files.append(hash_info.value)
+        else:
+            # Fallback: include all files (can't check remote)
+            for key, entry in fs_idx.items():
+                if entry.hash_info and entry.hash_info.value:
+                    files.append(entry.hash_info.value)
     
     if verbose:
         print(f"Found {len(files)} file(s) to push")
