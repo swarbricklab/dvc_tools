@@ -522,31 +522,146 @@ def doctor(verbose):
     ignore_unknown_options=True,
     allow_extra_args=True,
 ))
+@click.option('--workers', '-w', type=int, default=None,
+              help='Number of parallel workers for distributed push via qxub.')
+@click.option('--worker', type=int, default=None,
+              help='Worker ID (internal, used by submitted jobs).')
+@click.option('--manifest', type=click.Path(exists=True), default=None,
+              help='Manifest directory (internal, used by submitted jobs).')
+@click.option('--remote', '-r', default=None,
+              help='Push to specific remote instead of all project remotes.')
+@click.option('--no-wait', is_flag=True,
+              help='Submit jobs and exit without waiting for completion.')
+@click.option('--dry', '--dry-run', is_flag=True,
+              help='Show what would be pushed without actually pushing.')
+@click.option('--verbose', '-v', is_flag=True,
+              help='Print detailed progress.')
 @click.pass_context
-def push(ctx):
-    """Push DVC-tracked files to all project-configured remotes.
+def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
+    """Push DVC-tracked files to remotes.
     
-    Runs `dvc push` for each remote configured at project or local scope,
-    skipping remotes inherited from user or system config.
+    Without --workers: pushes to all project-configured remotes sequentially.
+    With --workers N: distributes push across N compute nodes via qxub.
     
-    All options and arguments are passed through to `dvc push`.\n
-    Run `dvc push --help` for additional options than can be passed through.
+    The parallel mode partitions files by hash prefix, ensuring no conflicts
+    between workers. Each worker calls DVC's internal push directly.
     
     \b
     Examples:
-        dt push                          # Push to all project remotes
-        dt push data/processed.csv.dvc   # Push specific targets
-        dt push --jobs 8                 # Push using 8 parallel jobs
+        dt push                              # Push to all project remotes
+        dt push data/processed.csv.dvc       # Push specific targets
+        dt push --dry                        # Show what would be pushed
+        dt push --dry -v                     # List all files to push
+        dt push --jobs 8                     # DVC parallel uploads (single node)
+        dt push --workers 16                 # Distributed via 16 qxub jobs
+        dt push -w 8 -r myremote data.dvc    # Push target to remote using 8 jobs
+        dt push -w 16 --no-wait              # Submit jobs and exit
+    
+    \b
+    Additional DVC options (passed through):
+        --jobs N    Number of parallel upload threads per worker
+        --force     Force push even if remote has newer versions
+    
+    Run `dvc push --help` for additional DVC options.
     """
+    from pathlib import Path
+    
     try:
-        results = push_mod.push_all(ctx.args)
+        # Dry run mode: show what would be pushed
+        if dry:
+            targets = [arg for arg in ctx.args if not arg.startswith('-')]
+            manifest = push_mod.build_manifest(
+                targets=targets if targets else None,
+                remote=remote,
+                verbose=False,
+            )
+            files = manifest.get('files', [])
+            
+            if not files:
+                click.echo("Nothing to push.")
+                return
+            
+            # Calculate total size if possible
+            total_size = push_mod.get_files_size(files)
+            
+            if verbose:
+                click.echo(f"Files to push ({len(files)} files, {push_mod.format_size(total_size)}):")
+                for file_hash in sorted(files):
+                    click.echo(f"  {file_hash}")
+            else:
+                click.echo(f"Would push {len(files)} file(s), {push_mod.format_size(total_size)}")
+                if workers:
+                    partitions = push_mod.partition_manifest(manifest, workers)
+                    click.echo(f"\nWith {workers} workers:")
+                    for worker_id, worker_files in partitions.items():
+                        if worker_files:
+                            click.echo(f"  Worker {worker_id}: {len(worker_files)} file(s)")
+            return
         
-        all_success = True
-        for remote, success, output in results:
+        # Worker mode: called by submitted jobs
+        if worker is not None and manifest is not None:
+            manifest_path = Path(manifest)
+            pushed, failed = push_mod.worker_push(
+                manifest_dir=manifest_path,
+                worker_id=worker,
+                verbose=verbose,
+            )
+            if verbose:
+                click.echo(f"Pushed: {pushed}, Failed: {failed}")
+            if failed > 0:
+                raise SystemExit(1)
+            return
+        
+        # Parallel mode: submit qxub jobs
+        if workers is not None:
+            # Extract targets from extra args (non-option args)
+            targets = [arg for arg in ctx.args if not arg.startswith('-')]
+            
+            # Extract qxub-relevant options if any (could extend later)
+            qxub_args = None
+            
+            job_ids, manifest_dir = push_mod.parallel_push(
+                targets=targets if targets else None,
+                remote=remote,
+                num_workers=workers,
+                qxub_args=qxub_args,
+                wait=not no_wait,
+                verbose=verbose,
+            )
+            
+            if no_wait and job_ids:
+                click.echo(f"Submitted {len(job_ids)} job(s):")
+                for job_id in job_ids:
+                    click.echo(f"  {job_id}")
+                if manifest_dir:
+                    click.echo(f"Manifest: {manifest_dir}")
+                click.echo(f"\nMonitor with: qxub monitor {' '.join(job_ids)}")
+            elif job_ids:
+                click.echo(f"Completed {len(job_ids)} job(s)")
+            return
+        
+        # Simple mode: push to all project remotes
+        # If remote specified, push to just that one
+        if remote:
+            success, output = push_mod.push_to_remote(remote, ctx.args)
             status = "✓" if success else "✗"
             click.echo(f"{status} {remote}")
             if output:
-                # Indent output lines
+                for line in output.split('\n'):
+                    if line.strip():
+                        click.echo(f"  {line}")
+            if not success:
+                raise SystemExit(1)
+            return
+        
+        # Default: push to all project remotes
+        results = push_mod.push_all(ctx.args)
+        
+        all_success = True
+        for remote_name, success, output in results:
+            status = "✓" if success else "✗"
+            click.echo(f"{status} {remote_name}")
+            if output:
                 for line in output.split('\n'):
                     if line.strip():
                         click.echo(f"  {line}")
