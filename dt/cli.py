@@ -576,6 +576,7 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
                 verbose=False,
             )
             files = manifest.get('files', [])
+            paths = manifest.get('paths', {})
             
             if not files:
                 click.echo("Nothing to push.")
@@ -587,7 +588,12 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
             if verbose:
                 click.echo(f"Files to push ({len(files)} files, {push_mod.format_size(total_size)}):")
                 for file_hash in sorted(files):
-                    click.echo(f"  {file_hash}")
+                    # Show path if available, with full hash in parentheses
+                    path = paths.get(file_hash)
+                    if path:
+                        click.echo(f"  {path}  ({file_hash})")
+                    else:
+                        click.echo(f"  {file_hash}")
             else:
                 click.echo(f"Would push {len(files)} file(s), {push_mod.format_size(total_size)}")
                 if workers:

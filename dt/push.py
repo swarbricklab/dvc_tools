@@ -248,7 +248,8 @@ def build_manifest(
         verbose: Print progress messages
         
     Returns:
-        Dict with 'files' (list of hash strings) and 'remote' info
+        Dict with 'files' (list of hash strings), 'paths' (hash->path mapping),
+        and 'remote' info
     """
     try:
         from dvc.repo import Repo
@@ -279,7 +280,17 @@ def build_manifest(
     )
     
     if not indexes:
-        return {'files': [], 'remote': remote, 'repo_root': str(repo.root_dir)}
+        return {'files': [], 'paths': {}, 'remote': remote, 'repo_root': str(repo.root_dir)}
+    
+    # Build hash-to-path mapping from indexes (before filtering)
+    hash_to_path: Dict[str, str] = {}
+    for idx in indexes.values():
+        repo_data = idx.data.get('repo')
+        if repo_data:
+            for key, entry in repo_data.items():
+                if entry.hash_info and entry.hash_info.value:
+                    path = '/'.join(key)
+                    hash_to_path[entry.hash_info.value] = path
     
     # Generate cache key for collect
     cache_key = (
@@ -310,6 +321,7 @@ def build_manifest(
     
     return {
         'files': files,
+        'paths': hash_to_path,
         'remote': remote,
         'repo_root': str(repo.root_dir),
     }
