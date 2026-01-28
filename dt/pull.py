@@ -714,10 +714,17 @@ def find_all_dvc_files() -> List[Path]:
     """Find all .dvc files in the current directory tree.
     
     Returns:
-        List of paths to .dvc files.
+        List of paths to .dvc files (excludes .dvc/ directory and .dt/ temp clones).
     """
     cwd = Path.cwd()
-    return sorted(cwd.rglob('*.dvc'))
+    # Exclude:
+    # - .dvc/ directory itself (not a .dvc file)
+    # - .dt/ directory (temp clones, manifests, etc.)
+    # - Must be a file, not a directory
+    return sorted(
+        f for f in cwd.rglob('*.dvc') 
+        if f.is_file() and '.dt' not in f.parts and f.name != '.dvc'
+    )
 
 
 def separate_targets(
