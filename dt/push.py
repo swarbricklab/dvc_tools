@@ -553,7 +553,8 @@ def submit_workers(
         conda_env = cfg.get_value('qxub.env', 'dt')
         queue = cfg.get_value('qxub.queue', 'copyq')
         walltime = cfg.get_value('qxub.walltime', '10:00:00')
-        cmd = ['qxub', 'exec', '--terse', '--env', conda_env, '--queue', queue, '--time', walltime]
+        mem = cfg.get_value('qxub.mem', '4GB')
+        cmd = ['qxub', 'exec', '--terse', '--env', conda_env, '--queue', queue, '--time', walltime, '--mem', mem]
         if qxub_args:
             cmd.extend(qxub_args)
         
