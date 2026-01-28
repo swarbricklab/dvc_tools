@@ -552,7 +552,7 @@ def submit_workers(
         # Get conda environment from config, default to 'dt'
         conda_env = cfg.get_value('qxub.env', 'dt')
         queue = cfg.get_value('qxub.queue', 'copyq')
-        walltime = cfg.get_value('qxub.walltime', '2:00:00')
+        walltime = cfg.get_value('qxub.walltime', '10:00:00')
         cmd = ['qxub', 'exec', '--terse', '--env', conda_env, '--queue', queue, '--time', walltime]
         if qxub_args:
             cmd.extend(qxub_args)
