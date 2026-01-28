@@ -441,11 +441,11 @@ def push_partition(
     jobs: int = 1,
     verbose: bool = False,
 ) -> Tuple[int, int]:
-    """Push a partition of files using DVC internals.
+    """Push a partition of files using direct cache-to-remote transfer.
     
-    This calls DVC's internal push function directly, bypassing
-    the workspace lock. Safe because each worker handles exclusive
-    hash prefixes.
+    This bypasses DVC's workspace index entirely, avoiding SQLite lock
+    contention when running parallel workers. We transfer directly from
+    the cache ODB to the remote ODB using the file hashes.
     
     Args:
         file_hashes: Set of file hashes to push
@@ -458,11 +458,8 @@ def push_partition(
     """
     try:
         from dvc.repo import Repo
-        from dvc.repo.fetch import _collect_indexes
-        from dvc_data.index.fetch import collect
-        from dvc_data.index import DataIndex
-        from dvc_data.index.push import push as ipush
-        from fsspec.utils import tokenize
+        from dvc_data.hashfile.transfer import transfer
+        from dvc_data.hashfile.hash_info import HashInfo
     except ImportError as e:
         raise PushError(f"DVC internals not available: {e}")
     
@@ -472,68 +469,36 @@ def push_partition(
     repo = Repo()
     
     if verbose:
-        print(f"Building index for {len(file_hashes)} files...")
+        print(f"Preparing to push {len(file_hashes)} files...")
     
-    # Collect all indexes
-    indexes = _collect_indexes(
-        repo,
-        targets=None,
-        remote=remote,
-        all_branches=False,
-        with_deps=False,
-        all_tags=False,
-        recursive=False,
-        all_commits=False,
-        revs=None,
-        workspace=True,
-        push=True,
-    )
-    
-    if not indexes:
-        return 0, 0
-    
-    cache_key = (
-        'push',
-        tokenize(sorted(idx.data_tree.hash_info.value for idx in indexes.values())),
-    )
-    
-    data = collect(
-        [idx.data['repo'] for idx in indexes.values()],
-        'remote',
-        cache_index=repo.data_index,
-        cache_key=cache_key,
-        push=True,
-    )
-    
-    # Filter to only our partition's files
-    filtered_data = []
-    for fs_idx in data:
-        filtered = DataIndex()
-        filtered.storage_map = fs_idx.storage_map
-        
-        for key, entry in fs_idx.items():
-            if entry.hash_info and entry.hash_info.value in file_hashes:
-                filtered.add(entry)
-        
-        # Only include if we have entries
-        if sum(1 for _ in filtered.items()) > 0:
-            filtered_data.append(filtered)
-    
-    if not filtered_data:
-        if verbose:
-            print("No files to push in this partition")
-        return 0, 0
+    # Get cache and remote ODBs directly (no index access)
+    cache_odb = repo.cache.local
+    remote_obj = repo.cloud.get_remote(name=remote)
+    remote_odb = remote_obj.odb
     
     if verbose:
-        total = sum(sum(1 for _ in idx.items()) for idx in filtered_data)
-        print(f"Pushing {total} files...")
+        print(f"Cache: {cache_odb.path}")
+        print(f"Remote: {remote_odb.path}")
     
-    # Call DVC's internal push
-    pushed, failed = ipush(filtered_data, jobs=jobs)
+    # Create HashInfo objects for the files to push
+    obj_ids = [HashInfo('md5', h) for h in file_hashes]
     
-    # Clean up
-    for fs_index in data:
-        fs_index.close()
+    if verbose:
+        print(f"Transferring {len(obj_ids)} files...")
+    
+    # Direct transfer from cache to remote
+    result = transfer(
+        cache_odb,
+        remote_odb,
+        obj_ids,
+        jobs=jobs,
+    )
+    
+    pushed = len(result.transferred)
+    failed = len(result.failed)
+    
+    if verbose:
+        print(f"Transferred: {pushed}, Failed: {failed}")
     
     return pushed, failed
 
