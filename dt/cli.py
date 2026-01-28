@@ -765,16 +765,33 @@ def checkout(ctx, targets, verbose, cache_name, no_refresh):
     ignore_unknown_options=True,
     allow_extra_args=True,
 ))
-@click.argument('targets', nargs=-1, type=click.Path())
+@click.option('--workers', '-w', type=int, default=None,
+              help='Number of parallel workers for distributed pull via qxub.')
+@click.option('--worker', type=int, default=None,
+              help='Worker ID (internal, used by submitted jobs).')
+@click.option('--manifest', type=click.Path(exists=True), default=None,
+              help='Manifest directory (internal, used by submitted jobs).')
+@click.option('--remote', '-r', default=None,
+              help='Pull from specific remote.')
+@click.option('--no-wait', is_flag=True,
+              help='Submit jobs and exit without waiting for completion.')
+@click.option('--dry', '--dry-run', is_flag=True,
+              help='Show what would be pulled without actually pulling.')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
 @click.pass_context
-def pull(ctx, targets, verbose, no_refresh):
+def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refresh):
     """Pull DVC-tracked files, handling imports automatically.
     
     For targets tracked by import .dvc files (those with deps.repo),
     uses dt checkout to fetch from the source repository's cache.
     For other targets, uses regular dvc pull.
+    
+    Without --workers: pulls using regular dvc pull.
+    With --workers N: distributes pull across N compute nodes via qxub.
+    
+    The parallel mode partitions files by hash prefix, ensuring no conflicts
+    between workers. Each worker calls DVC's internal transfer directly.
     
     \b
     Target resolution:
@@ -789,13 +806,94 @@ def pull(ctx, targets, verbose, no_refresh):
     Examples:
         dt pull                            # Pull all tracked files
         dt pull data/                      # Pull specific target
+        dt pull --dry                      # Show what would be pulled
+        dt pull --dry -v                   # List all files to pull
         dt pull -v                         # Show detailed progress
         dt pull --jobs 4                   # Parallel pull (passed to dvc)
+        dt pull --workers 16               # Distributed via 16 qxub jobs
+        dt pull -w 8 -r myremote data.dvc  # Pull target from remote using 8 jobs
+        dt pull -w 16 --no-wait            # Submit jobs and exit
         dt pull --no-refresh               # Skip refreshing temp clones
     """
+    from pathlib import Path
+    
     try:
+        # Dry run mode: show what would be pulled
+        if dry:
+            targets = [arg for arg in ctx.args if not arg.startswith('-')]
+            manifest_data = pull_mod.build_pull_manifest(
+                targets=targets if targets else None,
+                remote=remote,
+                verbose=False,
+            )
+            files = manifest_data.get('files', [])
+            paths = manifest_data.get('paths', {})
+            
+            if not files:
+                click.echo("Nothing to pull.")
+                return
+            
+            # Calculate total size if possible
+            total_size = pull_mod.get_remote_files_size(files, remote=remote)
+            
+            if verbose:
+                click.echo(f"Files to pull ({len(files)} files, {pull_mod.format_size(total_size)}):")
+                for file_hash in sorted(files):
+                    # Show path if available, with full hash in parentheses
+                    path = paths.get(file_hash)
+                    if path:
+                        click.echo(f"  {path}  ({file_hash})")
+                    else:
+                        click.echo(f"  {file_hash}")
+            else:
+                click.echo(f"Would pull {len(files)} file(s), {pull_mod.format_size(total_size)}")
+                if workers:
+                    partitions = pull_mod.partition_manifest(manifest_data, workers)
+                    click.echo(f"\nWith {workers} workers:")
+                    for worker_id, worker_files in partitions.items():
+                        if worker_files:
+                            click.echo(f"  Worker {worker_id}: {len(worker_files)} file(s)")
+            return
+        
+        # Worker mode: called by submitted jobs
+        if worker is not None and manifest is not None:
+            manifest_path = Path(manifest)
+            pulled, failed = pull_mod.worker_pull(
+                manifest_dir=manifest_path,
+                worker_id=worker,
+                verbose=verbose,
+            )
+            if verbose:
+                click.echo(f"Pulled: {pulled}, Failed: {failed}")
+            if failed > 0:
+                raise SystemExit(1)
+            return
+        
+        # Parallel mode: submit qxub jobs
+        if workers is not None:
+            # Extract targets from extra args (non-option args)
+            targets = [arg for arg in ctx.args if not arg.startswith('-')]
+            
+            job_ids, manifest_dir = pull_mod.parallel_pull(
+                targets=targets if targets else None,
+                remote=remote,
+                num_workers=workers,
+                qxub_args=None,
+                wait=not no_wait,
+                verbose=verbose,
+            )
+            
+            if no_wait and job_ids:
+                click.echo(f"Submitted {len(job_ids)} job(s):")
+                for job_id in job_ids:
+                    click.echo(f"  {job_id}")
+                click.echo(f"\nManifest: {manifest_dir}")
+                click.echo("Monitor with: qxub monitor --summary " + " ".join(job_ids))
+            return
+        
+        # Standard pull mode
         success = pull_mod.pull(
-            targets=list(targets) if targets else None,
+            targets=list(ctx.args) if ctx.args else None,
             verbose=verbose,
             dvc_args=ctx.args if ctx.args else None,
             refresh=not no_refresh,
@@ -803,6 +901,8 @@ def pull(ctx, targets, verbose, no_refresh):
         if not success:
             raise SystemExit(1)
     except pull_mod.CheckoutError as e:
+        raise click.ClickException(str(e))
+    except pull_mod.PullError as e:
         raise click.ClickException(str(e))
 
 
