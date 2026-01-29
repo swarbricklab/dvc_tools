@@ -13,6 +13,8 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `cache.root` | Root directory for [shared external caches](cache.md) | `/g/data/a56/dvc_cache` |
 | `remote.root` | Root directory for [DVC remote storage](remote.md) | `/g/data/a56/dvc_remote` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
+| `add.max_threads` | Maximum threads for checksum computation | `48` |
+| `add.mem_per_thread` | GB of RAM per thread for `dt add` | `4` |
 | `qxub.env` | Conda environment for parallel workers | `dt` |
 | `qxub.queue` | PBS queue for parallel jobs | `copyq` |
 | `qxub.walltime` | Maximum runtime for parallel jobs | `10:00:00` |
@@ -98,6 +100,34 @@ Memory allocation per worker. Increase for large files that require significant 
 dt config set qxub.mem 8GB
 ```
 
+## add Options
+
+These options configure the `dt add` command for parallel checksum computation.
+
+### `add.max_threads`
+
+**Default:** `48`
+
+Maximum number of threads for checksum computation when adding files. This controls the `core.checksum_jobs` DVC setting.
+
+```bash
+# Allow up to 64 threads
+dt config set add.max_threads 64
+```
+
+### `add.mem_per_thread`
+
+**Default:** `4`
+
+Gigabytes of RAM to allocate per thread when submitting `dt add` jobs via qxub. Total memory = threads × mem_per_thread.
+
+```bash
+# Allocate 8 GB per thread for memory-intensive operations
+dt config set add.mem_per_thread 8
+```
+
+**Example:** With 48 threads and 4 GB per thread, the job requests 192 GB RAM total.
+
 ## Example: Setting up parallel operations
 
 ```bash
@@ -116,6 +146,7 @@ dt pull -w 16
 
 - [dt config](config.md) - Set and get configuration values
 - [Configuration Scopes](config_scopes.md) - Understanding scope hierarchy
+- [dt add](add.md) - Add files with parallel checksums
 - [dt push](push.md) - Push with parallel support
 - [dt pull](pull.md) - Pull with parallel support
 

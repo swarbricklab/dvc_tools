@@ -9,6 +9,7 @@ from . import cache as cache_mod
 from . import remote as remote_mod
 from . import doctor as doctor_mod
 from . import push as push_mod
+from . import add as add_mod
 from . import checkout as checkout_mod
 from . import tmp as tmp_mod
 from . import import_data as import_mod
@@ -678,6 +679,77 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
             raise SystemExit(1)
             
     except push_mod.PushError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command(context_settings=dict(
+    ignore_unknown_options=True,
+    allow_extra_args=True,
+))
+@click.argument('targets', nargs=-1, type=click.Path(exists=True), required=True)
+@click.option('-t', '--threads', type=int, default=None,
+              help='Number of threads for checksum computation (default: 48).')
+@click.option('--no-wait', is_flag=True,
+              help='Submit job and exit without waiting for completion.')
+@click.option('-v', '--verbose', is_flag=True,
+              help='Show detailed progress.')
+@click.option('--worker', is_flag=True, hidden=True,
+              help='Internal: run dvc add directly (used by compute node).')
+@click.pass_context
+def add(ctx, targets, threads, no_wait, verbose, worker):
+    """Add files or directories to DVC tracking via compute node.
+    
+    Submits `dvc add` to a compute node via qxub with parallel checksum
+    computation. For local execution, use `dvc add` directly.
+    
+    \b
+    Options:
+        --threads/-t N    Use N threads for checksums (default: 48)
+        --no-wait         Don't wait for job to complete
+    
+    \b
+    Examples:
+        dt add data/                      # Add directory (48 threads)
+        dt add -t 24 large_file.csv       # Use 24 threads
+        dt add --no-wait data/            # Submit and exit immediately
+    
+    \b
+    Configuration:
+        add.max_threads     Maximum threads allowed (default: 48)
+        add.mem_per_thread  GB of RAM per thread (default: 4)
+    
+    All other options are passed through to `dvc add`.
+    Run `dvc add --help` for additional options.
+    """
+    try:
+        # Extract dvc_args from extra args (options only)
+        dvc_args = [arg for arg in ctx.args if arg.startswith('-')]
+        
+        if worker:
+            # Running on compute node - execute dvc add directly
+            success = add_mod.add(
+                targets=list(targets),
+                threads=threads,
+                dvc_args=dvc_args if dvc_args else None,
+                verbose=verbose,
+            )
+            if not success:
+                raise click.ClickException("dvc add failed")
+        else:
+            # Submit to compute node
+            job_id = add_mod.add_via_qxub(
+                targets=list(targets),
+                threads=threads,
+                dvc_args=dvc_args if dvc_args else None,
+                verbose=verbose,
+                wait=not no_wait,
+            )
+            
+            if no_wait:
+                click.echo(f"Submitted job: {job_id}")
+                click.echo(f"Monitor with: qxub monitor {job_id}")
+                
+    except add_mod.AddError as e:
         raise click.ClickException(str(e))
 
 
