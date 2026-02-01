@@ -4,6 +4,7 @@ Wraps `dvc add` with a --threads option to control checksum computation
 parallelism. Can optionally submit the work to a compute node via qxub.
 """
 
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,13 +19,35 @@ class AddError(Exception):
 
 
 # Default configuration
-DEFAULT_MAX_THREADS = 48
-DEFAULT_MEM_PER_THREAD = 4  # GB
+# Node specs: 48 CPUs, 192 GB RAM, 4 threads per CPU = 192 max threads
+DEFAULT_MAX_THREADS = 192
+DEFAULT_MEM_PER_THREAD = 1  # GB (192 GB / 192 threads)
+THREADS_PER_CPU = 4  # How many checksum jobs per CPU
 
 
 def check_qxub() -> bool:
     """Check if qxub is available."""
     return shutil.which('qxub') is not None
+
+
+def count_files(path: str) -> int:
+    """Count the number of files in a path.
+    
+    For a file, returns 1. For a directory, counts all files recursively.
+    
+    Args:
+        path: Path to file or directory.
+        
+    Returns:
+        Number of files.
+    """
+    p = Path(path)
+    if p.is_file():
+        return 1
+    elif p.is_dir():
+        return sum(1 for f in p.rglob('*') if f.is_file())
+    else:
+        return 1  # Fallback for symlinks etc
 
 
 def get_checksum_jobs() -> Optional[int]:
@@ -137,21 +160,24 @@ def add_via_qxub(
     dvc_args: Optional[List[str]] = None,
     verbose: bool = False,
     wait: bool = True,
-) -> Optional[str]:
+) -> Optional[List[str]]:
     """Add files to DVC tracking via qxub compute node.
     
-    Submits the add operation to a compute node with appropriate
-    resource allocation based on thread count.
+    Submits a single job to add all targets. DVC uses a lock file so
+    parallel jobs would cause lock contention.
+    
+    Threads are capped to the total number of files across all targets,
+    and CPUs are allocated at 1 CPU per 4 threads (checksum jobs).
     
     Args:
         targets: Files or directories to add.
-        threads: Number of threads for checksum computation.
+        threads: Max threads for checksum computation.
         dvc_args: Additional arguments to pass to dvc add.
         verbose: Print detailed progress.
         wait: Wait for job to complete.
         
     Returns:
-        Job ID if submitted, None if run locally.
+        List containing job ID if not waiting, None if waiting.
     """
     if not check_qxub():
         raise AddError("qxub not found. Install from https://github.com/swarbricklab/qxub")
@@ -176,23 +202,40 @@ def add_via_qxub(
     if threads > max_threads:
         raise AddError(f"Thread count {threads} exceeds maximum {max_threads}")
     
-    # Calculate memory: threads * mem_per_thread GB
+    # Count total files across all targets
+    total_files = sum(count_files(t) for t in targets)
+    
+    # Cap threads to file count
+    threads = min(threads, total_files)
+    
+    # Calculate CPUs: 1 CPU per THREADS_PER_CPU threads, minimum 1
+    cpus = max(1, math.ceil(threads / THREADS_PER_CPU))
+    
+    # Calculate memory based on threads
     total_mem = threads * mem_per_thread
     mem_str = f"{total_mem}GB"
     
+    # Job name from first target
+    target_name = Path(targets[0]).name[:20]
+    if len(targets) > 1:
+        target_name = f"{target_name}+{len(targets)-1}"
+    
     # Build qxub command
     cmd = [
-        'qxub', 'exec', '--terse',
+        'qxub', 'exec',
         '--env', conda_env,
         '--queue', queue,
         '--time', walltime,
         '--mem', mem_str,
-        '--ncpus', str(threads),
-        '-N', f'dt-add-{Path(targets[0]).name[:20]}',
+        '--cpus', str(cpus),
+        '-N', f'dt-add-{target_name}',
     ]
     
-    # Build dt add --worker command for the compute node
-    # --worker flag tells dt add to run dvc add directly instead of submitting another job
+    # Use --terse only for no-wait mode
+    if not wait:
+        cmd.insert(2, '--terse')
+    
+    # Build dt add --worker command
     cmd.extend(['--', 'dt', 'add', '--worker', '--threads', str(threads)])
     if verbose:
         cmd.append('--verbose')
@@ -201,38 +244,25 @@ def add_via_qxub(
     cmd.extend(targets)
     
     if verbose:
-        print(f"Submitting to compute node...")
-        print(f"  Threads: {threads}")
-        print(f"  Memory: {mem_str}")
-        print(f"  Command: {' '.join(cmd)}")
+        print(f"Submitting job for {len(targets)} target(s)")
+        print(f"  Files: {total_files}, Threads: {threads}, CPUs: {cpus}, Memory: {mem_str}")
     
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        # Stream output when waiting, capture when not waiting
+        result = subprocess.run(cmd, text=True, capture_output=not wait)
         
         if result.returncode != 0:
-            raise AddError(f"Failed to submit job: {result.stderr}")
-        
-        job_id = result.stdout.strip().split('\n')[0]
-        
-        if verbose:
-            print(f"  Job ID: {job_id}")
-        
-        if wait:
-            if verbose:
-                print(f"Waiting for job to complete...")
-            
-            monitor_result = subprocess.run(
-                ['qxub', 'monitor', '--summary', job_id],
-            )
-            
-            if monitor_result.returncode != 0:
+            if not wait:
+                raise AddError(f"Failed to submit job: {result.stderr}")
+            else:
                 raise AddError("Job failed")
         
-        return job_id
+        # Return job ID if not waiting
+        if not wait:
+            job_id = result.stdout.strip().split('\n')[0]
+            return [job_id]
+        
+        return None
         
     except subprocess.SubprocessError as e:
-        raise AddError(f"Failed to submit job: {e}")
+        raise AddError(f"Failed to run job: {e}")

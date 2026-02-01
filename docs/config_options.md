@@ -13,8 +13,8 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `cache.root` | Root directory for [shared external caches](cache.md) | `/g/data/a56/dvc_cache` |
 | `remote.root` | Root directory for [DVC remote storage](remote.md) | `/g/data/a56/dvc_remote` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
-| `add.max_threads` | Maximum threads for checksum computation | `48` |
-| `add.mem_per_thread` | GB of RAM per thread for `dt add` | `4` |
+| `add.max_threads` | Maximum threads for checksum computation | `192` |
+| `add.mem_per_thread` | GB of RAM per thread for `dt add` | `1` |
 | `qxub.env` | Conda environment for parallel workers | `dt` |
 | `qxub.queue` | PBS queue for parallel jobs | `copyq` |
 | `qxub.walltime` | Maximum runtime for parallel jobs | `10:00:00` |
@@ -106,27 +106,27 @@ These options configure the `dt add` command for parallel checksum computation.
 
 ### `add.max_threads`
 
-**Default:** `48`
+**Default:** `192`
 
-Maximum number of threads for checksum computation when adding files. This controls the `core.checksum_jobs` DVC setting.
+Maximum number of threads for checksum computation when adding files. This controls the `core.checksum_jobs` DVC setting. A standard node has 48 CPUs × 4 threads = 192 max threads.
 
 ```bash
-# Allow up to 64 threads
-dt config set add.max_threads 64
+# Limit to 96 threads
+dt config set add.max_threads 96
 ```
 
 ### `add.mem_per_thread`
 
-**Default:** `4`
+**Default:** `1`
 
-Gigabytes of RAM to allocate per thread when submitting `dt add` jobs via qxub. Total memory = threads × mem_per_thread.
+Gigabytes of RAM to allocate per thread when submitting `dt add` jobs via qxub. Total memory = threads × mem_per_thread. A standard node has 192 GB RAM / 192 threads = 1 GB per thread.
 
 ```bash
-# Allocate 8 GB per thread for memory-intensive operations
-dt config set add.mem_per_thread 8
+# Allocate 2 GB per thread for memory-intensive operations
+dt config set add.mem_per_thread 2
 ```
 
-**Example:** With 48 threads and 4 GB per thread, the job requests 192 GB RAM total.
+**Example:** With 192 threads and 1 GB per thread, the job requests 48 CPUs and 192 GB RAM.
 
 ## Example: Setting up parallel operations
 

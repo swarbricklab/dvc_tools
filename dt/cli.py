@@ -688,7 +688,7 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
 ))
 @click.argument('targets', nargs=-1, type=click.Path(exists=True), required=True)
 @click.option('-t', '--threads', type=int, default=None,
-              help='Number of threads for checksum computation (default: 48).')
+              help='Number of threads for checksum computation (default: 192).')
 @click.option('--no-wait', is_flag=True,
               help='Submit job and exit without waiting for completion.')
 @click.option('-v', '--verbose', is_flag=True,
@@ -736,8 +736,8 @@ def add(ctx, targets, threads, no_wait, verbose, worker):
             if not success:
                 raise click.ClickException("dvc add failed")
         else:
-            # Submit to compute node
-            job_id = add_mod.add_via_qxub(
+            # Submit to compute node (single job for all targets)
+            job_ids = add_mod.add_via_qxub(
                 targets=list(targets),
                 threads=threads,
                 dvc_args=dvc_args if dvc_args else None,
@@ -745,9 +745,9 @@ def add(ctx, targets, threads, no_wait, verbose, worker):
                 wait=not no_wait,
             )
             
-            if no_wait:
-                click.echo(f"Submitted job: {job_id}")
-                click.echo(f"Monitor with: qxub monitor {job_id}")
+            if no_wait and job_ids:
+                click.echo(f"Submitted job: {job_ids[0]}")
+                click.echo(f"Monitor with: qxub monitor {job_ids[0]}")
                 
     except add_mod.AddError as e:
         raise click.ClickException(str(e))

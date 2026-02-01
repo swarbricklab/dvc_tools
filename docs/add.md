@@ -5,9 +5,8 @@ Add files or directories to DVC tracking via compute node.
 ## Overview
 
 `dt add` submits a `dvc add` command to a compute node via qxub, enabling
-parallel checksum computation for large files. This is essential in HPC
-environments where computing MD5 checksums for large datasets can be
-time-consuming.
+parallel checksum computation for large files. All targets are processed
+in a single job to avoid DVC lock contention.
 
 For local execution (e.g., small files on a login node), use `dvc add` directly.
 
@@ -20,12 +19,13 @@ dt add [OPTIONS] TARGETS...
 ### Arguments
 
 - `TARGETS`: One or more files or directories to add to DVC tracking (required).
+  All targets are processed in a single job.
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `-t, --threads N` | Number of threads for checksum computation (default: 48) |
+| `-t, --threads N` | Number of threads for checksum computation (default: 192) |
 | `--no-wait` | Submit job and exit without waiting for completion |
 | `-v, --verbose` | Show detailed progress |
 
@@ -37,24 +37,24 @@ additional options.
 ### Basic Usage
 
 ```bash
-# Add a directory (uses 48 threads by default)
+# Add a directory (uses up to 192 threads)
 dt add data/
 
 # Add a single file
 dt add large_dataset.csv
 
-# Add multiple targets
+# Add multiple targets (all in one job)
 dt add data/ results/ models/
 ```
 
 ### Controlling Threads
 
 ```bash
-# Use 24 threads for smaller jobs
+# Use up to 24 threads
 dt add -t 24 data/
 
-# Use maximum threads for very large files
-dt add -t 96 huge_file.h5
+# Use maximum threads for very large directories
+dt add -t 96 huge_dataset/
 ```
 
 ### Async Submission
@@ -63,7 +63,7 @@ dt add -t 96 huge_file.h5
 # Submit and exit immediately (don't wait for completion)
 dt add --no-wait data/
 # Output: Submitted job: 12345678.gadi-pbs
-# Output: Monitor with: qxub monitor 12345678.gadi-pbs
+#         Monitor with: qxub monitor 12345678.gadi-pbs
 ```
 
 ### Passing DVC Options
@@ -82,8 +82,8 @@ The following options can be set in `.dt/config`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `add.max_threads` | 48 | Maximum threads allowed for checksum computation |
-| `add.mem_per_thread` | 4 | GB of RAM allocated per thread |
+| `add.max_threads` | 192 | Maximum threads allowed |
+| `add.mem_per_thread` | 1 | GB of RAM allocated per thread |
 
 ### Setting Configuration
 
@@ -98,22 +98,23 @@ dt config set add.mem_per_thread 8
 ### Resource Allocation
 
 Resources are requested from qxub based on thread count:
-- **CPUs**: Equal to thread count
+- **Threads**: Capped to total file count across all targets
+- **CPUs**: 1 CPU per 4 threads (rounded up), minimum 1
 - **Memory**: `threads × mem_per_thread` GB
 
-Example: With 48 threads and 4 GB per thread, the job requests 48 CPUs and 192 GB RAM.
+Example: With 192 threads and 1 GB per thread, the job requests 48 CPUs and 192 GB RAM.
 
 ## How It Works
 
 1. **Submit Phase** (login node):
-   - Validates targets exist
-   - Determines thread count from options or config
-   - Calculates resource requirements
-   - Submits job to compute node via qxub
+   - Counts files across all targets
+   - Caps threads to file count
+   - Calculates CPU and memory requirements
+   - Submits single job to compute node via qxub
 
 2. **Execution Phase** (compute node):
    - Sets `core.checksum_jobs` to thread count (local scope)
-   - Runs `dvc add` on the targets
+   - Runs `dvc add` on all targets
    - Unsets the config after completion
 
 3. **Result**:
