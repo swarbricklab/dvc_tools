@@ -34,7 +34,9 @@ This package provides the `dt` command with subcommands for working with DVC pro
 |---------|-------------|
 | `dt init` | Initialize a new DVC project with cache and remote |
 | `dt clone` | Clone an existing DVC project with local configuration |
+| `dt add` | Add files to DVC tracking via compute node |
 | `dt checkout` | Checkout files, searching across multiple caches |
+| `dt pull` | Pull DVC-tracked files, handling imports automatically |
 | `dt push` | Push files to all configured remotes |
 | `dt import` | Import data from other repositories using local caches |
 | `dt cache` | Manage external shared caches |
