@@ -96,6 +96,7 @@ The project will be configured with:
 
 ## Related Commands
 
+- [`dt add`](add.md) - Add files to DVC tracking
 - [`dt cache init`](cache.md#init) - Cache setup
 - [`dt remote init`](remote.md#init) - Remote storage setup
 - [`dt config`](config.md) - Configuration management
