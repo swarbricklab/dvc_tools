@@ -1047,7 +1047,7 @@ def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refre
 def tmp():
     """Manage temporary repository clones.
     
-    Temporary clones are stored in .dt/tmp/ and used to access
+    Temporary clones are stored in .dt/tmp/clones/ and used to access
     DVC configuration from remote repositories without full checkout.
     """
     pass
@@ -1058,7 +1058,7 @@ def tmp():
 @click.option('--owner', help='Override the GitHub owner for short names')
 @click.option('--no-refresh', is_flag=True, help='Use cached clone without refreshing')
 def tmp_clone(repository, owner, no_refresh):
-    """Clone a repository into .dt/tmp/.
+    """Clone a repository into .dt/tmp/clones/.
     
     Creates a sparse clone with only .dvc/ directory checked out.
     If the clone already exists, it is refreshed by default.
@@ -1084,15 +1084,15 @@ def tmp_clone(repository, owner, no_refresh):
 def tmp_list():
     """List cached repository clones.
     
-    Shows all repositories currently cached in .dt/tmp/.
+    Shows all repositories currently cached in .dt/tmp/clones/.
     """
     repos = tmp_mod.list_repos()
     
     if not repos:
-        click.echo("No cached repositories in .dt/tmp/")
+        click.echo("No cached repositories in .dt/tmp/clones/")
         return
     
-    click.echo(f"Cached repositories in .dt/tmp/:")
+    click.echo(f"Cached repositories in .dt/tmp/clones/:")
     for repo_id, path in repos:
         click.echo(f"  {repo_id}")
 

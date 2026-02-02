@@ -44,7 +44,7 @@ dt import neochemo data/large_dataset --no-checkout
 
 ### Step 1: Clone Source Repository
 
-A sparse clone is created in `.dt/tmp/` containing only the `.dvc/` directory and `*.dvc` files. This provides access to the source repo's DVC configuration.
+A sparse clone is created in `.dt/tmp/clones/` containing only the `.dvc/` directory and `*.dvc` files. This provides access to the source repo's DVC configuration.
 
 ### Step 2: Find Local Cache
 
