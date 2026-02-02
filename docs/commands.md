@@ -13,6 +13,7 @@
 | [`dt pull`](#dt-pull) | Pull DVC-tracked files, handling imports automatically |
 | [`dt push`](#dt-push) | Push DVC-tracked files to all configured remotes |
 | [`dt import`](#dt-import) | Import DVC-tracked data from other repositories |
+| [`dt summary`](#dt-summary) | Generate project documentation (tree.txt, dag.md) |
 | [`dt cache`](#dt-cache) | Manage external shared caches |
 | [`dt remote`](#dt-remote) | Manage remote storage |
 | [`dt tmp`](#dt-tmp) | Manage temporary repository clones |
@@ -102,6 +103,18 @@ dt import <repository> <path> [-o <output>] [--no-checkout]
 ```
 
 Imports files without network storage access by using locally-accessible caches. [Full documentation →](import.md)
+
+---
+
+## dt summary
+
+Generate project documentation files.
+
+```bash
+dt summary [--out <dir>] [--tree-only] [--dag-only]
+```
+
+Creates tree.txt (DVC-tracked file listing) and dag.md (pipeline DAG in mermaid format). [Full documentation →](summary.md)
 
 ---
 
