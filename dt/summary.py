@@ -75,7 +75,7 @@ def generate_tree(
         print(f"Generating {out_path}...")
     
     result = subprocess.run(
-        ['dvc', 'list', '--tree', '.'],
+        ['dvc', 'list', '--tree', '--dvc-only', '.'],
         capture_output=True,
         text=True,
     )
