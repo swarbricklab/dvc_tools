@@ -47,9 +47,9 @@ def get_tmp_dir() -> Path:
     """Get the temporary clones directory.
     
     Returns:
-        Path to .dt/tmp directory.
+        Path to .dt/tmp/clones directory.
     """
-    return get_dt_root() / 'tmp'
+    return get_dt_root() / 'tmp' / 'clones'
 
 
 def get_local_config_path() -> Path:
@@ -123,7 +123,7 @@ def list_temp_clones() -> List[Tuple[str, Path]]:
     
     Returns:
         List of (repo_id, local_path) tuples.
-        For example: ('github.com/org/repo', Path('.dt/tmp/github.com/org/repo'))
+        For example: ('github.com/org/repo', Path('.dt/tmp/clones/github.com/org/repo'))
     """
     tmp_dir = get_tmp_dir()
     if not tmp_dir.exists():

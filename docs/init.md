@@ -9,6 +9,8 @@ After running `dt init`, your project will have:
 ```
 my-project/
 ├── .git/                 # Git repository
+├── .dt/                  # DVC Tools configuration
+│   └── .gitignore        # Ignores config.local.yaml and tmp/
 ├── .dvc/                 # DVC configuration
 │   ├── config            # DVC settings (tracked)
 │   ├── config.local      # Local DVC settings (not tracked)
@@ -41,12 +43,15 @@ The `dt init` command orchestrates the following initialization steps:
 
 1. **Git Setup**: Initializes git repository with `git init`
 2. **DVC Setup**: Initializes DVC with `dvc init`
-3. **Cache Setup**: Runs `dt cache init` to configure shared external cache
-4. **Remote Setup**: Runs `dt remote init` to set up remote storage
-5. **Git Hooks**: Runs `dvc install` to set up git hooks
-6. **GitHub Check**: Checks for GitHub remote and suggests `gh repo create` if missing
+3. **DVC Tools Directory**: Creates `.dt/.gitignore` to ignore `config.local.yaml` and `tmp/`
+4. **Cache Setup**: Runs `dt cache init` to configure shared external cache
+5. **Remote Setup**: Runs `dt remote init` to set up remote storage
+6. **Git Hooks**: Runs `dvc install` to set up git hooks
+7. **GitHub Check**: Checks for GitHub remote and suggests `gh repo create` if missing
 
 Each cache and remote step can also be run independently for testing or incremental setup.
+
+The `.dt/.gitignore` is auto-staged if DVC's `core.autostage` is enabled.
 
 ## Complete Initialization Example
 

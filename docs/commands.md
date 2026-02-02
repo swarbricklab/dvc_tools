@@ -140,7 +140,7 @@ Manage temporary repository clones.
 
 | Subcommand | Description |
 |------------|-------------|
-| `dt tmp clone <repo>` | Clone a repository into `.dt/tmp/` (sparse checkout) |
+| `dt tmp clone <repo>` | Clone a repository into `.dt/tmp/clones/` (sparse checkout) |
 | `dt tmp list` | List cached repository clones |
 | `dt tmp clean` | Remove cached repository clones |
 

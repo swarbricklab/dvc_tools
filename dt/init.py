@@ -156,6 +156,68 @@ def install_dvc_hooks(repo_path: Path, verbose: bool = True) -> None:
     )
 
 
+def get_dvc_autostage(repo_path: Path) -> bool:
+    """Check if DVC's core.autostage config is enabled.
+    
+    Args:
+        repo_path: Path to the repository
+        
+    Returns:
+        True if autostage is enabled, False otherwise
+    """
+    result = subprocess.run(
+        ['dvc', 'config', 'core.autostage'],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip().lower() == 'true'
+
+
+def init_dt_directory(repo_path: Path, verbose: bool = True) -> Path:
+    """Initialize the .dt directory with .gitignore.
+    
+    Creates .dt/.gitignore to ignore config.local.yaml and tmp/.
+    Auto-stages the .gitignore if DVC's core.autostage is enabled.
+    
+    Args:
+        repo_path: Path to the repository
+        verbose: Print progress messages
+        
+    Returns:
+        Path to the .dt directory
+    """
+    dt_dir = repo_path / '.dt'
+    dt_dir.mkdir(parents=True, exist_ok=True)
+    
+    gitignore_path = dt_dir / '.gitignore'
+    gitignore_content = """/config.local.yaml
+/tmp/
+"""
+    
+    # Only write if it doesn't exist or content differs
+    if not gitignore_path.exists():
+        if verbose:
+            print("Creating .dt/.gitignore...")
+        gitignore_path.write_text(gitignore_content)
+        
+        # Auto-stage if DVC autostage is enabled
+        if get_dvc_autostage(repo_path):
+            subprocess.run(
+                ['git', 'add', str(gitignore_path)],
+                cwd=repo_path,
+                capture_output=True,
+            )
+            if verbose:
+                print("  Auto-staged .dt/.gitignore")
+    elif gitignore_path.read_text() != gitignore_content:
+        if verbose:
+            print("Updating .dt/.gitignore...")
+        gitignore_path.write_text(gitignore_content)
+    
+    return dt_dir
+
+
 def init_project(
     name: Optional[str] = None,
     owner: Optional[str] = None,
@@ -173,9 +235,10 @@ def init_project(
     Orchestrates all initialization steps:
     1. Git repository setup
     2. DVC initialization
-    3. Cache configuration
-    4. Remote storage setup
-    5. Git hooks installation
+    3. DVC Tools directory (.dt) with .gitignore
+    4. Cache configuration
+    5. Remote storage setup
+    6. Git hooks installation
     
     Args:
         name: Project name (defaults to current directory name)
@@ -225,7 +288,10 @@ def init_project(
         init_dvc(repo_path, verbose=verbose)
         result['dvc'] = repo_path / '.dvc'
     
-    # Step 3: Cache
+    # Step 3: DVC Tools directory (.dt)
+    init_dt_directory(repo_path, verbose=verbose)
+    
+    # Step 4: Cache
     if not no_cache:
         try:
             cache_dir = cache_mod.init_cache(
@@ -239,7 +305,7 @@ def init_project(
             if verbose:
                 print(f"Warning: {e}")
     
-    # Step 4: Remote
+    # Step 5: Remote
     if not no_remote:
         try:
             remote_dir = remote_mod.init_remote(
@@ -253,11 +319,11 @@ def init_project(
             if verbose:
                 print(f"Warning: {e}")
     
-    # Step 5: Git hooks
+    # Step 6: Git hooks
     if not no_dvc:
         install_dvc_hooks(repo_path, verbose=verbose)
     
-    # Step 6: Check for GitHub remote
+    # Step 7: Check for GitHub remote
     if not no_git:
         # Get owner and team from argument or config
         effective_owner = owner or cfg.get_value('owner')

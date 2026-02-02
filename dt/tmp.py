@@ -1,6 +1,6 @@
 """Temporary repository clone management for DVC Tools.
 
-Manages sparse clones of remote repositories in .dt/tmp/ for accessing
+Manages sparse clones of remote repositories in .dt/tmp/clones/ for accessing
 their DVC configuration without a full checkout.
 """
 
@@ -19,12 +19,12 @@ class TmpError(Exception):
 
 
 def get_tmp_dir() -> Path:
-    """Get the .dt/tmp directory path for the current repo.
+    """Get the .dt/tmp/clones directory path for the current repo.
     
     Returns:
-        Path to the .dt/tmp directory.
+        Path to the .dt/tmp/clones directory.
     """
-    return Path.cwd() / ".dt" / "tmp"
+    return Path.cwd() / ".dt" / "tmp" / "clones"
 
 
 def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:
@@ -102,6 +102,8 @@ def ensure_gitignore() -> bool:
     """Ensure .dt/tmp is in .gitignore.
     
     Creates or updates .gitignore to include .dt/tmp/ pattern.
+    Note: The .dt/.gitignore already ignores /tmp/, but this adds
+    .dt/tmp/ to the root .gitignore for backward compatibility.
     
     Returns:
         True if .gitignore was modified, False if already contains pattern.
@@ -115,7 +117,7 @@ def clone_repo(
     refresh: bool = True,
     verbose: bool = True,
 ) -> Path:
-    """Clone or refresh a repository in .dt/tmp/.
+    """Clone or refresh a repository in .dt/tmp/clones/.
     
     Creates a sparse clone with only .dvc/ directory checked out.
     
@@ -159,8 +161,8 @@ def clone_repo(
     tmp_dir.mkdir(parents=True, exist_ok=True)
     
     if verbose:
-        print(f"Cloning {url} to .dt/tmp/{repo_id}...")
-    
+        print(f"Cloning {url} to .dt/tmp/clones/{repo_id}...")
+
     # Clone with no checkout
     result = subprocess.run(
         ['git', 'clone', '--no-checkout', '--depth', '1', '--single-branch', url, str(repo_path)],
@@ -195,7 +197,7 @@ def clone_repo(
         raise TmpError(f"Failed to checkout: {result.stderr}")
     
     if verbose:
-        print(f"Cloned to .dt/tmp/{repo_id}")
+        print(f"Cloned to .dt/tmp/clones/{repo_id}")
     
     return repo_path
 
@@ -252,7 +254,7 @@ def list_repos() -> List[Tuple[str, Path]]:
     
     Returns:
         List of (repo_id, path) tuples where repo_id is the path
-        relative to .dt/tmp/ (e.g., "github.com/owner/repo")
+        relative to .dt/tmp/clones/ (e.g., "github.com/owner/repo")
     """
     tmp_dir = get_tmp_dir()
     
