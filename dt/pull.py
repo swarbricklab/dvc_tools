@@ -88,8 +88,8 @@ def get_remote_files_size(file_hashes: List[str], remote: Optional[str] = None) 
 # =============================================================================
 
 def get_pull_dir() -> Path:
-    """Get the .dt/pull directory for manifest storage."""
-    pull_dir = Path.cwd() / '.dt' / 'pull'
+    """Get the .dt/tmp/pull directory for manifest storage."""
+    pull_dir = Path.cwd() / '.dt' / 'tmp' / 'pull'
     pull_dir.mkdir(parents=True, exist_ok=True)
     return pull_dir
 

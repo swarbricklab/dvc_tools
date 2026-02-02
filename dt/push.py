@@ -210,8 +210,8 @@ def push_all(args: List[str]) -> List[Tuple[str, bool, str]]:
 # =============================================================================
 
 def get_push_dir() -> Path:
-    """Get the .dt/push directory for manifest storage."""
-    push_dir = Path.cwd() / '.dt' / 'push'
+    """Get the .dt/tmp/push directory for manifest storage."""
+    push_dir = Path.cwd() / '.dt' / 'tmp' / 'push'
     push_dir.mkdir(parents=True, exist_ok=True)
     return push_dir
 
