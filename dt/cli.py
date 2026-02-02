@@ -15,6 +15,7 @@ from . import tmp as tmp_mod
 from . import import_data as import_mod
 from . import pull as pull_mod
 from . import offline as offline_mod
+from . import summary as summary_mod
 
 
 @click.group()
@@ -1328,6 +1329,44 @@ def offline_status():
             click.echo("Run 'dt offline enable' to enable all available.")
             
     except offline_mod.OfflineError as e:
+        raise click.ClickException(str(e))
+
+
+# =============================================================================
+# Summary commands
+# =============================================================================
+
+@cli.command()
+@click.option('--out', '-o', 'output_dir', help='Output directory (default: docs/)')
+@click.option('--tree-only', is_flag=True, help='Generate only tree.txt')
+@click.option('--dag-only', is_flag=True, help='Generate only dag.md')
+def summary(output_dir, tree_only, dag_only):
+    """Generate project summary files.
+    
+    Creates tree.txt (file listing via dvc list --tree) and dag.md
+    (pipeline DAG via dvc dag --md) in the output directory.
+    
+    By default, both files are generated in docs/.
+    
+    \b
+    Examples:
+        dt summary              # Generate both to docs/
+        dt summary --tree-only  # Generate only tree.txt
+        dt summary --dag-only   # Generate only dag.md
+        dt summary -o .         # Generate both to current directory
+    """
+    try:
+        if tree_only and dag_only:
+            raise click.ClickException("Cannot use both --tree-only and --dag-only")
+        
+        if tree_only:
+            summary_mod.generate_tree(output_dir=output_dir, verbose=True)
+        elif dag_only:
+            summary_mod.generate_dag(output_dir=output_dir, verbose=True)
+        else:
+            summary_mod.generate_all(output_dir=output_dir, verbose=True)
+            
+    except summary_mod.SummaryError as e:
         raise click.ClickException(str(e))
 
 
