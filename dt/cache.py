@@ -5,7 +5,7 @@ Handles external shared cache setup and configuration for HPC environments.
 
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import config as cfg
 from . import utils
@@ -14,6 +14,20 @@ from . import utils
 class CacheError(Exception):
     """Raised when cache operations fail."""
     pass
+
+
+def format_size(size_bytes: int) -> str:
+    """Format byte size as human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    elif size_bytes < 1024 * 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024 * 1024):.1f} TB"
 
 
 def resolve_cache_path(
@@ -149,3 +163,231 @@ def init_cache(
     configure_dvc_cache(repo_path, cache_dir, verbose=verbose)
     
     return cache_dir
+
+
+# =============================================================================
+# Cache rm functionality
+# =============================================================================
+
+def get_cache_dir() -> Path:
+    """Get the primary DVC cache directory.
+    
+    Returns:
+        Path to the cache files/md5 directory
+        
+    Raises:
+        CacheError: If cache is not configured or DVC not available
+    """
+    try:
+        from dvc.repo import Repo
+        repo = Repo()
+        return Path(repo.cache.local.path)
+    except ImportError:
+        raise CacheError("DVC internals not available")
+    except Exception as e:
+        raise CacheError(f"Failed to get cache directory: {e}")
+
+
+def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
+    """Convert a file hash to its cache file path.
+    
+    Args:
+        cache_dir: Path to the cache files/md5 directory
+        file_hash: MD5 hash (possibly with .dir suffix)
+        
+    Returns:
+        Path to the cache file
+    """
+    hash_clean = file_hash.replace('.dir', '')
+    prefix = hash_clean[:2]
+    suffix = hash_clean[2:]
+    if file_hash.endswith('.dir'):
+        suffix += '.dir'
+    
+    return cache_dir / prefix / suffix
+
+
+def collect_hashes_for_targets(
+    targets: List[str],
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    """Collect all file hashes for the specified targets.
+    
+    Uses DVC internals to enumerate all files tracked by the targets.
+    
+    Args:
+        targets: List of targets (.dvc files, paths, stages)
+        verbose: Print progress messages
+        
+    Returns:
+        Dict with 'files' (list of hash strings), 'paths' (hash->path mapping),
+        and 'repo_root'
+    """
+    try:
+        from dvc.repo import Repo
+        from dvc.repo.fetch import _collect_indexes
+    except ImportError as e:
+        raise CacheError(f"DVC internals not available: {e}")
+    
+    repo = Repo()
+    
+    if verbose:
+        print(f"Collecting files for targets...")
+    
+    # Collect indexes for targets
+    indexes = _collect_indexes(
+        repo,
+        targets=targets,
+        remote=None,
+        all_branches=False,
+        with_deps=False,
+        all_tags=False,
+        recursive=False,
+        all_commits=False,
+        revs=None,
+        workspace=True,
+        push=False,  # We want all files, not just pushable ones
+    )
+    
+    if not indexes:
+        return {'files': [], 'paths': {}, 'repo_root': str(repo.root_dir)}
+    
+    # Build hash-to-path mapping and collect all hashes
+    hash_to_path: Dict[str, str] = {}
+    files: List[str] = []
+    
+    for idx in indexes.values():
+        repo_data = idx.data.get('repo')
+        if repo_data:
+            for key, entry in repo_data.items():
+                if entry.hash_info and entry.hash_info.value:
+                    path = '/'.join(key)
+                    file_hash = entry.hash_info.value
+                    hash_to_path[file_hash] = path
+                    if file_hash not in files:
+                        files.append(file_hash)
+    
+    if verbose:
+        print(f"Found {len(files)} file(s)")
+    
+    return {
+        'files': files,
+        'paths': hash_to_path,
+        'repo_root': str(repo.root_dir),
+    }
+
+
+def get_cache_file_info(
+    cache_dir: Path,
+    file_hashes: List[str],
+) -> List[Tuple[str, Path, Optional[int]]]:
+    """Get cache file paths and sizes for the given hashes.
+    
+    Args:
+        cache_dir: Path to the cache files/md5 directory
+        file_hashes: List of file hashes
+        
+    Returns:
+        List of (hash, cache_path, size) tuples. Size is None if file doesn't exist.
+    """
+    results = []
+    for file_hash in file_hashes:
+        cache_path = hash_to_cache_path(cache_dir, file_hash)
+        if cache_path.exists():
+            try:
+                size = cache_path.stat().st_size
+            except OSError:
+                size = None
+            results.append((file_hash, cache_path, size))
+        else:
+            results.append((file_hash, cache_path, None))
+    
+    return results
+
+
+def remove_cache_files(
+    targets: List[str],
+    dry_run: bool = False,
+    show_size: bool = False,
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    """Remove cache files for the specified targets.
+    
+    Only affects the primary cache. Alternate caches are never modified.
+    
+    Args:
+        targets: List of targets (.dvc files, paths, stages)
+        dry_run: If True, only report what would be deleted
+        show_size: If True, include file sizes in the output
+        verbose: Print detailed progress
+        
+    Returns:
+        Dict with results:
+            - 'deleted': List of (path, hash, size) for deleted files
+            - 'missing': List of (path, hash) for files not in cache
+            - 'failed': List of (path, hash, error) for deletion failures
+            - 'total_size': Total size of deleted (or would-be-deleted) files
+    """
+    try:
+        utils.check_dvc()
+    except utils.DependencyError as e:
+        raise CacheError(str(e))
+    
+    # Get primary cache directory
+    cache_dir = get_cache_dir()
+    
+    if verbose:
+        print(f"Primary cache: {cache_dir}")
+    
+    # Collect hashes for targets
+    manifest = collect_hashes_for_targets(targets, verbose=verbose)
+    
+    if not manifest['files']:
+        return {
+            'deleted': [],
+            'missing': [],
+            'failed': [],
+            'total_size': 0,
+        }
+    
+    # Get cache file info
+    file_info = get_cache_file_info(cache_dir, manifest['files'])
+    hash_to_path = manifest['paths']
+    
+    deleted = []
+    missing = []
+    failed = []
+    total_size = 0
+    
+    for file_hash, cache_path, size in file_info:
+        workspace_path = hash_to_path.get(file_hash, file_hash)
+        
+        if size is None:
+            # File not in cache
+            missing.append((workspace_path, file_hash))
+            continue
+        
+        total_size += size
+        
+        if dry_run:
+            # Just record what would be deleted
+            deleted.append((workspace_path, file_hash, size))
+        else:
+            # Actually delete the file
+            try:
+                cache_path.unlink()
+                deleted.append((workspace_path, file_hash, size))
+                if verbose:
+                    size_str = f" ({format_size(size)})" if show_size else ""
+                    print(f"Deleted: {workspace_path}{size_str}")
+            except OSError as e:
+                failed.append((workspace_path, file_hash, str(e)))
+                if verbose:
+                    print(f"Failed to delete {workspace_path}: {e}")
+    
+    return {
+        'deleted': deleted,
+        'missing': missing,
+        'failed': failed,
+        'total_size': total_size,
+    }

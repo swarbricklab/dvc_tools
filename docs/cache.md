@@ -160,6 +160,7 @@ dt cache rm -v data/
 
 ### Notes
 
+- This command only affects the **primary cache**. Alternate caches are never modified.
 - This command only affects the local cache. Remote storage is not modified.
 - If the workspace files are still present, they can be re-cached using `dvc add` or restored from remote using `dvc pull`.
 - Directory targets are processed recursively to find all contained DVC-tracked files.
