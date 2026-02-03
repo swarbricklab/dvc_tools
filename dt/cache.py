@@ -573,6 +573,11 @@ def remove_cache_files(
                 if verbose:
                     size_str = f" ({format_size(size)})" if show_size else ""
                     print(f"Deleted: {workspace_path}{size_str}")
+            except PermissionError as e:
+                # Cache files are often read-only (mode 0444)
+                failed.append((workspace_path, file_hash, f"Permission denied (file is read-only)"))
+                if verbose:
+                    print(f"Failed to delete {workspace_path}: permission denied (read-only)")
             except OSError as e:
                 failed.append((workspace_path, file_hash, str(e)))
                 if verbose:
