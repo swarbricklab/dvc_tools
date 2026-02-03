@@ -16,18 +16,8 @@ class CacheError(Exception):
     pass
 
 
-def format_size(size_bytes: int) -> str:
-    """Format byte size as human-readable string."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    elif size_bytes < 1024 * 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
-    else:
-        return f"{size_bytes / (1024 * 1024 * 1024 * 1024):.1f} TB"
+# Use utils.format_size for size formatting
+format_size = utils.format_size
 
 
 def resolve_cache_path(
