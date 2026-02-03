@@ -210,7 +210,8 @@ def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
 def expand_dir_hashes(
     cache_dir: Path,
     file_hashes: List[str],
-) -> List[str]:
+    hash_to_path: Optional[Dict[str, str]] = None,
+) -> Tuple[List[str], Dict[str, str]]:
     """Expand .dir hashes to include the files they reference.
     
     For each hash ending in .dir, reads the manifest and adds the
@@ -219,34 +220,137 @@ def expand_dir_hashes(
     Args:
         cache_dir: Path to the cache files/md5 directory
         file_hashes: List of file hashes (some may be .dir files)
+        hash_to_path: Optional existing hash->path mapping to extend
         
     Returns:
-        Expanded list including both .dir hashes and their contents
+        Tuple of (expanded hash list, updated hash->path mapping)
     """
     import json
     
     expanded = []
+    paths = dict(hash_to_path) if hash_to_path else {}
+    
     for file_hash in file_hashes:
         expanded.append(file_hash)
         
         if file_hash.endswith('.dir'):
             # Read the .dir file to get contained file hashes
             cache_path = hash_to_cache_path(cache_dir, file_hash)
+            dir_path = paths.get(file_hash, '')
             if cache_path.exists():
                 try:
                     with open(cache_path, 'r') as f:
                         dir_contents = json.load(f)
-                    # Each entry has 'md5' key with the file hash
+                    # Each entry has 'md5' key with the file hash and 'relpath'
                     for entry in dir_contents:
                         if 'md5' in entry:
                             child_hash = entry['md5']
                             if child_hash not in expanded:
                                 expanded.append(child_hash)
+                            # Build path for child
+                            if dir_path and 'relpath' in entry:
+                                child_path = f"{dir_path}/{entry['relpath']}"
+                                paths[child_hash] = child_path
                 except (json.JSONDecodeError, OSError, KeyError):
                     # If we can't read the .dir file, just skip expansion
                     pass
     
-    return expanded
+    return expanded, paths
+
+
+def get_hash_for_path_in_dir(
+    cache_dir: Path,
+    dir_hash: str,
+    relative_path: str,
+) -> Optional[str]:
+    """Get the hash for a specific file within a tracked directory.
+    
+    Args:
+        cache_dir: Path to the cache files/md5 directory
+        dir_hash: The .dir hash for the tracked directory
+        relative_path: Path of the file relative to the directory root
+        
+    Returns:
+        The file's hash if found, None otherwise
+    """
+    import json
+    
+    cache_path = hash_to_cache_path(cache_dir, dir_hash)
+    if not cache_path.exists():
+        return None
+    
+    try:
+        with open(cache_path, 'r') as f:
+            dir_contents = json.load(f)
+        
+        for entry in dir_contents:
+            if entry.get('relpath') == relative_path:
+                return entry.get('md5')
+    except (json.JSONDecodeError, OSError, KeyError):
+        pass
+    
+    return None
+
+
+def check_hashes_in_remote(
+    file_hashes: List[str],
+    remote: Optional[str] = None,
+) -> Tuple[List[str], List[str]]:
+    """Check which hashes exist in the remote.
+    
+    Args:
+        file_hashes: List of file hashes to check
+        remote: Optional remote name (uses default if not specified)
+        
+    Returns:
+        Tuple of (hashes_in_remote, hashes_not_in_remote)
+    """
+    try:
+        from dvc.repo import Repo
+        from dvc_data.hashfile.hash_info import HashInfo
+        from dvc_data.hashfile.status import compare_status
+    except ImportError:
+        # Can't access DVC internals -> conservative: treat as NOT in remote
+        return [], file_hashes
+
+    if not file_hashes:
+        return [], []
+
+    try:
+        repo = Repo()
+        cache_odb = repo.cache.local
+        remote_obj = repo.cloud.get_remote(name=remote)
+        remote_odb = remote_obj.odb
+
+        # Create HashInfo objects (strip possible .dir suffix)
+        obj_ids = [HashInfo('md5', h.replace('.dir', '')) for h in file_hashes]
+
+        # Compare with remote
+        status = compare_status(
+            cache_odb,
+            remote_odb,
+            obj_ids,
+            check_deleted=False,
+            shallow=True,
+        )
+
+        # status.new = hashes NOT on remote
+        not_in_remote = {hi.value for hi in status.new}
+
+        in_remote = []
+        not_found = []
+        for h in file_hashes:
+            h_clean = h.replace('.dir', '')
+            if h_clean in not_in_remote:
+                not_found.append(h)
+            else:
+                in_remote.append(h)
+
+        return in_remote, not_found
+
+    except Exception:
+        # Any failure to contact/check remote -> conservative: treat as NOT in remote
+        return [], file_hashes
 
 
 def collect_hashes_for_targets(
@@ -352,6 +456,7 @@ def remove_cache_files(
     dry_run: bool = False,
     show_size: bool = False,
     verbose: bool = False,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Remove cache files for the specified targets.
     
@@ -362,13 +467,16 @@ def remove_cache_files(
         dry_run: If True, only report what would be deleted
         show_size: If True, include file sizes in the output
         verbose: Print detailed progress
+        force: If True, delete even if files are not in remote
         
     Returns:
         Dict with results:
             - 'deleted': List of (path, hash, size) for deleted files
             - 'missing': List of (path, hash) for files not in cache
             - 'failed': List of (path, hash, error) for deletion failures
+            - 'not_in_remote': List of (path, hash) for files not in remote
             - 'total_size': Total size of deleted (or would-be-deleted) files
+            - 'blocked': True if deletion was blocked due to files not in remote
     """
     try:
         utils.check_dvc()
@@ -389,23 +497,60 @@ def remove_cache_files(
             'deleted': [],
             'missing': [],
             'failed': [],
+            'not_in_remote': [],
             'total_size': 0,
+            'blocked': False,
         }
     
     # Expand .dir hashes to include contained files
-    all_hashes = expand_dir_hashes(cache_dir, manifest['files'])
+    all_hashes, hash_to_path = expand_dir_hashes(
+        cache_dir, manifest['files'], manifest['paths']
+    )
     
     if verbose and len(all_hashes) > len(manifest['files']):
         print(f"Expanded to {len(all_hashes)} file(s) (including directory contents)")
     
-    # Get cache file info
+    # Get cache file info (filter to files that exist)
     file_info = get_cache_file_info(cache_dir, all_hashes)
-    hash_to_path = manifest['paths']
+    existing_hashes = [h for h, _, size in file_info if size is not None]
+    
+    # Check which files are in remote
+    not_in_remote = []
+    if existing_hashes and not force:
+        if verbose:
+            print("Checking remote status...")
+        in_remote, not_in_remote_hashes = check_hashes_in_remote(existing_hashes)
+        not_in_remote = [
+            (hash_to_path.get(h, h), h) 
+            for h in not_in_remote_hashes
+        ]
     
     deleted = []
     missing = []
     failed = []
     total_size = 0
+    blocked = False
+    
+    # If there are files not in remote and not forcing, block deletion
+    if not_in_remote and not force:
+        blocked = True
+        # Still calculate what would be deleted for reporting
+        for file_hash, cache_path, size in file_info:
+            workspace_path = hash_to_path.get(file_hash, file_hash)
+            if size is None:
+                missing.append((workspace_path, file_hash))
+            else:
+                total_size += size
+                deleted.append((workspace_path, file_hash, size))
+        
+        return {
+            'deleted': deleted,
+            'missing': missing,
+            'failed': failed,
+            'not_in_remote': not_in_remote,
+            'total_size': total_size,
+            'blocked': blocked,
+        }
     
     for file_hash, cache_path, size in file_info:
         workspace_path = hash_to_path.get(file_hash, file_hash)
@@ -437,5 +582,7 @@ def remove_cache_files(
         'deleted': deleted,
         'missing': missing,
         'failed': failed,
+        'not_in_remote': not_in_remote,
         'total_size': total_size,
+        'blocked': False,
     }

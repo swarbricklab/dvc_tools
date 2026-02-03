@@ -121,14 +121,30 @@ dt cache rm [options] <target> [<target> ...]
 - `--dry`: Show what would be deleted without actually deleting anything.
 - `--size`: Report file sizes for each file (works with or without `--dry`).
 - `-v, --verbose`: Print detailed progress information.
+- `-f, --force`: Delete even if files are not in the remote (dangerous - may cause data loss).
 
 ### What it does
 
 1. Resolves the specified targets to find all associated DVC-tracked files
-2. Locates the corresponding cache files (using the MD5 hashes from `.dvc` files)
-3. Deletes the cache files from the local cache directory
+2. Checks if each file exists in the remote (safety check)
+3. Locates the corresponding cache files (using the MD5 hashes from `.dvc` files)
+4. Deletes the cache files from the local cache directory
 
 The workspace files are **not** affected. Users can manipulate workspace files directly using standard OS commands like `rm`.
+
+### Safety Check
+
+By default, `dt cache rm` **refuses to delete files that are not in the remote**. This prevents accidental data loss for files that haven't been pushed yet.
+
+If you want to delete such files anyway (e.g., cleaning up a mistaken `dvc add`), use `--force`:
+
+```bash
+# This will fail if data/uncommitted.csv is not in remote
+dt cache rm data/uncommitted.csv
+
+# Force deletion even if not in remote
+dt cache rm --force data/uncommitted.csv
+```
 
 ### Examples
 
@@ -148,6 +164,9 @@ dt cache rm --dry --size data/
 # Remove cache for multiple targets with size reporting
 dt cache rm --size data/train.csv data/test.csv models/
 
+# Force delete files not yet pushed to remote
+dt cache rm --force data/temp_experiment/
+
 # Verbose output
 dt cache rm -v data/
 ```
@@ -157,6 +176,7 @@ dt cache rm -v data/
 - **Reclaiming disk space**: Remove cached files for data you no longer need locally.
 - **Cleaning up after experiments**: Delete cache for intermediate results.
 - **Selective cache management**: Keep important data cached while removing less-used files.
+- **Undoing a mistaken `dvc add`**: Use `--force` to remove cache for files you added by accident.
 
 ### Notes
 
@@ -164,6 +184,7 @@ dt cache rm -v data/
 - This command only affects the local cache. Remote storage is not modified.
 - If the workspace files are still present, they can be re-cached using `dvc add` or restored from remote using `dvc pull`.
 - Directory targets are processed recursively to find all contained DVC-tracked files.
+- Use `dvc data status` to check if your cache is consistent after removing files.
 
 ## dt cache add-from
 
