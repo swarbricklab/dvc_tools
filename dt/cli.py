@@ -401,6 +401,99 @@ def cache_add_from(repository, owner, scope):
         click.echo(f"Path already exists in {scope} config: {local_path}")
 
 
+@cache.command('rm')
+@click.argument('targets', nargs=-1, required=True)
+@click.option('--dry', is_flag=True, help='Show what would be deleted without deleting')
+@click.option('--size', is_flag=True, help='Report file sizes')
+@click.option('-v', '--verbose', is_flag=True, help='Print detailed progress')
+@click.option('--force', '-f', is_flag=True, help='Delete even if files are not in remote')
+def cache_rm(targets, dry, size, verbose, force):
+    """Remove cached files for specified targets.
+    
+    Deletes cache files associated with the target(s) while leaving
+    the workspace unchanged. Only affects the primary cache; alternate
+    caches are never modified.
+    
+    By default, refuses to delete files that are not in the remote
+    (to prevent data loss). Use --force to override.
+    
+    \b
+    Examples:
+        dt cache rm data/large_file.csv
+        dt cache rm --dry data/
+        dt cache rm --dry --size data/
+        dt cache rm --force data/uncommitted.csv
+    """
+    try:
+        result = cache_mod.remove_cache_files(
+            targets=list(targets),
+            dry_run=dry,
+            show_size=size,
+            verbose=verbose,
+            force=force,
+        )
+    except cache_mod.CacheError as e:
+        raise click.ClickException(str(e))
+    
+    deleted = result['deleted']
+    missing = result['missing']
+    failed = result['failed']
+    not_in_remote = result.get('not_in_remote', [])
+    total_size = result['total_size']
+    blocked = result.get('blocked', False)
+    
+    # Handle blocked state (files not in remote)
+    if blocked:
+        click.echo("ERROR: Some files are not in the remote and would be permanently lost!", err=True)
+        click.echo("\nFiles not in remote:", err=True)
+        for workspace_path, file_hash in not_in_remote:
+            click.echo(f"  {workspace_path}", err=True)
+        click.echo(f"\nUse --force to delete anyway, or push these files first.", err=True)
+        raise click.ClickException(f"Refusing to delete {len(not_in_remote)} file(s) not in remote")
+    
+    # Report results
+    if dry:
+        if deleted:
+            click.echo("Would delete:")
+            for workspace_path, file_hash, file_size in deleted:
+                if size:
+                    click.echo(f"  {workspace_path}  ({cache_mod.format_size(file_size)})")
+                else:
+                    click.echo(f"  {workspace_path}")
+            if size:
+                click.echo(f"\nTotal: {cache_mod.format_size(total_size)}")
+            # Warn about files not in remote (only in verbose or if force was used)
+            if not_in_remote and verbose:
+                click.echo(f"\nNote: {len(not_in_remote)} file(s) not verified in remote (--force used)")
+        else:
+            click.echo("No cached files found for the specified targets.")
+    else:
+        if deleted:
+            if not verbose:
+                # Summary mode
+                click.echo(f"Deleted {len(deleted)} file(s) from cache.")
+            if size:
+                click.echo(f"Freed: {cache_mod.format_size(total_size)}")
+            # Warn if force was used for files not in remote
+            if not_in_remote:
+                click.echo(f"\nWarning: {len(not_in_remote)} file(s) were not in remote", err=True)
+        else:
+            click.echo("No cached files found for the specified targets.")
+    
+    # Report missing files
+    if missing and verbose:
+        click.echo(f"\nNot in cache ({len(missing)}):")
+        for workspace_path, file_hash in missing:
+            click.echo(f"  {workspace_path}")
+    
+    # Report failures
+    if failed:
+        click.echo(f"\nFailed to delete ({len(failed)}):", err=True)
+        for workspace_path, file_hash, error in failed:
+            click.echo(f"  {workspace_path}: {error}", err=True)
+        raise click.ClickException(f"Failed to delete {len(failed)} file(s)")
+
+
 @cli.group()
 def remote():
     """Manage remote storage."""
