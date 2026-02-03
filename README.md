@@ -5,11 +5,8 @@ Convenient tools for working with DVC in HPC environments with shared external c
 ## Installation
 
 ```bash
-# Install from source (development)
-pip install -e .
-
-# Or install from PyPI (when published)
-pip install dvc-tools
+# Install from GitHub
+pip install git+ssh://git@github.com/swarbricklab/dvc_tools.git
 ```
 
 ## Quick Start
