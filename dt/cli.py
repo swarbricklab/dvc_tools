@@ -16,6 +16,7 @@ from . import import_data as import_mod
 from . import pull as pull_mod
 from . import offline as offline_mod
 from . import summary as summary_mod
+from . import du as du_mod
 
 
 @click.group()
@@ -611,6 +612,91 @@ def doctor(verbose):
         click.echo("--- DVC Doctor ---")
         dvc_output = doctor_mod.run_dvc_doctor()
         click.echo(dvc_output)
+
+
+@cli.command()
+@click.argument('targets', nargs=-1)
+@click.option('-h', '--human-readable', 'human', is_flag=True,
+              help='Print sizes in human-readable format (K, M, G)')
+@click.option('-d', '--max-depth', type=int, default=None,
+              help='Limit output to N levels of depth')
+@click.option('-s', '--summarize', is_flag=True,
+              help='Show only the total (equivalent to -d 0)')
+@click.option('--inodes', is_flag=True,
+              help='Count number of files instead of bytes')
+@click.option('-c', '--total', 'show_total', is_flag=True,
+              help='Show a grand total line at the end')
+@click.option('--cached/--expected', default=True,
+              help='Show cached sizes (default) or expected sizes from metadata')
+def du(targets, human, max_depth, summarize, inodes, show_total, cached):
+    """Report disk usage for DVC-tracked files.
+    
+    Similar to the standard `du` command, but for DVC-tracked data.
+    Output is sorted by size (largest last).
+    
+    \b
+    Examples:
+        dt du                    # All tracked files
+        dt du -h                 # Human-readable sizes
+        dt du -s -h              # Summary total only
+        dt du -d 1 -h            # One level deep
+        dt du --inodes           # Count files
+        dt du --expected -h      # Expected sizes (not just cached)
+    """
+    try:
+        results = du_mod.calculate_du(
+            targets=list(targets) if targets else None,
+            cached=cached,
+            max_depth=max_depth,
+            count_inodes=inodes,
+        )
+    except du_mod.DuError as e:
+        raise click.ClickException(str(e))
+    
+    if not results:
+        click.echo("No tracked files found.")
+        return
+    
+    # Calculate grand total first (needed for summarize mode and -c)
+    grand_total = sum(value for value, _ in results)
+    
+    # Determine what to display
+    if summarize:
+        # -s shows only the grand total
+        display_results = [(grand_total, '.')]
+    else:
+        display_results = results
+    
+    # Calculate column width for alignment
+    if inodes:
+        max_width = max(len(str(count)) for count, _ in display_results)
+    else:
+        if human:
+            max_width = max(len(du_mod.format_size(size, True)) for size, _ in display_results)
+        else:
+            max_width = max(len(str(size)) for size, _ in display_results)
+    
+    # Also consider grand total width if showing total line
+    if show_total and not summarize:
+        if human and not inodes:
+            total_width = len(du_mod.format_size(grand_total, True))
+        else:
+            total_width = len(str(grand_total))
+        max_width = max(max_width, total_width)
+    
+    for value, path in display_results:
+        if human and not inodes:
+            size_str = du_mod.format_size(value, True)
+        else:
+            size_str = str(value)
+        click.echo(f"{size_str:>{max_width}}   {path}")
+    
+    if show_total and not summarize:
+        if human and not inodes:
+            total_str = du_mod.format_size(grand_total, True)
+        else:
+            total_str = str(grand_total)
+        click.echo(f"{total_str:>{max_width}}   total")
 
 
 @cli.command(context_settings=dict(

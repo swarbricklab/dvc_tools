@@ -18,6 +18,7 @@
 | [`dt remote`](#dt-remote) | Manage remote storage |
 | [`dt tmp`](#dt-tmp) | Manage temporary repository clones |
 | [`dt config`](#dt-config) | View and modify configuration settings |
+| [`dt du`](#dt-du) | Report disk usage for DVC-tracked files |
 | [`dt doctor`](#dt-doctor) | Diagnose common setup issues |
 
 ---
@@ -174,6 +175,27 @@ View and modify configuration settings.
 | `dt config path` | Show configuration file paths |
 
 Configuration uses hierarchical scopes: local > project > user > system. [Full documentation →](config.md)
+
+---
+
+## dt du
+
+Report disk usage for DVC-tracked files.
+
+```bash
+dt du [targets...] [-h] [-d N] [-s] [--inodes] [-c] [--cached|--expected]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-h, --human-readable` | Print sizes in human-readable format (K, M, G) |
+| `-d, --max-depth N` | Limit output to N levels of depth |
+| `-s, --summarize` | Show only the grand total |
+| `--inodes` | Count number of files instead of bytes |
+| `-c, --total` | Show a grand total line at the end |
+| `--cached/--expected` | Show cached sizes (default) or expected sizes from metadata |
+
+Output is sorted by size ascending (largest last). [Full documentation →](du.md)
 
 ---
 
