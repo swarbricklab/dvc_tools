@@ -207,6 +207,48 @@ def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
     return cache_dir / prefix / suffix
 
 
+def expand_dir_hashes(
+    cache_dir: Path,
+    file_hashes: List[str],
+) -> List[str]:
+    """Expand .dir hashes to include the files they reference.
+    
+    For each hash ending in .dir, reads the manifest and adds the
+    individual file hashes to the result.
+    
+    Args:
+        cache_dir: Path to the cache files/md5 directory
+        file_hashes: List of file hashes (some may be .dir files)
+        
+    Returns:
+        Expanded list including both .dir hashes and their contents
+    """
+    import json
+    
+    expanded = []
+    for file_hash in file_hashes:
+        expanded.append(file_hash)
+        
+        if file_hash.endswith('.dir'):
+            # Read the .dir file to get contained file hashes
+            cache_path = hash_to_cache_path(cache_dir, file_hash)
+            if cache_path.exists():
+                try:
+                    with open(cache_path, 'r') as f:
+                        dir_contents = json.load(f)
+                    # Each entry has 'md5' key with the file hash
+                    for entry in dir_contents:
+                        if 'md5' in entry:
+                            child_hash = entry['md5']
+                            if child_hash not in expanded:
+                                expanded.append(child_hash)
+                except (json.JSONDecodeError, OSError, KeyError):
+                    # If we can't read the .dir file, just skip expansion
+                    pass
+    
+    return expanded
+
+
 def collect_hashes_for_targets(
     targets: List[str],
     verbose: bool = False,
@@ -350,8 +392,14 @@ def remove_cache_files(
             'total_size': 0,
         }
     
+    # Expand .dir hashes to include contained files
+    all_hashes = expand_dir_hashes(cache_dir, manifest['files'])
+    
+    if verbose and len(all_hashes) > len(manifest['files']):
+        print(f"Expanded to {len(all_hashes)} file(s) (including directory contents)")
+    
     # Get cache file info
-    file_info = get_cache_file_info(cache_dir, manifest['files'])
+    file_info = get_cache_file_info(cache_dir, all_hashes)
     hash_to_path = manifest['paths']
     
     deleted = []
