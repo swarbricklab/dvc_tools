@@ -102,6 +102,68 @@ dt cache remove <path> [--local|--project|--user|--system]
 dt cache remove /g/data/a56/dvc/neochemo
 ```
 
+## dt cache rm
+
+Remove cached files for specified targets from the local cache. This deletes the cache files while leaving the workspace unchanged.
+
+### Usage
+
+```bash
+dt cache rm [options] <target> [<target> ...]
+```
+
+### Arguments
+
+- `<target>`: One or more paths, `.dvc` files, or directories to remove from cache.
+
+### Options
+
+- `--dry`: Show what would be deleted without actually deleting anything.
+- `--size`: Report file sizes for each file (works with or without `--dry`).
+- `-v, --verbose`: Print detailed progress information.
+
+### What it does
+
+1. Resolves the specified targets to find all associated DVC-tracked files
+2. Locates the corresponding cache files (using the MD5 hashes from `.dvc` files)
+3. Deletes the cache files from the local cache directory
+
+The workspace files are **not** affected. Users can manipulate workspace files directly using standard OS commands like `rm`.
+
+### Examples
+
+```bash
+# Remove cache for a single file
+dt cache rm data/large_dataset.csv
+
+# Remove cache for an entire directory
+dt cache rm data/processed/
+
+# Dry run - show what would be deleted
+dt cache rm --dry data/
+
+# Show sizes of files that would be deleted
+dt cache rm --dry --size data/
+
+# Remove cache for multiple targets with size reporting
+dt cache rm --size data/train.csv data/test.csv models/
+
+# Verbose output
+dt cache rm -v data/
+```
+
+### Use Cases
+
+- **Reclaiming disk space**: Remove cached files for data you no longer need locally.
+- **Cleaning up after experiments**: Delete cache for intermediate results.
+- **Selective cache management**: Keep important data cached while removing less-used files.
+
+### Notes
+
+- This command only affects the local cache. Remote storage is not modified.
+- If the workspace files are still present, they can be re-cached using `dvc add` or restored from remote using `dvc pull`.
+- Directory targets are processed recursively to find all contained DVC-tracked files.
+
 ## dt cache add-from
 
 Discover and add a cache from a remote repository's DVC configuration.
