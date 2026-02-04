@@ -875,6 +875,33 @@ def fetch(ctx, targets, verbose, no_refresh):
         raise click.ClickException(str(e))
 
 
+@cli.command()
+@click.argument('src', type=click.Path(exists=True))
+@click.argument('dst', type=click.Path())
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def mv(src, dst, verbose):
+    """Move or rename DVC-tracked files, preserving import metadata.
+    
+    Works like `dvc mv`, but correctly preserves the `deps` section
+    for import .dvc files (which `dvc mv` incorrectly drops).
+    
+    For non-import files, this is equivalent to `dvc mv`.
+    
+    \b
+    Examples:
+        dt mv data/old_name.dvc data/new_name.dvc
+        dt mv data/file.csv new_location/
+        dt mv -v imported_data.dvc renamed_data.dvc
+    """
+    from . import mv as mv_mod
+    
+    try:
+        old_dvc, new_dvc = mv_mod.mv(src, dst, verbose=verbose)
+        click.echo(f"Moved {old_dvc} -> {new_dvc}")
+    except mv_mod.MvError as e:
+        raise click.ClickException(str(e))
+
+
 @cli.command(context_settings=dict(
     ignore_unknown_options=True,
     allow_extra_args=True,

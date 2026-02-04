@@ -10,6 +10,7 @@
 | [`dt clone`](#dt-clone) | Clone an existing DVC project and set up local configuration |
 | [`dt add`](#dt-add) | Add files to DVC tracking via compute node |
 | [`dt checkout`](#dt-checkout) | Checkout DVC-tracked files, searching across multiple caches |
+| [`dt mv`](#dt-mv) | Move or rename DVC-tracked files, preserving import metadata |
 | [`dt pull`](#dt-pull) | Pull DVC-tracked files, handling imports automatically |
 | [`dt push`](#dt-push) | Push DVC-tracked files to all configured remotes |
 | [`dt import`](#dt-import) | Import DVC-tracked data from other repositories |
@@ -68,6 +69,18 @@ dt checkout [targets...] [-v] [-c <cache>]
 ```
 
 Searches primary and alternate caches for files. Automatically handles import `.dvc` files by cloning source repos. [Full documentation →](checkout.md)
+
+---
+
+## dt mv
+
+Move or rename DVC-tracked files, preserving import metadata.
+
+```bash
+dt mv <src> <dst> [-v]
+```
+
+Wraps `dvc mv` to fix a bug where import `.dvc` files lose their `deps` section. [Full documentation →](mv.md)
 
 ---
 
