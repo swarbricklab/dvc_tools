@@ -40,61 +40,12 @@ def collect_tracked_files(
         List of dicts with 'path', 'hash', 'size', 'nfiles' (for dirs), 'is_dir'
     """
     try:
-        from dvc.repo import Repo
-        from dvc.repo.fetch import _collect_indexes
-    except ImportError as e:
-        raise DuError(f"DVC internals not available: {e}")
+        result = utils.collect_tracked_entries(targets=targets, push=False)
+    except utils.DependencyError as e:
+        raise DuError(str(e))
     
-    repo = Repo()
-    
-    # Collect indexes for targets
-    indexes = _collect_indexes(
-        repo,
-        targets=targets,
-        remote=None,
-        all_branches=False,
-        with_deps=False,
-        all_tags=False,
-        recursive=False,
-        all_commits=False,
-        revs=None,
-        workspace=True,
-        push=False,
-    )
-    
-    if not indexes:
-        return []
-    
-    files = []
-    seen_hashes = set()
-    
-    for idx in indexes.values():
-        repo_data = idx.data.get('repo')
-        if repo_data:
-            for key, entry in repo_data.items():
-                if entry.hash_info and entry.hash_info.value:
-                    file_hash = entry.hash_info.value
-                    if file_hash in seen_hashes:
-                        continue
-                    seen_hashes.add(file_hash)
-                    
-                    path = '/'.join(key)
-                    is_dir = file_hash.endswith('.dir')
-                    
-                    # Get size and nfiles from entry.meta
-                    meta = entry.meta
-                    size = meta.size if meta and meta.size else 0
-                    nfiles = meta.nfiles if meta and meta.nfiles else 1
-                    
-                    files.append({
-                        'path': path,
-                        'hash': file_hash,
-                        'size': size,
-                        'nfiles': nfiles,
-                        'is_dir': is_dir,
-                    })
-    
-    return files
+    # Return entries in the format expected by this module
+    return result['entries']
 
 
 def get_dir_file_count(repo, dir_hash: str) -> int:
