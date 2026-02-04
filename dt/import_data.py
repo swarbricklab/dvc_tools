@@ -80,446 +80,30 @@ def populate_primary_cache(
         # Create parent directory if needed
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         
-        # Follow DVC's preferred order: reflink → hardlink → symlink → copy
-        actual_file = workspace_file.resolve()
-        cached = False
-        
-        # 1. Try reflink (copy-on-write) - best option
         try:
-            import subprocess
-            result = subprocess.run(
-                ['cp', '--reflink=only', str(actual_file), str(cache_file)],
-                capture_output=True
-            )
-            if result.returncode == 0:
-                count += 1
-                cached = True
-                if verbose:
-                    print(f"  Cached (reflink): {md5[:8]}... ({relpath or workspace_path.name})")
-        except (OSError, FileNotFoundError):
-            pass
-        
-        if cached:
-            continue
-        
-        # 2. Try hardlink - same inode, no extra space
-        try:
-            os.link(actual_file, cache_file)
+            # Try to hardlink the workspace symlink to the cache
+            # This creates a new directory entry pointing to the same symlink inode
+            os.link(workspace_file, cache_file)
             count += 1
-            cached = True
             if verbose:
-                print(f"  Cached (hardlink): {md5[:8]}... ({relpath or workspace_path.name})")
+                print(f"  Cached: {md5[:8]}... ({relpath or workspace_path.name})")
         except OSError as e:
-            # EXDEV (18): Cross-device link
-            # EPERM (1): Operation not permitted (HPC quota restrictions)
-            # EACCES (13): Permission denied
-            if e.errno not in (1, 13, 18):
+            if e.errno == 18:  # EXDEV: Invalid cross-device link
+                # Fall back to creating a symlink with the same target
+                try:
+                    target = os.readlink(workspace_file)
+                    os.symlink(target, cache_file)
+                    count += 1
+                    if verbose:
+                        print(f"  Cached (symlink): {md5[:8]}... ({relpath or workspace_path.name})")
+                except OSError as e2:
+                    if verbose:
+                        print(f"  Warning: Failed to cache {md5[:8]}...: {e2}")
+            else:
                 if verbose:
                     print(f"  Warning: Failed to cache {md5[:8]}...: {e}")
-                continue
-        
-        if cached:
-            continue
-        
-        # 3. Try symlink - works across filesystems
-        try:
-            os.symlink(actual_file, cache_file)
-            count += 1
-            cached = True
-            if verbose:
-                print(f"  Cached (symlink): {md5[:8]}... ({relpath or workspace_path.name})")
-        except OSError:
-            pass
-        
-        if cached:
-            continue
-        
-        # 4. Fall back to regular copy
-        try:
-            import shutil
-            shutil.copy2(actual_file, cache_file)
-            count += 1
-            if verbose:
-                print(f"  Cached (copy): {md5[:8]}... ({relpath or workspace_path.name})")
-        except OSError as e:
-            if verbose:
-                print(f"  Warning: Failed to copy {md5[:8]}...: {e}")
     
     return count
-
-
-def is_v3_dvc_file(dvc_data: Dict[str, Any]) -> bool:
-    """Detect if a .dvc file uses v3 format based on explicit hash field.
-    
-    DVC v3 format explicitly includes 'hash: md5' in outputs.
-    DVC v2 format only has 'md5:' without the 'hash:' field.
-    
-    Args:
-        dvc_data: Parsed .dvc file contents.
-        
-    Returns:
-        True if v3 format (has explicit hash field), False if v2/legacy.
-    """
-    outs = dvc_data.get('outs', [])
-    if not outs:
-        return True  # Default to v3 for empty/new files
-    
-    # Check first output for explicit hash field
-    out = outs[0]
-    return 'hash' in out
-
-
-def build_dir_manifest(entries: List[Dict[str, str]]) -> bytes:
-    """Build a .dir manifest file content in exact DVC format.
-    
-    DVC uses a specific JSON format for .dir files that must be reproduced
-    exactly to match the expected hash. The format is:
-    - JSON array, no trailing newline
-    - Compact format with `: ` after colons and `, ` between entries
-    - Keys in order: md5, relpath
-    - Entries sorted by relpath
-    
-    Args:
-        entries: List of dicts with 'md5' and 'relpath' keys.
-        
-    Returns:
-        Bytes content of the .dir file.
-    """
-    # Sort by relpath
-    sorted_entries = sorted(entries, key=lambda x: x['relpath'])
-    
-    # Build JSON with exact DVC format
-    # DVC uses: [{"md5": "...", "relpath": "..."}, {"md5": "...", "relpath": "..."}]
-    parts = []
-    for entry in sorted_entries:
-        parts.append(f'{{"md5": "{entry["md5"]}", "relpath": "{entry["relpath"]}"}}')
-    
-    content = '[' + ', '.join(parts) + ']'
-    return content.encode('utf-8')
-
-
-def construct_dir_from_dvc_list(
-    repo_url: str,
-    path: str,
-    revision: str,
-    expected_hash: str,
-    dest_cache: str,
-    use_v3_layout: bool = True,
-    verbose: bool = False,
-    update: bool = False,
-) -> Optional[Tuple[List[Dict[str, str]], Optional[str]]]:
-    """Construct a .dir manifest using 'dvc list' on a remote repository.
-    
-    This is useful for nested DVC imports where the source directory contains
-    .dvc files. 'dvc list' can retrieve the file listing and hashes without
-    needing to checkout the actual data.
-    
-    Args:
-        repo_url: URL of the source repository.
-        path: Path within the repo to list.
-        revision: Git revision (commit hash) to list at.
-        expected_hash: The expected MD5 hash of the .dir file (without .dir suffix).
-        dest_cache: Path to destination cache base directory.
-        use_v3_layout: If True, write .dir file to v3 layout.
-        verbose: Print progress messages.
-        update: If True, accept hash mismatch and return new hash for .dvc update.
-        
-    Returns:
-        Tuple of (entries, new_hash) if successful, None on failure.
-        new_hash is None if hash matched, or the actual hash if update=True and hash differed.
-    """
-    import hashlib
-    
-    if verbose:
-        print(f"  Using 'dvc list' to build manifest from {repo_url}")
-        print(f"    Path: {path}")
-        print(f"    Revision: {revision[:12]}...")
-    
-    # Run dvc list to get file listing with hashes
-    cmd = [
-        'dvc', 'list',
-        '--json',
-        '--show-hash',
-        '--recursive',
-        repo_url,
-        path,
-        '--rev', revision,
-    ]
-    
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        if verbose:
-            print(f"  ERROR: 'dvc list' failed: {result.stderr.strip()}")
-        return None
-    
-    try:
-        files = json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        if verbose:
-            print(f"  ERROR: Could not parse 'dvc list' output: {e}")
-        return None
-    
-    # Filter to only files with hashes (DVC-tracked outputs)
-    entries = []
-    for f in files:
-        if f.get('isdir'):
-            continue
-        md5 = f.get('md5')
-        if not md5:
-            continue
-        relpath = f.get('path', '')
-        if relpath:
-            entries.append({'md5': md5, 'relpath': relpath})
-    
-    if not entries:
-        if verbose:
-            print(f"  ERROR: No DVC-tracked files found in listing")
-        return None
-    
-    if verbose:
-        print(f"  Found {len(entries)} files via 'dvc list'")
-    
-    # Build the manifest content
-    manifest_content = build_dir_manifest(entries)
-    
-    # Compute actual hash
-    actual_hash = hashlib.md5(manifest_content).hexdigest()
-    new_hash = None  # Will be set if hash differs and update=True
-    
-    if actual_hash != expected_hash:
-        if update:
-            if verbose:
-                print(f"  Hash mismatch (update mode):")
-                print(f"    Old: {expected_hash}")
-                print(f"    New: {actual_hash}")
-            new_hash = actual_hash
-        else:
-            # Raise specific exception so caller can handle appropriately
-            from .errors import HashMismatchError
-            raise HashMismatchError(
-                expected_hash=expected_hash,
-                actual_hash=actual_hash,
-                message=(
-                    f"Hash mismatch when constructing .dir manifest:\n"
-                    f"  Expected: {expected_hash}\n"
-                    f"  Got:      {actual_hash}\n"
-                    f"  Files found: {len(entries)}\n"
-                    f"Try: dt fetch --update <file> to rebuild and update the .dvc file"
-                )
-            )
-    
-    # Use actual_hash for file path (in update mode this may differ from expected)
-    file_hash = new_hash if new_hash else expected_hash
-    
-    # Write .dir file to cache
-    if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / file_hash[:2] / f"{file_hash[2:]}.dir"
-    else:
-        dest_file = Path(dest_cache) / file_hash[:2] / f"{file_hash[2:]}.dir"
-    
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
-        if verbose:
-            print(f"  Created .dir file: {dest_file}")
-    
-    return entries, new_hash
-
-
-def construct_dir_file(
-    source_dir: Path,
-    expected_hash: str,
-    dest_cache: str,
-    use_v3_layout: bool = True,
-    verbose: bool = False,
-) -> Optional[List[Dict[str, str]]]:
-    """Construct a .dir manifest file from source directory using DVC internals.
-    
-    When importing a directory that is not DVC-tracked in the source repo,
-    the .dir file only exists in the importing repo's cache. This function
-    uses DVC's internal build() function to construct it correctly.
-    
-    Args:
-        source_dir: Path to the source directory to scan.
-        expected_hash: The expected MD5 hash of the .dir file (without .dir suffix).
-        dest_cache: Path to destination cache base directory.
-        use_v3_layout: If True, write .dir file to v3 layout.
-        verbose: Print progress messages.
-        
-    Returns:
-        List of manifest entries if successful, None if hash mismatch.
-    """
-    import tempfile
-    
-    if not source_dir.exists() or not source_dir.is_dir():
-        if verbose:
-            print(f"  ERROR: Source directory not found: {source_dir}")
-        return None
-    
-    # Check for nested DVC structure (directory containing .dvc files)
-    dvc_files_in_source = list(source_dir.rglob('*.dvc'))
-    if dvc_files_in_source:
-        if verbose:
-            print(f"  ERROR: Source directory contains DVC files - cannot reconstruct .dir")
-            print(f"    Found {len(dvc_files_in_source)} .dvc file(s):")
-            for f in dvc_files_in_source[:5]:
-                print(f"      {f.relative_to(source_dir)}")
-            if len(dvc_files_in_source) > 5:
-                print(f"      ... and {len(dvc_files_in_source) - 5} more")
-            print()
-            print("    This is a nested DVC import - the source directory itself contains")
-            print("    DVC-tracked data that would need 'dvc checkout' to materialize.")
-            print()
-            print("    The .dir file must be copied from the machine where 'dvc import'")
-            print("    was originally run. Look in that machine's cache at:")
-            print(f"      .dvc/cache/files/md5/{expected_hash[:2]}/{expected_hash[2:]}.dir")
-        return None
-    
-    try:
-        # Use DVC internals to build the directory hash
-        from dvc_data.hashfile.build import build
-        from dvc_data.hashfile.db.local import LocalHashFileDB
-        from dvc_data.hashfile.tree import Tree
-        from dvc.fs import LocalFileSystem
-        
-        fs = LocalFileSystem()
-        
-        # Create a temp cache for the ODB
-        with tempfile.TemporaryDirectory() as tmpdir:
-            odb = LocalHashFileDB(fs, tmpdir)
-            
-            # Build the tree (dry_run=True means just compute hashes, don't save)
-            _, _, hash_file = build(odb, str(source_dir), fs, 'md5', dry_run=True)
-            
-            if not isinstance(hash_file, Tree):
-                if verbose:
-                    print(f"  ERROR: DVC build did not produce a Tree object")
-                return None
-            
-            # Get the computed hash (without .dir suffix)
-            actual_hash = hash_file.hash_info.value.replace('.dir', '')
-            
-            if actual_hash != expected_hash:
-                if verbose:
-                    # Get entries for debug output
-                    debug_entries = hash_file.as_list()
-                    print(f"  ERROR: Constructed .dir hash mismatch!")
-                    print(f"    Expected: {expected_hash}")
-                    print(f"    Got:      {actual_hash}")
-                    print(f"    Source dir: {source_dir}")
-                    print(f"    Files found ({len(debug_entries)}):")
-                    for entry in debug_entries[:20]:  # Limit to first 20
-                        print(f"      {entry.get('relpath')}: {entry.get('md5')}")
-                    if len(debug_entries) > 20:
-                        print(f"      ... and {len(debug_entries) - 20} more files")
-                    print()
-                    print("    This can happen when:")
-                    print("    1. The source directory contains DVC-tracked files (nested DVC)")
-                    print("       In this case, 'dt fetch' cannot reconstruct the .dir file")
-                    print("       because it would need to run 'dvc checkout' on the source repo")
-                    print("    2. The source directory has changed since the import was created")
-                    print()
-                    print("    Solution: Copy the .dir file from a machine that has it cached")
-                    print("    (likely the machine where 'dvc import' was originally run)")
-                return None
-            
-            # Get manifest content and entries
-            manifest_content = hash_file.as_bytes()
-            entries = hash_file.as_list()
-            
-            if verbose:
-                print(f"  DVC computed .dir hash: {actual_hash[:12]}... ({len(entries)} files)")
-    
-    except ImportError as e:
-        # Fall back to manual implementation if DVC internals not available
-        if verbose:
-            print(f"  Warning: DVC internals not available, using fallback: {e}")
-        return _construct_dir_file_fallback(
-            source_dir, expected_hash, dest_cache, use_v3_layout, verbose
-        )
-    except Exception as e:
-        if verbose:
-            print(f"  ERROR: DVC build failed: {e}")
-        return None
-    
-    # Write .dir file to cache
-    if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
-    else:
-        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
-    
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
-        if verbose:
-            print(f"  Constructed .dir file: {expected_hash[:12]}...")
-    
-    return entries
-
-
-def _construct_dir_file_fallback(
-    source_dir: Path,
-    expected_hash: str,
-    dest_cache: str,
-    use_v3_layout: bool = True,
-    verbose: bool = False,
-) -> Optional[List[Dict[str, str]]]:
-    """Fallback implementation using manual hashing (for when DVC internals unavailable)."""
-    import hashlib
-    
-    entries = []
-    
-    # Scan directory recursively
-    for file_path in sorted(source_dir.rglob('*')):
-        if file_path.is_file():
-            # Calculate MD5 hash
-            hasher = hashlib.md5()
-            try:
-                with open(file_path, 'rb') as f:
-                    for chunk in iter(lambda: f.read(8192), b''):
-                        hasher.update(chunk)
-                file_hash = hasher.hexdigest()
-                
-                # Get relative path from source_dir
-                relpath = str(file_path.relative_to(source_dir))
-                entries.append({'md5': file_hash, 'relpath': relpath})
-            except OSError as e:
-                if verbose:
-                    print(f"  Warning: Could not hash {file_path}: {e}")
-                continue
-    
-    if not entries:
-        if verbose:
-            print(f"  Warning: No files found in {source_dir}")
-        return None
-    
-    # Build the manifest content
-    manifest_content = build_dir_manifest(entries)
-    
-    # Verify hash matches expected
-    actual_hash = hashlib.md5(manifest_content).hexdigest()
-    
-    if actual_hash != expected_hash:
-        if verbose:
-            print(f"  ERROR: Constructed .dir hash mismatch!")
-            print(f"    Expected: {expected_hash}")
-            print(f"    Got:      {actual_hash}")
-        return None
-    
-    # Write .dir file to cache
-    if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
-    else:
-        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
-    
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
-        if verbose:
-            print(f"  Constructed .dir file (fallback): {expected_hash[:12]}...")
-    
-    return entries
 
 
 def populate_cache_file(
@@ -527,31 +111,22 @@ def populate_cache_file(
     source_cache: str,
     dest_cache: str,
     verbose: bool = False,
-    use_v3_layout: bool = True,
-) -> Optional[bool]:
+) -> bool:
     """Copy or link a single file from source cache to destination cache.
     
     Used for .dir files and single file imports where we need to ensure
     the file exists in the primary cache.
     
-    Supports both DVC v3 cache layout (files/md5/XX/hash) and legacy 
-    DVC v2 layout (XX/hash directly in remote root).
-    
     Args:
         md5: The MD5 hash (with optional .dir suffix).
         source_cache: Path to the source cache/remote root (e.g., /path/to/.remote).
-            May contain files/md5/ structure (v3) or direct hash dirs (v2).
-        dest_cache: Path to the destination cache base directory.
-            For v3 layout, files go in dest_cache/files/md5/XX/hash.
-            For v2 layout, files go in dest_cache/XX/hash.
+            Should contain files/md5/ structure.
+        dest_cache: Path to the destination cache files/md5 directory
+            (e.g., from repo.cache.local.path which returns .../files/md5).
         verbose: Print progress messages.
-        use_v3_layout: If True, use v3 layout (files/md5/XX/hash) for destination.
-            If False, use v2 layout (XX/hash). Should match the .dvc file format.
         
     Returns:
-        True if file was added to cache.
-        False if file already exists in cache.
-        None if source file not found (error case).
+        True if file was added to cache, False otherwise.
     """
     # Handle .dir suffix
     if md5.endswith('.dir'):
@@ -561,87 +136,42 @@ def populate_cache_file(
         hash_only = md5
         filename = hash_only[2:]
     
-    # Try DVC v3 path first (files/md5/XX/hash)
-    source_file_v3 = Path(source_cache) / 'files' / 'md5' / hash_only[:2] / filename
-    # Fall back to DVC v2 path (XX/hash directly in remote root)
-    source_file_v2 = Path(source_cache) / hash_only[:2] / filename
+    # Source is a remote/cache root - needs files/md5 added
+    source_file = Path(source_cache) / 'files' / 'md5' / hash_only[:2] / filename
     
-    # Use whichever exists
-    if source_file_v3.exists():
-        source_file = source_file_v3
-    elif source_file_v2.exists():
-        source_file = source_file_v2
-        if verbose:
-            print(f"  Using legacy cache layout for: {md5[:12]}...")
-    else:
-        # Neither exists - return None to indicate source not found
-        return None
-    
-    # Destination path depends on the .dvc file format
-    # v3 format (.dvc has 'hash: md5') -> files/md5/XX/hash
-    # v2 format (.dvc only has 'md5:') -> XX/hash (at cache root)
-    if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / hash_only[:2] / filename
-    else:
-        dest_file = Path(dest_cache) / hash_only[:2] / filename
+    # Dest is already the files/md5 directory (from repo.cache.local.path)
+    dest_file = Path(dest_cache) / hash_only[:2] / filename
     
     if dest_file.exists():
         return False
     
+    if not source_file.exists():
+        if verbose:
+            print(f"  Warning: Source file not found: {md5[:8]}...")
+        return False
+    
     dest_file.parent.mkdir(parents=True, exist_ok=True)
     
-    # Follow DVC's preferred order: reflink → hardlink → symlink → copy
-    # See: https://dvc.org/doc/user-guide/data-management/large-dataset-optimization
-    
-    # 1. Try reflink (copy-on-write) - best option: instant, zero space, safe to modify
     try:
-        import subprocess
-        result = subprocess.run(
-            ['cp', '--reflink=only', str(source_file), str(dest_file)],
-            capture_output=True
-        )
-        if result.returncode == 0:
-            if verbose:
-                print(f"  Cached (reflink): {md5[:12]}...")
-            return True
-    except (OSError, FileNotFoundError):
-        pass  # cp not available or reflink not supported
-    
-    # 2. Try hardlink - same inode, no extra space, works within same filesystem/project
-    try:
+        # Try hardlink first
         os.link(source_file, dest_file)
         if verbose:
-            print(f"  Cached (hardlink): {md5[:12]}...")
+            print(f"  Cached: {md5[:12]}...")
         return True
     except OSError as e:
-        # EXDEV (18): Cross-device link (different filesystems)
-        # EPERM (1): Operation not permitted (common on HPC with quota restrictions)
-        # EACCES (13): Permission denied
-        if e.errno not in (1, 13, 18):
+        if e.errno == 18:  # EXDEV: Invalid cross-device link
+            # Fall back to symlink
+            try:
+                os.symlink(source_file.resolve(), dest_file)
+                if verbose:
+                    print(f"  Cached (symlink): {md5[:12]}...")
+                return True
+            except OSError as e2:
+                if verbose:
+                    print(f"  Warning: Failed to cache {md5[:12]}...: {e2}")
+        else:
             if verbose:
-                print(f"  ERROR: Failed to cache {md5[:12]}...: {e}")
-            return False
-    
-    # 3. Try symlink - pointer to source, no extra space, works across filesystems
-    try:
-        os.symlink(source_file, dest_file)
-        if verbose:
-            print(f"  Cached (symlink): {md5[:12]}...")
-        return True
-    except OSError as e:
-        if verbose:
-            print(f"  Warning: symlink failed for {md5[:12]}...: {e}")
-    
-    # 4. Fall back to regular copy - slower but universally compatible
-    try:
-        import shutil
-        shutil.copy2(source_file, dest_file)
-        if verbose:
-            print(f"  Cached (copy): {md5[:12]}...")
-        return True
-    except OSError as e:
-        if verbose:
-            print(f"  ERROR: Failed to copy {md5[:12]}...: {e}")
+                print(f"  Warning: Failed to cache {md5[:12]}...: {e}")
     
     return False
 
