@@ -1,7 +1,0 @@
-#! /bin/bash
-
-set -e
-
-cache=$1 # path to the cache
-
-find $cache/files/md5 -type f -exec dt_cache_file_validate {} \;

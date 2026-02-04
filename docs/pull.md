@@ -26,6 +26,7 @@ This enables pulling data from repositories that were imported with `dvc import`
 | `-v`, `--verbose` | Show detailed progress (with `--dry`, lists all files) |
 | `-w N`, `--workers N` | Distribute pull across N compute nodes via qxub |
 | `-r NAME`, `--remote NAME` | Pull from specific remote |
+| `-f`, `--force` | Delete `.dir` manifests before pulling to force re-fetch |
 | `--no-wait` | Submit worker jobs and exit without waiting for completion |
 | `--no-refresh` | Skip refreshing temp clones (for offline use) |
 
@@ -47,6 +48,9 @@ dt pull data/
 
 # Pull with verbose output
 dt pull -v
+
+# Force re-fetch (after fixing corrupted cache files)
+dt pull --force data/
 ```
 
 ### Dry run
@@ -203,8 +207,36 @@ dt pull -v
 dt pull -w 16
 ```
 
+## Force mode
+
+The `--force` option deletes `.dir` manifest files from the cache before pulling. This forces DVC to re-fetch the entire directory contents from the remote.
+
+### When to use
+
+Use `--force` after running `dt cache validate --fix` to repair corrupted directories:
+
+```bash
+# Step 1: Find and delete corrupted files
+dt cache validate --fix
+# Output: Deleted 2 corrupted file(s)
+#         Affected .dir manifests: 1
+#         Run 'dt pull --force' to re-fetch affected directories
+
+# Step 2: Force re-fetch the directory
+dt pull --force data/
+```
+
+### How it works
+
+1. Finds all `.dir` manifest files for the specified targets
+2. Deletes them from the cache
+3. Runs normal pull, which triggers a fresh fetch of all directory contents
+
+Without `--force`, DVC would see the `.dir` manifest and assume all files are present, even if some were deleted by `--fix`.
+
 ## See also
 
+- [dt cache validate](cache.md#dt-cache-validate) - Validate cache integrity
 - [dt fetch](fetch.md) - Fetch imports from local caches
 - [dt import](import.md) - Import data from other repositories
 - [dt push](push.md) - Push to all remotes (with parallel support)
