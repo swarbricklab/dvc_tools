@@ -14,67 +14,18 @@ class DuError(Exception):
     pass
 
 
+# Use shared utilities from utils module
 def format_size(size_bytes: int, human_readable: bool = False) -> str:
     """Format byte size for output.
     
-    Args:
-        size_bytes: Size in bytes
-        human_readable: Use human-readable format (K, M, G)
-        
-    Returns:
-        Formatted size string
+    Wrapper around utils.format_size with human_readable parameter.
     """
-    if human_readable:
-        try:
-            from dvc.utils.humanize import naturalsize
-            return naturalsize(size_bytes)
-        except ImportError:
-            # Fallback if DVC internals unavailable
-            if size_bytes < 1024:
-                return f"{size_bytes}B"
-            elif size_bytes < 1024 * 1024:
-                return f"{size_bytes / 1024:.1f}K"
-            elif size_bytes < 1024 * 1024 * 1024:
-                return f"{size_bytes / (1024 * 1024):.1f}M"
-            elif size_bytes < 1024 * 1024 * 1024 * 1024:
-                return f"{size_bytes / (1024 * 1024 * 1024):.1f}G"
-            else:
-                return f"{size_bytes / (1024 * 1024 * 1024 * 1024):.1f}T"
-    else:
-        return str(size_bytes)
+    return utils.format_size(size_bytes, human_readable)
 
 
-def get_cache_dir() -> Optional[Path]:
-    """Get the primary DVC cache directory.
-    
-    Returns:
-        Path to the cache files/md5 directory, or None if not available
-    """
-    try:
-        from dvc.repo import Repo
-        repo = Repo()
-        return Path(repo.cache.local.path)
-    except Exception:
-        return None
-
-
-def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
-    """Convert a file hash to its cache file path.
-    
-    Args:
-        cache_dir: Path to the cache files/md5 directory
-        file_hash: MD5 hash (possibly with .dir suffix)
-        
-    Returns:
-        Path to the cache file
-    """
-    hash_clean = file_hash.replace('.dir', '')
-    prefix = hash_clean[:2]
-    suffix = hash_clean[2:]
-    if file_hash.endswith('.dir'):
-        suffix += '.dir'
-    
-    return cache_dir / prefix / suffix
+# Re-export from utils for internal use
+get_cache_dir = utils.get_cache_dir
+hash_to_cache_path = utils.hash_to_cache_path
 
 
 def collect_tracked_files(

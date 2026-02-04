@@ -14,6 +14,111 @@ class DependencyError(Exception):
     pass
 
 
+# =============================================================================
+# Formatting utilities
+# =============================================================================
+
+def format_size(size_bytes: int, human_readable: bool = True) -> str:
+    """Format byte size as human-readable string.
+    
+    Uses DVC's naturalsize for consistent formatting with DVC output.
+    Falls back to a simple implementation if DVC is not available.
+    
+    Args:
+        size_bytes: Size in bytes
+        human_readable: If True, format as K, M, G etc. If False, return raw bytes.
+        
+    Returns:
+        Formatted size string
+    """
+    if not human_readable:
+        return str(size_bytes)
+    
+    try:
+        from dvc.utils.humanize import naturalsize
+        return naturalsize(size_bytes)
+    except ImportError:
+        # Fallback if DVC internals unavailable
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+        elif size_bytes < 1024 * 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+        else:
+            return f"{size_bytes / (1024 * 1024 * 1024 * 1024):.1f} TB"
+
+
+# =============================================================================
+# DVC cache utilities
+# =============================================================================
+
+def get_cache_dir() -> Optional[Path]:
+    """Get the primary DVC cache directory.
+    
+    Returns the path to the cache files/md5 directory where DVC stores
+    content-addressed files.
+    
+    Returns:
+        Path to the cache files/md5 directory, or None if not in a DVC repo
+        or cache not configured.
+    """
+    try:
+        from dvc.repo import Repo
+        repo = Repo()
+        return Path(repo.cache.local.path)
+    except Exception:
+        return None
+
+
+def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
+    """Convert a file hash to its cache file path.
+    
+    Uses DVC's standard layout: cache_dir/XX/XXXXXX...
+    where XX is the first two characters of the hash.
+    
+    Args:
+        cache_dir: Path to the cache files/md5 directory
+        file_hash: MD5 hash (possibly with .dir suffix)
+        
+    Returns:
+        Path to the cache file
+    """
+    # Handle .dir suffix
+    hash_clean = file_hash.replace('.dir', '')
+    prefix = hash_clean[:2]
+    suffix = hash_clean[2:]
+    if file_hash.endswith('.dir'):
+        suffix += '.dir'
+    
+    return cache_dir / prefix / suffix
+
+
+def oid_to_path(file_hash: str) -> Optional[Path]:
+    """Convert a file hash to its cache path using DVC's cache object.
+    
+    This uses DVC's internal oid_to_path method for guaranteed compatibility.
+    
+    Args:
+        file_hash: MD5 hash (possibly with .dir suffix)
+        
+    Returns:
+        Path to the cache file, or None if cache not available
+    """
+    try:
+        from dvc.repo import Repo
+        repo = Repo()
+        return Path(repo.cache.local.oid_to_path(file_hash))
+    except Exception:
+        return None
+
+
+# =============================================================================
+# Project utilities
+# =============================================================================
+
 def get_project_name() -> str:
     """Get the project name from the current directory.
     
