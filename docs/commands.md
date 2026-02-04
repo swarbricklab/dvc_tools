@@ -9,7 +9,9 @@
 | [`dt init`](#dt-init) | Initialize a new DVC project with external cache and remote |
 | [`dt clone`](#dt-clone) | Clone an existing DVC project and set up local configuration |
 | [`dt add`](#dt-add) | Add files to DVC tracking via compute node |
+| [`dt diff`](#dt-diff) | Show content differences between file versions |
 | [`dt fetch`](#dt-fetch) | Fetch import files into primary cache from local sources |
+| [`dt history`](#dt-history) | Show version history of DVC-tracked files |
 | [`dt mv`](#dt-mv) | Move or rename DVC-tracked files, preserving import metadata |
 | [`dt pull`](#dt-pull) | Pull DVC-tracked files, handling imports automatically |
 | [`dt push`](#dt-push) | Push DVC-tracked files to all configured remotes |
@@ -61,6 +63,18 @@ Submits `dvc add` to a compute node via qxub with parallel checksum computation.
 
 ---
 
+## dt diff
+
+Show content differences between versions of DVC-tracked files.
+
+```bash
+dt diff <path> [--old REV] [--new REV] [-o FORMAT] [-v]
+```
+
+Compares actual file content (not just checksums) using format-specific handlers. [Full documentation →](diff.md)
+
+---
+
 ## dt fetch
 
 Fetch import files into the primary cache from local sources.
@@ -70,6 +84,18 @@ dt fetch [targets...] [-v] [--no-refresh]
 ```
 
 Populates the primary cache with symlinks from source caches. For imports, automatically clones source repos to find local caches. [Full documentation →](fetch.md)
+
+---
+
+## dt history
+
+Show version history of DVC-tracked files.
+
+```bash
+dt history <path> [-n LIMIT] [--since DATE] [--json] [-v]
+```
+
+Lists different versions (checksums) across git history, showing when each version was introduced. [Full documentation →](history.md)
 
 ---
 
