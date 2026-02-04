@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from dvc.repo import Repo
+
 from . import hpc
 from . import utils
 from .fetch import fetch, smart_checkout
@@ -41,11 +43,6 @@ def delete_dir_manifests(
     Returns:
         List of deleted .dir hashes.
     """
-    try:
-        from dvc.repo import Repo
-    except ImportError:
-        raise PullError("DVC not available")
-    
     try:
         repo = Repo()
         cache_dir = Path(repo.cache.local.path)
@@ -129,7 +126,6 @@ def get_remote_files_size(file_hashes: List[str], remote: Optional[str] = None) 
         Total size in bytes (0 if not determinable)
     """
     try:
-        from dvc.repo import Repo
         repo = Repo()
         cache_dir = Path(repo.cache.local.path)
     except Exception:
@@ -304,7 +300,6 @@ def pull_partition(
         Tuple of (pulled_count, failed_count)
     """
     try:
-        from dvc.repo import Repo
         from dvc_data.hashfile.transfer import transfer
         from dvc_data.hashfile.hash_info import HashInfo
     except ImportError as e:
