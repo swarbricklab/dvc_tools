@@ -552,7 +552,7 @@ def import_data(
             print(f"Warning: Checkout failed. Run 'dt checkout {dvc_file}' after configuring caches.")
         else:
             # Step 8: Populate primary cache with hardlinks to workspace symlinks
-            primary_cache = checkout_mod.get_primary_cache()
+            primary_cache = utils.get_cache_dir()
             if primary_cache:
                 if verbose:
                     print(f"Populating primary cache...")

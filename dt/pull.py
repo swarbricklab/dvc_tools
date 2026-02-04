@@ -15,14 +15,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import config as cfg
+from . import hpc
 from . import utils
 from .checkout import (
     CheckoutError,
     smart_checkout,
 )
-
-# Use shared parse_dvc_file from utils (for compatibility)
-parse_dvc_file = utils.parse_dvc_file
 
 
 class PullError(Exception):
@@ -33,9 +31,6 @@ class PullError(Exception):
 # =============================================================================
 # Utility functions  
 # =============================================================================
-
-# Use utils.format_size for size formatting
-format_size = utils.format_size
 
 
 def get_remote_files_size(file_hashes: List[str], remote: Optional[str] = None) -> int:
@@ -359,125 +354,6 @@ def pull_partition(
 # Distributed pull via qxub
 # =============================================================================
 
-def check_qxub() -> bool:
-    """Check if qxub is available."""
-    return shutil.which('qxub') is not None
-
-
-def submit_workers(
-    manifest_dir: Path,
-    num_workers: int,
-    qxub_args: Optional[List[str]] = None,
-    verbose: bool = False,
-) -> List[str]:
-    """Submit worker jobs via qxub.
-    
-    Args:
-        manifest_dir: Path to manifest directory
-        num_workers: Number of workers to submit
-        qxub_args: Additional arguments for qxub exec
-        verbose: Print progress
-        
-    Returns:
-        List of job IDs
-    """
-    if not check_qxub():
-        raise PullError("qxub not found. Install from https://github.com/swarbricklab/qxub")
-    
-    job_ids = []
-    repo_root = Path.cwd()
-    
-    for worker_id in range(num_workers):
-        # Check if this worker has any files
-        worker_file = manifest_dir / f'worker_{worker_id}.json'
-        if worker_file.exists():
-            with open(worker_file) as f:
-                partition = json.load(f)
-            if not partition.get('files'):
-                if verbose:
-                    print(f"Skipping worker {worker_id}: no files")
-                continue
-        else:
-            continue
-        
-        # Build qxub command with config options
-        conda_env = cfg.get_value('qxub.env', 'dt')
-        queue = cfg.get_value('qxub.queue', 'copyq')
-        walltime = cfg.get_value('qxub.walltime', '10:00:00')
-        mem = cfg.get_value('qxub.mem', '4GB')
-        cmd = ['qxub', 'exec', '--terse', '--env', conda_env, '--queue', queue, '--time', walltime, '--mem', mem]
-        if qxub_args:
-            cmd.extend(qxub_args)
-        
-        # Add job name
-        cmd.extend(['-N', f'dt-pull-{manifest_dir.name}-w{worker_id}'])
-        
-        # The worker command - always add --verbose so we get output in job logs
-        cmd.extend([
-            '--',
-            'dt', 'pull',
-            '--worker', str(worker_id),
-            '--manifest', str(manifest_dir),
-            '--verbose',
-        ])
-        
-        if verbose:
-            print(f"Submitting worker {worker_id}...")
-            print(f"  Command: {' '.join(cmd)}")
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=repo_root,
-            )
-            
-            if result.returncode == 0:
-                job_id = result.stdout.strip().split('\n')[0]
-                job_ids.append(job_id)
-                if verbose:
-                    print(f"  Job ID: {job_id}")
-            else:
-                print(f"Warning: Failed to submit worker {worker_id}: {result.stderr}")
-        except Exception as e:
-            print(f"Warning: Failed to submit worker {worker_id}: {e}")
-    
-    return job_ids
-
-
-def monitor_jobs(job_ids: List[str], verbose: bool = False) -> bool:
-    """Monitor jobs until completion using qxub monitor.
-    
-    Args:
-        job_ids: List of job IDs to monitor
-        verbose: Print progress
-        
-    Returns:
-        True if all jobs succeeded
-    """
-    if not job_ids:
-        return True
-    
-    if not check_qxub():
-        raise PullError("qxub not found")
-    
-    cmd = ['qxub', 'monitor', '--summary'] + job_ids
-    
-    if verbose:
-        print(f"Monitoring {len(job_ids)} job(s):")
-        for job_id in job_ids:
-            print(f"  {job_id}")
-        print(f"Command: {' '.join(cmd)}")
-    
-    try:
-        result = subprocess.run(cmd)
-        return result.returncode == 0
-    except Exception as e:
-        print(f"Error monitoring jobs: {e}")
-        return False
-
-
 def parallel_pull(
     targets: Optional[List[str]] = None,
     remote: Optional[str] = None,
@@ -528,12 +404,16 @@ def parallel_pull(
         print(f"Manifest saved to {manifest_dir}")
     
     # Submit workers
-    job_ids = submit_workers(
-        manifest_dir,
-        num_workers,
-        qxub_args=qxub_args,
-        verbose=verbose,
-    )
+    try:
+        job_ids = hpc.submit_workers(
+            manifest_dir,
+            num_workers,
+            operation='pull',
+            qxub_args=qxub_args,
+            verbose=verbose,
+        )
+    except hpc.HPCError as e:
+        raise PullError(str(e))
     
     if not job_ids:
         print("No jobs submitted")
@@ -544,7 +424,10 @@ def parallel_pull(
     
     # Wait for completion if requested
     if wait:
-        success = monitor_jobs(job_ids, verbose=verbose)
+        try:
+            success = hpc.monitor_jobs(job_ids, verbose=verbose)
+        except hpc.HPCError as e:
+            raise PullError(str(e))
         if not success:
             raise PullError("Some jobs failed")
     
