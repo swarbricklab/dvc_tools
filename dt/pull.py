@@ -21,6 +21,97 @@ from .errors import FetchError, PullError
 
 
 # =============================================================================
+# Force mode - delete .dir manifests
+# =============================================================================
+
+
+def delete_dir_manifests(
+    targets: Optional[List[str]] = None,
+    verbose: bool = False,
+) -> List[str]:
+    """Delete .dir manifest files from cache for specified targets.
+    
+    This forces DVC to re-fetch directory contents on the next pull,
+    useful after fixing corrupted files inside directories.
+    
+    Args:
+        targets: Specific targets to process. If None, finds all directories.
+        verbose: Print detailed progress.
+        
+    Returns:
+        List of deleted .dir hashes.
+    """
+    try:
+        from dvc.repo import Repo
+    except ImportError:
+        raise PullError("DVC not available")
+    
+    try:
+        repo = Repo()
+        cache_dir = Path(repo.cache.local.path)
+    except Exception as e:
+        raise PullError(f"Not in a DVC repository: {e}")
+    
+    deleted = []
+    repo_root = Path(repo.root_dir)
+    
+    # Resolve targets to absolute paths
+    target_paths = set()
+    if targets:
+        for target in targets:
+            target_path = Path(target).resolve()
+            if not target_path.exists():
+                target_path = repo_root / target
+            target_paths.add(target_path)
+    
+    # Find matching directory outputs
+    for out in repo.index.outs:
+        if not out.hash_info or not out.hash_info.isdir:
+            continue
+        
+        out_path = Path(out.fs_path)
+        
+        # Check if this directory matches targets (or no targets = all)
+        if target_paths:
+            matches = False
+            for target_path in target_paths:
+                try:
+                    # Check if output matches or is under target
+                    if out_path == target_path:
+                        matches = True
+                        break
+                    out_path.relative_to(target_path)
+                    matches = True
+                    break
+                except ValueError:
+                    try:
+                        target_path.relative_to(out_path)
+                        matches = True
+                        break
+                    except ValueError:
+                        pass
+            if not matches:
+                continue
+        
+        # Delete the .dir file from cache
+        dir_hash = out.hash_info.value
+        hash_clean = dir_hash.replace('.dir', '')
+        cache_path = cache_dir / hash_clean[:2] / (hash_clean[2:] + '.dir')
+        
+        if cache_path.exists():
+            try:
+                cache_path.unlink()
+                deleted.append(dir_hash)
+                if verbose:
+                    print(f"  Deleted .dir manifest: {out.fs_path}")
+            except OSError as e:
+                if verbose:
+                    print(f"  Failed to delete {cache_path}: {e}")
+    
+    return deleted
+
+
+# =============================================================================
 # Utility functions  
 # =============================================================================
 
@@ -507,6 +598,7 @@ def pull(
     verbose: bool = False,
     dvc_args: Optional[List[str]] = None,
     refresh: bool = True,
+    force: bool = False,
 ) -> bool:
     """Pull DVC-tracked files, handling imports automatically.
     
@@ -515,11 +607,27 @@ def pull(
         verbose: Print detailed progress.
         dvc_args: Additional arguments to pass to dvc pull.
         refresh: Whether to refresh temp clones (default True).
+        force: Delete .dir manifests from cache before pulling.
+               This forces re-fetch of directory contents, useful
+               after dt cache validate --fix removed corrupted files.
         
     Returns:
         True if all operations succeeded.
     """
     success = True
+    
+    # If force mode, delete .dir manifests first
+    if force:
+        if verbose:
+            print("Force mode: deleting .dir manifests from cache...")
+        try:
+            deleted = delete_dir_manifests(targets=targets, verbose=verbose)
+            if deleted:
+                print(f"  Deleted {len(deleted)} .dir manifest(s)")
+            elif verbose:
+                print("  No .dir manifests found for targets")
+        except Exception as e:
+            print(f"Warning: failed to delete .dir manifests: {e}")
     
     # If no targets specified, find all .dvc files
     if not targets:

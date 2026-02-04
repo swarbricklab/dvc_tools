@@ -377,7 +377,7 @@ def cache_rm(targets, dry, size, verbose, force):
 
 @cache.command('validate')
 @click.argument('targets', nargs=-1)
-@click.option('--fix', is_flag=True, help='Delete corrupted files (and their parent .dir manifests)')
+@click.option('--fix', is_flag=True, help='Delete corrupted files')
 @click.option('-v', '--verbose', is_flag=True, help='Show result for each file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 @click.option('--no-progress', is_flag=True, help='Disable progress counter')
@@ -392,8 +392,8 @@ def cache_validate(targets, fix, verbose, json_output, no_progress):
     only the files associated with those workspace paths.
     
     Use --fix to delete corrupted files. For files inside directories,
-    this also deletes the parent .dir manifest so that `dt pull` will
-    re-fetch the entire directory.
+    use `dt pull --force` after fixing to re-fetch (it will delete the
+    .dir manifest to trigger a fresh pull).
     
     \b
     Examples:
@@ -473,8 +473,10 @@ def cache_validate(targets, fix, verbose, json_output, no_progress):
     if fix and fixed:
         click.echo(f"\nFixed: deleted {len(fixed)} corrupted file(s)")
         if dir_fixed:
-            click.echo(f"Also deleted {len(dir_fixed)} parent .dir manifest(s)")
-        click.echo("\nRun 'dt pull' to re-fetch the deleted files.")
+            click.echo(f"\n{len(dir_fixed)} file(s) were inside directories.")
+            click.echo("Run 'dt pull --force' to re-fetch those directories.")
+        else:
+            click.echo("\nRun 'dt pull' to re-fetch the deleted files.")
     elif corrupted and not fix:
         click.echo("\nRun with --fix to delete corrupted files, then 'dt pull' to re-fetch.")
     
@@ -1232,6 +1234,8 @@ def mv(src, dst, verbose):
               help='Manifest directory (internal, used by submitted jobs).')
 @click.option('--remote', '-r', default=None,
               help='Pull from specific remote.')
+@click.option('--force', '-f', is_flag=True,
+              help='Delete .dir manifests before pulling to force re-fetch. Useful after dt cache validate --fix.')
 @click.option('--no-wait', is_flag=True,
               help='Submit jobs and exit without waiting for completion.')
 @click.option('--dry', '--dry-run', is_flag=True,
@@ -1239,7 +1243,7 @@ def mv(src, dst, verbose):
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
 @click.pass_context
-def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refresh):
+def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, no_refresh):
     """Pull DVC-tracked files, handling imports automatically.
     
     For targets tracked by import .dvc files (those with deps.repo),
@@ -1273,6 +1277,7 @@ def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refre
         dt pull -w 8 -r myremote data.dvc  # Pull target from remote using 8 jobs
         dt pull -w 16 --no-wait            # Submit jobs and exit
         dt pull --no-refresh               # Skip refreshing temp clones
+        dt pull --force data/              # Force re-fetch (after cache validate --fix)
     """
     from pathlib import Path
     
@@ -1307,6 +1312,19 @@ def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refre
         if not targets:
             click.echo("No .dvc files found")
             return
+        
+        # Force mode: delete .dir manifests before pulling
+        if force and not dry:
+            if verbose:
+                click.echo("Force mode: deleting .dir manifests from cache...")
+            try:
+                deleted = pull_mod.delete_dir_manifests(targets=targets, verbose=verbose)
+                if deleted:
+                    click.echo(f"  Deleted {len(deleted)} .dir manifest(s)")
+                elif verbose:
+                    click.echo("  No .dir manifests found for targets")
+            except Exception as e:
+                click.echo(f"Warning: failed to delete .dir manifests: {e}")
         
         # Separate import targets from regular targets
         if verbose:

@@ -671,10 +671,19 @@ def validate_cache(
                 files_to_check.append((cache_file, file_hash, file_hash))
     
     total = len(files_to_check)
+    deleted_paths = set()  # Track files deleted during --fix
     
     for i, (cache_path, file_hash, workspace_path) in enumerate(files_to_check):
         if progress and not verbose:
             print(f"\rValidating {i+1}/{total}...", end='', flush=True)
+        
+        # Skip if already deleted (e.g., .dir manifest deleted when fixing child)
+        if str(cache_path) in deleted_paths:
+            continue
+        
+        # Check if file still exists (may have been deleted)
+        if not cache_path.exists():
+            continue
         
         try:
             is_valid, expected, actual = validate_cache_file(cache_path)
@@ -695,19 +704,15 @@ def validate_cache(
                     try:
                         cache_path.unlink()
                         fixed.append((workspace_path, file_hash))
+                        deleted_paths.add(str(cache_path))
                         if verbose:
                             print(f"  Deleted corrupted file")
                         
-                        # Also delete parent .dir if this file is inside a directory
+                        # Track parent .dir for informational purposes
                         clean_hash = file_hash.replace('.dir', '')
                         parent_dir = get_parent_dir_hash(cache_dir, clean_hash)
                         if parent_dir and parent_dir not in dir_fixed:
-                            parent_path = hash_to_cache_path(cache_dir, parent_dir)
-                            if parent_path.exists():
-                                parent_path.unlink()
-                                dir_fixed.append(parent_dir)
-                                if verbose:
-                                    print(f"  Deleted parent .dir: {parent_dir[:16]}...")
+                            dir_fixed.append(parent_dir)
                     except OSError as e:
                         errors.append((str(cache_path), f"Failed to delete: {e}"))
                         
