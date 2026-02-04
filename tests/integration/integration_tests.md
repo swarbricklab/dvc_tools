@@ -70,22 +70,22 @@ Integration tests run real git/DVC commands against actual repositories.
 
 **File:** `test_clone_cmd.py`
 
-- [ ] Clone with full SSH URL
-  - [ ] `dt clone git@github.com:swarbricklab/dt-test-fixtures`
-- [ ] Clone with HTTPS URL
-  - [ ] `dt clone https://github.com/swarbricklab/dt-test-fixtures`
-- [ ] Clone with short name (uses config owner)
-  - [ ] `dt clone dt-test-fixtures`
-- [ ] Clone with --owner flag
-  - [ ] `dt clone dt-test-fixtures --owner swarbricklab`
-- [ ] Clone with --shallow flag
-  - [ ] Repository has truncated history
-- [ ] Clone with --no-submodules flag
-  - [ ] Submodules not initialized
-- [ ] Clone with custom path
-  - [ ] `dt clone dt-test-fixtures ./custom-dir`
-- [ ] Error: clone non-existent repo
-- [ ] Error: clone to existing directory
+- [x] Clone with full SSH URL
+  - [x] `dt clone git@github.com:swarbricklab/dt-test-fixtures`
+- [x] Clone with HTTPS URL
+  - [x] `dt clone https://github.com/swarbricklab/dt-test-fixtures`
+- [x] Clone with short name (uses config owner)
+  - [x] `dt clone dt-test-fixtures`
+- [x] Clone with --owner flag
+  - [x] `dt clone dt-test-fixtures --owner swarbricklab`
+- [x] Clone with --shallow flag
+  - [x] Repository has truncated history
+- [x] Clone with --no-submodules flag
+  - [x] Submodules not initialized
+- [x] Clone with custom path
+  - [x] `dt clone dt-test-fixtures ./custom-dir`
+- [x] Error: clone non-existent repo
+- [x] Error: clone to existing directory
 
 ---
 
@@ -94,28 +94,30 @@ Integration tests run real git/DVC commands against actual repositories.
 **File:** `test_config_cmd.py`
 
 #### `dt config list`
-- [ ] List all config values
-- [ ] List with --scope (user, project, local, system)
-- [ ] Show sources with --show-source
+- [x] List all config values
+- [x] List with --scope (user, project, local, system)
+- [x] Show sources with --show-origin
 
 #### `dt config get`
-- [ ] Get existing key value
-- [ ] Get nested key (dot notation)
-- [ ] Returns empty for missing key
+- [x] Get existing key value
+- [x] Get nested key (dot notation)
+- [x] Returns error for missing key
 
 #### `dt config set`
-- [ ] Set value at default scope (project)
-- [ ] Set value at specific scope
-- [ ] Set nested key creates structure
-- [ ] YAML value parsing (lists, bools)
+- [x] Set value at default scope (project)
+- [x] Set value at specific scope
+- [x] Set nested key creates structure
+- [x] YAML value parsing (lists, bools, integers)
 
 #### `dt config unset`
-- [ ] Remove existing key
-- [ ] Clean up empty parent dicts
-- [ ] No error for missing key
+- [x] Remove existing key
+- [x] Clean up empty parent dicts
+- [x] Error for missing key
 
-#### `dt config edit`
-- [ ] Opens editor for config file
+#### `dt config path`
+- [x] Shows all scope paths
+- [x] Shows single scope with flag
+- [x] Shows existence indicator
 
 ---
 
@@ -241,15 +243,15 @@ Integration tests run real git/DVC commands against actual repositories.
 
 **File:** `test_init_cmd.py`
 
-- [ ] Initialize new project (git + DVC)
-- [ ] Initialize with --no-git (DVC only)
-- [ ] Initialize with --no-dvc (git only)
-- [ ] Install DVC git hooks
-- [ ] Create .dt directory
-- [ ] Configure external cache (if cache.root set)
-- [ ] Configure remote (if remote.root set)
-- [ ] Check GitHub remote and suggest creation
-- [ ] Error: already initialized
+- [x] Initialize new project (git + DVC)
+- [x] Initialize with --no-git (DVC only)
+- [x] Initialize with --no-dvc (git only)
+- [x] Install DVC git hooks
+- [x] Create .dt directory
+- [x] Configure external cache (if cache.root set)
+- [x] Configure remote (if remote.root set)
+- [x] Check GitHub remote and suggest creation
+- [x] Error: already initialized
 
 ---
 
@@ -463,8 +465,8 @@ Tests requiring network access:
 |---------|-------|--------|
 | add | 0 | ⬜ Not started |
 | cache | 0 | ⬜ Not started |
-| clone | 0 | ⬜ Not started |
-| config | 0 | ⬜ Not started |
+| clone | 15 | ✅ Complete |
+| config | 24 | ✅ Complete |
 | diff | 0 | ⬜ Not started |
 | doctor | 0 | ⬜ Not started |
 | du | 0 | ⬜ Not started |
@@ -473,7 +475,7 @@ Tests requiring network access:
 | history | 0 | ⬜ Not started |
 | import | 0 | ⬜ Not started |
 | index | 0 | ⬜ Not started |
-| init | 0 | ⬜ Not started |
+| init | 16 | ✅ Complete |
 | ls | 0 | ⬜ Not started |
 | mv | 0 | ⬜ Not started |
 | offline | 0 | ⬜ Not started |
@@ -484,4 +486,4 @@ Tests requiring network access:
 | tmp | 0 | ⬜ Not started |
 | worktree | 0 | ⬜ Not started |
 
-**Total:** 0 tests implemented
+**Total:** 55 tests implemented
