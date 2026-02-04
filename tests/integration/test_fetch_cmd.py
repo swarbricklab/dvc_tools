@@ -1,7 +1,10 @@
 """Integration tests for dt fetch command.
 
 These tests verify fetch functionality with real DVC repositories.
-Uses the local dt-test-fixtures and dt-test-registry repositories.
+Uses cloned dt-test-fixtures and dt-test-registry repositories.
+
+The test repos are cloned from GitHub on first use (session-scoped).
+Data is fetched from remotes, which works on NCI with SSH access.
 """
 
 import os
@@ -12,6 +15,9 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import requires_dvc, requires_git
+
+# Import requires_network from integration conftest
+from tests.integration.conftest import requires_network
 
 
 # =============================================================================
@@ -64,92 +70,107 @@ def run_dvc(*args, cwd=None, check=True):
 
 
 # =============================================================================
-# Fixtures
+# Session-Scoped Test Repository Fixtures
 # =============================================================================
 
-def _find_test_repo(repo_name: str) -> Path:
-    """Find a test repository by checking multiple locations.
+@pytest.fixture(scope="session")
+def test_repos_base(tmp_path_factory):
+    """Session-scoped base directory for test repositories.
     
-    Checks in order:
-    1. Environment variable (DT_TEST_FIXTURES_PATH or DT_TEST_REGISTRY_PATH)
-    2. Alongside dvc_tools (../repo_name)
-    3. Common NCI locations
+    Clones dt-test-fixtures and dt-test-registry from GitHub once per session.
+    Fetches data from remotes (works on NCI with SSH access).
     
-    Args:
-        repo_name: Name of the repo (e.g., 'dt-test-fixtures')
-        
-    Returns:
-        Path to the repository
-        
-    Raises:
-        pytest.skip if not found
+    Returns a dict with paths to the cloned repos.
     """
-    env_var = f"DT_{repo_name.upper().replace('-', '_')}_PATH"
+    base_dir = tmp_path_factory.mktemp("test-repos")
     
-    # Check environment variable first
-    if os.environ.get(env_var):
-        path = Path(os.environ[env_var])
-        if path.exists():
-            return path
+    repos = {}
     
-    # Check relative to dvc_tools project
-    project_root = Path(__file__).parent.parent.parent
-    relative_path = project_root.parent / repo_name
-    if relative_path.exists():
-        return relative_path
-    
-    # Check common NCI locations
-    nci_locations = [
-        Path.home() / 'projects' / repo_name,
-        Path.home() / repo_name,
-        Path(f'/g/data/a56/dvc/testing/{repo_name}'),
-    ]
-    
-    for path in nci_locations:
-        if path.exists():
-            return path
-    
-    # Not found - skip the test
-    checked_paths = [str(relative_path)] + [str(p) for p in nci_locations]
-    pytest.skip(
-        f"{repo_name} not found. Checked:\n" +
-        "\n".join(f"  - {p}" for p in checked_paths) +
-        f"\nSet {env_var} environment variable to specify location."
+    # Clone dt-test-registry first (source for imports)
+    registry_path = base_dir / "dt-test-registry"
+    result = subprocess.run(
+        ['git', 'clone', 'https://github.com/swarbricklab/dt-test-registry.git', 
+         str(registry_path)],
+        capture_output=True,
+        text=True,
     )
+    if result.returncode != 0:
+        pytest.skip(f"Could not clone dt-test-registry: {result.stderr}")
+    repos['registry'] = registry_path
+    
+    # Fetch data from remote (requires network access to SSH remote on NCI)
+    result = subprocess.run(
+        ['dvc', 'fetch', '-a'],  # -a to fetch all revisions
+        capture_output=True,
+        text=True,
+        cwd=registry_path,
+    )
+    # Don't fail if fetch fails - data might already be cached or we might
+    # be testing without network. Tests will skip if data not available.
+    repos['registry_fetch_ok'] = result.returncode == 0
+    
+    # Clone dt-test-fixtures
+    fixtures_path = base_dir / "dt-test-fixtures"
+    result = subprocess.run(
+        ['git', 'clone', 'https://github.com/swarbricklab/dt-test-fixtures.git',
+         str(fixtures_path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"Could not clone dt-test-fixtures: {result.stderr}")
+    repos['fixtures'] = fixtures_path
+    
+    # Fetch data from remote
+    result = subprocess.run(
+        ['dvc', 'fetch', '-a'],
+        capture_output=True,
+        text=True,
+        cwd=fixtures_path,
+    )
+    repos['fixtures_fetch_ok'] = result.returncode == 0
+    
+    return repos
 
 
 @pytest.fixture
-def dt_test_fixtures_path():
-    """Path to the dt-test-fixtures repository."""
-    return _find_test_repo('dt-test-fixtures')
+def dt_test_fixtures_path(test_repos_base):
+    """Path to the dt-test-fixtures repository (session-cached clone)."""
+    return test_repos_base['fixtures']
 
 
 @pytest.fixture
-def dt_test_registry_path():
-    """Path to the dt-test-registry repository."""
-    return _find_test_repo('dt-test-registry')
+def dt_test_registry_path(test_repos_base):
+    """Path to the dt-test-registry repository (session-cached clone)."""
+    return test_repos_base['registry']
 
 
 @pytest.fixture
 def cloned_test_fixtures(tmp_path, dt_test_fixtures_path, dt_test_registry_path):
     """Create a fresh clone of dt-test-fixtures for isolated testing.
     
-    Configures the clone to use local remotes and updates import URLs
-    to point to the local dt-test-registry.
+    Configures the clone to use local remotes and copies cached data
+    so tests can run without network access.
     """
     clone_path = tmp_path / 'dt-test-fixtures'
     
-    # Clone the repo
+    # Clone the repo (from session-cached clone)
     subprocess.run(
         ['git', 'clone', str(dt_test_fixtures_path), str(clone_path)],
         check=True, capture_output=True
     )
     
-    # Configure local remote
+    # Set up local remote storage
     local_remote = tmp_path / 'local-remote'
     local_remote.mkdir()
     
-    # Copy the remote data from original repo
+    # Copy cached data from the session-cached repo to local remote
+    # The cache contains files fetched from SSH remotes
+    source_cache = dt_test_fixtures_path / '.dvc' / 'cache'
+    if source_cache.exists():
+        shutil.copytree(source_cache, local_remote / 'files', dirs_exist_ok=True)
+    
+    # Also copy from .remote if it exists (local development)
     original_remote = dt_test_fixtures_path / '.remote'
     if original_remote.exists():
         shutil.copytree(original_remote, local_remote, dirs_exist_ok=True)
@@ -173,6 +194,7 @@ def cloned_test_fixtures(tmp_path, dt_test_fixtures_path, dt_test_registry_path)
     )
     
     # Update import .dvc files to point to local dt-test-registry
+    import yaml
     for dvc_file in clone_path.rglob('*.dvc'):
         # Skip the .dvc directory itself
         if dvc_file.is_dir():
@@ -184,8 +206,6 @@ def cloned_test_fixtures(tmp_path, dt_test_fixtures_path, dt_test_registry_path)
         content = dvc_file.read_text()
         if 'repo:' in content:
             # Update URL to point to local registry
-            # This handles both absolute and relative URLs
-            import yaml
             data = yaml.safe_load(content)
             if data and 'deps' in data:
                 for dep in data['deps']:
@@ -208,6 +228,7 @@ def cloned_test_fixtures(tmp_path, dt_test_fixtures_path, dt_test_registry_path)
 @pytest.mark.integration
 @requires_git
 @requires_dvc
+@requires_network  # Clones repos from GitHub
 class TestFetchBasic:
     """Test basic dt fetch functionality."""
 
@@ -247,6 +268,7 @@ class TestFetchBasic:
 @pytest.mark.integration
 @requires_git
 @requires_dvc
+@requires_network  # Clones repos from GitHub
 class TestFetchImport:
     """Test fetch with import .dvc files."""
 
@@ -286,6 +308,7 @@ class TestFetchImport:
 @pytest.mark.integration
 @requires_git
 @requires_dvc
+@requires_network  # Clones repos from GitHub
 class TestFetchRegular:
     """Test fetch with regular (non-import) .dvc files."""
 
@@ -322,6 +345,7 @@ class TestFetchRegular:
 @pytest.mark.integration
 @requires_git
 @requires_dvc
+@requires_network  # Clones repos from GitHub
 class TestFetchOptions:
     """Test fetch command options."""
 
@@ -354,6 +378,7 @@ class TestFetchOptions:
 @pytest.mark.integration
 @requires_git
 @requires_dvc
+@requires_network  # Clones repos from GitHub
 class TestFetchErrors:
     """Test fetch error handling."""
 
@@ -388,6 +413,7 @@ class TestFetchErrors:
 @pytest.mark.integration
 @requires_git
 @requires_dvc
+@requires_network  # Clones repos from GitHub
 class TestFetchCheckoutWorkflow:
     """Test fetch + checkout workflow."""
 
