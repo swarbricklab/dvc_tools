@@ -100,6 +100,11 @@ class TmpError(DTError):
     pass
 
 
+class WorktreeError(DTError):
+    """Error during worktree operations."""
+    pass
+
+
 class AddError(DTError):
     """Error during add operations."""
     pass
