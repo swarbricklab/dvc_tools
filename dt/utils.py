@@ -6,7 +6,7 @@ Common functions used across multiple modules.
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 class DependencyError(Exception):
@@ -220,8 +220,40 @@ def collect_tracked_entries(
 # DVC file utilities
 # =============================================================================
 
+def load_dvc_file(dvc_path: Path, repo: Optional[Any] = None) -> Any:
+    """Load a .dvc file using DVC's internal parser.
+    
+    Returns a SingleStageFile object with typed access to stage data.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        repo: Optional DVC Repo object. If not provided, one will be created.
+        
+    Returns:
+        SingleStageFile object with .stage attribute containing:
+        - stage.outs: List of Output objects
+        - stage.deps: List of Dependency objects  
+        - stage.is_repo_import: True if this is an import from another repo
+        - stage.is_import: True if this is any kind of import
+        
+    Raises:
+        DVCFileError: If the file cannot be parsed.
+    """
+    from dvc.dvcfile import load_file
+    from dvc.repo import Repo
+    
+    try:
+        if repo is None:
+            repo = Repo()
+        return load_file(repo, str(dvc_path))
+    except Exception as e:
+        raise DVCFileError(f"Failed to parse {dvc_path}: {e}")
+
+
 def parse_dvc_file(dvc_path: Path) -> Dict[str, Any]:
-    """Parse a .dvc file and return its contents.
+    """Parse a .dvc file and return its contents as a dictionary.
+    
+    This is a compatibility wrapper - prefer load_dvc_file() for new code.
     
     Args:
         dvc_path: Path to the .dvc file.
@@ -239,6 +271,57 @@ def parse_dvc_file(dvc_path: Path) -> Dict[str, Any]:
             return yaml.safe_load(f) or {}
     except Exception as e:
         raise DVCFileError(f"Failed to parse {dvc_path}: {e}")
+
+
+def is_repo_import(dvc_path: Path, repo: Optional[Any] = None) -> bool:
+    """Check if a .dvc file is an import from another repository.
+    
+    Uses DVC's internal stage.is_repo_import property.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        repo: Optional DVC Repo object.
+        
+    Returns:
+        True if this .dvc file was created by `dvc import`.
+    """
+    try:
+        dvc_file = load_dvc_file(dvc_path, repo)
+        return dvc_file.stage.is_repo_import
+    except DVCFileError:
+        return False
+
+
+def get_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+    """Extract import information from a .dvc file.
+    
+    Uses DVC's internal RepoDependency to get source repo details.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        repo: Optional DVC Repo object.
+        
+    Returns:
+        Dictionary with 'url', 'rev', and 'path' keys, or None if not an import.
+    """
+    try:
+        dvc_file = load_dvc_file(dvc_path, repo)
+        stage = dvc_file.stage
+        
+        if not stage.is_repo_import:
+            return None
+        
+        # Get the first repo dependency
+        for dep in stage.deps:
+            if hasattr(dep, 'def_repo') and dep.def_repo:
+                return {
+                    'url': dep.def_repo.get('url'),
+                    'rev': dep.def_repo.get('rev_lock') or dep.def_repo.get('rev'),
+                    'path': dep.def_path,
+                }
+        return None
+    except DVCFileError:
+        return None
 
 
 # =============================================================================
