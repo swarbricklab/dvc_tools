@@ -1,3 +1,0 @@
-#! /bin/bash
-
-dvc dag --dot | grep -v ".dvc" | dot -Tsvg > dag.svg  
