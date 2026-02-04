@@ -54,54 +54,6 @@ The cache location is determined by (in order of precedence):
 
 **Default behavior** (no options): Uses `${cache.root config}/${current directory name}`
 
-## dt cache list
-
-List the primary DVC cache and all configured alternate caches.
-
-```bash
-dt cache list
-```
-
-Example output:
-
-```
-Primary: /scratch/a56/jr9959/.dvc/cache
-
-Alternate caches:
-  /g/data/a56/dvc/neochemo      (local)
-  /g/data/a56/dvc/projectA      (user)
-```
-
-## dt cache add
-
-Add an alternate cache path for multi-cache checkout.
-
-```bash
-dt cache add <path> [--local|--project|--user|--system]
-```
-
-Default scope is **local** (stored in `.dt/config.local`).
-
-```bash
-# Add to local config (default)
-dt cache add /g/data/a56/dvc/neochemo
-
-# Add to user config
-dt cache add /g/data/a56/dvc/shared --user
-```
-
-## dt cache remove
-
-Remove an alternate cache path.
-
-```bash
-dt cache remove <path> [--local|--project|--user|--system]
-```
-
-```bash
-dt cache remove /g/data/a56/dvc/neochemo
-```
-
 ## dt cache rm
 
 Remove cached files for specified targets from the local cache. This deletes the cache files while leaving the workspace unchanged.
@@ -180,71 +132,15 @@ dt cache rm -v data/
 
 ### Notes
 
-- This command only affects the **primary cache**. Alternate caches are never modified.
-- This command only affects the local cache. Remote storage is not modified.
+- This command only affects the **primary cache**. Remote storage is not modified.
 - If the workspace files are still present, they can be re-cached using `dvc add` or restored from remote using `dvc pull`.
 - Directory targets are processed recursively to find all contained DVC-tracked files.
 - Use `dvc data status` to check if your cache is consistent after removing files.
 
-## dt cache add-from
-
-Discover and add a cache from a remote repository's DVC configuration.
-
-```bash
-dt cache add-from <repository> [--owner <owner>]
-```
-
-This command:
-1. Clones the repository (sparsely) to access its DVC configuration
-2. Lists its configured remotes
-3. Finds a locally-accessible remote (filesystem path)
-4. Adds that path as an alternate cache
-
-### Examples
-
-```bash
-# Add cache from a GitHub repository
-dt cache add-from git@github.com:myorg/otherproject.git
-
-# Using short name (requires git.owner config)
-dt cache add-from otherproject
-
-# With owner override
-dt cache add-from otherproject --owner myorg
-```
-
-### How it works
-
-The command looks for remotes with URLs that resolve to local filesystem paths:
-- Direct paths: `/g/data/a56/dvc/project`
-- SSH URLs with local host: `ssh://gadi-dm.nci.org.au/g/data/...`
-
-The `ssh.host` config value is used to determine if an SSH URL points to the local system.
-
-## Alternate cache configuration
-
-Alternate caches are stored in dt config under `cache.alt`:
-
-```yaml
-# .dt/config.local
-cache:
-  alt:
-    - /g/data/a56/dvc/neochemo
-    - /g/data/a56/dvc/projectA
-```
-
-Paths from all scopes are merged, with duplicates removed.
-
-Alternate caches allow `dt checkout` to find files across multiple cache locations. This is useful when:
-
-- Importing data from other projects on the same filesystem
-- Sharing caches across related projects
-- Accessing data from a project's remote storage directly (when mounted locally)
-
 ## Related Commands
 
 - [`dt init`](init.md) - Initialize projects with cache setup
-- [`dt checkout`](checkout.md) - Checkout using multiple caches
+- [`dt fetch`](fetch.md) - Fetch imports from local caches
 - [`dt import`](import.md) - Import data from other repositories
 - [`dt remote init`](remote.md#init) - Set up remote storage
 - [`dt tmp`](tmp.md) - Manage temporary repository clones

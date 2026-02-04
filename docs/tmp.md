@@ -6,7 +6,7 @@ Manage temporary repository clones for accessing DVC configuration from remote r
 
 The `dt tmp` commands manage sparse clones stored in `.dt/tmp/clones/`. These clones contain only the `.dvc/` directory and `*.dvc` files, providing access to a repository's DVC configuration without downloading any data.
 
-Temporary clones are used by other commands like `dt import`, `dt cache add-from`, and `dt checkout` (for import files).
+Temporary clones are used by other commands like `dt import` and `dt fetch` (for import files).
 
 ## dt tmp clone
 
@@ -127,8 +127,7 @@ This checks out only:
 You typically don't need to use `dt tmp` directly. These commands use it automatically:
 
 - `dt import` - Clones source repo to find cache
-- `dt cache add-from` - Clones repo to discover remotes  
-- `dt checkout` - Clones source for import `.dvc` files
+- `dt fetch` - Clones source for import `.dvc` files
 
 ## Gitignore
 
@@ -137,5 +136,5 @@ The `.dt/tmp/` directory is automatically added to `.dt/.gitignore` to prevent a
 ## See also
 
 - [dt import](import.md) - Import data from repositories
-- [dt cache add-from](cache.md#dt-cache-add-from) - Add cache from repository
+- [dt fetch](fetch.md) - Fetch imports from local caches
 - [dt remote list](remote.md#dt-remote-list) - List repository remotes

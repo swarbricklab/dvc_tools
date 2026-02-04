@@ -9,7 +9,7 @@
 | [`dt init`](#dt-init) | Initialize a new DVC project with external cache and remote |
 | [`dt clone`](#dt-clone) | Clone an existing DVC project and set up local configuration |
 | [`dt add`](#dt-add) | Add files to DVC tracking via compute node |
-| [`dt checkout`](#dt-checkout) | Checkout DVC-tracked files, searching across multiple caches |
+| [`dt fetch`](#dt-fetch) | Fetch import files into primary cache from local sources |
 | [`dt mv`](#dt-mv) | Move or rename DVC-tracked files, preserving import metadata |
 | [`dt pull`](#dt-pull) | Pull DVC-tracked files, handling imports automatically |
 | [`dt push`](#dt-push) | Push DVC-tracked files to all configured remotes |
@@ -60,15 +60,15 @@ Submits `dvc add` to a compute node via qxub with parallel checksum computation.
 
 ---
 
-## dt checkout
+## dt fetch
 
-Checkout DVC-tracked files, searching across multiple caches.
+Fetch import files into the primary cache from local sources.
 
 ```bash
-dt checkout [targets...] [-v] [-c <cache>]
+dt fetch [targets...] [-v] [--no-refresh]
 ```
 
-Searches primary and alternate caches for files. Automatically handles import `.dvc` files by cloning source repos. [Full documentation →](checkout.md)
+Populates the primary cache with symlinks from source caches. For imports, automatically clones source repos to find local caches. [Full documentation →](fetch.md)
 
 ---
 
@@ -92,7 +92,7 @@ Pull DVC-tracked files, handling imports automatically.
 dt pull [targets...] [-v]
 ```
 
-Resolves targets to their tracking `.dvc` files. For imports (`.dvc` with `deps.repo`), uses `dt checkout`. For regular files, uses `dvc pull`. [Full documentation →](pull.md)
+Resolves targets to their tracking `.dvc` files. For imports (`.dvc` with `deps.repo`), uses `dt fetch`. For regular files, uses `dvc pull`. [Full documentation →](pull.md)
 
 ---
 
@@ -139,10 +139,7 @@ Manage external shared caches.
 | Subcommand | Description |
 |------------|-------------|
 | `dt cache init` | Set up an external shared cache with proper permissions |
-| `dt cache list` | List the primary DVC cache and all alternate caches |
-| `dt cache add <path>` | Add an alternate cache path for multi-cache checkout |
-| `dt cache add-from <repo>` | Discover and add a cache from a repository's remotes |
-| `dt cache remove <path>` | Remove an alternate cache path |
+| `dt cache rm` | Remove cached files for specified targets |
 
 [Full documentation →](cache.md)
 
