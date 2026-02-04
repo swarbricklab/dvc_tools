@@ -23,80 +23,6 @@ class CheckoutError(Exception):
     pass
 
 
-# Use shared DVC file utilities from utils
-parse_dvc_file = utils.parse_dvc_file
-load_dvc_file = utils.load_dvc_file
-
-
-def is_import_dvc(dvc_data: Dict[str, Any]) -> bool:
-    """Check if a .dvc file represents an import (has deps section).
-    
-    DEPRECATED: Use utils.is_repo_import(path) for new code.
-    This function is kept for compatibility with code that already
-    has parsed dvc_data.
-    
-    Args:
-        dvc_data: Parsed .dvc file contents.
-        
-    Returns:
-        True if this is an import .dvc file.
-    """
-    deps = dvc_data.get('deps', [])
-    if not deps:
-        return False
-    
-    # Check for repo section in deps
-    for dep in deps:
-        if 'repo' in dep:
-            return True
-    
-    return False
-
-
-def get_import_info(dvc_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Extract import information from a .dvc file.
-    
-    DEPRECATED: Use utils.get_import_info(path) for new code.
-    This function is kept for compatibility with code that already
-    has parsed dvc_data.
-    
-    Args:
-        dvc_data: Parsed .dvc file contents.
-        
-    Returns:
-        Dictionary with 'url', 'rev', and 'path' keys, or None if not an import.
-    """
-    deps = dvc_data.get('deps', [])
-    for dep in deps:
-        repo = dep.get('repo', {})
-        if repo:
-            return {
-                'url': repo.get('url'),
-                'rev': repo.get('rev_lock') or repo.get('rev'),
-                'path': dep.get('path'),
-            }
-    return None
-
-
-def get_primary_cache() -> Optional[str]:
-    """Get the primary DVC cache directory.
-    
-    Returns:
-        Path to the primary cache, or None if not configured.
-    """
-    try:
-        result = subprocess.run(
-            ['dvc', 'cache', 'dir'],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return None
-
-
 def get_cache_by_name(name: str) -> Optional[str]:
     """Get a cache directory by name or path.
     
@@ -138,9 +64,9 @@ def get_all_caches() -> List[str]:
     caches = []
     
     # Primary cache first
-    primary = get_primary_cache()
+    primary = utils.get_cache_dir()
     if primary:
-        caches.append(primary)
+        caches.append(str(primary))
     
     # Alternate caches from config
     alt_caches = cfg.get_list_value('cache.alt')
@@ -387,27 +313,22 @@ def smart_checkout(
         
         # Only check .dvc files that exist
         if target_path.suffix == '.dvc' and target_path.exists():
-            try:
-                dvc_data = parse_dvc_file(target_path)
-                if is_import_dvc(dvc_data):
-                    import_targets.append((target_path, dvc_data))
-                    continue
-            except CheckoutError:
-                pass  # Fall through to regular checkout
+            if utils.is_repo_import(target_path):
+                import_targets.append(target_path)
+                continue
         
         regular_targets.append(target)
     
     all_results = []
     
     # Handle import targets
-    for dvc_path, dvc_data in import_targets:
+    for dvc_path in import_targets:
         if verbose:
             print(f"Detected import: {dvc_path}")
         
         try:
             results = checkout_import(
                 dvc_path=dvc_path,
-                dvc_data=dvc_data,
                 extra_args=extra_args,
                 verbose=verbose,
                 refresh=refresh,
@@ -432,7 +353,6 @@ def smart_checkout(
 
 def checkout_import(
     dvc_path: Path,
-    dvc_data: Dict[str, Any],
     extra_args: Optional[List[str]] = None,
     verbose: bool = False,
     refresh: bool = True,
@@ -444,7 +364,6 @@ def checkout_import(
     
     Args:
         dvc_path: Path to the .dvc file.
-        dvc_data: Parsed .dvc file contents.
         extra_args: Additional arguments to pass to dvc checkout.
         verbose: Print progress messages.
         refresh: Whether to refresh the temp clone (default True).
@@ -472,7 +391,7 @@ def checkout_import(
     from . import remote as remote_mod
     from . import tmp as tmp_mod
     
-    import_info = get_import_info(dvc_data)
+    import_info = utils.get_import_info(dvc_path)
     if not import_info:
         raise CheckoutError(f"Not an import .dvc file: {dvc_path}")
     
@@ -565,7 +484,7 @@ def _populate_cache_from_dvc(
     # Import here to avoid circular imports
     from . import import_data as import_mod
     
-    primary_cache = get_primary_cache()
+    primary_cache = utils.get_cache_dir()
     if not primary_cache:
         return
     
