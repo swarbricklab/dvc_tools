@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import hpc
 from . import utils
-from .fetch import fetch
+from .fetch import fetch, smart_checkout
 from .errors import FetchError, PullError
 
 

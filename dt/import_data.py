@@ -30,7 +30,7 @@ def populate_primary_cache(
 ) -> int:
     """Hardlink workspace symlinks to the primary cache.
     
-    After dt checkout creates symlinks in the workspace pointing to an alt cache,
+    After dvc checkout creates symlinks in the workspace pointing to an alt cache,
     this function creates hardlinks to those symlinks in the primary cache.
     This allows regular DVC operations (dvc checkout, dvc status) to work
     transparently by finding files in the primary cache location.
@@ -66,7 +66,7 @@ def populate_primary_cache(
         else:
             workspace_file = workspace_path
         
-        # Only process if it's a symlink (created by dt checkout)
+        # Only process if it's a symlink (created by dvc checkout)
         if not workspace_file.is_symlink():
             continue
         

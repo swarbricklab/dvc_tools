@@ -87,5 +87,5 @@ outs:
 ## See also
 
 - [dt import](import.md) — Import data from other repositories
-- [dt checkout](checkout.md) — Checkout DVC-tracked files including imports
+- [dt fetch](fetch.md) — Fetch DVC-tracked files including imports
 - [dt pull](pull.md) — Pull DVC-tracked files
