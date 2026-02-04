@@ -74,8 +74,8 @@ Integration tests run real git/DVC commands against actual repositories.
   - [x] `dt clone git@github.com:swarbricklab/dt-test-fixtures`
 - [x] Clone with HTTPS URL
   - [x] `dt clone https://github.com/swarbricklab/dt-test-fixtures`
-- [ ] Clone with short name (uses config owner)
-  - [ ] `dt clone dt-test-fixtures`
+- [x] Clone with short name (uses config owner)
+  - [x] `dt clone dt-test-fixtures`
 - [x] Clone with --owner flag
   - [x] `dt clone dt-test-fixtures --owner swarbricklab`
 - [x] Clone with --shallow flag
@@ -94,28 +94,30 @@ Integration tests run real git/DVC commands against actual repositories.
 **File:** `test_config_cmd.py`
 
 #### `dt config list`
-- [ ] List all config values
-- [ ] List with --scope (user, project, local, system)
-- [ ] Show sources with --show-source
+- [x] List all config values
+- [x] List with --scope (user, project, local, system)
+- [x] Show sources with --show-origin
 
 #### `dt config get`
-- [ ] Get existing key value
-- [ ] Get nested key (dot notation)
-- [ ] Returns empty for missing key
+- [x] Get existing key value
+- [x] Get nested key (dot notation)
+- [x] Returns error for missing key
 
 #### `dt config set`
-- [ ] Set value at default scope (project)
-- [ ] Set value at specific scope
-- [ ] Set nested key creates structure
-- [ ] YAML value parsing (lists, bools)
+- [x] Set value at default scope (project)
+- [x] Set value at specific scope
+- [x] Set nested key creates structure
+- [x] YAML value parsing (lists, bools, integers)
 
 #### `dt config unset`
-- [ ] Remove existing key
-- [ ] Clean up empty parent dicts
-- [ ] No error for missing key
+- [x] Remove existing key
+- [x] Clean up empty parent dicts
+- [x] Error for missing key
 
-#### `dt config edit`
-- [ ] Opens editor for config file
+#### `dt config path`
+- [x] Shows all scope paths
+- [x] Shows single scope with flag
+- [x] Shows existence indicator
 
 ---
 
@@ -463,8 +465,8 @@ Tests requiring network access:
 |---------|-------|--------|
 | add | 0 | ⬜ Not started |
 | cache | 0 | ⬜ Not started |
-| clone | 14 | ✅ Complete |
-| config | 0 | ⬜ Not started |
+| clone | 15 | ✅ Complete |
+| config | 24 | ✅ Complete |
 | diff | 0 | ⬜ Not started |
 | doctor | 0 | ⬜ Not started |
 | du | 0 | ⬜ Not started |
@@ -484,4 +486,4 @@ Tests requiring network access:
 | tmp | 0 | ⬜ Not started |
 | worktree | 0 | ⬜ Not started |
 
-**Total:** 30 tests implemented
+**Total:** 55 tests implemented

@@ -127,6 +127,24 @@ class TestCloneShortName:
         assert result.returncode != 0
         assert 'owner' in result.stderr.lower() or 'owner' in str(result.stdout).lower()
 
+    def test_clone_short_name_with_config_owner(self, dvc_repo):
+        """Clone with short name uses owner from config."""
+        # Pre-configure owner
+        run_dt('config', 'set', 'owner', 'swarbricklab', cwd=dvc_repo)
+        
+        # Clone using short name - config owner should be used
+        result = run_dt(
+            'clone',
+            'dt-test-fixtures',
+            '--shallow',
+            cwd=dvc_repo
+        )
+        
+        assert result.returncode == 0
+        repo_path = dvc_repo / 'dt-test-fixtures'
+        assert repo_path.is_dir()
+        assert (repo_path / '.git').is_dir()
+
 
 # =============================================================================
 # Clone with Custom Path Tests
