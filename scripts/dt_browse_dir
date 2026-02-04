@@ -1,8 +1,0 @@
-#! /bin/bash
-
-dir_file=$1
-
-cat $dir_file \
-    | sed 's|}, {|},\n {|g' \
-    | sed 's|\[{|\[\n\{|g' \
-    | sed 's|}\]|}\n\]|g'
