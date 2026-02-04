@@ -91,9 +91,8 @@ dvc checkout      # Standard checkout works
 ### "No locally-accessible cache found"
 
 The source repository doesn't have a remote that resolves to a local path. Options:
-1. Manually add the cache: `dt cache add /path/to/cache`
-2. Use standard `dvc import` with network access
-3. Copy the cache to a local filesystem
+1. Use standard `dvc import` with network access
+2. Copy the cache to a local filesystem
 
 ### Files not found in cache
 
@@ -105,7 +104,7 @@ dvc push
 
 ## See also
 
-- [dt checkout](checkout.md) - Checkout with import handling
-- [dt cache add-from](cache.md#dt-cache-add-from) - Add cache from repository
+- [dt fetch](fetch.md) - Fetch imports from local caches
+- [dt pull](pull.md) - Pull files including imports
 - [dt tmp](tmp.md) - Manage temporary clones
 - [dt remote list](remote.md#dt-remote-list) - List repository remotes

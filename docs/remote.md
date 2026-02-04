@@ -98,6 +98,6 @@ The `[local]` marker indicates paths accessible on the local filesystem.
 
 - [`dt init`](init.md) - Initialize projects with remote setup
 - [`dt cache init`](cache.md#init) - Set up local cache
-- [`dt cache add-from`](cache.md#dt-cache-add-from) - Add cache from remote repo
+- [`dt fetch`](fetch.md) - Fetch imports from local caches
 - [`dt config`](config.md) - Configure remote settings
 - [`dt tmp`](tmp.md) - Manage temporary repository clones

@@ -925,7 +925,7 @@ def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refre
     """Pull DVC-tracked files, handling imports automatically.
     
     For targets tracked by import .dvc files (those with deps.repo),
-    uses dt checkout to fetch from the source repository's cache.
+    uses dt fetch to populate the cache from the source repository.
     For other targets, uses regular dvc pull.
     
     Without --workers: pulls using regular dvc pull.
@@ -999,10 +999,10 @@ def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refre
         if import_targets:
             if dry:
                 # Dry run: just report imports
-                click.echo(f"Imports to checkout ({len(import_targets)}):")
+                click.echo(f"Imports to fetch ({len(import_targets)}):")
                 for target in import_targets:
                     dvc_file = pull_mod.resolve_to_dvc_file(target)
-                    click.echo(f"  {target} → dt checkout {dvc_file}")
+                    click.echo(f"  {target} → dt fetch {dvc_file}")
             else:
                 # Actually checkout imports
                 if verbose:
@@ -1012,7 +1012,7 @@ def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refre
                     dvc_file = pull_mod.resolve_to_dvc_file(target)
                     if dvc_file:
                         if verbose:
-                            click.echo(f"  dt checkout {dvc_file}")
+                            click.echo(f"  dt fetch {dvc_file}")
                         pull_mod.smart_checkout(
                             targets=[str(dvc_file)],
                             cache=None,
