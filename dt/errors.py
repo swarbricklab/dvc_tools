@@ -65,6 +65,11 @@ class InitError(DTError):
     pass
 
 
+class MvError(DTError):
+    """Error during move/rename operations."""
+    pass
+
+
 class OfflineError(DTError):
     """Error during offline mode operations."""
     pass
