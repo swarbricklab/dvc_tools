@@ -52,6 +52,11 @@ class FetchError(DTError):
     pass
 
 
+class FindError(DTError):
+    """Error during find operations."""
+    pass
+
+
 class HistoryError(DTError):
     """Error during history operations."""
     pass

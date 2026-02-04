@@ -11,6 +11,7 @@
 | [`dt add`](#dt-add) | Add files to DVC tracking via compute node |
 | [`dt diff`](#dt-diff) | Show content differences between file versions |
 | [`dt fetch`](#dt-fetch) | Fetch import files into primary cache from local sources |
+| [`dt find`](#dt-find) | Find workspace path(s) for a given hash |
 | [`dt history`](#dt-history) | Show version history of DVC-tracked files |
 | [`dt mv`](#dt-mv) | Move or rename DVC-tracked files, preserving import metadata |
 | [`dt pull`](#dt-pull) | Pull DVC-tracked files, handling imports automatically |
@@ -84,6 +85,18 @@ dt fetch [targets...] [-v] [--no-refresh]
 ```
 
 Populates the primary cache with symlinks from source caches. For imports, automatically clones source repos to find local caches. [Full documentation →](fetch.md)
+
+---
+
+## dt find
+
+Find workspace path(s) for a given hash.
+
+```bash
+dt find <hash> [--dvc-file] [--dir-file] [--cache-path] [-v] [--json]
+```
+
+Reverse lookup: given an MD5 hash, find which DVC-tracked file(s) it corresponds to. Searches both top-level files and files within directories. [Full documentation →](find.md)
 
 ---
 

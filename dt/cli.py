@@ -622,6 +622,57 @@ def du(targets, human, max_depth, summarize, inodes, show_total, cached):
         click.echo(f"{total_str:>{max_width}}   total")
 
 
+@cli.command()
+@click.argument('hash')
+@click.option('--dvc-file', is_flag=True, help='Show the .dvc file path')
+@click.option('--dir-file', is_flag=True, help='Show the .dir hash if file is in a directory')
+@click.option('--cache-path', is_flag=True, help='Show the full path in cache')
+@click.option('--no-expand', is_flag=True, help='Do not search inside .dir manifests')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True, help='Show all available details')
+def find(hash, dvc_file, dir_file, cache_path, no_expand, json_output, verbose):
+    """Find workspace path(s) for a given hash.
+    
+    Reverse lookup: given an MD5 hash, find which DVC-tracked file(s) it
+    corresponds to in the workspace.
+    
+    Searches both top-level tracked files and files within tracked directories.
+    Partial hashes are supported (minimum 4 characters).
+    
+    \b
+    Examples:
+        dt find cf7bfcb23f8c              # Find by partial hash
+        dt find cf7bfcb23f8c0b12... -v    # Verbose with all details
+        dt find abc123 --dvc-file         # Show which .dvc file tracks it
+        dt find abc123 --cache-path       # Show path in cache
+        dt find abc123 --json             # JSON output
+    """
+    from . import find as find_mod
+    
+    try:
+        results = find_mod.find_by_hash(
+            file_hash=hash,
+            expand_dirs=not no_expand,
+            show_dvc_file=dvc_file or verbose,
+            show_dir_file=dir_file or verbose,
+            show_cache_path=cache_path or verbose,
+        )
+        
+        if not results and not json_output:
+            click.echo(f"No matches found for hash: {hash}")
+            raise SystemExit(1)
+        
+        output = find_mod.format_results(
+            results,
+            verbose=verbose,
+            json_output=json_output,
+        )
+        click.echo(output)
+        
+    except find_mod.FindError as e:
+        raise click.ClickException(str(e))
+
+
 @cli.command(context_settings=dict(
     ignore_unknown_options=True,
     allow_extra_args=True,
