@@ -14,6 +14,11 @@ class DependencyError(Exception):
     pass
 
 
+class DVCFileError(Exception):
+    """Raised when a .dvc file cannot be parsed or is invalid."""
+    pass
+
+
 # =============================================================================
 # Formatting utilities
 # =============================================================================
@@ -209,6 +214,31 @@ def collect_tracked_entries(
         'repo': repo,
         'indexes': indexes,
     }
+
+
+# =============================================================================
+# DVC file utilities
+# =============================================================================
+
+def parse_dvc_file(dvc_path: Path) -> Dict[str, Any]:
+    """Parse a .dvc file and return its contents.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        
+    Returns:
+        Dictionary with the .dvc file contents.
+        
+    Raises:
+        DVCFileError: If the file cannot be parsed.
+    """
+    import yaml
+    
+    try:
+        with open(dvc_path) as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        raise DVCFileError(f"Failed to parse {dvc_path}: {e}")
 
 
 # =============================================================================
