@@ -14,8 +14,6 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
-
 from . import config as cfg
 from . import utils
 
@@ -25,23 +23,8 @@ class CheckoutError(Exception):
     pass
 
 
-def parse_dvc_file(dvc_path: Path) -> Dict[str, Any]:
-    """Parse a .dvc file and return its contents.
-    
-    Args:
-        dvc_path: Path to the .dvc file.
-        
-    Returns:
-        Dictionary with the .dvc file contents.
-        
-    Raises:
-        CheckoutError: If the file cannot be parsed.
-    """
-    try:
-        with open(dvc_path) as f:
-            return yaml.safe_load(f) or {}
-    except Exception as e:
-        raise CheckoutError(f"Failed to parse {dvc_path}: {e}")
+# Use shared parse_dvc_file from utils
+parse_dvc_file = utils.parse_dvc_file
 
 
 def is_import_dvc(dvc_data: Dict[str, Any]) -> bool:
