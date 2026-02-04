@@ -375,6 +375,120 @@ def cache_rm(targets, dry, size, verbose, force):
         raise click.ClickException(f"Failed to delete {len(failed)} file(s)")
 
 
+@cache.command('validate')
+@click.argument('targets', nargs=-1)
+@click.option('--fix', is_flag=True, help='Delete corrupted files (and their parent .dir manifests)')
+@click.option('-v', '--verbose', is_flag=True, help='Show result for each file')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+@click.option('--no-progress', is_flag=True, help='Disable progress counter')
+def cache_validate(targets, fix, verbose, json_output, no_progress):
+    """Validate cache files by checking MD5 checksums.
+    
+    Detects corrupted cache files (e.g., from interrupted transfers)
+    by computing their actual MD5 hash and comparing to the expected
+    hash from the filename.
+    
+    Without targets, validates the entire cache. With targets, validates
+    only the files associated with those workspace paths.
+    
+    Use --fix to delete corrupted files. For files inside directories,
+    this also deletes the parent .dir manifest so that `dt pull` will
+    re-fetch the entire directory.
+    
+    \b
+    Examples:
+        dt cache validate                  # Validate entire cache
+        dt cache validate data/            # Validate files for data/
+        dt cache validate -v               # Verbose output
+        dt cache validate --fix            # Delete corrupted files
+        dt cache validate --fix data/      # Fix only specific targets
+    """
+    import json
+    
+    try:
+        result = cache_mod.validate_cache(
+            targets=list(targets) if targets else None,
+            fix=fix,
+            verbose=verbose,
+            progress=not no_progress and not json_output,
+        )
+    except cache_mod.CacheError as e:
+        raise click.ClickException(str(e))
+    
+    valid = result['valid']
+    corrupted = result['corrupted']
+    missing = result['missing']
+    fixed = result['fixed']
+    dir_fixed = result['dir_fixed']
+    errors = result['errors']
+    
+    if json_output:
+        output = {
+            'valid_count': len(valid),
+            'corrupted': [
+                {'path': p, 'hash': h, 'expected': e, 'actual': a}
+                for p, h, e, a in corrupted
+            ],
+            'missing': [{'path': p, 'hash': h} for p, h in missing],
+            'fixed': [{'path': p, 'hash': h} for p, h in fixed],
+            'dir_fixed': dir_fixed,
+            'errors': [{'path': p, 'error': e} for p, e in errors],
+        }
+        click.echo(json.dumps(output, indent=2))
+        return
+    
+    # Summary
+    total = len(valid) + len(corrupted)
+    
+    if total == 0 and missing:
+        # Only missing files (not in cache)
+        click.echo(f"No cached files to validate ({len(missing)} file(s) not in cache)")
+        if verbose:
+            for workspace_path, file_hash in missing:
+                click.echo(f"  {workspace_path}")
+    elif not corrupted and not errors:
+        click.echo(f"✓ All {total} files validated successfully")
+        if missing:
+            click.echo(f"  ({len(missing)} file(s) not in cache)")
+    else:
+        click.echo(f"Validated {total} files:")
+        click.echo(f"  ✓ Valid: {len(valid)}")
+        if corrupted:
+            click.echo(f"  ✗ Corrupted: {len(corrupted)}")
+        if missing:
+            click.echo(f"  - Not in cache: {len(missing)}")
+        if errors:
+            click.echo(f"  ! Errors: {len(errors)}")
+    
+    # Details for corrupted files
+    if corrupted and not verbose:
+        click.echo("\nCorrupted files:")
+        for workspace_path, file_hash, expected, actual in corrupted:
+            click.echo(f"  {workspace_path}")
+            if verbose:
+                click.echo(f"    Expected: {expected}")
+                click.echo(f"    Actual:   {actual}")
+    
+    # Report fixes
+    if fix and fixed:
+        click.echo(f"\nFixed: deleted {len(fixed)} corrupted file(s)")
+        if dir_fixed:
+            click.echo(f"Also deleted {len(dir_fixed)} parent .dir manifest(s)")
+        click.echo("\nRun 'dt pull' to re-fetch the deleted files.")
+    elif corrupted and not fix:
+        click.echo("\nRun with --fix to delete corrupted files, then 'dt pull' to re-fetch.")
+    
+    # Report errors
+    if errors:
+        click.echo(f"\nErrors ({len(errors)}):", err=True)
+        for path, error in errors:
+            click.echo(f"  {path}: {error}", err=True)
+    
+    # Exit with error if corruption found and not fixed
+    if corrupted and not fix:
+        raise SystemExit(1)
+
+
 @cli.group()
 def remote():
     """Manage remote storage."""

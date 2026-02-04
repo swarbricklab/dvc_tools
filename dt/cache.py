@@ -518,3 +518,302 @@ def remove_cache_files(
         'total_size': total_size,
         'blocked': False,
     }
+
+
+# =============================================================================
+# Cache validate functionality
+# =============================================================================
+
+def compute_file_hash(file_path: Path) -> str:
+    """Compute MD5 hash of a file.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        MD5 hash as hex string
+    """
+    import hashlib
+    
+    hasher = hashlib.md5()
+    with open(file_path, 'rb') as f:
+        # Read in chunks to handle large files
+        for chunk in iter(lambda: f.read(8192), b''):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def expected_hash_from_path(cache_file: Path) -> str:
+    """Extract expected hash from a cache file path.
+    
+    Cache files are stored as: cache_dir/XX/YYYYYY...
+    where XX is the first 2 chars of the hash and YYYYYY... is the rest.
+    
+    Args:
+        cache_file: Path to a cache file
+        
+    Returns:
+        Expected hash (without .dir suffix)
+    """
+    # Parent directory name is first 2 chars
+    prefix = cache_file.parent.name
+    # File name is rest of hash (possibly with .dir suffix)
+    suffix = cache_file.name.replace('.dir', '')
+    return prefix + suffix
+
+
+def validate_cache_file(cache_file: Path) -> Tuple[bool, str, str]:
+    """Validate a single cache file by checking its hash.
+    
+    Args:
+        cache_file: Path to the cache file
+        
+    Returns:
+        Tuple of (is_valid, expected_hash, actual_hash)
+    """
+    expected = expected_hash_from_path(cache_file)
+    actual = compute_file_hash(cache_file)
+    return expected == actual, expected, actual
+
+
+def get_parent_dir_hash(
+    cache_dir: Path,
+    file_hash: str,
+) -> Optional[str]:
+    """Find the .dir manifest that contains a given file hash.
+    
+    Searches all .dir files in the cache to find which directory
+    contains the specified file.
+    
+    Args:
+        cache_dir: Path to the cache files/md5 directory
+        file_hash: Hash of the file to find parent for
+        
+    Returns:
+        The .dir hash if found, None otherwise
+    """
+    import json
+    
+    # Search all .dir files
+    for subdir in cache_dir.iterdir():
+        if not subdir.is_dir():
+            continue
+        for cache_file in subdir.iterdir():
+            if not cache_file.name.endswith('.dir'):
+                continue
+            try:
+                with open(cache_file, 'r') as f:
+                    entries = json.load(f)
+                for entry in entries:
+                    if entry.get('md5') == file_hash:
+                        # Found it - return the full .dir hash
+                        return subdir.name + cache_file.name
+            except (json.JSONDecodeError, OSError):
+                pass
+    return None
+
+
+def validate_cache(
+    targets: Optional[List[str]] = None,
+    fix: bool = False,
+    verbose: bool = False,
+    progress: bool = True,
+) -> Dict[str, Any]:
+    """Validate cache files by checking MD5 checksums.
+    
+    Args:
+        targets: Optional list of workspace paths to validate.
+                 If None, validates all files in cache.
+        fix: If True, delete corrupted files (and their parent .dir)
+        verbose: Print progress for each file
+        progress: Show progress counter
+        
+    Returns:
+        Dictionary with:
+            - valid: List of (workspace_path, hash) for valid files
+            - corrupted: List of (workspace_path, hash, expected, actual) for corrupted
+            - missing: List of (workspace_path, hash) for files not in cache
+            - fixed: List of (workspace_path, hash) for files that were deleted
+            - dir_fixed: List of dir_hash for .dir manifests that were deleted
+            - errors: List of (path, error) for files that couldn't be checked
+    """
+    cache_dir = get_cache_dir()
+    
+    valid = []
+    corrupted = []
+    missing = []
+    fixed = []
+    dir_fixed = []
+    errors = []
+    
+    # Build list of files to check
+    if targets:
+        # Get hashes for specific targets
+        file_hashes, hash_to_path = collect_hashes_for_targets(targets)
+        files_to_check = []
+        for file_hash in file_hashes:
+            cache_path = hash_to_cache_path(cache_dir, file_hash)
+            workspace_path = hash_to_path.get(file_hash, file_hash)
+            if cache_path.exists():
+                files_to_check.append((cache_path, file_hash, workspace_path))
+            else:
+                missing.append((workspace_path, file_hash))
+    else:
+        # Validate entire cache
+        files_to_check = []
+        for subdir in cache_dir.iterdir():
+            if not subdir.is_dir():
+                continue
+            for cache_file in subdir.iterdir():
+                if cache_file.name.endswith('.tmp'):
+                    continue  # Skip temp files
+                file_hash = subdir.name + cache_file.name
+                files_to_check.append((cache_file, file_hash, file_hash))
+    
+    total = len(files_to_check)
+    
+    for i, (cache_path, file_hash, workspace_path) in enumerate(files_to_check):
+        if progress and not verbose:
+            print(f"\rValidating {i+1}/{total}...", end='', flush=True)
+        
+        try:
+            is_valid, expected, actual = validate_cache_file(cache_path)
+            
+            if is_valid:
+                valid.append((workspace_path, file_hash))
+                if verbose:
+                    print(f"✓ {workspace_path}")
+            else:
+                corrupted.append((workspace_path, file_hash, expected, actual))
+                if verbose:
+                    print(f"✗ {workspace_path}")
+                    print(f"  Expected: {expected}")
+                    print(f"  Actual:   {actual}")
+                
+                if fix:
+                    # Delete the corrupted file
+                    try:
+                        cache_path.unlink()
+                        fixed.append((workspace_path, file_hash))
+                        if verbose:
+                            print(f"  Deleted corrupted file")
+                        
+                        # Also delete parent .dir if this file is inside a directory
+                        clean_hash = file_hash.replace('.dir', '')
+                        parent_dir = get_parent_dir_hash(cache_dir, clean_hash)
+                        if parent_dir and parent_dir not in dir_fixed:
+                            parent_path = hash_to_cache_path(cache_dir, parent_dir)
+                            if parent_path.exists():
+                                parent_path.unlink()
+                                dir_fixed.append(parent_dir)
+                                if verbose:
+                                    print(f"  Deleted parent .dir: {parent_dir[:16]}...")
+                    except OSError as e:
+                        errors.append((str(cache_path), f"Failed to delete: {e}"))
+                        
+        except OSError as e:
+            errors.append((str(cache_path), str(e)))
+            if verbose:
+                print(f"? {workspace_path}: {e}")
+    
+    if progress and not verbose:
+        print()  # Newline after progress
+    
+    return {
+        'valid': valid,
+        'corrupted': corrupted,
+        'missing': missing,
+        'fixed': fixed,
+        'dir_fixed': dir_fixed,
+        'errors': errors,
+    }
+
+
+def collect_hashes_for_targets(
+    targets: List[str],
+) -> Tuple[List[str], Dict[str, str]]:
+    """Collect file hashes for the given targets.
+    
+    Uses DVC internals to resolve targets to their hashes,
+    expanding directories to include all contained files.
+    
+    Args:
+        targets: List of workspace paths
+        
+    Returns:
+        Tuple of (list of hashes, hash->path mapping)
+    """
+    try:
+        from dvc.repo import Repo
+    except ImportError:
+        raise CacheError("DVC not available")
+    
+    try:
+        repo = Repo()
+    except Exception as e:
+        raise CacheError(f"Not in a DVC repository: {e}")
+    
+    cache_dir = get_cache_dir()
+    file_hashes = []
+    hash_to_path = {}
+    
+    # Resolve targets to absolute paths
+    repo_root = Path(repo.root_dir)
+    target_paths = set()
+    for target in targets:
+        target_path = Path(target).resolve()
+        if target_path.exists():
+            target_paths.add(target_path)
+        else:
+            # Try relative to repo root
+            rel_path = repo_root / target
+            if rel_path.exists():
+                target_paths.add(rel_path)
+            else:
+                target_paths.add(target_path)  # Add anyway, might be in .dvc
+    
+    # Find matching outputs
+    for out in repo.index.outs:
+        if not out.hash_info or not out.hash_info.value:
+            continue
+        
+        out_path = Path(out.fs_path)
+        matches = False
+        
+        for target_path in target_paths:
+            try:
+                # Check if output matches or is under target
+                if out_path == target_path:
+                    matches = True
+                    break
+                out_path.relative_to(target_path)
+                matches = True
+                break
+            except ValueError:
+                # Not relative - check if target is under output (for dirs)
+                try:
+                    target_path.relative_to(out_path)
+                    matches = True
+                    break
+                except ValueError:
+                    pass
+        
+        if not matches:
+            continue
+        
+        file_hash = out.hash_info.value
+        workspace_path = str(out.fs_path)
+        
+        file_hashes.append(file_hash)
+        hash_to_path[file_hash] = workspace_path
+        
+        # Expand directories
+        if out.hash_info.isdir:
+            expanded, hash_to_path = expand_dir_hashes(
+                cache_dir, [file_hash], hash_to_path
+            )
+            for h in expanded:
+                if h not in file_hashes:
+                    file_hashes.append(h)
+    
+    return file_hashes, hash_to_path
