@@ -446,3 +446,66 @@ def create_md5_subdirs(parent_dir: Path, verbose: bool = False) -> None:
         subdir = files_md5 / f"{i:02x}"
         subdir.mkdir(exist_ok=True)
         set_group_writable(subdir)
+
+
+# =============================================================================
+# Project root discovery
+# =============================================================================
+
+def find_dvc_root(start: Optional[Path] = None) -> Optional[Path]:
+    """Find the DVC project root using DVC internals.
+    
+    Uses Repo.find_root() which searches for a .dvc directory.
+    
+    Args:
+        start: Starting path for the search. Defaults to cwd.
+        
+    Returns:
+        Path to the DVC project root, or None if not in a DVC project.
+    """
+    try:
+        from dvc.repo import Repo
+        root = Repo.find_root(root=str(start) if start else None)
+        return Path(root)
+    except Exception:
+        return None
+
+
+def find_git_root(start: Optional[Path] = None) -> Optional[Path]:
+    """Find the git repository root using DVC internals.
+    
+    Args:
+        start: Starting path for the search. Defaults to cwd.
+        
+    Returns:
+        Path to the git root, or None if not in a git repository.
+    """
+    try:
+        from dvc.repo import Repo
+        repo = Repo(root_dir=str(start) if start else None)
+        return Path(repo.scm.root_dir)
+    except Exception:
+        return None
+
+
+def find_project_root(start: Optional[Path] = None) -> Path:
+    """Find the project root (git root preferred, then DVC root, then cwd).
+    
+    Args:
+        start: Starting path for the search. Defaults to cwd.
+        
+    Returns:
+        Path to the project root (never None, falls back to cwd).
+    """
+    # Try git root first (more common case)
+    git_root = find_git_root(start)
+    if git_root:
+        return git_root
+    
+    # Try DVC root
+    dvc_root = find_dvc_root(start)
+    if dvc_root:
+        return dvc_root
+    
+    # Fallback to cwd
+    return start or Path.cwd()
