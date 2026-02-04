@@ -242,8 +242,6 @@ def build_manifest(
         and 'remote' info
     """
     try:
-        from dvc.repo import Repo
-        from dvc.repo.fetch import _collect_indexes
         from dvc_data.index.fetch import collect
         from dvc_data.index import ObjectStorage
         from dvc_data.hashfile.status import compare_status
@@ -251,38 +249,21 @@ def build_manifest(
     except ImportError as e:
         raise PushError(f"DVC internals not available: {e}")
     
-    repo = Repo()
-    
     if verbose:
         print(f"Collecting files to push...")
     
-    # Collect indexes for targets
-    indexes = _collect_indexes(
-        repo,
-        targets=targets,
-        remote=remote,
-        all_branches=False,
-        with_deps=False,
-        all_tags=False,
-        recursive=False,
-        all_commits=False,
-        revs=None,
-        workspace=True,
-        push=True,
-    )
+    # Use shared helper to collect tracked entries
+    try:
+        result = utils.collect_tracked_entries(targets=targets, remote=remote, push=True)
+    except utils.DependencyError as e:
+        raise PushError(str(e))
+    
+    repo = result['repo']
+    indexes = result['indexes']
+    hash_to_path = result['hash_to_path']
     
     if not indexes:
         return {'files': [], 'paths': {}, 'remote': remote, 'repo_root': str(repo.root_dir)}
-    
-    # Build hash-to-path mapping from indexes (before filtering)
-    hash_to_path: Dict[str, str] = {}
-    for idx in indexes.values():
-        repo_data = idx.data.get('repo')
-        if repo_data:
-            for key, entry in repo_data.items():
-                if entry.hash_info and entry.hash_info.value:
-                    path = '/'.join(key)
-                    hash_to_path[entry.hash_info.value] = path
     
     # Generate cache key for collect
     cache_key = (

@@ -6,7 +6,7 @@ Common functions used across multiple modules.
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 
 class DependencyError(Exception):
@@ -113,6 +113,102 @@ def oid_to_path(file_hash: str) -> Optional[Path]:
         return Path(repo.cache.local.oid_to_path(file_hash))
     except Exception:
         return None
+
+
+def collect_tracked_entries(
+    targets: Optional[List[str]] = None,
+    remote: Optional[str] = None,
+    push: bool = False,
+) -> Dict[str, Any]:
+    """Collect tracked file entries for targets using DVC internals.
+    
+    This is a shared wrapper around DVC's _collect_indexes that provides
+    a consistent interface for enumerating tracked files.
+    
+    Args:
+        targets: Optional list of targets (.dvc files, paths, stages).
+                 If None, collects all tracked files.
+        remote: Optional remote name (used for push/pull filtering).
+        push: If True, use push mode; if False, use fetch mode.
+        
+    Returns:
+        Dict with:
+            - 'entries': List of dicts with 'path', 'hash', 'size', 'nfiles', 'is_dir', 'meta'
+            - 'hash_to_path': Dict mapping hash -> workspace path
+            - 'repo': The DVC Repo object (for further operations)
+            - 'indexes': The raw indexes (for advanced use cases)
+            
+    Raises:
+        DependencyError: If DVC internals are not available
+    """
+    try:
+        from dvc.repo import Repo
+        from dvc.repo.fetch import _collect_indexes
+    except ImportError as e:
+        raise DependencyError(f"DVC internals not available: {e}")
+    
+    repo = Repo()
+    
+    indexes = _collect_indexes(
+        repo,
+        targets=targets,
+        remote=remote,
+        all_branches=False,
+        with_deps=False,
+        all_tags=False,
+        recursive=False,
+        all_commits=False,
+        revs=None,
+        workspace=True,
+        push=push,
+    )
+    
+    if not indexes:
+        return {
+            'entries': [],
+            'hash_to_path': {},
+            'repo': repo,
+            'indexes': indexes,
+        }
+    
+    entries = []
+    hash_to_path: Dict[str, str] = {}
+    seen_hashes = set()
+    
+    for idx in indexes.values():
+        repo_data = idx.data.get('repo')
+        if repo_data:
+            for key, entry in repo_data.items():
+                if entry.hash_info and entry.hash_info.value:
+                    file_hash = entry.hash_info.value
+                    path = '/'.join(key)
+                    
+                    # Always update hash_to_path mapping
+                    hash_to_path[file_hash] = path
+                    
+                    # Skip duplicates for entries list
+                    if file_hash in seen_hashes:
+                        continue
+                    seen_hashes.add(file_hash)
+                    
+                    is_dir = file_hash.endswith('.dir')
+                    meta = entry.meta
+                    
+                    entries.append({
+                        'path': path,
+                        'hash': file_hash,
+                        'size': meta.size if meta and meta.size else 0,
+                        'nfiles': meta.nfiles if meta and meta.nfiles else 1,
+                        'is_dir': is_dir,
+                        'meta': meta,
+                    })
+    
+    return {
+        'entries': entries,
+        'hash_to_path': hash_to_path,
+        'repo': repo,
+        'indexes': indexes,
+    }
 
 
 # =============================================================================

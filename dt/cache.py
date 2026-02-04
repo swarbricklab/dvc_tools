@@ -340,57 +340,24 @@ def collect_hashes_for_targets(
         Dict with 'files' (list of hash strings), 'paths' (hash->path mapping),
         and 'repo_root'
     """
-    try:
-        from dvc.repo import Repo
-        from dvc.repo.fetch import _collect_indexes
-    except ImportError as e:
-        raise CacheError(f"DVC internals not available: {e}")
-    
-    repo = Repo()
-    
     if verbose:
         print(f"Collecting files for targets...")
     
-    # Collect indexes for targets
-    indexes = _collect_indexes(
-        repo,
-        targets=targets,
-        remote=None,
-        all_branches=False,
-        with_deps=False,
-        all_tags=False,
-        recursive=False,
-        all_commits=False,
-        revs=None,
-        workspace=True,
-        push=False,  # We want all files, not just pushable ones
-    )
+    try:
+        result = utils.collect_tracked_entries(targets=targets, push=False)
+    except utils.DependencyError as e:
+        raise CacheError(str(e))
     
-    if not indexes:
-        return {'files': [], 'paths': {}, 'repo_root': str(repo.root_dir)}
-    
-    # Build hash-to-path mapping and collect all hashes
-    hash_to_path: Dict[str, str] = {}
-    files: List[str] = []
-    
-    for idx in indexes.values():
-        repo_data = idx.data.get('repo')
-        if repo_data:
-            for key, entry in repo_data.items():
-                if entry.hash_info and entry.hash_info.value:
-                    path = '/'.join(key)
-                    file_hash = entry.hash_info.value
-                    hash_to_path[file_hash] = path
-                    if file_hash not in files:
-                        files.append(file_hash)
+    # Extract hashes from entries
+    files = [entry['hash'] for entry in result['entries']]
     
     if verbose:
         print(f"Found {len(files)} file(s)")
     
     return {
         'files': files,
-        'paths': hash_to_path,
-        'repo_root': str(repo.root_dir),
+        'paths': result['hash_to_path'],
+        'repo_root': str(result['repo'].root_dir),
     }
 
 
