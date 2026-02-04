@@ -17,15 +17,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from . import config as cfg
 from . import hpc
 from . import utils
-from .checkout import (
-    CheckoutError,
-    smart_checkout,
-)
-
-
-class PullError(Exception):
-    """Error during pull operation."""
-    pass
+from .checkout import smart_checkout
+from .errors import CheckoutError, PullError
 
 
 # =============================================================================

@@ -9,11 +9,7 @@ from typing import Optional
 
 from . import config as cfg
 from . import cache as cache_mod
-
-
-class CloneError(Exception):
-    """Raised when clone operations fail."""
-    pass
+from .errors import CloneError
 
 
 def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:

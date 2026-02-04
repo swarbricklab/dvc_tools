@@ -21,19 +21,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from . import config as cfg
 from . import hpc
 from . import utils
-
-
-class PushError(Exception):
-    """Error during push operation."""
-    pass
+from .errors import PushError
 
 
 # =============================================================================
 # Utility functions
 # =============================================================================
-
-# Use utils.format_size for size formatting
-format_size = utils.format_size
 
 
 def get_files_size(file_hashes: List[str]) -> int:

@@ -7,20 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import utils
-
-
-class DuError(Exception):
-    """Error during disk usage calculation."""
-    pass
-
-
-# Use shared utilities from utils module
-def format_size(size_bytes: int, human_readable: bool = False) -> str:
-    """Format byte size for output.
-    
-    Wrapper around utils.format_size with human_readable parameter.
-    """
-    return utils.format_size(size_bytes, human_readable)
+from .errors import DuError
 
 
 # Re-export from utils for internal use

@@ -11,11 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import config as cfg
-
-
-class AddError(Exception):
-    """Error during add operation."""
-    pass
+from .errors import AddError
 
 
 # Default configuration

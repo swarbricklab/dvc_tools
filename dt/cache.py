@@ -9,15 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import config as cfg
 from . import utils
-
-
-class CacheError(Exception):
-    """Raised when cache operations fail."""
-    pass
-
-
-# Use utils.format_size for size formatting
-format_size = utils.format_size
+from .errors import CacheError
 
 
 def resolve_cache_path(
@@ -506,7 +498,7 @@ def remove_cache_files(
                 cache_path.unlink()
                 deleted.append((workspace_path, file_hash, size))
                 if verbose:
-                    size_str = f" ({format_size(size)})" if show_size else ""
+                    size_str = f" ({utils.format_size(size)})" if show_size else ""
                     print(f"Deleted: {workspace_path}{size_str}")
             except PermissionError as e:
                 # Cache files are often read-only (mode 0444)

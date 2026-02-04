@@ -21,11 +21,7 @@ from . import checkout as checkout_mod
 from . import remote as remote_mod
 from . import tmp as tmp_mod
 from . import utils
-
-
-class ImportError(Exception):
-    """Raised when import operations fail."""
-    pass
+from .errors import ImportError_ as ImportError
 
 
 def populate_primary_cache(

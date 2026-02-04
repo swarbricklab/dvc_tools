@@ -9,11 +9,7 @@ from typing import Optional
 
 from . import config as cfg
 from . import utils
-
-
-class SummaryError(Exception):
-    """Raised when summary generation fails."""
-    pass
+from .errors import SummaryError
 
 
 # Default output directory

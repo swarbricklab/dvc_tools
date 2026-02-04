@@ -8,15 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-
-class DependencyError(Exception):
-    """Raised when required external tools are not available."""
-    pass
-
-
-class DVCFileError(Exception):
-    """Raised when a .dvc file cannot be parsed or is invalid."""
-    pass
+from .errors import DependencyError, DVCFileError
 
 
 # =============================================================================
