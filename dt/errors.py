@@ -32,6 +32,11 @@ class DependencyError(DTError):
     pass
 
 
+class DiffError(DTError):
+    """Error during diff operations."""
+    pass
+
+
 class DuError(DTError):
     """Error during disk usage operations."""
     pass
@@ -44,6 +49,11 @@ class DVCFileError(DTError):
 
 class FetchError(DTError):
     """Error during fetch operations."""
+    pass
+
+
+class HistoryError(DTError):
+    """Error during history operations."""
     pass
 
 
