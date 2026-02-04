@@ -311,30 +311,59 @@ class TestFetchBasic:
     def test_fetch_no_targets_finds_dvc_files(self, cloned_test_fixtures):
         """Fetch without targets processes all .dvc files."""
         repo = cloned_test_fixtures['path']
+        cache = cloned_test_fixtures['cache']
+        
+        # Clear cache to verify fetch populates it
+        if cache.exists():
+            shutil.rmtree(cache)
+        cache.mkdir()
         
         result = run_dt('fetch', cwd=repo, check=False)
         
         # Should complete (may have some failures for non-import files)
         # But should at least find and process .dvc files
         assert result.returncode == 0 or 'dvc fetch' in result.stdout.lower() or '✗' in result.stdout
+        
+        # Verify cache was populated with at least some files (imports should fetch)
+        cache_files = [f for f in cache.rglob('*') if f.is_file()]
+        assert len(cache_files) > 0, f"Cache should contain files after fetch: {list(cache.rglob('*'))}"
 
     def test_fetch_specific_target(self, cloned_test_fixtures):
-        """Fetch specific .dvc file target."""
+        """Fetch specific .dvc file target populates cache."""
         repo = cloned_test_fixtures['path']
+        cache = cloned_test_fixtures['cache']
+        
+        # Clear cache first
+        if cache.exists():
+            shutil.rmtree(cache)
+        cache.mkdir()
         
         # Try to fetch the imported file
         result = run_dt('fetch', 'imported/file.csv.dvc', '-v', cwd=repo, check=False)
         
         # Should process the target
-        assert 'imported/file.csv.dvc' in result.stdout or 'file.csv' in result.stdout
+        assert result.returncode == 0, f"Fetch failed: {result.stderr}"
+        
+        # Verify cache is now populated
+        cache_files = [f for f in cache.rglob('*') if f.is_file()]
+        assert len(cache_files) > 0, f"Cache should contain fetched file: {list(cache.rglob('*'))}"
 
     def test_fetch_nonexistent_target(self, cloned_test_fixtures):
-        """Fetch non-existent target shows error."""
+        """Fetch non-existent target shows error and doesn't modify cache."""
         repo = cloned_test_fixtures['path']
+        cache = cloned_test_fixtures['cache']
+        
+        # Record cache state before
+        cache_files_before = set(f.name for f in cache.rglob('*') if f.is_file()) if cache.exists() else set()
         
         result = run_dt('fetch', 'nonexistent/file.dvc', cwd=repo, check=False)
         
+        # Should indicate error
         assert result.returncode != 0 or 'not found' in result.stdout.lower() or '✗' in result.stdout
+        
+        # Cache should not have been modified
+        cache_files_after = set(f.name for f in cache.rglob('*') if f.is_file()) if cache.exists() else set()
+        assert cache_files_before == cache_files_after, "Cache should not change for nonexistent target"
 
 
 # =============================================================================
@@ -370,15 +399,28 @@ class TestFetchImport:
         assert len(cache_files_only) > 0, f"Cache should contain files after fetch: {cache}"
 
     def test_fetch_import_verbose_output(self, cloned_test_fixtures):
-        """Fetch with -v shows detailed progress."""
+        """Fetch with -v shows detailed progress and actually populates cache."""
         repo = cloned_test_fixtures['path']
+        cache = cloned_test_fixtures['cache']
+        
+        # Clear cache to verify fetch works
+        if cache.exists():
+            shutil.rmtree(cache)
+        cache.mkdir()
         
         result = run_dt('fetch', 'imported/file.csv.dvc', '-v', cwd=repo, check=False)
+        
+        # Fetch should succeed
+        assert result.returncode == 0, f"Fetch failed: {result.stderr}"
         
         # Verbose output should show progress details
         output = result.stdout + result.stderr
         assert 'Import from:' in output, "Verbose should show import source"
         assert 'Found local cache:' in output or 'Cached:' in output, "Verbose should show cache activity"
+        
+        # Verify cache was actually populated (not just output claims)
+        cache_files = [f for f in cache.rglob('*') if f.is_file()]
+        assert len(cache_files) > 0, "Cache should be populated after verbose fetch"
 
 
 # =============================================================================
@@ -393,8 +435,12 @@ class TestFetchRegular:
     """Test fetch with regular (non-import) .dvc files."""
 
     def test_fetch_regular_file_suggests_dvc_fetch(self, cloned_test_fixtures):
-        """Fetch regular file suggests using dvc fetch."""
+        """Fetch regular file (non-import) indicates it's not fetchable via dt."""
         repo = cloned_test_fixtures['path']
+        cache = cloned_test_fixtures['cache']
+        
+        # Record cache state before
+        cache_files_before = set(f.name for f in cache.rglob('*') if f.is_file()) if cache.exists() else set()
         
         # single_file/data.txt.dvc is a regular .dvc file (not an import)
         result = run_dt('fetch', 'single_file/data.txt.dvc', cwd=repo, check=False)
@@ -402,20 +448,36 @@ class TestFetchRegular:
         # Should indicate it's not an import or already in cache
         output = result.stdout.lower()
         assert 'dvc fetch' in output or 'not an import' in output or 'already in cache' in output or '✗' in result.stdout
+        
+        # Since it's not an import, dt fetch shouldn't add anything new to cache
+        cache_files_after = set(f.name for f in cache.rglob('*') if f.is_file()) if cache.exists() else set()
+        # Note: Cache may have files from previous tests, but shouldn't grow from this specific operation
+        new_files = cache_files_after - cache_files_before
+        assert len(new_files) == 0, f"Regular file fetch shouldn't add to cache: {new_files}"
 
     def test_fetch_file_already_in_cache(self, cloned_test_fixtures):
-        """Fetch file already in cache reports success."""
+        """Fetch import file already in cache completes quickly without re-fetching."""
         repo = cloned_test_fixtures['path']
         cache = cloned_test_fixtures['cache']
         
-        # First, ensure data is in cache by running dvc pull
-        run_dvc('pull', 'single_file/data.txt.dvc', cwd=repo, check=False)
+        # First, populate cache with a fetch
+        run_dt('fetch', 'imported/file.csv.dvc', cwd=repo, check=False)
         
-        result = run_dt('fetch', 'single_file/data.txt.dvc', cwd=repo, check=False)
+        # Record cache state after first fetch
+        cache_files_after_first = set(f.name for f in cache.rglob('*') if f.is_file())
+        assert len(cache_files_after_first) > 0, "Cache should have files after first fetch"
         
-        # Should either say already in cache or not an import
+        # Fetch again - should report already cached
+        result = run_dt('fetch', 'imported/file.csv.dvc', cwd=repo, check=False)
+        
+        # Should succeed or indicate already cached
+        assert result.returncode == 0, f"Second fetch failed: {result.stderr}"
         output = result.stdout
-        assert 'already in cache' in output.lower() or 'not an import' in output.lower() or '✓' in output or '✗' in output
+        assert 'already in cache' in output.lower() or '✓' in output
+        
+        # Cache should not have changed (no new files)
+        cache_files_after_second = set(f.name for f in cache.rglob('*') if f.is_file())
+        assert cache_files_after_first == cache_files_after_second, "Cache shouldn't change on second fetch"
 
 
 # =============================================================================
@@ -430,8 +492,14 @@ class TestFetchOptions:
     """Test fetch command options."""
 
     def test_fetch_no_refresh(self, cloned_test_fixtures):
-        """Fetch with --no-refresh skips clone refresh."""
+        """Fetch with --no-refresh skips clone refresh but still populates cache."""
         repo = cloned_test_fixtures['path']
+        cache = cloned_test_fixtures['cache']
+        
+        # Clear cache to verify fetch works
+        if cache.exists():
+            shutil.rmtree(cache)
+        cache.mkdir()
         
         result = run_dt('fetch', '--no-refresh', '-v', 'imported/file.csv.dvc', 
                        cwd=repo, check=False)
@@ -439,16 +507,32 @@ class TestFetchOptions:
         # Should complete without errors about refreshing
         # The flag should be accepted
         assert '--no-refresh' not in result.stderr  # Flag should be recognized
+        assert result.returncode == 0, f"Fetch with --no-refresh failed: {result.stderr}"
+        
+        # Cache should still be populated even with --no-refresh
+        cache_files = [f for f in cache.rglob('*') if f.is_file()]
+        assert len(cache_files) > 0, "Cache should be populated despite --no-refresh flag"
 
     def test_fetch_no_index_sync(self, cloned_test_fixtures):
-        """Fetch with --no-index-sync skips index sync."""
+        """Fetch with --no-index-sync skips index sync but still populates cache."""
         repo = cloned_test_fixtures['path']
+        cache = cloned_test_fixtures['cache']
+        
+        # Clear cache to verify fetch works
+        if cache.exists():
+            shutil.rmtree(cache)
+        cache.mkdir()
         
         result = run_dt('fetch', '--no-index-sync', 'imported/file.csv.dvc',
                        cwd=repo, check=False)
         
         # Flag should be recognized (no error about unknown option)
         assert '--no-index-sync' not in result.stderr
+        assert result.returncode == 0, f"Fetch with --no-index-sync failed: {result.stderr}"
+        
+        # Cache should still be populated even with --no-index-sync
+        cache_files = [f for f in cache.rglob('*') if f.is_file()]
+        assert len(cache_files) > 0, "Cache should be populated despite --no-index-sync flag"
 
 
 # =============================================================================
@@ -463,8 +547,12 @@ class TestFetchErrors:
     """Test fetch error handling."""
 
     def test_fetch_invalid_dvc_file(self, cloned_test_fixtures, tmp_path):
-        """Fetch invalid .dvc file shows error."""
+        """Fetch invalid .dvc file shows error and doesn't corrupt cache."""
         repo = cloned_test_fixtures['path']
+        cache = cloned_test_fixtures['cache']
+        
+        # Record cache state before
+        cache_files_before = set(f.name for f in cache.rglob('*') if f.is_file()) if cache.exists() else set()
         
         # Create an invalid .dvc file
         invalid_dvc = repo / 'invalid.dvc'
@@ -474,16 +562,28 @@ class TestFetchErrors:
         
         # Should report an error
         assert result.returncode != 0 or '✗' in result.stdout
+        
+        # Cache should not have been modified by the failed fetch
+        cache_files_after = set(f.name for f in cache.rglob('*') if f.is_file()) if cache.exists() else set()
+        assert cache_files_before == cache_files_after, "Cache should not change on invalid file fetch"
 
     def test_fetch_directory_not_dvc_file(self, cloned_test_fixtures):
-        """Fetch directory (not .dvc file) shows error."""
+        """Fetch directory (not .dvc file) shows error and doesn't modify cache."""
         repo = cloned_test_fixtures['path']
+        cache = cloned_test_fixtures['cache']
+        
+        # Record cache state before
+        cache_files_before = set(f.name for f in cache.rglob('*') if f.is_file()) if cache.exists() else set()
         
         result = run_dt('fetch', 'single_file/', cwd=repo, check=False)
         
         # Should fail - not a .dvc file
         output = result.stdout + result.stderr
         assert 'not a .dvc file' in output.lower() or result.returncode != 0 or '✗' in result.stdout
+        
+        # Cache should not have been modified
+        cache_files_after = set(f.name for f in cache.rglob('*') if f.is_file()) if cache.exists() else set()
+        assert cache_files_before == cache_files_after, "Cache should not change on directory fetch"
 
 
 # =============================================================================
