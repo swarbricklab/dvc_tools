@@ -1,8 +1,8 @@
 """Pull DVC-tracked files, automatically handling imports.
 
 For targets tracked by import .dvc files (those with deps.repo), uses
-dt checkout to fetch from the source repo's cache. For other targets,
-uses regular dvc pull.
+dt fetch to populate the cache from the source repo's cache. For other 
+targets, uses regular dvc pull.
 
 Supports parallel distribution via qxub for high-throughput pulls.
 """
@@ -14,11 +14,10 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from . import config as cfg
 from . import hpc
 from . import utils
-from .checkout import smart_checkout
-from .errors import CheckoutError, PullError
+from .fetch import fetch
+from .errors import FetchError, PullError
 
 
 # =============================================================================
@@ -540,26 +539,29 @@ def pull(
         print("Resolving targets...")
     import_targets, regular_targets = separate_targets(targets, verbose)
     
-    # Handle imports with dt checkout
+    # Handle imports with dt fetch + dvc checkout
     if import_targets:
         if verbose:
             print(f"\nHandling {len(import_targets)} import target(s)...")
         
         for target in import_targets:
             try:
-                # Resolve to .dvc file for checkout
+                # Resolve to .dvc file for fetch
                 dvc_file = resolve_to_dvc_file(target)
                 if dvc_file:
                     if verbose:
-                        print(f"  dt checkout {dvc_file}")
-                    smart_checkout(
+                        print(f"  dt fetch {dvc_file}")
+                    fetch(
                         targets=[str(dvc_file)],
-                        cache=None,
                         verbose=verbose,
                         refresh=refresh,
                     )
-            except CheckoutError as e:
-                print(f"Error checking out {target}: {e}")
+                    # Then checkout the fetched files
+                    if verbose:
+                        print(f"  dvc checkout {dvc_file}")
+                    subprocess.run(['dvc', 'checkout', str(dvc_file)], check=False)
+            except FetchError as e:
+                print(f"Error fetching {target}: {e}")
                 success = False
     
     # Handle regular targets with dvc pull

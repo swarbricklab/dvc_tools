@@ -1,7 +1,7 @@
 """Import DVC-tracked data from remote repositories.
 
 Enables importing files and directories (or subsets) from other DVC projects
-by creating our own .dvc and .dir files, then using dt checkout.
+by creating our own .dvc and .dir files, then using dt fetch + dvc checkout.
 
 Unlike dvc import, this does not require network access to the remote storage.
 Instead, it uses locally-accessible cache paths.
@@ -16,8 +16,6 @@ from typing import Optional, Tuple, Dict, Any, List
 
 import yaml
 
-from . import config as cfg
-from . import checkout as checkout_mod
 from . import remote as remote_mod
 from . import tmp as tmp_mod
 from . import utils
@@ -413,23 +411,14 @@ def import_data(
     
     if result:
         _, cache_path = result
-    else:
-        # Check cache.alt for a cache that matches the repo name
-        # Extract repo name from the spec (last component of repo_id)
-        repo_id = tmp_mod.get_repo_id(repository, owner=owner)
-        repo_name = repo_id.split('/')[-1] if repo_id else ''
-        if repo_name:
-            alt_caches = cfg.get_list_value('cache.alt')
-            for cache in alt_caches:
-                if repo_name in cache and Path(cache).exists():
-                    cache_path = cache
-                    break
     
     if not cache_path:
         raise ImportError(
             f"No locally-accessible cache found for {repository}.\n"
-            f"Run: dt cache add /path/to/cache  (to add manually)\n"
-            f"  or: dt cache add-from {repository}  (if source has local remote)"
+            f"The source repository's remote may not be on this filesystem.\n"
+            f"Options:\n"
+            f"  1. Ensure the source repo has a locally-accessible remote configured\n"
+            f"  2. Use 'dvc import' and 'dvc pull' to fetch from the remote directly"
         )
     
     if verbose:
@@ -449,9 +438,6 @@ def import_data(
     
     if verbose:
         print(f"Found {len(files)} file(s)")
-    
-    # Add cache to alt caches for checkout
-    cfg.add_list_value('cache.alt', cache_path, 'local')
     
     # Track whether this is a directory or single file import
     is_directory = not (len(files) == 1 and not files[0].get('isdir', False))
@@ -532,54 +518,49 @@ def import_data(
         if verbose:
             print(f"Added {gitignore_pattern} to .gitignore")
     
-    # Step 7: Checkout if requested
+    # Step 7: Populate primary cache and checkout if requested
     if checkout:
         if verbose:
-            print(f"Checking out {dvc_file}...")
+            print(f"Populating cache for {dvc_file}...")
         
-        results = checkout_mod.checkout(
-            targets=[str(dvc_file)],
-            verbose=verbose,
-        )
-        
-        # Check if any cache succeeded
-        any_success = any(success for _, success, _ in results)
-        if not any_success:
-            print(f"Warning: Checkout failed. Run 'dt checkout {dvc_file}' after configuring caches.")
-        else:
-            # Step 8: Populate primary cache with hardlinks to workspace symlinks
-            primary_cache = utils.get_cache_dir()
-            if primary_cache:
-                if verbose:
-                    print(f"Populating primary cache...")
-                
-                # First, add the .dir file or single file hash to primary cache
-                if root_hash:
+        # Populate primary cache with links from source cache
+        primary_cache = utils.get_cache_dir()
+        if primary_cache:
+            # First, add the .dir file or single file hash to primary cache
+            if root_hash:
+                populate_cache_file(
+                    md5=root_hash,
+                    source_cache=cache_path,
+                    dest_cache=primary_cache,
+                    verbose=verbose,
+                )
+            
+            # Then, add individual files
+            for f in files:
+                if f.get('isdir', False):
+                    continue
+                file_md5 = f.get('md5', '')
+                if file_md5:
                     populate_cache_file(
-                        md5=root_hash,
+                        md5=file_md5,
                         source_cache=cache_path,
                         dest_cache=primary_cache,
                         verbose=verbose,
                     )
-                
-                # Then, add individual files from workspace symlinks
-                cache_files = []
-                for f in files:
-                    if f.get('isdir', False):
-                        continue
-                    cache_files.append({
-                        'md5': f['md5'],
-                        'path': f.get('path', ''),
-                    })
-                
-                count = populate_primary_cache(
-                    files=cache_files,
-                    workspace_path=out_path,
-                    primary_cache=primary_cache,
-                    verbose=verbose,
-                )
-                
-                if verbose and count > 0:
-                    print(f"Added {count} file(s) to primary cache")
+            
+            # Now run dvc checkout
+            if verbose:
+                print(f"Checking out {dvc_file}...")
+            
+            result = subprocess.run(
+                ['dvc', 'checkout', str(dvc_file)],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                print(f"Warning: Checkout failed: {result.stderr.strip()}")
+                print(f"Run 'dvc checkout {dvc_file}' after checking cache configuration.")
+        else:
+            print("Warning: No primary cache configured. Run 'dvc checkout' manually.")
     
     return dvc_file, cache_path
