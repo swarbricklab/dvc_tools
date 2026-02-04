@@ -396,23 +396,6 @@ def worker_pull(
 # =============================================================================
 
 
-def find_project_root(start: Path) -> Optional[Path]:
-    """Find the DVC project root (directory containing .dvc/).
-    
-    Args:
-        start: Starting path for the search.
-        
-    Returns:
-        Path to project root, or None if not in a DVC project.
-    """
-    current = start.resolve()
-    while current != current.parent:
-        if (current / ".dvc").is_dir():
-            return current
-        current = current.parent
-    return None
-
-
 def resolve_to_dvc_file(target: str) -> Optional[Path]:
     """Resolve a target to its tracking .dvc file.
     
@@ -442,7 +425,7 @@ def resolve_to_dvc_file(target: str) -> Optional[Path]:
         return dvc_path
     
     # Find project root to know when to stop
-    project_root = find_project_root(Path.cwd())
+    project_root = utils.find_dvc_root(Path.cwd())
     if project_root is None:
         return None
     
