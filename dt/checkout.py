@@ -16,11 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import config as cfg
 from . import utils
-
-
-class CheckoutError(Exception):
-    """Raised when checkout operations fail."""
-    pass
+from .errors import CheckoutError
 
 
 def get_cache_by_name(name: str) -> Optional[str]:

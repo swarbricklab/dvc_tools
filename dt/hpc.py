@@ -14,11 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from . import config as cfg
-
-
-class HPCError(Exception):
-    """Raised when HPC operations fail."""
-    pass
+from .errors import HPCError
 
 
 def check_qxub() -> bool:

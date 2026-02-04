@@ -18,11 +18,7 @@ import yaml
 
 from . import tmp as tmp_mod
 from . import remote as remote_mod
-
-
-class OfflineError(Exception):
-    """Raised when offline operations fail."""
-    pass
+from .errors import OfflineError
 
 
 def get_dt_root() -> Path:
