@@ -440,6 +440,50 @@ def remote_list(repository, owner):
 
 
 @cli.command()
+@click.argument('path', type=click.Path())
+@click.option('--old', 'old_rev', default='HEAD',
+              help='The older revision to compare (default: HEAD)')
+@click.option('--new', 'new_rev', default=None,
+              help='The newer revision to compare (default: workspace)')
+@click.option('-o', '--output', 'output_format',
+              type=click.Choice(['terminal', 'json', 'html', 'md']),
+              default='terminal', help='Output format')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def diff(path, old_rev, new_rev, output_format, verbose):
+    """Show content differences between versions of a DVC-tracked file.
+    
+    Compares the actual content of files (not just checksums) between
+    git revisions. Uses format-specific handlers for smart diffing
+    (e.g., daff for CSV files).
+    
+    \b
+    Examples:
+        dt diff data.csv                       # Compare HEAD → workspace
+        dt diff data.csv --old HEAD~1          # Compare HEAD~1 → workspace
+        dt diff data.csv --old v1.0 --new v2.0 # Compare two tags
+        dt diff data.csv -o html > diff.html   # HTML output
+    
+    \b
+    Supported formats:
+        CSV/TSV: Uses daff for tabular diff (pip install daff)
+        Other: Shows size/metadata comparison
+    """
+    from . import diff as diff_mod
+    
+    try:
+        result = diff_mod.diff(
+            path=path,
+            old_rev=old_rev,
+            new_rev=new_rev,
+            output_format=output_format,
+            verbose=verbose,
+        )
+        click.echo(result)
+    except diff_mod.DiffError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command()
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed output including dvc doctor and config')
 def doctor(verbose):
     """Diagnose common setup issues and verify environment configuration.
@@ -872,6 +916,49 @@ def fetch(ctx, targets, verbose, no_refresh):
             raise SystemExit(1)
             
     except fetch_mod.FetchError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command()
+@click.argument('path', type=click.Path())
+@click.option('-n', '--limit', type=int, default=None,
+              help='Maximum number of versions to show')
+@click.option('--since', default=None,
+              help='Only show versions since date (e.g., "2025-01-01", "1 month ago")')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True, help='Show full hashes and author')
+def history(path, limit, since, json_output, verbose):
+    """Show version history of a DVC-tracked file.
+    
+    Lists the different versions (checksums) of a file across git history,
+    showing when each version was introduced.
+    
+    Use with `dt diff` to examine the actual content changes between versions.
+    
+    \b
+    Examples:
+        dt history data.csv                    # Show all versions
+        dt history data.csv -n 5               # Show last 5 versions
+        dt history data.csv --since "1 month ago"
+        dt history data.csv --json             # Output as JSON
+        dt history data.csv -v                 # Verbose with full hashes
+    """
+    from . import history as history_mod
+    
+    try:
+        entries = history_mod.history(
+            path=path,
+            limit=limit,
+            since=since,
+            verbose=verbose,
+        )
+        output = history_mod.format_history(
+            entries,
+            json_output=json_output,
+            verbose=verbose,
+        )
+        click.echo(output)
+    except history_mod.HistoryError as e:
         raise click.ClickException(str(e))
 
 

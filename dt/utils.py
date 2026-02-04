@@ -501,3 +501,143 @@ def find_project_root(start: Optional[Path] = None) -> Path:
     
     # Fallback to cwd
     return start or Path.cwd()
+
+
+# =============================================================================
+# Git revision utilities
+# =============================================================================
+
+def get_hash_at_rev(path: str, rev: str, repo: Optional[Any] = None) -> Optional[str]:
+    """Get DVC hash for a path at a specific git revision.
+    
+    Uses DVC internals for speed and to handle all tracking mechanisms
+    (direct .dvc files, directories, dvc.lock).
+    
+    Args:
+        path: Path to the DVC-tracked file or directory
+        rev: Git revision (commit hash, tag, branch, HEAD~1, etc.)
+        repo: Optional DVC Repo object for reuse across calls
+        
+    Returns:
+        MD5 hash of the file at that revision, or None if not found/tracked
+    """
+    import logging
+    
+    try:
+        from dvc.repo import Repo
+        from dvc.repo.fetch import _collect_indexes
+    except ImportError:
+        return None
+    
+    if repo is None:
+        repo = Repo()
+    
+    # Suppress DVC warnings about missing files (expected when checking history)
+    dvc_logger = logging.getLogger('dvc')
+    old_level = dvc_logger.level
+    dvc_logger.setLevel(logging.ERROR)
+    
+    try:
+        indexes = _collect_indexes(
+            repo,
+            targets=[path],
+            revs=[rev],
+            workspace=False,
+        )
+        for idx in indexes.values():
+            repo_data = idx.data.get('repo')
+            if repo_data:
+                for _k, entry in repo_data.items():
+                    if entry.hash_info and entry.hash_info.value:
+                        return entry.hash_info.value
+    except Exception:
+        return None
+    finally:
+        dvc_logger.setLevel(old_level)
+    
+    return None
+
+
+def get_candidate_commits(
+    paths: Optional[List[str]] = None,
+    since: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> List[str]:
+    """Get commits that modified DVC metadata files.
+    
+    These are the candidate commits where tracked files might have changed.
+    
+    Args:
+        paths: Optional list of paths to filter by (looks for corresponding .dvc files)
+        since: Optional date filter (e.g., "2025-01-01", "1 month ago")
+        limit: Optional maximum number of commits to return
+        
+    Returns:
+        List of commit hashes (newest first)
+    """
+    import subprocess
+    
+    cmd = ["git", "log", "--format=%H"]
+    
+    if since:
+        cmd.append(f"--since={since}")
+    
+    # Add path filters for DVC metadata files
+    cmd.append("--")
+    cmd.extend(["*.dvc", "dvc.lock"])
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    
+    commits = [c.strip() for c in result.stdout.strip().split('\n') if c.strip()]
+    
+    if limit:
+        commits = commits[:limit]
+    
+    return commits
+
+
+def get_commit_info(commit: str) -> Dict[str, str]:
+    """Get metadata for a git commit.
+    
+    Args:
+        commit: Git commit hash
+        
+    Returns:
+        Dict with 'hash', 'short_hash', 'date', 'message', 'author'
+    """
+    import subprocess
+    
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%H|%h|%ai|%s|%an", commit],
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        return {
+            'hash': commit,
+            'short_hash': commit[:7],
+            'date': '',
+            'message': '',
+            'author': '',
+        }
+    
+    parts = result.stdout.strip().split('|', 4)
+    if len(parts) >= 5:
+        return {
+            'hash': parts[0],
+            'short_hash': parts[1],
+            'date': parts[2].split()[0],  # Just the date, not time
+            'message': parts[3],
+            'author': parts[4],
+        }
+    
+    return {
+        'hash': commit,
+        'short_hash': commit[:7],
+        'date': '',
+        'message': '',
+        'author': '',
+    }
