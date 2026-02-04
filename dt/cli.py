@@ -18,6 +18,7 @@ from . import offline as offline_mod
 from . import summary as summary_mod
 from . import du as du_mod
 from . import ls as ls_mod
+from . import index as index_mod
 from . import utils
 
 
@@ -964,10 +965,11 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
               help='Submit job and exit without waiting for completion.')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show detailed progress.')
+@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--worker', is_flag=True, hidden=True,
               help='Internal: run dvc add directly (used by compute node).')
 @click.pass_context
-def add(ctx, targets, threads, no_wait, verbose, worker):
+def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
     """Add files or directories to DVC tracking via compute node.
     
     Submits `dvc add` to a compute node via qxub with parallel checksum
@@ -1019,6 +1021,14 @@ def add(ctx, targets, threads, no_wait, verbose, worker):
             if no_wait and job_ids:
                 click.echo(f"Submitted job: {job_ids[0]}")
                 click.echo(f"Monitor with: qxub monitor {job_ids[0]}")
+            elif not no_wait:
+                # Job completed, sync index to mirror
+                if not no_index_sync and index_mod.is_auto_sync_enabled():
+                    try:
+                        index_mod.push(quiet=not verbose, verbose=verbose)
+                    except Exception as e:
+                        if verbose:
+                            click.echo(f"Warning: index sync failed: {e}")
                 
     except add_mod.AddError as e:
         raise click.ClickException(str(e))
@@ -1031,8 +1041,9 @@ def add(ctx, targets, threads, no_wait, verbose, worker):
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
+@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_refresh):
+def fetch(ctx, targets, verbose, no_refresh, no_index_sync):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1056,6 +1067,14 @@ def fetch(ctx, targets, verbose, no_refresh):
     from . import fetch as fetch_mod
     
     try:
+        # Sync index from mirror before fetch (if configured)
+        if not no_index_sync and index_mod.is_auto_sync_enabled():
+            try:
+                index_mod.pull(quiet=not verbose, verbose=verbose)
+            except Exception as e:
+                if verbose:
+                    click.echo(f"Warning: index sync failed: {e}")
+        
         results = fetch_mod.fetch(
             targets=list(targets) if targets else None,
             verbose=verbose,
@@ -1080,6 +1099,13 @@ def fetch(ctx, targets, verbose, no_refresh):
         # Report summary
         if any_success and not any_failure:
             click.echo("\nFetch complete. Run 'dvc checkout' to link files to workspace.")
+            # Sync index to mirror after fetch (if configured)
+            if not no_index_sync and index_mod.is_auto_sync_enabled():
+                try:
+                    index_mod.push(quiet=not verbose, verbose=verbose)
+                except Exception as e:
+                    if verbose:
+                        click.echo(f"Warning: index sync failed: {e}")
         elif any_failure and not any_success:
             raise SystemExit(1)
             
@@ -1242,8 +1268,9 @@ def mv(src, dst, verbose):
               help='Show what would be pulled without actually pulling.')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
+@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.pass_context
-def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, no_refresh):
+def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, no_refresh, no_index_sync):
     """Pull DVC-tracked files, handling imports automatically.
     
     For targets tracked by import .dvc files (those with deps.repo),
@@ -1282,6 +1309,14 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, n
     from pathlib import Path
     
     try:
+        # Sync index from mirror before pull (if configured)
+        if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
+            try:
+                index_mod.pull(quiet=not verbose, verbose=verbose)
+            except Exception as e:
+                if verbose:
+                    click.echo(f"Warning: index sync failed: {e}")
+        
         # Worker mode: called by submitted jobs (no import handling needed)
         if worker is not None and manifest is not None:
             manifest_path = Path(manifest)
@@ -1441,6 +1476,14 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, n
         result = subprocess.run(cmd)
         if result.returncode != 0:
             raise SystemExit(1)
+        
+        # Sync index to mirror after pull (if configured)
+        if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
+            try:
+                index_mod.push(quiet=not verbose, verbose=verbose)
+            except Exception as e:
+                if verbose:
+                    click.echo(f"Warning: index sync failed: {e}")
             
     except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
@@ -1835,6 +1878,110 @@ def offline_status():
             
     except offline_mod.OfflineError as e:
         raise click.ClickException(str(e))
+
+
+# =============================================================================
+# Index commands
+# =============================================================================
+
+@cli.group()
+def index():
+    """Manage DVC site cache index mirror.
+    
+    The site cache index allows DVC to quickly look up files across caches.
+    This command syncs the local index with a shared mirror so all users
+    benefit from the same index without rebuilding it.
+    
+    \b
+    Configure with:
+        dt config set index.mirror_root /g/data/a56/dvc/mirror
+    """
+    pass
+
+
+@index.command('pull')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
+def index_pull(verbose, dry):
+    """Pull index from mirror to local.
+    
+    Syncs the shared index mirror to your local site cache index.
+    This brings in index entries created by other users.
+    
+    \b
+    Examples:
+        dt index pull           # Pull latest index
+        dt index pull -v        # Verbose output
+        dt index pull --dry     # Preview what would sync
+    """
+    try:
+        success = index_mod.pull(verbose=verbose, dry=dry)
+        if not success:
+            raise SystemExit(1)
+    except index_mod.IndexError as e:
+        raise click.ClickException(str(e))
+
+
+@index.command('push')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
+def index_push(verbose, dry):
+    """Push index from local to mirror.
+    
+    Syncs your local site cache index to the shared mirror.
+    This shares your index entries with other users.
+    
+    \b
+    Examples:
+        dt index push           # Push index to mirror
+        dt index push -v        # Verbose output
+        dt index push --dry     # Preview what would sync
+    """
+    try:
+        success = index_mod.push(verbose=verbose, dry=dry)
+        if not success:
+            raise SystemExit(1)
+    except index_mod.IndexError as e:
+        raise click.ClickException(str(e))
+
+
+@index.command('status')
+@click.option('-v', '--verbose', is_flag=True, help='Show additional details')
+def index_status(verbose):
+    """Show index mirror status.
+    
+    Displays information about the local index and mirror,
+    including paths, existence, and lock status.
+    """
+    info = index_mod.status(verbose=verbose)
+    
+    if not info['configured']:
+        click.echo("Index mirror not configured")
+        if 'error' in info:
+            click.echo(f"  {info['error']}")
+        click.echo()
+        click.echo("Configure with:")
+        click.echo("  dt config set index.mirror_root /g/data/a56/dvc/mirror")
+        return
+    
+    click.echo("Index configuration:")
+    click.echo(f"  Local:  {info['local_index']}")
+    click.echo(f"  Mirror: {info['mirror_path']}")
+    click.echo()
+    
+    click.echo("Status:")
+    click.echo(f"  Local exists:  {'yes' if info['local_exists'] else 'no'}")
+    click.echo(f"  Mirror exists: {'yes' if info['mirror_exists'] else 'no'}")
+    
+    if info.get('local_locked'):
+        owner = info.get('local_lock_owner', 'unknown')
+        age = info.get('local_lock_age', 0)
+        click.echo(f"  Local locked:  yes (by {owner}, {age:.0f}s ago)")
+    
+    if info.get('mirror_locked'):
+        owner = info.get('mirror_lock_owner', 'unknown')
+        age = info.get('mirror_lock_age', 0)
+        click.echo(f"  Mirror locked: yes (by {owner}, {age:.0f}s ago)")
 
 
 # =============================================================================
