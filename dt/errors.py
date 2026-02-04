@@ -42,6 +42,11 @@ class DVCFileError(DTError):
     pass
 
 
+class FetchError(DTError):
+    """Error during fetch operations."""
+    pass
+
+
 class HPCError(DTError):
     """Error during HPC/qxub operations."""
     pass

@@ -10,7 +10,7 @@ from . import remote as remote_mod
 from . import doctor as doctor_mod
 from . import push as push_mod
 from . import add as add_mod
-from . import checkout as checkout_mod
+from . import fetch as fetch_mod
 from . import tmp as tmp_mod
 from . import import_data as import_mod
 from . import pull as pull_mod
@@ -256,89 +256,6 @@ def cache():
     pass
 
 
-@cache.command('list')
-def cache_list():
-    """List the primary DVC cache and all alternate caches.
-    
-    Shows the primary cache configured for DVC, plus any alternate
-    caches configured for multi-cache checkout.
-    """
-    import subprocess
-    
-    # Get primary cache from DVC
-    try:
-        result = subprocess.run(
-            ['dvc', 'cache', 'dir'],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            primary = result.stdout.strip()
-        else:
-            primary = "(not configured)"
-    except Exception:
-        primary = "(dvc not available)"
-    
-    click.echo(f"Primary: {primary}")
-    
-    # Get alternate caches from dt config
-    alt_caches = cfg.get_list_value('cache.alt')
-    
-    if alt_caches:
-        click.echo()
-        click.echo("Alternate caches:")
-        for path, scope in alt_caches:
-            click.echo(f"  {path}  ({scope})")
-    else:
-        click.echo()
-        click.echo("No alternate caches configured.")
-
-
-@cache.command('add')
-@click.argument('path')
-@click.option('--local', 'scope', flag_value='local', default=True, help='Add to local config (default)')
-@click.option('--project', 'scope', flag_value='project', help='Add to project config')
-@click.option('--user', 'scope', flag_value='user', help='Add to user config')
-@click.option('--system', 'scope', flag_value='system', help='Add to system config')
-def cache_add(path, scope):
-    """Add an alternate cache path for multi-cache checkout.
-    
-    Alternate caches are searched during `dt checkout` to find
-    cached files from other projects or remotes.
-    """
-    from pathlib import Path
-    
-    # Resolve to absolute path
-    abs_path = str(Path(path).resolve())
-    
-    if cfg.add_list_value('cache.alt', abs_path, scope):
-        click.echo(f"Added {abs_path} to {scope} config.")
-    else:
-        click.echo(f"Path already exists in {scope} config.")
-
-
-@cache.command('remove')
-@click.argument('path')
-@click.option('--local', 'scope', flag_value='local', default=True, help='Remove from local config (default)')
-@click.option('--project', 'scope', flag_value='project', help='Remove from project config')
-@click.option('--user', 'scope', flag_value='user', help='Remove from user config')
-@click.option('--system', 'scope', flag_value='system', help='Remove from system config')
-def cache_remove(path, scope):
-    """Remove an alternate cache path.
-    """
-    from pathlib import Path
-    
-    # Try both as given and resolved
-    abs_path = str(Path(path).resolve())
-    
-    if cfg.remove_list_value('cache.alt', abs_path, scope):
-        click.echo(f"Removed {abs_path} from {scope} config.")
-    elif cfg.remove_list_value('cache.alt', path, scope):
-        click.echo(f"Removed {path} from {scope} config.")
-    else:
-        raise click.ClickException(f"Path not found in {scope} config.")
-
-
 @cache.command('init')
 @click.argument('project_name', required=False)
 @click.option('--name', help='Override project name')
@@ -362,45 +279,6 @@ def cache_init(project_name, name, cache_root, cache_path):
         click.echo(f"Cache initialized at {cache_dir}")
     except cache_mod.CacheError as e:
         raise click.ClickException(str(e))
-
-
-@cache.command('add-from')
-@click.argument('repository')
-@click.option('--owner', help='Override the GitHub owner for short names')
-@click.option('--local', 'scope', flag_value='local', default=True, help='Add to local config (default)')
-@click.option('--project', 'scope', flag_value='project', help='Add to project config')
-@click.option('--user', 'scope', flag_value='user', help='Add to user config')
-@click.option('--system', 'scope', flag_value='system', help='Add to system config')
-def cache_add_from(repository, owner, scope):
-    """Add a repository's remote as an alternate cache.
-    
-    Discovers the locally-accessible remote from another repository
-    and adds it as an alternate cache for multi-cache checkout.
-    
-    This is useful for importing data from another project - adding
-    their remote as an alternate cache allows `dt checkout` to find
-    files without copying them to your local cache first.
-    
-    \b
-    Examples:
-        dt cache add-from otherproject
-        dt cache add-from git@github.com:myorg/otherproject.git
-    """
-    result = remote_mod.find_local_remote_from_repo(repository, owner=owner)
-    
-    if not result:
-        raise click.ClickException(
-            f"No locally-accessible remote found for '{repository}'.\n"
-            f"Use 'dt remote list {repository}' to see available remotes."
-        )
-    
-    remote_name, local_path = result
-    
-    if cfg.add_list_value('cache.alt', local_path, scope):
-        click.echo(f"Added {local_path} to {scope} config.")
-        click.echo(f"  (from remote '{remote_name}')")
-    else:
-        click.echo(f"Path already exists in {scope} config: {local_path}")
 
 
 @cache.command('rm')
@@ -939,78 +817,61 @@ def add(ctx, targets, threads, no_wait, verbose, worker):
     allow_extra_args=True,
 ))
 @click.argument('targets', nargs=-1, type=click.Path())
-@click.option('-v', '--verbose', is_flag=True, help='Show which cache is being checked')
-@click.option('-c', '--cache', 'cache_name', help='Use only this cache (by name or path)')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
 @click.pass_context
-def checkout(ctx, targets, verbose, cache_name, no_refresh):
-    """Checkout DVC-tracked files, searching across multiple caches.
+def fetch(ctx, targets, verbose, no_refresh):
+    """Fetch DVC-tracked files into the primary cache.
     
-    Runs `dvc checkout` but searches for cached files across:
-    
-    \b
-    1. The primary DVC cache (from .dvc/config or .dvc/config.local)
-    2. All alternate caches configured via `dt cache add`
-    
-    This enables checking out files that exist in another project's cache
-    or remote storage without copying them to the local cache first.
+    Populates the primary cache with symlinks to files from source caches.
+    This is the dt equivalent of `dvc fetch` but for local caches.
     
     For import .dvc files (created by `dvc import`), automatically clones
-    the source repository to find a locally-accessible cache.
+    the source repository to find a locally-accessible cache and creates
+    symlinks in the primary cache.
     
-    Use --cache to checkout from a specific cache only. In this mode,
-    checkout will fail if files are not found (no --allow-missing).
+    After fetch, run `dvc checkout` to link files to the workspace.
     
-    All other options are passed through to `dvc checkout`.
-    Run `dvc checkout --help` for additional options.
+    For non-import files, use `dvc fetch` to download from remotes.
     
     \b
     Examples:
-        dt checkout                        # Checkout all tracked files
-        dt checkout data/processed.dvc     # Checkout specific targets
-        dt checkout --force                # Force checkout (overwrite modified)
-        dt checkout -v                     # Show cache search progress
-        dt checkout --cache neochemo       # Checkout from specific cache only
-        dt checkout --no-refresh           # Skip refreshing temp clones
+        dt fetch                           # Fetch all import files
+        dt fetch data/external.dvc         # Fetch specific targets
+        dt fetch -v                        # Show detailed progress
+        dt fetch --no-refresh              # Skip refreshing temp clones
     """
+    from . import fetch as fetch_mod
+    
     try:
-        results = checkout_mod.smart_checkout(
-            targets=list(targets),
-            extra_args=ctx.args,
+        results = fetch_mod.fetch(
+            targets=list(targets) if targets else None,
             verbose=verbose,
-            cache=cache_name,
             refresh=not no_refresh,
         )
         
         any_success = False
         any_failure = False
         
-        for cache_path, success, output in results:
-            if verbose:
+        for target, success, message in results:
+            if verbose or not success:
                 status = "✓" if success else "✗"
-                click.echo(f"{status} {cache_path}")
+                click.echo(f"{status} {target}: {message}")
+            elif success:
+                click.echo(f"✓ {target}")
             
             if success:
                 any_success = True
-                # Show output only for successful checkouts with content
-                if output and 'M ' in output or 'A ' in output:
-                    for line in output.split('\n'):
-                        if line.strip():
-                            click.echo(line)
             else:
                 any_failure = True
-                # Show errors only in verbose mode since --allow-missing
-                # is expected to produce some "errors"
-                if verbose and output:
-                    for line in output.split('\n'):
-                        if line.strip():
-                            click.echo(f"  {line}")
         
-        # Only fail if all caches failed
-        if not any_success and any_failure:
+        # Report summary
+        if any_success and not any_failure:
+            click.echo("\nFetch complete. Run 'dvc checkout' to link files to workspace.")
+        elif any_failure and not any_success:
             raise SystemExit(1)
             
-    except checkout_mod.CheckoutError as e:
+    except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
 
 
@@ -1218,7 +1079,7 @@ def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refre
         if result.returncode != 0:
             raise SystemExit(1)
             
-    except pull_mod.CheckoutError as e:
+    except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
     except pull_mod.PullError as e:
         raise click.ClickException(str(e))
