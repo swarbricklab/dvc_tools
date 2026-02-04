@@ -119,8 +119,10 @@ def populate_cache_file(
     
     Args:
         md5: The MD5 hash (with optional .dir suffix).
-        source_cache: Path to the source cache (alt cache).
-        dest_cache: Path to the destination cache (primary cache).
+        source_cache: Path to the source cache/remote root (e.g., /path/to/.remote).
+            Should contain files/md5/ structure.
+        dest_cache: Path to the destination cache files/md5 directory
+            (e.g., from repo.cache.local.path which returns .../files/md5).
         verbose: Print progress messages.
         
     Returns:
@@ -134,8 +136,11 @@ def populate_cache_file(
         hash_only = md5
         filename = hash_only[2:]
     
+    # Source is a remote/cache root - needs files/md5 added
     source_file = Path(source_cache) / 'files' / 'md5' / hash_only[:2] / filename
-    dest_file = Path(dest_cache) / 'files' / 'md5' / hash_only[:2] / filename
+    
+    # Dest is already the files/md5 directory (from repo.cache.local.path)
+    dest_file = Path(dest_cache) / hash_only[:2] / filename
     
     if dest_file.exists():
         return False

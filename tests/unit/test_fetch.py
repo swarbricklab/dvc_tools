@@ -21,15 +21,21 @@ class TestPopulateCacheFile:
     
     @pytest.fixture
     def cache_dirs(self, tmp_path):
-        """Create source and destination cache directories."""
+        """Create source and destination cache directories.
+        
+        Source is a remote/cache root (contains files/md5 structure).
+        Dest is the files/md5 path (what repo.cache.local.path returns).
+        """
         source = tmp_path / 'source_cache'
         dest = tmp_path / 'dest_cache'
         
         # Create cache structure
         (source / 'files' / 'md5').mkdir(parents=True)
-        (dest / 'files' / 'md5').mkdir(parents=True)
+        dest_files_md5 = dest / 'files' / 'md5'
+        dest_files_md5.mkdir(parents=True)
         
-        return {'source': str(source), 'dest': str(dest)}
+        # Source is the root, dest is the files/md5 path
+        return {'source': str(source), 'dest': str(dest_files_md5)}
     
     def test_single_file_cached_via_hardlink(self, cache_dirs):
         """Single file is cached using hardlink."""
@@ -50,8 +56,8 @@ class TestPopulateCacheFile:
         # File should be cached
         assert result is True
         
-        # Destination file should exist
-        dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / md5[:2] / md5[2:]
+        # Destination file should exist (dest already points to files/md5)
+        dest_file = Path(cache_dirs['dest']) / md5[:2] / md5[2:]
         assert dest_file.exists()
         assert dest_file.read_text() == 'test content'
     
@@ -75,8 +81,8 @@ class TestPopulateCacheFile:
         
         assert result is True
         
-        # Destination .dir file should exist
-        dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / hash_only[:2] / (hash_only[2:] + '.dir')
+        # Destination .dir file should exist (dest already points to files/md5)
+        dest_file = Path(cache_dirs['dest']) / hash_only[:2] / (hash_only[2:] + '.dir')
         assert dest_file.exists()
         assert json.loads(dest_file.read_text()) == dir_content
     
@@ -84,11 +90,15 @@ class TestPopulateCacheFile:
         """File already in destination returns False."""
         md5 = 'deadbeefcafe1234567890abcdef0123'
         
-        # Create both source and dest files
-        for cache_type in ['source', 'dest']:
-            cache_dir = Path(cache_dirs[cache_type]) / 'files' / 'md5' / md5[:2]
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            (cache_dir / md5[2:]).write_text(f'{cache_type} content')
+        # Create source file (source needs files/md5 added)
+        source_dir = Path(cache_dirs['source']) / 'files' / 'md5' / md5[:2]
+        source_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / md5[2:]).write_text('source content')
+        
+        # Create dest file (dest already points to files/md5)
+        dest_dir = Path(cache_dirs['dest']) / md5[:2]
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / md5[2:]).write_text('dest content')
         
         result = import_data.populate_cache_file(
             md5=md5,
@@ -123,17 +133,17 @@ class TestPopulateCacheFromSource:
         project.mkdir()
         (project / '.dvc').mkdir()
         
-        # Create primary cache
-        cache = tmp_path / 'cache'
-        (cache / 'files' / 'md5').mkdir(parents=True)
+        # Create primary cache (files/md5 path, matching repo.cache.local.path)
+        cache = tmp_path / 'cache' / 'files' / 'md5'
+        cache.mkdir(parents=True)
         
-        # Create source cache with files
+        # Create source cache with files (source is cache root)
         source_cache = tmp_path / 'source_cache'
         (source_cache / 'files' / 'md5').mkdir(parents=True)
         
         return {
             'project': project,
-            'cache': cache,
+            'cache': cache,  # This is the files/md5 path
             'source_cache': source_cache,
         }
     
@@ -166,8 +176,8 @@ class TestPopulateCacheFromSource:
         
         assert count == 1
         
-        # Verify file is in primary cache
-        dest_file = cache / 'files' / 'md5' / md5[:2] / md5[2:]
+        # Verify file is in primary cache (cache already points to files/md5)
+        dest_file = cache / md5[:2] / md5[2:]
         assert dest_file.exists()
     
     def test_directory_fetch(self, fetch_setup, monkeypatch):
