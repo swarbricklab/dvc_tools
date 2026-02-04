@@ -2,13 +2,16 @@
 
 Provides common functionality for submitting and monitoring batch jobs
 on HPC clusters using qxub (https://github.com/swarbricklab/qxub).
+
+Also provides shared infrastructure for partitioning work across parallel
+workers, including manifest storage and hash-based partitioning.
 """
 
 import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from . import config as cfg
 
@@ -197,3 +200,100 @@ def monitor_jobs(job_ids: List[str], verbose: bool = False) -> bool:
     except Exception as e:
         print(f"Error monitoring jobs: {e}")
         return False
+
+
+# =============================================================================
+# Parallel transfer infrastructure
+# =============================================================================
+
+def get_transfer_dir(operation: str) -> Path:
+    """Get the .dt/tmp/{operation} directory for manifest storage.
+    
+    Args:
+        operation: Transfer operation name ('push' or 'pull')
+        
+    Returns:
+        Path to the transfer directory (created if needed)
+    """
+    transfer_dir = Path.cwd() / '.dt' / 'tmp' / operation
+    transfer_dir.mkdir(parents=True, exist_ok=True)
+    return transfer_dir
+
+
+def get_prefixes_for_worker(worker_id: int, num_workers: int) -> Set[str]:
+    """Get hash prefixes assigned to a worker.
+    
+    Partitions the 256 possible hash prefixes (00-ff) across workers.
+    
+    Args:
+        worker_id: Worker index (0 to num_workers-1)
+        num_workers: Total number of workers
+        
+    Returns:
+        Set of 2-character hex prefixes for this worker.
+    """
+    prefixes = set()
+    for i in range(256):
+        if i % num_workers == worker_id:
+            prefixes.add(f"{i:02x}")
+    return prefixes
+
+
+def save_manifest(
+    manifest: Dict[str, Any],
+    partitions: Dict[int, List[str]],
+    job_id: str,
+    operation: str,
+) -> Path:
+    """Save manifest and partitions to disk.
+    
+    Args:
+        manifest: Original manifest with metadata
+        partitions: Worker partitions (worker_id -> list of file hashes)
+        job_id: Unique job identifier
+        operation: Transfer operation name ('push' or 'pull')
+        
+    Returns:
+        Path to the manifest directory
+    """
+    manifest_dir = get_transfer_dir(operation) / job_id
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save metadata
+    with open(manifest_dir / 'manifest.json', 'w') as f:
+        json.dump({
+            'remote': manifest.get('remote'),
+            'repo_root': manifest.get('repo_root'),
+            'total_files': len(manifest.get('files', [])),
+            'num_workers': len(partitions),
+        }, f, indent=2)
+    
+    # Save each worker's partition
+    for worker_id, files in partitions.items():
+        with open(manifest_dir / f'worker_{worker_id}.json', 'w') as f:
+            json.dump({'files': files}, f)
+    
+    return manifest_dir
+
+
+def load_worker_partition(manifest_dir: Path, worker_id: int) -> Tuple[Dict, List[str]]:
+    """Load manifest metadata and worker's file partition.
+    
+    Args:
+        manifest_dir: Path to manifest directory
+        worker_id: Worker index
+        
+    Returns:
+        Tuple of (metadata dict, list of file hashes)
+    """
+    with open(manifest_dir / 'manifest.json') as f:
+        metadata = json.load(f)
+    
+    worker_file = manifest_dir / f'worker_{worker_id}.json'
+    if not worker_file.exists():
+        return metadata, []
+    
+    with open(worker_file) as f:
+        partition = json.load(f)
+    
+    return metadata, partition.get('files', [])
