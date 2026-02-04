@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from dvc.repo import Repo
+
 from . import config as cfg
 from . import utils
 from .errors import CacheError
@@ -269,7 +271,6 @@ def check_hashes_in_remote(
         Tuple of (hashes_in_remote, hashes_not_in_remote)
     """
     try:
-        from dvc.repo import Repo
         from dvc_data.hashfile.hash_info import HashInfo
         from dvc_data.hashfile.status import compare_status
     except ImportError:
@@ -748,11 +749,6 @@ def collect_hashes_for_targets(
     Returns:
         Tuple of (list of hashes, hash->path mapping)
     """
-    try:
-        from dvc.repo import Repo
-    except ImportError:
-        raise CacheError("DVC not available")
-    
     try:
         repo = Repo()
     except Exception as e:

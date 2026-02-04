@@ -1,0 +1,332 @@
+"""Tests for dt fetch module internal functions.
+
+Tests utility functions from fetch and import_data modules.
+"""
+
+import os
+import json
+import tempfile
+import shutil
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+import pytest
+
+from dt import fetch
+from dt import import_data
+
+
+class TestPopulateCacheFile:
+    """Tests for populate_cache_file function."""
+    
+    @pytest.fixture
+    def cache_dirs(self, tmp_path):
+        """Create source and destination cache directories."""
+        source = tmp_path / 'source_cache'
+        dest = tmp_path / 'dest_cache'
+        
+        # Create cache structure
+        (source / 'files' / 'md5').mkdir(parents=True)
+        (dest / 'files' / 'md5').mkdir(parents=True)
+        
+        return {'source': str(source), 'dest': str(dest)}
+    
+    def test_single_file_cached_via_hardlink(self, cache_dirs):
+        """Single file is cached using hardlink."""
+        md5 = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
+        
+        # Create source file
+        source_dir = Path(cache_dirs['source']) / 'files' / 'md5' / md5[:2]
+        source_dir.mkdir(parents=True)
+        source_file = source_dir / md5[2:]
+        source_file.write_text('test content')
+        
+        result = import_data.populate_cache_file(
+            md5=md5,
+            source_cache=cache_dirs['source'],
+            dest_cache=cache_dirs['dest'],
+        )
+        
+        # File should be cached
+        assert result is True
+        
+        # Destination file should exist
+        dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / md5[:2] / md5[2:]
+        assert dest_file.exists()
+        assert dest_file.read_text() == 'test content'
+    
+    def test_dir_file_cached(self, cache_dirs):
+        """Directory manifest (.dir file) is cached correctly."""
+        md5 = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6.dir'
+        hash_only = md5[:-4]
+        
+        # Create source .dir file
+        source_dir = Path(cache_dirs['source']) / 'files' / 'md5' / hash_only[:2]
+        source_dir.mkdir(parents=True)
+        source_file = source_dir / (hash_only[2:] + '.dir')
+        dir_content = [{'relpath': 'a.txt', 'md5': 'abc123'}]
+        source_file.write_text(json.dumps(dir_content))
+        
+        result = import_data.populate_cache_file(
+            md5=md5,
+            source_cache=cache_dirs['source'],
+            dest_cache=cache_dirs['dest'],
+        )
+        
+        assert result is True
+        
+        # Destination .dir file should exist
+        dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / hash_only[:2] / (hash_only[2:] + '.dir')
+        assert dest_file.exists()
+        assert json.loads(dest_file.read_text()) == dir_content
+    
+    def test_already_exists_returns_false(self, cache_dirs):
+        """File already in destination returns False."""
+        md5 = 'deadbeefcafe1234567890abcdef0123'
+        
+        # Create both source and dest files
+        for cache_type in ['source', 'dest']:
+            cache_dir = Path(cache_dirs[cache_type]) / 'files' / 'md5' / md5[:2]
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / md5[2:]).write_text(f'{cache_type} content')
+        
+        result = import_data.populate_cache_file(
+            md5=md5,
+            source_cache=cache_dirs['source'],
+            dest_cache=cache_dirs['dest'],
+        )
+        
+        # Should return False (already exists)
+        assert result is False
+    
+    def test_source_not_found_returns_false(self, cache_dirs):
+        """Source file not found returns False."""
+        md5 = 'nonexistent123456789012345678901234'
+        
+        result = import_data.populate_cache_file(
+            md5=md5,
+            source_cache=cache_dirs['source'],
+            dest_cache=cache_dirs['dest'],
+            verbose=True,
+        )
+        
+        assert result is False
+
+
+class TestPopulateCacheFromSource:
+    """Tests for _populate_cache_from_source function."""
+    
+    @pytest.fixture
+    def fetch_setup(self, tmp_path):
+        """Create DVC project with cache for testing."""
+        project = tmp_path / 'project'
+        project.mkdir()
+        (project / '.dvc').mkdir()
+        
+        # Create primary cache
+        cache = tmp_path / 'cache'
+        (cache / 'files' / 'md5').mkdir(parents=True)
+        
+        # Create source cache with files
+        source_cache = tmp_path / 'source_cache'
+        (source_cache / 'files' / 'md5').mkdir(parents=True)
+        
+        return {
+            'project': project,
+            'cache': cache,
+            'source_cache': source_cache,
+        }
+    
+    def test_single_file_fetch(self, fetch_setup, monkeypatch):
+        """Fetch single file populates cache."""
+        project = fetch_setup['project']
+        source_cache = fetch_setup['source_cache']
+        cache = fetch_setup['cache']
+        
+        # Create .dvc file
+        md5 = 'abcdef1234567890abcdef1234567890'
+        dvc_content = f'outs:\n  - md5: {md5}\n    path: data.csv\n'
+        dvc_file = project / 'data.csv.dvc'
+        dvc_file.write_text(dvc_content)
+        
+        # Create source cache file
+        source_dir = source_cache / 'files' / 'md5' / md5[:2]
+        source_dir.mkdir(parents=True)
+        (source_dir / md5[2:]).write_text('csv,data')
+        
+        # Mock get_cache_dir to return our test cache
+        monkeypatch.chdir(project)
+        
+        with patch('dt.fetch.utils.get_cache_dir', return_value=cache):
+            count = fetch._populate_cache_from_source(
+                dvc_path=dvc_file,
+                source_cache=str(source_cache),
+                verbose=False,
+            )
+        
+        assert count == 1
+        
+        # Verify file is in primary cache
+        dest_file = cache / 'files' / 'md5' / md5[:2] / md5[2:]
+        assert dest_file.exists()
+    
+    def test_directory_fetch(self, fetch_setup, monkeypatch):
+        """Fetch directory populates cache with .dir and files."""
+        project = fetch_setup['project']
+        source_cache = fetch_setup['source_cache']
+        cache = fetch_setup['cache']
+        
+        # Create .dvc file for directory
+        dir_hash = 'abcdef1234567890abcdef1234567890'
+        file1_hash = '1111111111111111111111111111111a'
+        file2_hash = '2222222222222222222222222222222b'
+        
+        dvc_content = f'outs:\n  - md5: {dir_hash}.dir\n    path: mydir\n'
+        dvc_file = project / 'mydir.dvc'
+        dvc_file.write_text(dvc_content)
+        
+        # Create source cache .dir file
+        source_dir = source_cache / 'files' / 'md5' / dir_hash[:2]
+        source_dir.mkdir(parents=True)
+        dir_manifest = [
+            {'relpath': 'file1.txt', 'md5': file1_hash},
+            {'relpath': 'file2.txt', 'md5': file2_hash},
+        ]
+        (source_dir / (dir_hash[2:] + '.dir')).write_text(json.dumps(dir_manifest))
+        
+        # Create source cache individual files
+        for fhash in [file1_hash, file2_hash]:
+            fdir = source_cache / 'files' / 'md5' / fhash[:2]
+            fdir.mkdir(parents=True, exist_ok=True)
+            (fdir / fhash[2:]).write_text(f'content for {fhash}')
+        
+        monkeypatch.chdir(project)
+        
+        with patch('dt.fetch.utils.get_cache_dir', return_value=cache):
+            count = fetch._populate_cache_from_source(
+                dvc_path=dvc_file,
+                source_cache=str(source_cache),
+                verbose=False,
+            )
+        
+        # Should cache .dir file + 2 individual files = 3
+        assert count == 3
+    
+    def test_no_cache_returns_zero(self, fetch_setup, monkeypatch):
+        """No cache configured returns 0."""
+        project = fetch_setup['project']
+        source_cache = fetch_setup['source_cache']
+        
+        md5 = 'abcdef1234567890abcdef1234567890'
+        dvc_file = project / 'data.csv.dvc'
+        dvc_file.write_text(f'outs:\n  - md5: {md5}\n    path: data.csv\n')
+        
+        monkeypatch.chdir(project)
+        
+        with patch('dt.fetch.utils.get_cache_dir', return_value=None):
+            count = fetch._populate_cache_from_source(
+                dvc_path=dvc_file,
+                source_cache=str(source_cache),
+            )
+        
+        assert count == 0
+    
+    def test_no_outs_returns_zero(self, fetch_setup, monkeypatch):
+        """DVC file with no outputs returns 0."""
+        project = fetch_setup['project']
+        source_cache = fetch_setup['source_cache']
+        cache = fetch_setup['cache']
+        
+        dvc_file = project / 'empty.dvc'
+        dvc_file.write_text('# empty dvc file\n')
+        
+        monkeypatch.chdir(project)
+        
+        with patch('dt.fetch.utils.get_cache_dir', return_value=cache):
+            count = fetch._populate_cache_from_source(
+                dvc_path=dvc_file,
+                source_cache=str(source_cache),
+            )
+        
+        assert count == 0
+
+
+class TestFetch:
+    """Tests for the main fetch function."""
+    
+    @pytest.fixture
+    def dvc_project(self, tmp_path, monkeypatch):
+        """Create a minimal DVC project."""
+        project = tmp_path / 'project'
+        project.mkdir()
+        (project / '.dvc').mkdir()
+        
+        # Create cache
+        cache = tmp_path / 'cache' / 'files' / 'md5'
+        cache.mkdir(parents=True)
+        
+        monkeypatch.chdir(project)
+        yield project, tmp_path / 'cache'
+    
+    def test_nonexistent_target_fails(self, dvc_project):
+        """Nonexistent target returns failure."""
+        project, cache = dvc_project
+        
+        with patch('dt.fetch.utils.check_dvc'):
+            results = fetch.fetch(targets=['nonexistent.csv.dvc'])
+        
+        assert len(results) == 1
+        target, success, message = results[0]
+        assert success is False
+        assert 'not found' in message.lower()
+    
+    def test_non_dvc_file_tries_suffix(self, dvc_project):
+        """Non-.dvc file tries adding .dvc suffix."""
+        project, cache = dvc_project
+        
+        # Create data.csv.dvc but ask for data.csv
+        dvc_file = project / 'data.csv.dvc'
+        dvc_file.write_text('outs:\n  - md5: abc123\n    path: data.csv\n')
+        
+        # Mock is_repo_import to return False (regular file)
+        with patch('dt.fetch.utils.check_dvc'), \
+             patch('dt.fetch.utils.is_repo_import', return_value=False), \
+             patch('dt.fetch.utils.parse_dvc_file') as mock_parse, \
+             patch('dt.fetch.utils.get_cache_dir', return_value=cache):
+            
+            mock_parse.return_value = {'outs': [{'md5': 'abc123', 'path': 'data.csv'}]}
+            
+            results = fetch.fetch(targets=['data.csv'])
+        
+        # Should have processed data.csv.dvc
+        assert len(results) == 1
+    
+    def test_import_file_calls_fetch_import(self, dvc_project):
+        """Import .dvc file triggers fetch_import."""
+        project, cache = dvc_project
+        
+        # Create import .dvc file
+        dvc_file = project / 'imported.csv.dvc'
+        dvc_file.write_text(
+            'deps:\n'
+            '  - path: source.csv\n'
+            '    repo:\n'
+            '      url: https://github.com/example/repo\n'
+            'outs:\n'
+            '  - md5: abc123\n'
+            '    path: imported.csv\n'
+        )
+        
+        with patch('dt.fetch.utils.check_dvc'), \
+             patch('dt.fetch.utils.is_repo_import', return_value=True), \
+             patch('dt.fetch.fetch_import') as mock_fetch_import:
+            
+            mock_fetch_import.return_value = ('/path/to/cache', 5)
+            
+            results = fetch.fetch(targets=['imported.csv.dvc'])
+        
+        assert len(results) == 1
+        assert mock_fetch_import.called
+        target, success, message = results[0]
+        assert success is True
+        assert '5 files' in message

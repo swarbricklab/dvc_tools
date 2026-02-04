@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dvc.repo import Repo
+
 from .errors import HistoryError
 from .offline import status as offline_status, enable as offline_enable, disable as offline_disable
 from .utils import get_candidate_commits, get_commit_info, get_hash_at_rev
@@ -44,11 +46,6 @@ def history(
     Raises:
         HistoryError: If the file is not tracked by DVC or other errors
     """
-    try:
-        from dvc.repo import Repo
-    except ImportError as e:
-        raise HistoryError(f"DVC not available: {e}")
-    
     # Normalize path
     path = str(Path(path))
     

@@ -8,6 +8,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from dvc.repo import Repo
+
 from .errors import DependencyError, DVCFileError
 
 
@@ -63,7 +65,6 @@ def get_cache_dir() -> Optional[Path]:
         or cache not configured.
     """
     try:
-        from dvc.repo import Repo
         repo = Repo()
         return Path(repo.cache.local.path)
     except Exception:
@@ -105,7 +106,6 @@ def oid_to_path(file_hash: str) -> Optional[Path]:
         Path to the cache file, or None if cache not available
     """
     try:
-        from dvc.repo import Repo
         repo = Repo()
         return Path(repo.cache.local.oid_to_path(file_hash))
     except Exception:
@@ -139,7 +139,6 @@ def collect_tracked_entries(
         DependencyError: If DVC internals are not available
     """
     try:
-        from dvc.repo import Repo
         from dvc.repo.fetch import _collect_indexes
     except ImportError as e:
         raise DependencyError(f"DVC internals not available: {e}")
@@ -232,7 +231,6 @@ def load_dvc_file(dvc_path: Path, repo: Optional[Any] = None) -> Any:
         DVCFileError: If the file cannot be parsed.
     """
     from dvc.dvcfile import load_file
-    from dvc.repo import Repo
     
     try:
         if repo is None:
@@ -456,7 +454,6 @@ def find_dvc_root(start: Optional[Path] = None) -> Optional[Path]:
         Path to the DVC project root, or None if not in a DVC project.
     """
     try:
-        from dvc.repo import Repo
         root = Repo.find_root(root=str(start) if start else None)
         return Path(root)
     except Exception:
@@ -473,7 +470,6 @@ def find_git_root(start: Optional[Path] = None) -> Optional[Path]:
         Path to the git root, or None if not in a git repository.
     """
     try:
-        from dvc.repo import Repo
         repo = Repo(root_dir=str(start) if start else None)
         return Path(repo.scm.root_dir)
     except Exception:
@@ -524,7 +520,6 @@ def get_hash_at_rev(path: str, rev: str, repo: Optional[Any] = None) -> Optional
     import logging
     
     try:
-        from dvc.repo import Repo
         from dvc.repo.fetch import _collect_indexes
     except ImportError:
         return None

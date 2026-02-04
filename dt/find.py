@@ -6,6 +6,8 @@ Reverse lookup: given a hash, find which workspace path(s) it corresponds to.
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dvc.repo import Repo
+
 from .errors import FindError
 from .utils import get_cache_dir, hash_to_cache_path
 
@@ -46,11 +48,6 @@ def find_by_hash(
     
     # Normalize hash (remove .dir suffix for matching)
     search_hash = file_hash.replace('.dir', '').lower()
-    
-    try:
-        from dvc.repo import Repo
-    except ImportError as e:
-        raise FindError(f"DVC not available: {e}")
     
     try:
         repo = Repo()
