@@ -13,6 +13,10 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `cache.root` | Root directory for [shared external caches](cache.md) | `/g/data/a56/dvc_cache` |
 | `remote.root` | Root directory for [DVC remote storage](remote.md) | `/g/data/a56/dvc_remote` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
+| `index.mirror_root` | Root directory for [index mirror](index.md) | `/g/data/a56/dvc/mirror` |
+| `index.lock_timeout` | Seconds to wait for index lock | `120` |
+| `index.retry_interval` | Initial retry interval for locks | `5` |
+| `index.auto_sync` | Enable automatic index sync | `true` |
 | `add.max_threads` | Maximum threads for checksum computation | `192` |
 | `add.mem_per_thread` | GB of RAM per thread for `dt add` | `1` |
 | `qxub.env` | Conda environment for parallel workers | `dt` |
@@ -49,6 +53,55 @@ The remote is the authoritative store for DVC-tracked files, accessed via SSH fr
 ### `ssh.host`
 
 Hostname used when configuring SSH remotes. This allows DVC to push/pull data from external machines.
+
+## Index Options
+
+These options configure the [index mirror](index.md) for shared cache lookups.
+
+### `index.mirror_root`
+
+**Required for index sync**
+
+Root directory for the shared index mirror. The actual mirror path is `{mirror_root}/repo/{repo_hash}/`.
+
+```bash
+dt config set index.mirror_root /g/data/a56/dvc/mirror
+```
+
+### `index.lock_timeout`
+
+**Default:** `120`
+
+Maximum seconds to wait for an index lock to be released before giving up.
+
+```bash
+# Wait up to 5 minutes for locks
+dt config set index.lock_timeout 300
+```
+
+### `index.retry_interval`
+
+**Default:** `5`
+
+Initial retry interval in seconds when waiting for a lock. Uses exponential backoff up to 30 seconds.
+
+```bash
+dt config set index.retry_interval 10
+```
+
+### `index.auto_sync`
+
+**Default:** `true`
+
+Enable automatic index sync during `dt pull`, `dt fetch`, and `dt add`. Set to `false` to disable.
+
+```bash
+# Disable automatic sync globally
+dt config set index.auto_sync false
+
+# Or use --no-index-sync on individual commands
+dt pull --no-index-sync
+```
 
 ## qxub Options
 
