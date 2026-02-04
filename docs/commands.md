@@ -18,6 +18,7 @@
 | [`dt cache`](#dt-cache) | Manage external shared caches |
 | [`dt remote`](#dt-remote) | Manage remote storage |
 | [`dt tmp`](#dt-tmp) | Manage temporary repository clones |
+| [`dt worktree`](#dt-worktree) | Manage git worktrees with DVC cache configured |
 | [`dt config`](#dt-config) | View and modify configuration settings |
 | [`dt du`](#dt-du) | Report disk usage for DVC-tracked files |
 | [`dt doctor`](#dt-doctor) | Diagnose common setup issues |
@@ -169,6 +170,20 @@ Manage temporary repository clones.
 | `dt tmp clean` | Remove cached repository clones |
 
 Temporary clones provide access to DVC configuration from remote repositories. [Full documentation →](tmp.md)
+
+---
+
+## dt worktree
+
+Manage git worktrees with DVC cache configured.
+
+| Subcommand | Description |
+|------------|-------------|
+| `dt worktree add <path>` | Create a worktree with DVC cache configured |
+| `dt worktree list` | List all worktrees |
+| `dt worktree remove <path>` | Remove a worktree |
+
+Ensures DVC cache is shared between worktrees. [Full documentation →](worktree.md)
 
 ---
 

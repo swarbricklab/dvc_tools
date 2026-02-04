@@ -1244,6 +1244,107 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
         raise click.ClickException(str(e))
 
 
+# =============================================================================
+# dt worktree - Git worktree management with DVC cache configuration
+# =============================================================================
+
+@cli.group()
+def worktree():
+    """Manage git worktrees with DVC cache configured.
+    
+    Git worktrees allow working on multiple branches simultaneously.
+    These commands ensure DVC cache is properly shared between worktrees.
+    """
+    pass
+
+
+@worktree.command('add')
+@click.argument('path')
+@click.option('-b', '--new-branch', help='Create a new branch with this name')
+@click.option('--branch', help='Checkout this existing branch')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def worktree_add(path, new_branch, branch, verbose):
+    """Create a git worktree with DVC cache configured.
+    
+    Creates a new worktree and configures it to use the same DVC cache
+    as the current repository. Also initializes submodules.
+    
+    \b
+    Examples:
+        dt worktree add ../feature-branch --branch feature/new
+        dt worktree add ../experiment -b experiment/test
+    """
+    from . import worktree as worktree_mod
+    
+    try:
+        worktree_path = worktree_mod.add(
+            path=path,
+            branch=branch,
+            new_branch=new_branch,
+            verbose=verbose,
+        )
+        click.echo(f"Created worktree at: {worktree_path}")
+    except worktree_mod.WorktreeError as e:
+        raise click.ClickException(str(e))
+
+
+@worktree.command('list')
+def worktree_list():
+    """List all git worktrees.
+    
+    Shows path, branch, and commit for each worktree.
+    """
+    from . import worktree as worktree_mod
+    
+    try:
+        worktrees = worktree_mod.list_worktrees()
+        
+        if not worktrees:
+            click.echo("No worktrees found")
+            return
+        
+        for wt in worktrees:
+            path = wt.get('path', 'unknown')
+            branch = wt.get('branch', '').replace('refs/heads/', '')
+            head = wt.get('head', '')[:8] if wt.get('head') else ''
+            
+            if wt.get('detached'):
+                branch = f"(detached at {head})"
+            elif wt.get('bare'):
+                branch = "(bare)"
+            
+            click.echo(f"{path}")
+            if branch:
+                click.echo(f"  branch: {branch}")
+            if head and not wt.get('detached'):
+                click.echo(f"  commit: {head}")
+    except worktree_mod.WorktreeError as e:
+        raise click.ClickException(str(e))
+
+
+@worktree.command('remove')
+@click.argument('path')
+@click.option('-f', '--force', is_flag=True, help='Force removal even if dirty')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def worktree_remove(path, force, verbose):
+    """Remove a git worktree.
+    
+    Removes the worktree at the specified path.
+    
+    \b
+    Examples:
+        dt worktree remove ../feature-branch
+        dt worktree remove ../dirty-branch --force
+    """
+    from . import worktree as worktree_mod
+    
+    try:
+        worktree_mod.remove(path=path, force=force, verbose=verbose)
+        click.echo(f"Removed worktree: {path}")
+    except worktree_mod.WorktreeError as e:
+        raise click.ClickException(str(e))
+
+
 @cli.group()
 def offline():
     """Manage offline mode for compute nodes without internet.
