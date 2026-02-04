@@ -62,6 +62,11 @@ class HistoryError(DTError):
     pass
 
 
+class LsError(DTError):
+    """Error during ls operations."""
+    pass
+
+
 class HPCError(DTError):
     """Error during HPC/qxub operations."""
     pass

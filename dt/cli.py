@@ -17,6 +17,7 @@ from . import pull as pull_mod
 from . import offline as offline_mod
 from . import summary as summary_mod
 from . import du as du_mod
+from . import ls as ls_mod
 from . import utils
 
 
@@ -1010,6 +1011,68 @@ def history(path, limit, since, json_output, verbose):
         )
         click.echo(output)
     except history_mod.HistoryError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command()
+@click.argument('url', default='.')
+@click.argument('path', required=False)
+@click.option('--rev', default=None, help='Git revision (e.g., SHA, branch, tag)')
+@click.option('-R', '--recursive', is_flag=True, help='List recursively')
+@click.option('--all', 'include_all', is_flag=True, help='Include non-DVC files (git files too)')
+@click.option('--pattern', '-p', default=None, help='Glob pattern for path filtering (e.g., "*.csv", "data/**")')
+@click.option('--regex', '-e', default=None, help='Regex pattern for path filtering')
+@click.option('--min-size', default=None, help='Minimum size (e.g., 100K, 1M, 1G)')
+@click.option('--max-size', default=None, help='Maximum size (e.g., 100M, 1G)')
+@click.option('--files', 'files_only', is_flag=True, help='Show only files')
+@click.option('--dirs', 'dirs_only', is_flag=True, help='Show only directories')
+@click.option('--hash', 'hash_prefix', default=None, help='Filter by hash prefix')
+@click.option('-l', '--long', 'long_format', is_flag=True, help='Long format (show type and size)')
+@click.option('--show-hash', is_flag=True, help='Show MD5 hash')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+def ls(url, path, rev, recursive, include_all, pattern, regex, min_size, max_size,
+       files_only, dirs_only, hash_prefix, long_format, show_hash, json_output):
+    """List and filter DVC-tracked files.
+    
+    Wraps `dvc list` with filtering capabilities. By default lists the current
+    repository, but can list any DVC repository by URL.
+    
+    Output is pipe-friendly: one path per line by default.
+    
+    \b
+    Examples:
+        dt ls                              # List current repo
+        dt ls -R                           # List recursively
+        dt ls -l                           # Long format with size
+        dt ls --pattern "*.csv"            # Filter by glob pattern
+        dt ls --min-size 1M                # Files >= 1MB
+        dt ls --files --min-size 100K      # Files only, >= 100KB
+        dt ls --hash abc123                # Filter by hash prefix
+        dt ls . data/                      # List specific directory
+        dt ls --rev HEAD~5                 # List at specific revision
+        dt ls . --json | jq '.[] | .path'  # Pipe JSON to jq
+    """
+    try:
+        _, output = ls_mod.list_files(
+            url=url,
+            path=path,
+            rev=rev,
+            recursive=recursive,
+            dvc_only=not include_all,
+            pattern=pattern,
+            regex=regex,
+            min_size=min_size,
+            max_size=max_size,
+            files_only=files_only,
+            dirs_only=dirs_only,
+            hash_prefix=hash_prefix,
+            long_format=long_format,
+            show_hash=show_hash,
+            json_output=json_output,
+        )
+        if output:
+            click.echo(output)
+    except ls_mod.LsError as e:
         raise click.ClickException(str(e))
 
 
