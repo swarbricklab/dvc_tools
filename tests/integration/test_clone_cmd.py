@@ -17,13 +17,22 @@ from tests.conftest import requires_dvc, requires_git, requires_network
 # Helper Functions
 # =============================================================================
 
-def run_dt(*args, cwd=None, check=True):
-    """Run dt command and return result."""
+def run_dt(*args, cwd=None, check=True, env=None):
+    """Run dt command and return result.
+    
+    Args:
+        *args: Command arguments to pass to dt
+        cwd: Working directory
+        check: Raise exception on non-zero exit
+        env: Environment variables (defaults to os.environ)
+    """
+    run_env = env if env is not None else os.environ
     result = subprocess.run(
         ['dt', *args],
         capture_output=True,
         text=True,
         cwd=cwd,
+        env=run_env,
     )
     if check and result.returncode != 0:
         raise subprocess.CalledProcessError(
@@ -113,14 +122,26 @@ class TestCloneShortName:
         repo_path = isolated_dir / 'dt-test-fixtures'
         assert repo_path.is_dir()
 
-    def test_clone_short_name_without_owner_fails(self, isolated_dir):
+    def test_clone_short_name_without_owner_fails(self, isolated_dir, tmp_path):
         """Clone with short name and no owner configured fails."""
-        # Ensure no owner is configured
+        # Isolate from system/user config by overriding XDG paths in subprocess env
+        empty_config = tmp_path / 'empty_config'
+        empty_config.mkdir()
+        
+        # Create isolated environment for subprocess
+        isolated_env = os.environ.copy()
+        isolated_env['XDG_CONFIG_HOME'] = str(empty_config)
+        isolated_env['XDG_CONFIG_DIRS'] = str(empty_config)
+        # Also clear HOME-based fallback
+        isolated_env['HOME'] = str(tmp_path / 'fake_home')
+        (tmp_path / 'fake_home').mkdir()
+        
         result = run_dt(
             'clone',
             'some-nonexistent-repo',
             cwd=isolated_dir,
-            check=False
+            check=False,
+            env=isolated_env,
         )
         
         # Should fail because no owner is configured
