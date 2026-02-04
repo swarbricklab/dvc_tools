@@ -18,11 +18,10 @@ from . import config as cfg
 from . import utils
 from .checkout import (
     CheckoutError,
-    is_import_dvc,
     smart_checkout,
 )
 
-# Use shared parse_dvc_file from utils
+# Use shared parse_dvc_file from utils (for compatibility)
 parse_dvc_file = utils.parse_dvc_file
 
 
@@ -674,12 +673,9 @@ def is_import_target(target: str) -> Tuple[bool, Optional[Path]]:
     if dvc_file is None:
         return False, None
     
-    try:
-        dvc_data = parse_dvc_file(dvc_file)
-        if is_import_dvc(dvc_data):
-            return True, dvc_file
-    except CheckoutError:
-        pass
+    # Use DVC's internal is_repo_import check
+    if utils.is_repo_import(dvc_file):
+        return True, dvc_file
     
     return False, dvc_file
 

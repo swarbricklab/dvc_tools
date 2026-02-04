@@ -23,12 +23,17 @@ class CheckoutError(Exception):
     pass
 
 
-# Use shared parse_dvc_file from utils
+# Use shared DVC file utilities from utils
 parse_dvc_file = utils.parse_dvc_file
+load_dvc_file = utils.load_dvc_file
 
 
 def is_import_dvc(dvc_data: Dict[str, Any]) -> bool:
     """Check if a .dvc file represents an import (has deps section).
+    
+    DEPRECATED: Use utils.is_repo_import(path) for new code.
+    This function is kept for compatibility with code that already
+    has parsed dvc_data.
     
     Args:
         dvc_data: Parsed .dvc file contents.
@@ -50,6 +55,10 @@ def is_import_dvc(dvc_data: Dict[str, Any]) -> bool:
 
 def get_import_info(dvc_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Extract import information from a .dvc file.
+    
+    DEPRECATED: Use utils.get_import_info(path) for new code.
+    This function is kept for compatibility with code that already
+    has parsed dvc_data.
     
     Args:
         dvc_data: Parsed .dvc file contents.
