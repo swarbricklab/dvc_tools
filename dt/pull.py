@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import config as cfg
+from . import utils
 from .checkout import (
     CheckoutError,
     is_import_dvc,
@@ -32,18 +33,8 @@ class PullError(Exception):
 # Utility functions  
 # =============================================================================
 
-def format_size(size_bytes: int) -> str:
-    """Format byte size as human-readable string."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    elif size_bytes < 1024 * 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
-    else:
-        return f"{size_bytes / (1024 * 1024 * 1024 * 1024):.1f} TB"
+# Use utils.format_size for size formatting
+format_size = utils.format_size
 
 
 def get_remote_files_size(file_hashes: List[str], remote: Optional[str] = None) -> int:

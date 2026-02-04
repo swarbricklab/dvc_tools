@@ -16,18 +16,8 @@ class CacheError(Exception):
     pass
 
 
-def format_size(size_bytes: int) -> str:
-    """Format byte size as human-readable string."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    elif size_bytes < 1024 * 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
-    else:
-        return f"{size_bytes / (1024 * 1024 * 1024 * 1024):.1f} TB"
+# Use utils.format_size for size formatting
+format_size = utils.format_size
 
 
 def resolve_cache_path(
@@ -178,33 +168,14 @@ def get_cache_dir() -> Path:
     Raises:
         CacheError: If cache is not configured or DVC not available
     """
-    try:
-        from dvc.repo import Repo
-        repo = Repo()
-        return Path(repo.cache.local.path)
-    except ImportError:
-        raise CacheError("DVC internals not available")
-    except Exception as e:
-        raise CacheError(f"Failed to get cache directory: {e}")
+    cache_dir = utils.get_cache_dir()
+    if cache_dir is None:
+        raise CacheError("Cache not configured or DVC not available")
+    return cache_dir
 
 
-def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
-    """Convert a file hash to its cache file path.
-    
-    Args:
-        cache_dir: Path to the cache files/md5 directory
-        file_hash: MD5 hash (possibly with .dir suffix)
-        
-    Returns:
-        Path to the cache file
-    """
-    hash_clean = file_hash.replace('.dir', '')
-    prefix = hash_clean[:2]
-    suffix = hash_clean[2:]
-    if file_hash.endswith('.dir'):
-        suffix += '.dir'
-    
-    return cache_dir / prefix / suffix
+# Re-export hash_to_cache_path from utils
+hash_to_cache_path = utils.hash_to_cache_path
 
 
 def expand_dir_hashes(
