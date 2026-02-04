@@ -127,6 +127,7 @@ def filter_items(
     max_size: Optional[int] = None,
     files_only: bool = False,
     dirs_only: bool = False,
+    exec_only: bool = False,
     hash_prefix: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Filter list items by various criteria.
@@ -139,6 +140,7 @@ def filter_items(
         max_size: Maximum size in bytes
         files_only: Only include files
         dirs_only: Only include directories
+        exec_only: Only include executable files
         hash_prefix: Match items with hash starting with this prefix
         
     Returns:
@@ -159,6 +161,8 @@ def filter_items(
         if files_only and item.get('isdir'):
             continue
         if dirs_only and not item.get('isdir'):
+            continue
+        if exec_only and not item.get('isexec'):
             continue
         
         # Path pattern filter
@@ -255,6 +259,7 @@ def list_files(
     max_size: Optional[str] = None,
     files_only: bool = False,
     dirs_only: bool = False,
+    exec_only: bool = False,
     hash_prefix: Optional[str] = None,
     long_format: bool = False,
     show_hash: bool = False,
@@ -276,6 +281,7 @@ def list_files(
         max_size: Maximum size (e.g., '1G')
         files_only: Only include files
         dirs_only: Only include directories
+        exec_only: Only include executable files
         hash_prefix: Match items with hash starting with this prefix
         long_format: Show size and type
         show_hash: Show MD5 hash
@@ -309,6 +315,7 @@ def list_files(
         max_size=max_bytes,
         files_only=files_only,
         dirs_only=dirs_only,
+        exec_only=exec_only,
         hash_prefix=hash_prefix,
     )
     

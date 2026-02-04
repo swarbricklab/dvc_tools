@@ -13,6 +13,7 @@
 | [`dt fetch`](#dt-fetch) | Fetch import files into primary cache from local sources |
 | [`dt find`](#dt-find) | Find workspace path(s) for a given hash |
 | [`dt history`](#dt-history) | Show version history of DVC-tracked files |
+| [`dt ls`](#dt-ls) | List and filter DVC-tracked files |
 | [`dt mv`](#dt-mv) | Move or rename DVC-tracked files, preserving import metadata |
 | [`dt pull`](#dt-pull) | Pull DVC-tracked files, handling imports automatically |
 | [`dt push`](#dt-push) | Push DVC-tracked files to all configured remotes |
@@ -109,6 +110,18 @@ dt history <path> [-n LIMIT] [--since DATE] [--json] [-v]
 ```
 
 Lists different versions (checksums) across git history, showing when each version was introduced. [Full documentation →](history.md)
+
+---
+
+## dt ls
+
+List and filter DVC-tracked files.
+
+```bash
+dt ls [URL] [PATH] [-R] [--pattern GLOB] [--min-size SIZE] [--files] [--json]
+```
+
+Wraps `dvc list` with filtering by path pattern, size, type, and hash. Pipe-friendly output. [Full documentation →](ls.md)
 
 ---
 

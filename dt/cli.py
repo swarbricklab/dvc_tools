@@ -1026,22 +1026,24 @@ def history(path, limit, since, json_output, verbose):
 @click.option('--max-size', default=None, help='Maximum size (e.g., 100M, 1G)')
 @click.option('--files', 'files_only', is_flag=True, help='Show only files')
 @click.option('--dirs', 'dirs_only', is_flag=True, help='Show only directories')
+@click.option('--exec', 'exec_only', is_flag=True, help='Show only executable files')
 @click.option('--hash', 'hash_prefix', default=None, help='Filter by hash prefix')
 @click.option('-l', '--long', 'long_format', is_flag=True, help='Long format (show type and size)')
 @click.option('--show-hash', is_flag=True, help='Show MD5 hash')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def ls(url, path, rev, recursive, include_all, pattern, regex, min_size, max_size,
-       files_only, dirs_only, hash_prefix, long_format, show_hash, json_output):
+       files_only, dirs_only, exec_only, hash_prefix, long_format, show_hash, json_output):
     """List and filter DVC-tracked files.
     
-    Wraps `dvc list` with filtering capabilities. By default lists the current
-    repository, but can list any DVC repository by URL.
+    Wraps `dvc list` with filtering capabilities. By default lists only DVC
+    outputs (tracked data). Use --all to include git-tracked files too.
     
     Output is pipe-friendly: one path per line by default.
     
     \b
     Examples:
-        dt ls                              # List current repo
+        dt ls                              # List DVC outputs only
+        dt ls --all                        # Include git files too
         dt ls -R                           # List recursively
         dt ls -l                           # Long format with size
         dt ls --pattern "*.csv"            # Filter by glob pattern
@@ -1065,6 +1067,7 @@ def ls(url, path, rev, recursive, include_all, pattern, regex, min_size, max_siz
             max_size=max_size,
             files_only=files_only,
             dirs_only=dirs_only,
+            exec_only=exec_only,
             hash_prefix=hash_prefix,
             long_format=long_format,
             show_hash=show_hash,
