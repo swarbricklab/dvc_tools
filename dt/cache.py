@@ -502,13 +502,10 @@ def remove_cache_files(
             'blocked': False,
         }
     
-    # Expand .dir hashes to include contained files
-    all_hashes, hash_to_path = expand_dir_hashes(
-        cache_dir, manifest['files'], manifest['paths']
-    )
-    
-    if verbose and len(all_hashes) > len(manifest['files']):
-        print(f"Expanded to {len(all_hashes)} file(s) (including directory contents)")
+    # _collect_indexes already returns both directory manifests (.dir files)
+    # and all contained files, so no expansion is needed
+    all_hashes = manifest['files']
+    hash_to_path = manifest['paths']
     
     # Get cache file info (filter to files that exist)
     file_info = get_cache_file_info(cache_dir, all_hashes)
