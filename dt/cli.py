@@ -17,6 +17,7 @@ from . import pull as pull_mod
 from . import offline as offline_mod
 from . import summary as summary_mod
 from . import du as du_mod
+from . import utils
 
 
 @click.group()
@@ -458,11 +459,11 @@ def cache_rm(targets, dry, size, verbose, force):
             click.echo("Would delete:")
             for workspace_path, file_hash, file_size in deleted:
                 if size:
-                    click.echo(f"  {workspace_path}  ({cache_mod.format_size(file_size)})")
+                    click.echo(f"  {workspace_path}  ({utils.format_size(file_size)})")
                 else:
                     click.echo(f"  {workspace_path}")
             if size:
-                click.echo(f"\nTotal: {cache_mod.format_size(total_size)}")
+                click.echo(f"\nTotal: {utils.format_size(total_size)}")
             # Warn about files not in remote (only in verbose or if force was used)
             if not_in_remote and verbose:
                 click.echo(f"\nNote: {len(not_in_remote)} file(s) not verified in remote (--force used)")
@@ -474,7 +475,7 @@ def cache_rm(targets, dry, size, verbose, force):
                 # Summary mode
                 click.echo(f"Deleted {len(deleted)} file(s) from cache.")
             if size:
-                click.echo(f"Freed: {cache_mod.format_size(total_size)}")
+                click.echo(f"Freed: {utils.format_size(total_size)}")
             # Warn if force was used for files not in remote
             if not_in_remote:
                 click.echo(f"\nWarning: {len(not_in_remote)} file(s) were not in remote", err=True)
@@ -672,28 +673,28 @@ def du(targets, human, max_depth, summarize, inodes, show_total, cached):
         max_width = max(len(str(count)) for count, _ in display_results)
     else:
         if human:
-            max_width = max(len(du_mod.format_size(size, True)) for size, _ in display_results)
+            max_width = max(len(utils.format_size(size, True)) for size, _ in display_results)
         else:
             max_width = max(len(str(size)) for size, _ in display_results)
     
     # Also consider grand total width if showing total line
     if show_total and not summarize:
         if human and not inodes:
-            total_width = len(du_mod.format_size(grand_total, True))
+            total_width = len(utils.format_size(grand_total, True))
         else:
             total_width = len(str(grand_total))
         max_width = max(max_width, total_width)
     
     for value, path in display_results:
         if human and not inodes:
-            size_str = du_mod.format_size(value, True)
+            size_str = utils.format_size(value, True)
         else:
             size_str = str(value)
         click.echo(f"{size_str:>{max_width}}   {path}")
     
     if show_total and not summarize:
         if human and not inodes:
-            total_str = du_mod.format_size(grand_total, True)
+            total_str = utils.format_size(grand_total, True)
         else:
             total_str = str(grand_total)
         click.echo(f"{total_str:>{max_width}}   total")
@@ -767,7 +768,7 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
             total_size = push_mod.get_files_size(files)
             
             if verbose:
-                click.echo(f"Files to push ({len(files)} files, {push_mod.format_size(total_size)}):")
+                click.echo(f"Files to push ({len(files)} files, {utils.format_size(total_size)}):")
                 for file_hash in sorted(files):
                     # Show path if available, with full hash in parentheses
                     path = paths.get(file_hash)
@@ -776,7 +777,7 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
                     else:
                         click.echo(f"  {file_hash}")
             else:
-                click.echo(f"Would push {len(files)} file(s), {push_mod.format_size(total_size)}")
+                click.echo(f"Would push {len(files)} file(s), {utils.format_size(total_size)}")
                 if workers:
                     partitions = push_mod.partition_manifest(manifest, workers)
                     click.echo(f"\nWith {workers} workers:")
@@ -1158,7 +1159,7 @@ def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refre
             total_size = pull_mod.get_remote_files_size(files, remote=remote)
             
             if verbose:
-                click.echo(f"Regular files to pull ({len(files)} files, {pull_mod.format_size(total_size)}):")
+                click.echo(f"Regular files to pull ({len(files)} files, {utils.format_size(total_size)}):")
                 for file_hash in sorted(files):
                     path = paths.get(file_hash)
                     if path:
@@ -1166,7 +1167,7 @@ def pull(ctx, workers, worker, manifest, remote, no_wait, dry, verbose, no_refre
                     else:
                         click.echo(f"  {file_hash}")
             else:
-                click.echo(f"Would pull {len(files)} regular file(s), {pull_mod.format_size(total_size)}")
+                click.echo(f"Would pull {len(files)} regular file(s), {utils.format_size(total_size)}")
                 if workers:
                     partitions = pull_mod.partition_manifest(manifest_data, workers)
                     click.echo(f"\nWith {workers} workers:")

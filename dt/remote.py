@@ -10,11 +10,7 @@ from typing import List, Optional, Tuple
 
 from . import config as cfg
 from . import utils
-
-
-class RemoteError(Exception):
-    """Raised when remote operations fail."""
-    pass
+from .errors import RemoteError
 
 
 def resolve_remote_path(

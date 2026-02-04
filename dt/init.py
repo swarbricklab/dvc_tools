@@ -11,11 +11,7 @@ from . import config as cfg
 from . import cache as cache_mod
 from . import remote as remote_mod
 from . import utils
-
-
-class InitError(Exception):
-    """Raised when initialization operations fail."""
-    pass
+from .errors import InitError
 
 
 def check_dependencies(require_dvc: bool = True, require_git: bool = True) -> None:

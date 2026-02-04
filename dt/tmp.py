@@ -11,11 +11,7 @@ from typing import List, Optional, Tuple
 
 from . import config as cfg
 from . import utils
-
-
-class TmpError(Exception):
-    """Raised when tmp clone operations fail."""
-    pass
+from .errors import TmpError
 
 
 def get_tmp_dir() -> Path:
