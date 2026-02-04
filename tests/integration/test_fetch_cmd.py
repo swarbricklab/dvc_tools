@@ -67,35 +67,67 @@ def run_dvc(*args, cwd=None, check=True):
 # Fixtures
 # =============================================================================
 
+def _find_test_repo(repo_name: str) -> Path:
+    """Find a test repository by checking multiple locations.
+    
+    Checks in order:
+    1. Environment variable (DT_TEST_FIXTURES_PATH or DT_TEST_REGISTRY_PATH)
+    2. Alongside dvc_tools (../repo_name)
+    3. Common NCI locations
+    
+    Args:
+        repo_name: Name of the repo (e.g., 'dt-test-fixtures')
+        
+    Returns:
+        Path to the repository
+        
+    Raises:
+        pytest.skip if not found
+    """
+    env_var = f"DT_{repo_name.upper().replace('-', '_')}_PATH"
+    
+    # Check environment variable first
+    if os.environ.get(env_var):
+        path = Path(os.environ[env_var])
+        if path.exists():
+            return path
+    
+    # Check relative to dvc_tools project
+    project_root = Path(__file__).parent.parent.parent
+    relative_path = project_root.parent / repo_name
+    if relative_path.exists():
+        return relative_path
+    
+    # Check common NCI locations
+    nci_locations = [
+        Path.home() / 'projects' / repo_name,
+        Path.home() / repo_name,
+        Path(f'/g/data/a56/dvc/testing/{repo_name}'),
+    ]
+    
+    for path in nci_locations:
+        if path.exists():
+            return path
+    
+    # Not found - skip the test
+    checked_paths = [str(relative_path)] + [str(p) for p in nci_locations]
+    pytest.skip(
+        f"{repo_name} not found. Checked:\n" +
+        "\n".join(f"  - {p}" for p in checked_paths) +
+        f"\nSet {env_var} environment variable to specify location."
+    )
+
+
 @pytest.fixture
 def dt_test_fixtures_path():
-    """Path to the dt-test-fixtures repository.
-    
-    Assumes it's cloned alongside dvc_tools at ../dt-test-fixtures.
-    """
-    # Try relative to the dvc_tools project
-    project_root = Path(__file__).parent.parent.parent
-    fixtures_path = project_root.parent / 'dt-test-fixtures'
-    
-    if not fixtures_path.exists():
-        pytest.skip("dt-test-fixtures not found at expected location")
-    
-    return fixtures_path
+    """Path to the dt-test-fixtures repository."""
+    return _find_test_repo('dt-test-fixtures')
 
 
 @pytest.fixture
 def dt_test_registry_path():
-    """Path to the dt-test-registry repository.
-    
-    Assumes it's cloned alongside dvc_tools at ../dt-test-registry.
-    """
-    project_root = Path(__file__).parent.parent.parent
-    registry_path = project_root.parent / 'dt-test-registry'
-    
-    if not registry_path.exists():
-        pytest.skip("dt-test-registry not found at expected location")
-    
-    return registry_path
+    """Path to the dt-test-registry repository."""
+    return _find_test_repo('dt-test-registry')
 
 
 @pytest.fixture
