@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from dvc.repo import Repo
+
 from . import config as cfg
 from . import hpc
 from . import utils
@@ -39,7 +41,6 @@ def get_files_size(file_hashes: List[str]) -> int:
         Total size in bytes (0 if cache not accessible)
     """
     try:
-        from dvc.repo import Repo
         repo = Repo()
         # repo.cache.local.path already points to the hash directory (files/md5)
         cache_dir = Path(repo.cache.local.path)
@@ -78,7 +79,6 @@ def get_project_remotes() -> List[Tuple[str, str]]:
         List of (name, url) tuples for remotes in project/local config.
     """
     try:
-        from dvc.repo import Repo
         repo = Repo()
         
         remotes = []
@@ -339,7 +339,6 @@ def push_partition(
         Tuple of (pushed_count, failed_count)
     """
     try:
-        from dvc.repo import Repo
         from dvc_data.hashfile.transfer import transfer
         from dvc_data.hashfile.hash_info import HashInfo
     except ImportError as e:
