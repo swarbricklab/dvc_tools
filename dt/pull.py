@@ -19,9 +19,11 @@ from . import utils
 from .checkout import (
     CheckoutError,
     is_import_dvc,
-    parse_dvc_file,
     smart_checkout,
 )
+
+# Use shared parse_dvc_file from utils
+parse_dvc_file = utils.parse_dvc_file
 
 
 class PullError(Exception):
