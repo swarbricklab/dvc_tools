@@ -16,6 +16,8 @@ from typing import Any, Optional, List
 import confuse
 import yaml
 
+from . import utils
+
 
 APP_NAME = 'dt'
 
@@ -51,24 +53,11 @@ def get_config_paths() -> dict[str, Path]:
         paths['user'] = Path.home() / '.config' / APP_NAME / 'config.yaml'
     
     # Project and local: relative to git root or cwd
-    project_root = find_project_root()
+    project_root = utils.find_project_root()
     paths['project'] = project_root / '.dt' / 'config.yaml'
     paths['local'] = project_root / '.dt' / 'config.local.yaml'
     
     return paths
-
-
-def find_project_root() -> Path:
-    """Find the project root by looking for .git directory.
-    
-    Returns:
-        Path to project root, or cwd if not in a git repo
-    """
-    cwd = Path.cwd()
-    for parent in [cwd] + list(cwd.parents):
-        if (parent / '.git').exists():
-            return parent
-    return cwd
 
 
 def load_config() -> confuse.Configuration:
