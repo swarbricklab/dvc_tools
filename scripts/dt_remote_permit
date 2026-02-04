@@ -1,5 +1,0 @@
-#! /bin/bash
-
-remote=${1:-/g/data/ab12/dvc}
-
-find . -type d -user $USER -not -perm 2775 -exec chmod 2775 {} \;
