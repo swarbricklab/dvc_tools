@@ -5,7 +5,6 @@ Convenient tools for working with DVC in HPC environments with shared external c
 ## Installation
 
 ```bash
-# Install from GitHub
 pip install git+ssh://git@github.com/swarbricklab/dvc_tools.git
 ```
 
@@ -25,26 +24,24 @@ dt doctor
 
 ## Commands
 
-This package provides the `dt` command with subcommands for working with DVC projects:
+The `dt` command provides subcommands for managing DVC projects:
 
-| Command | Description |
-|---------|-------------|
-| `dt init` | Initialize a new DVC project with cache and remote |
-| `dt clone` | Clone an existing DVC project with local configuration |
-| `dt add` | Add files to DVC tracking via compute node |
-| `dt checkout` | Checkout files, searching across multiple caches |
-| `dt pull` | Pull DVC-tracked files, handling imports automatically |
-| `dt push` | Push files to all configured remotes |
-| `dt import` | Import data from other repositories using local caches |
-| `dt cache` | Manage external shared caches |
-| `dt remote` | Manage remote storage |
-| `dt tmp` | Manage temporary repository clones |
-| `dt config` | View and modify configuration settings |
-| `dt doctor` | Diagnose common setup issues |
+```bash
+dt init       # Initialize a new DVC project with cache and remote
+dt clone      # Clone an existing DVC project with local configuration
+dt add        # Add files to DVC tracking via compute node
+dt fetch      # Fetch import files into cache from local sources
+dt pull       # Pull DVC-tracked files, handling imports automatically
+dt push       # Push files to all configured remotes
+dt import     # Import data from other repositories using local caches
+dt mv         # Move/rename files, preserving import metadata
+dt cache      # Manage external shared caches
+dt remote     # Manage remote storage
+dt config     # View and modify configuration settings
+dt doctor     # Diagnose common setup issues
+```
 
-See the [Command Reference](docs/commands.md) for full documentation.
-
-Each command includes help via `dt <command> --help`.
+See the [Command Reference](docs/commands.md) for full documentation, or use `dt <command> --help`.
 
 ## Architecture
 
