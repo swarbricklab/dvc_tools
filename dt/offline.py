@@ -18,11 +18,15 @@ import yaml
 
 from . import tmp as tmp_mod
 from . import remote as remote_mod
+from . import utils
 from .errors import OfflineError
 
 
 def get_dt_root() -> Path:
     """Get the .dt directory root.
+    
+    Searches upward from current directory to find the project root,
+    then returns the .dt directory within it.
     
     Returns:
         Path to .dt directory.
@@ -30,11 +34,14 @@ def get_dt_root() -> Path:
     Raises:
         OfflineError: If not in a dt-initialized directory.
     """
-    cwd = Path.cwd()
-    dt_dir = cwd / '.dt'
+    # Find project root by looking for git or DVC repo
+    project_root = utils.find_project_root()
+    
+    dt_dir = project_root / '.dt'
     if not dt_dir.exists():
         raise OfflineError(
-            "Not in a dt-initialized directory. Run 'dt init' first."
+            f"Not in a dt-initialized directory (checked {project_root})."
+            f" Run 'dt init' first."
         )
     return dt_dir
 
@@ -457,7 +464,9 @@ def get_ssh_remotes() -> List[Tuple[str, str, str]]:
     """
     import configparser
     
-    dvc_config = Path.cwd() / '.dvc' / 'config'
+    # Find DVC root from anywhere in the repo
+    dvc_root = utils.find_dvc_root()
+    dvc_config = dvc_root / 'config'
     if not dvc_config.exists():
         return []
     
