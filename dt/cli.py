@@ -4,6 +4,7 @@ import click
 
 from . import config as cfg
 from . import clone as clone_mod
+from . import errors
 from . import init as init_mod
 from . import cache as cache_mod
 from . import remote as remote_mod
@@ -1042,8 +1043,9 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
+@click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_refresh, no_index_sync):
+def fetch(ctx, targets, verbose, no_refresh, no_index_sync, update):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1063,6 +1065,7 @@ def fetch(ctx, targets, verbose, no_refresh, no_index_sync):
         dt fetch data/external.dvc         # Fetch specific targets
         dt fetch -v                        # Show detailed progress
         dt fetch --no-refresh              # Skip refreshing temp clones
+        dt fetch --update                  # Rebuild .dir files, update .dvc if needed
     """
     from . import fetch as fetch_mod
     
@@ -1079,6 +1082,7 @@ def fetch(ctx, targets, verbose, no_refresh, no_index_sync):
             targets=list(targets) if targets else None,
             verbose=verbose,
             refresh=not no_refresh,
+            update=update,
         )
         
         any_success = False
@@ -1108,7 +1112,10 @@ def fetch(ctx, targets, verbose, no_refresh, no_index_sync):
                         click.echo(f"Warning: index sync failed: {e}")
         elif any_failure and not any_success:
             raise SystemExit(1)
-            
+    
+    except errors.HashMismatchError as e:
+        # Clean error message with suggestion
+        raise click.ClickException(str(e))
     except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
 

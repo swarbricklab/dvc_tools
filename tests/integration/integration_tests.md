@@ -171,12 +171,19 @@ Integration tests run real git/DVC commands against actual repositories.
 
 **File:** `test_fetch_cmd.py`
 
-- [ ] Fetch all tracked files to cache
-- [ ] Fetch specific targets
-- [ ] Fetch import file (uses source cache)
+- [x] Fetch all tracked files to cache
+- [x] Fetch specific targets
+- [x] Fetch import file (uses source cache)
 - [ ] --checkout runs dvc checkout after
-- [ ] Progress display
-- [ ] Error: fetch non-existent target
+- [x] Progress display (verbose output)
+- [x] Error: fetch non-existent target
+- [x] Error: fetch invalid .dvc file
+- [x] Error: fetch directory instead of .dvc file
+- [x] --no-refresh option
+- [x] --no-index-sync option
+- [x] Regular file suggests dvc fetch
+- [x] File already in cache reports success
+- [x] Fetch + checkout workflow
 
 ---
 
@@ -470,7 +477,7 @@ Tests requiring network access:
 | diff | 0 | ⬜ Not started |
 | doctor | 0 | ⬜ Not started |
 | du | 0 | ⬜ Not started |
-| fetch | 0 | ⬜ Not started |
+| fetch | 12 | ✅ Complete |
 | find | 0 | ⬜ Not started |
 | history | 0 | ⬜ Not started |
 | import | 0 | ⬜ Not started |
@@ -486,4 +493,4 @@ Tests requiring network access:
 | tmp | 0 | ⬜ Not started |
 | worktree | 0 | ⬜ Not started |
 
-**Total:** 55 tests implemented
+**Total:** 67 tests implemented
