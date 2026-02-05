@@ -333,3 +333,98 @@ def get_repo_dvc_config(repo_spec: str, owner: Optional[str] = None) -> Optional
         return config_path
     
     return None
+
+
+def checkout_path_at_revision(
+    repo_path: Path,
+    path: str,
+    revision: str,
+    verbose: bool = False,
+) -> bool:
+    """Checkout a specific path at a specific revision in a clone.
+    
+    This is used when we need to access source files at the exact revision
+    that was used for an import (rev_lock). The clone may be sparse and shallow,
+    so we need to fetch the specific commit first.
+    
+    Args:
+        repo_path: Path to the git repository clone.
+        path: Path within the repo to checkout.
+        revision: Git revision (commit hash) to checkout.
+        verbose: Print progress messages.
+        
+    Returns:
+        True if successful, False otherwise.
+    """
+    # First, fetch the specific commit (it may not be in our shallow clone)
+    if verbose:
+        print(f"  Fetching revision {revision[:12]}...")
+    
+    result = subprocess.run(
+        ['git', 'fetch', '--depth', '1', 'origin', revision],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        if verbose:
+            print(f"  Warning: Could not fetch revision: {result.stderr.strip()}")
+        # Try without depth in case it's already available
+        result = subprocess.run(
+            ['git', 'fetch', 'origin', revision],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            if verbose:
+                print(f"  Error: Fetch failed: {result.stderr.strip()}")
+            return False
+    
+    # Disable sparse checkout to get the full tree at this revision
+    if verbose:
+        print(f"  Disabling sparse checkout to access full tree...")
+    
+    result = subprocess.run(
+        ['git', 'sparse-checkout', 'disable'],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    # Ignore errors - sparse checkout may not be enabled
+    
+    # Checkout the specific revision for the whole repo
+    if verbose:
+        print(f"  Checking out revision {revision[:12]}...")
+    
+    result = subprocess.run(
+        ['git', 'checkout', revision],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        # Try checkout with FETCH_HEAD
+        if verbose:
+            print(f"  Trying checkout of FETCH_HEAD...")
+        result = subprocess.run(
+            ['git', 'checkout', 'FETCH_HEAD'],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            if verbose:
+                print(f"  Error: Could not checkout: {result.stderr.strip()}")
+            return False
+    
+    # Verify the path exists
+    target_path = repo_path / path
+    if not target_path.exists():
+        if verbose:
+            print(f"  Warning: Path does not exist after checkout: {path}")
+        return False
+    
+    return True

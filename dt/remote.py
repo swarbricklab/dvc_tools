@@ -255,16 +255,23 @@ def list_remotes_from_repo(
 ) -> List[Tuple[str, str, bool]]:
     """List remotes for a remote repository.
     
-    Uses tmp clone infrastructure to clone the repo and run
-    `dvc remote list` within it.
+    If repo_spec is a local path, runs `dvc remote list` directly.
+    Otherwise, uses tmp clone infrastructure to clone the repo first.
     
     Args:
-        repo_spec: Repository URL or short name
+        repo_spec: Repository URL, local path, or short name
         owner: Optional owner for short names
         
     Returns:
         List of (remote_name, url, is_default) tuples
     """
+    # Check if repo_spec is a local path that already exists
+    local_repo = Path(repo_spec)
+    if local_repo.exists() and (local_repo / '.dvc').is_dir():
+        # Local repo - run dvc remote list directly to get correct resolved paths
+        return _run_dvc_remote_list(local_repo)
+    
+    # Remote repo - clone it first
     from . import tmp as tmp_mod
     
     repo_path = tmp_mod.clone_repo(repo_spec, owner=owner, refresh=True, verbose=False)
