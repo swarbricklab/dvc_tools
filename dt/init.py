@@ -217,6 +217,7 @@ def init_dt_directory(repo_path: Path, verbose: bool = True) -> Path:
 def init_project(
     name: Optional[str] = None,
     owner: Optional[str] = None,
+    team: Optional[str] = None,
     cache_root: Optional[str] = None,
     remote_root: Optional[str] = None,
     no_git: bool = False,
@@ -239,6 +240,7 @@ def init_project(
     Args:
         name: Project name (defaults to current directory name)
         owner: GitHub owner (user or organization)
+        team: GitHub team for access (only valid if owner is an org)
         cache_root: Root directory for caches
         remote_root: Root directory for remotes
         no_git: Skip git initialization
@@ -323,7 +325,7 @@ def init_project(
     if not no_git:
         # Get owner and team from argument or config
         effective_owner = owner or cfg.get_value('owner')
-        effective_team = cfg.get_value('team')
+        effective_team = team or cfg.get_value('team')
         check_github_remote(repo_path, project_name, owner=effective_owner, team=effective_team, verbose=verbose)
     
     if verbose:

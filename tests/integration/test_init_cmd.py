@@ -185,7 +185,7 @@ class TestInitCacheRemote:
         # Should complete without errors even with no cache.root configured
 
     def test_init_with_cache_root(self, isolated_dir, tmp_path):
-        """Init with --cache-root creates cache structure."""
+        """Init with --cache-root creates cache structure and configures DVC."""
         cache_root = tmp_path / 'caches'
         cache_root.mkdir()
         
@@ -193,21 +193,65 @@ class TestInitCacheRemote:
                        '--no-remote', cwd=isolated_dir)
         
         assert result.returncode == 0
-        # Cache directory should be created
+        
+        # Cache directory should be created with project name
         project_name = isolated_dir.name
         cache_dir = cache_root / project_name
-        # Check if cache was configured (may exist or DVC config set)
+        assert cache_dir.exists(), f"Cache directory {cache_dir} should be created"
+        
+        # DVC should be configured to use external cache
+        dvc_config_local = isolated_dir / '.dvc' / 'config.local'
+        assert dvc_config_local.exists(), "DVC local config should exist"
+        config_content = dvc_config_local.read_text()
+        assert str(cache_dir) in config_content, "Cache path should be in DVC config"
+        assert 'cache' in config_content.lower(), "Cache section should be configured"
 
     def test_init_with_remote_root(self, isolated_dir, tmp_path):
-        """Init with --remote-root creates remote structure."""
+        """Init with --remote-root creates remote structure and configures DVC."""
+        cache_root = tmp_path / 'caches'
+        cache_root.mkdir()
         remote_root = tmp_path / 'remotes'
         remote_root.mkdir()
         
-        result = run_dt('init', '--cache-root', str(tmp_path / 'caches'),
+        result = run_dt('init', '--cache-root', str(cache_root),
                        '--remote-root', str(remote_root), cwd=isolated_dir)
         
-        # Just check it doesn't error with valid paths
-        # Remote initialization depends on remote_mod implementation
+        assert result.returncode == 0
+        
+        # Remote directory should be created with project name
+        project_name = isolated_dir.name
+        remote_dir = remote_root / project_name
+        assert remote_dir.exists(), f"Remote directory {remote_dir} should be created"
+
+
+# =============================================================================
+# Team and Owner Option Tests
+# =============================================================================
+
+@pytest.mark.integration
+@requires_git
+@requires_dvc
+class TestInitOwnerTeamOptions:
+    """Test --owner and --team options for gh repo create suggestion."""
+
+    def test_init_with_team_shows_in_suggestion(self, isolated_dir):
+        """Init with --team includes team in gh repo create suggestion."""
+        result = run_dt('init', '--owner', 'myorg', '--team', 'analysts',
+                       '--no-cache', '--no-remote', cwd=isolated_dir)
+        
+        assert result.returncode == 0
+        # Suggestion should include the team option
+        if 'gh repo create' in result.stdout:
+            assert '--team=analysts' in result.stdout
+
+    def test_init_without_team_omits_team_option(self, isolated_dir):
+        """Init without --team does not include team in suggestion."""
+        result = run_dt('init', '--owner', 'myorg',
+                       '--no-cache', '--no-remote', cwd=isolated_dir)
+        
+        assert result.returncode == 0
+        if 'gh repo create' in result.stdout:
+            assert '--team=' not in result.stdout
 
 
 # =============================================================================
@@ -236,6 +280,45 @@ class TestInitErrors:
         """Init fails gracefully when dvc is not available."""
         # This test only runs if we can simulate missing dvc
         pass
+
+
+# =============================================================================
+# DVC Configuration Verification Tests
+# =============================================================================
+
+@pytest.mark.integration
+@requires_git
+@requires_dvc
+class TestInitDvcConfiguration:
+    """Test that dt init correctly configures DVC settings."""
+
+    def test_init_creates_dvcignore(self, isolated_dir):
+        """Init creates .dvcignore file."""
+        run_dt('init', '--no-cache', '--no-remote', cwd=isolated_dir)
+        
+        dvcignore = isolated_dir / '.dvcignore'
+        assert dvcignore.exists(), ".dvcignore should be created"
+
+    def test_init_dvc_config_exists(self, isolated_dir):
+        """Init creates .dvc/config file."""
+        run_dt('init', '--no-cache', '--no-remote', cwd=isolated_dir)
+        
+        dvc_config = isolated_dir / '.dvc' / 'config'
+        assert dvc_config.exists(), ".dvc/config should be created"
+
+    def test_init_with_cache_configures_external_cache(self, isolated_dir, tmp_path):
+        """Init with cache-root configures DVC to use external cache."""
+        cache_root = tmp_path / 'caches'
+        cache_root.mkdir()
+        
+        run_dt('init', '--cache-root', str(cache_root), '--no-remote', cwd=isolated_dir)
+        
+        # Verify cache is configured in .dvc/config.local
+        dvc_config_local = isolated_dir / '.dvc' / 'config.local'
+        if dvc_config_local.exists():
+            content = dvc_config_local.read_text()
+            # Should configure external cache directory
+            assert 'cache' in content.lower()
 
 
 # =============================================================================
