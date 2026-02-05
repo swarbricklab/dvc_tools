@@ -61,7 +61,47 @@ def _is_ignored(path: Path) -> bool:
     return False
 
 
-def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool = False) -> None:
+def _is_autostage_enabled() -> bool:
+    """Check if DVC core.autostage is enabled.
+    
+    Returns:
+        True if autostage is enabled, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            ['dvc', 'config', 'core.autostage'],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and result.stdout.strip().lower() == 'true'
+    except (OSError, FileNotFoundError):
+        return False
+
+
+def _git_stage_file(path: Path, verbose: bool = False) -> None:
+    """Stage a file with git add.
+    
+    Args:
+        path: Path to file to stage.
+        verbose: Print progress messages.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'add', str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            if verbose:
+                print(f"  Staged {path.name} (core.autostage enabled)")
+        elif verbose:
+            print(f"  Warning: Could not stage {path.name}: {result.stderr.strip()}")
+    except (OSError, FileNotFoundError) as e:
+        if verbose:
+            print(f"  Warning: Could not stage {path.name}: {e}")
+
+
+def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool = False) -> bool:
     """Update the MD5 hash in a .dvc file.
     
     For import files, the hash is in outs with a .dir suffix (e.g., "abc123.dir").
@@ -71,6 +111,9 @@ def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool
         old_hash: The old hash to replace (without .dir suffix).
         new_hash: The new hash to use.
         verbose: Print progress messages.
+        
+    Returns:
+        True if the file was modified, False otherwise.
     """
     import yaml
     
@@ -96,12 +139,20 @@ def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool
                 yaml.dump(data, f, default_flow_style=False, sort_keys=False)
             if verbose:
                 print(f"  Updated .dvc file hash: {old_hash[:12]}... -> {new_hash[:12]}...")
+            
+            # Stage file if autostage is enabled
+            if _is_autostage_enabled():
+                _git_stage_file(dvc_path, verbose)
+            
+            return True
         elif verbose:
             print(f"  Warning: Could not find hash {old_hash[:12]}... in .dvc file to update")
+        return False
             
     except Exception as e:
         if verbose:
             print(f"  Warning: Could not update .dvc file: {e}")
+        return False
 
 
 def _populate_cache_from_source(
