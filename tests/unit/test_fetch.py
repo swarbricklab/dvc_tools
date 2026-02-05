@@ -111,8 +111,8 @@ class TestPopulateCacheFile:
         # Should return False (already exists)
         assert result is False
     
-    def test_source_not_found_returns_false(self, cache_dirs):
-        """Source file not found returns False."""
+    def test_source_not_found_returns_none(self, cache_dirs):
+        """Source file not found returns None."""
         md5 = 'nonexistent123456789012345678901234'
         
         result = import_data.populate_cache_file(
@@ -123,7 +123,7 @@ class TestPopulateCacheFile:
             use_v3_layout=True,
         )
         
-        assert result is False
+        assert result is None
 
     def test_dvc_v2_layout_fallback(self, cache_dirs):
         """Falls back to DVC v2 layout (XX/hash directly in root) for source.

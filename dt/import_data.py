@@ -525,7 +525,7 @@ def populate_cache_file(
     dest_cache: str,
     verbose: bool = False,
     use_v3_layout: bool = True,
-) -> bool:
+) -> Optional[bool]:
     """Copy or link a single file from source cache to destination cache.
     
     Used for .dir files and single file imports where we need to ensure
@@ -546,7 +546,9 @@ def populate_cache_file(
             If False, use v2 layout (XX/hash). Should match the .dvc file format.
         
     Returns:
-        True if file was added to cache, False otherwise.
+        True if file was added to cache.
+        False if file already exists in cache.
+        None if source file not found (error case).
     """
     # Handle .dir suffix
     if md5.endswith('.dir'):
@@ -569,12 +571,8 @@ def populate_cache_file(
         if verbose:
             print(f"  Using legacy cache layout for: {md5[:12]}...")
     else:
-        # Neither exists - this is a critical error, not a warning
-        if verbose:
-            print(f"  ERROR: Source file not found in cache: {md5[:12]}...")
-            print(f"    Checked: {source_file_v3}")
-            print(f"    Checked: {source_file_v2}")
-        return False
+        # Neither exists - return None to indicate source not found
+        return None
     
     # Destination path depends on the .dvc file format
     # v3 format (.dvc has 'hash: md5') -> files/md5/XX/hash
