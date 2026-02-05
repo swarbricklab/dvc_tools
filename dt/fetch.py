@@ -64,9 +64,11 @@ def _is_ignored(path: Path) -> bool:
 def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool = False) -> None:
     """Update the MD5 hash in a .dvc file.
     
+    For import files, the hash is in outs with a .dir suffix (e.g., "abc123.dir").
+    
     Args:
         dvc_path: Path to the .dvc file.
-        old_hash: The old hash to replace.
+        old_hash: The old hash to replace (without .dir suffix).
         new_hash: The new hash to use.
         verbose: Print progress messages.
     """
@@ -76,11 +78,16 @@ def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool
         content = dvc_path.read_text()
         data = yaml.safe_load(content)
         
-        # Update the outs section
+        # Update the outs section - check for both exact hash and hash.dir format
         modified = False
         for out in data.get('outs', []):
-            if out.get('md5') == old_hash:
+            out_md5 = out.get('md5', '')
+            # Handle both "hash" and "hash.dir" formats
+            if out_md5 == old_hash:
                 out['md5'] = new_hash
+                modified = True
+            elif out_md5 == f"{old_hash}.dir":
+                out['md5'] = f"{new_hash}.dir"
                 modified = True
         
         if modified:
@@ -268,6 +275,7 @@ def _populate_cache_from_source(
         if entries:
             for entry in entries:
                 file_md5 = entry.get('md5', '')
+                relpath = entry.get('relpath', file_md5[:12])  # Use relpath if available
                 if file_md5:
                     result = import_mod.populate_cache_file(
                         md5=file_md5,
@@ -285,6 +293,8 @@ def _populate_cache_from_source(
                         else:
                             cache_file = Path(cache_base) / file_md5[:2] / file_md5[2:]
                         if not cache_file.exists():
+                            if verbose:
+                                print(f"  ERROR: File not found in source cache: {relpath} ({file_md5[:12]}...)")
                             failed += 1
     
     return count, failed
