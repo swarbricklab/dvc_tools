@@ -198,6 +198,118 @@ def build_dir_manifest(entries: List[Dict[str, str]]) -> bytes:
     return content.encode('utf-8')
 
 
+def construct_dir_from_dvc_list(
+    repo_url: str,
+    path: str,
+    revision: str,
+    expected_hash: str,
+    dest_cache: str,
+    use_v3_layout: bool = True,
+    verbose: bool = False,
+) -> Optional[List[Dict[str, str]]]:
+    """Construct a .dir manifest using 'dvc list' on a remote repository.
+    
+    This is useful for nested DVC imports where the source directory contains
+    .dvc files. 'dvc list' can retrieve the file listing and hashes without
+    needing to checkout the actual data.
+    
+    Args:
+        repo_url: URL of the source repository.
+        path: Path within the repo to list.
+        revision: Git revision (commit hash) to list at.
+        expected_hash: The expected MD5 hash of the .dir file (without .dir suffix).
+        dest_cache: Path to destination cache base directory.
+        use_v3_layout: If True, write .dir file to v3 layout.
+        verbose: Print progress messages.
+        
+    Returns:
+        List of manifest entries if successful, None on failure.
+    """
+    import hashlib
+    
+    if verbose:
+        print(f"  Using 'dvc list' to build manifest from {repo_url}")
+        print(f"    Path: {path}")
+        print(f"    Revision: {revision[:12]}...")
+    
+    # Run dvc list to get file listing with hashes
+    cmd = [
+        'dvc', 'list',
+        '--json',
+        '--show-hash',
+        '--recursive',
+        repo_url,
+        path,
+        '--rev', revision,
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        if verbose:
+            print(f"  ERROR: 'dvc list' failed: {result.stderr.strip()}")
+        return None
+    
+    try:
+        files = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(f"  ERROR: Could not parse 'dvc list' output: {e}")
+        return None
+    
+    # Filter to only files with hashes (DVC-tracked outputs)
+    entries = []
+    for f in files:
+        if f.get('isdir'):
+            continue
+        md5 = f.get('md5')
+        if not md5:
+            continue
+        relpath = f.get('path', '')
+        if relpath:
+            entries.append({'md5': md5, 'relpath': relpath})
+    
+    if not entries:
+        if verbose:
+            print(f"  ERROR: No DVC-tracked files found in listing")
+        return None
+    
+    if verbose:
+        print(f"  Found {len(entries)} files via 'dvc list'")
+    
+    # Build the manifest content
+    manifest_content = build_dir_manifest(entries)
+    
+    # Verify hash matches expected
+    actual_hash = hashlib.md5(manifest_content).hexdigest()
+    
+    if actual_hash != expected_hash:
+        if verbose:
+            print(f"  ERROR: Constructed .dir hash mismatch!")
+            print(f"    Expected: {expected_hash}")
+            print(f"    Got:      {actual_hash}")
+            print(f"    Files ({len(entries)}):")
+            for entry in entries[:10]:
+                print(f"      {entry['relpath']}: {entry['md5']}")
+            if len(entries) > 10:
+                print(f"      ... and {len(entries) - 10} more")
+        return None
+    
+    # Write .dir file to cache
+    if use_v3_layout:
+        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+    else:
+        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+    
+    if not dest_file.exists():
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        dest_file.write_bytes(manifest_content)
+        if verbose:
+            print(f"  Created .dir file: {dest_file}")
+    
+    return entries
+
+
 def construct_dir_file(
     source_dir: Path,
     expected_hash: str,

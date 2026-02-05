@@ -65,30 +65,28 @@ def _populate_cache_from_source(
     dvc_path: Path,
     source_cache: str,
     verbose: bool = False,
-    source_clone_path: Optional[Path] = None,
     rev_lock: Optional[str] = None,
+    source_url: Optional[str] = None,
 ) -> Tuple[int, int]:
     """Populate the primary cache from a source cache.
     
     Creates symlinks in the primary cache pointing to files in the source cache.
     Respects the .dvc file format (v2 vs v3) when determining cache layout.
     
-    For directory imports, if the .dir file doesn't exist in the source cache
-    (because the source directory wasn't DVC-tracked), it will be constructed
-    from the source files at the specified revision.
+    For directory imports, if the .dir file doesn't exist in the source cache,
+    it will be constructed using 'dvc list' to query the source repository.
     
     Args:
         dvc_path: Path to the .dvc file.
         source_cache: Path to the source cache.
         verbose: Print progress messages.
-        source_clone_path: Path to the source repo clone (for constructing .dir files).
-        rev_lock: Git revision to checkout when constructing .dir files.
+        rev_lock: Git revision for constructing .dir files via dvc list.
+        source_url: URL of the source repository (for dvc list).
         
     Returns:
         Tuple of (files_added, files_failed) counts.
     """
     from . import import_data as import_mod
-    from . import tmp as tmp_mod
     
     primary_cache = utils.get_cache_dir()
     if not primary_cache:
@@ -182,80 +180,33 @@ def _populate_cache_from_source(
                 dir_file = dir_file_v2
         
         if dir_file is None:
-            # .dir file not in source cache or dest cache - need to construct it
-            # This happens when importing a directory that wasn't DVC-tracked in source
-            # NOTE: This may fail if the import was created with DVC v2 (dos2unix hashing)
-            # and we're using DVC v3 (raw hashing) to reconstruct
-            if source_clone_path:
-                # Get the dependency path from the .dvc file
+            # .dir file not in source cache or dest cache - construct it using dvc list
+            # This works for both regular directories and nested DVC imports
+            if source_url:
                 deps = dvc_data.get('deps', [])
                 if deps:
                     dep_path = deps[0].get('path', '')
                     if dep_path:
-                        source_dir = source_clone_path / dep_path
+                        if verbose:
+                            print(f"  .dir file not in cache, using dvc list to build manifest...")
                         
-                        # Need to checkout the source files at rev_lock
-                        if rev_lock:
+                        entries = import_mod.construct_dir_from_dvc_list(
+                            repo_url=source_url,
+                            path=dep_path,
+                            revision=rev_lock,
+                            expected_hash=dir_hash,
+                            dest_cache=cache_base,
+                            use_v3_layout=use_v3_layout,
+                            verbose=verbose,
+                        )
+                        
+                        if entries is None:
                             if verbose:
-                                print(f"  .dir file not in source cache, checking out {dep_path} at {rev_lock[:12]}...")
-                            
-                            checkout_ok = tmp_mod.checkout_path_at_revision(
-                                repo_path=source_clone_path,
-                                path=dep_path,
-                                revision=rev_lock,
-                                verbose=verbose,
-                            )
-                            
-                            if not checkout_ok:
-                                if verbose:
-                                    print(f"  ERROR: Could not checkout source files at revision {rev_lock[:12]}")
-                                failed += 1
-                            elif source_dir.exists():
-                                # Debug: list what files were checked out
-                                if verbose:
-                                    print(f"  Source dir after checkout: {source_dir}")
-                                    try:
-                                        files_found = list(source_dir.rglob('*'))
-                                        print(f"  Files found: {len([f for f in files_found if f.is_file()])}")
-                                        for f in sorted(files_found):
-                                            if f.is_file():
-                                                print(f"    {f.relative_to(source_dir)}")
-                                    except Exception as e:
-                                        print(f"  Could not list files: {e}")
-                                
-                                entries = import_mod.construct_dir_file(
-                                    source_dir=source_dir,
-                                    expected_hash=dir_hash,
-                                    dest_cache=cache_base,
-                                    use_v3_layout=use_v3_layout,
-                                    verbose=verbose,
-                                )
-                                if entries is None:
-                                    if verbose:
-                                        print(f"  ERROR: Could not construct .dir file")
-                                    failed += 1
-                            else:
-                                if verbose:
-                                    print(f"  ERROR: Source directory not found after checkout: {source_dir}")
-                                failed += 1
-                        else:
-                            if verbose:
-                                print(f"  WARNING: No rev_lock to checkout source files, trying current state")
-                            if source_dir.exists():
-                                entries = import_mod.construct_dir_file(
-                                    source_dir=source_dir,
-                                    expected_hash=dir_hash,
-                                    dest_cache=cache_base,
-                                    use_v3_layout=use_v3_layout,
-                                    verbose=verbose,
-                                )
-                            if entries is None:
-                                if verbose:
-                                    print(f"  ERROR: Could not construct .dir file (source may have changed)")
-                                failed += 1
+                                print(f"  ERROR: Could not construct .dir file from dvc list")
+                            failed += 1
             else:
                 if verbose:
-                    print(f"  .dir file not found in source cache and no clone available")
+                    print(f"  .dir file not found in cache and no source URL available")
                 failed += 1
         
         # Read entries from existing .dir file
@@ -297,7 +248,7 @@ def _populate_cache_from_source(
 def fetch_import(
     dvc_path: Path,
     verbose: bool = False,
-    refresh: bool = True,
+    refresh: bool = True,  # Currently unused, kept for API compatibility
 ) -> Tuple[str, int, int]:
     """Fetch an import .dvc file by finding and linking from the source cache.
     
@@ -307,7 +258,7 @@ def fetch_import(
     Args:
         dvc_path: Path to the .dvc file.
         verbose: Print progress messages.
-        refresh: Whether to refresh the temp clone (default True).
+        refresh: Whether to refresh the temp clone (currently unused).
         
     Returns:
         Tuple of (source_cache_path, files_added_count, files_failed_count).
@@ -316,7 +267,6 @@ def fetch_import(
         FetchError: If fetch fails.
     """
     from . import remote as remote_mod
-    from . import tmp as tmp_mod
     
     import_info = utils.get_import_info(dvc_path)
     if not import_info:
@@ -331,16 +281,7 @@ def fetch_import(
         if import_info.get('path'):
             print(f"  Path: {import_info['path']}")
     
-    # Step 1: Clone the source repo to access its DVC config
-    if verbose:
-        print(f"Cloning source repository...")
-    
-    try:
-        clone_path = tmp_mod.clone_repo(source_url, refresh=refresh, verbose=verbose)
-    except tmp_mod.TmpError as e:
-        raise FetchError(f"Failed to clone source repository: {e}")
-    
-    # Step 2: Find a local remote from the source repo
+    # Step 1: Find a local remote from the source repo (clones if needed)
     if verbose:
         print(f"Looking for local cache...")
     
@@ -360,14 +301,14 @@ def fetch_import(
     if verbose:
         print(f"Found local cache: {cache_path} (from remote '{remote_name}')")
     
-    # Step 3: Populate primary cache with symlinks
+    # Step 2: Populate primary cache with symlinks
     if verbose:
         print(f"Populating primary cache...")
     
     count, failed = _populate_cache_from_source(
         dvc_path, cache_path, verbose,
-        source_clone_path=clone_path,
         rev_lock=import_info.get('rev'),
+        source_url=source_url,
     )
     
     return cache_path, count, failed
