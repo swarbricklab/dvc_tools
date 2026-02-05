@@ -195,6 +195,18 @@ def _populate_cache_from_source(
                                     print(f"  ERROR: Could not checkout source files at revision {rev_lock[:12]}")
                                 failed += 1
                             elif source_dir.exists():
+                                # Debug: list what files were checked out
+                                if verbose:
+                                    print(f"  Source dir after checkout: {source_dir}")
+                                    try:
+                                        files_found = list(source_dir.rglob('*'))
+                                        print(f"  Files found: {len([f for f in files_found if f.is_file()])}")
+                                        for f in sorted(files_found):
+                                            if f.is_file():
+                                                print(f"    {f.relative_to(source_dir)}")
+                                    except Exception as e:
+                                        print(f"  Could not list files: {e}")
+                                
                                 entries = import_mod.construct_dir_file(
                                     source_dir=source_dir,
                                     expected_hash=dir_hash,
