@@ -638,3 +638,428 @@ class TestFetch:
         assert success is False  # Should be failure now
         assert 'FAILED' in message
         assert '1 file' in message
+
+    def test_regular_file_calls_fetch_non_import(self, dvc_project):
+        """Regular .dvc file triggers _fetch_non_import."""
+        project, cache = dvc_project
+        
+        # Create regular .dvc file
+        dvc_file = project / 'data.csv.dvc'
+        dvc_file.write_text('outs:\n  - md5: abc123\n    path: data.csv\n')
+        
+        with patch('dt.fetch.utils.check_dvc'), \
+             patch('dt.fetch.utils.is_repo_import', return_value=False), \
+             patch('dt.fetch._fetch_non_import') as mock_fetch_non_import:
+            
+            mock_fetch_non_import.return_value = (True, "Fetched 1 files from local remote 'test'")
+            
+            results = fetch.fetch(targets=['data.csv.dvc'])
+        
+        assert len(results) == 1
+        assert mock_fetch_non_import.called
+        target, success, message = results[0]
+        assert success is True
+        assert 'local remote' in message
+
+    def test_network_parameter_passed_to_fetch_non_import(self, dvc_project):
+        """Network parameter is passed to _fetch_non_import."""
+        project, cache = dvc_project
+        
+        dvc_file = project / 'data.csv.dvc'
+        dvc_file.write_text('outs:\n  - md5: abc123\n    path: data.csv\n')
+        
+        with patch('dt.fetch.utils.check_dvc'), \
+             patch('dt.fetch.utils.is_repo_import', return_value=False), \
+             patch('dt.fetch._fetch_non_import') as mock_fetch_non_import:
+            
+            mock_fetch_non_import.return_value = (True, "Fetched via dvc fetch (network)")
+            
+            results = fetch.fetch(targets=['data.csv.dvc'], network=True)
+        
+        # Verify network=True was passed
+        mock_fetch_non_import.assert_called_once()
+        call_kwargs = mock_fetch_non_import.call_args[1]
+        assert call_kwargs.get('network') is True
+
+
+class TestFetchNonImport:
+    """Tests for _fetch_non_import function."""
+    
+    @pytest.fixture
+    def dvc_project(self, tmp_path, monkeypatch):
+        """Create a minimal DVC project with cache."""
+        project = tmp_path / 'project'
+        project.mkdir()
+        (project / '.dvc').mkdir()
+        
+        cache = tmp_path / 'cache'
+        (cache / 'files' / 'md5').mkdir(parents=True)
+        
+        remote = tmp_path / 'remote'
+        (remote / 'files' / 'md5').mkdir(parents=True)
+        
+        monkeypatch.chdir(project)
+        return {'project': project, 'cache': cache, 'remote': remote}
+    
+    def test_parse_error_returns_failure(self, dvc_project):
+        """Invalid .dvc file returns failure."""
+        dvc_file = dvc_project['project'] / 'bad.dvc'
+        dvc_file.write_text('invalid: yaml: content:')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value=None):
+            success, message = fetch._fetch_non_import(dvc_file)
+        
+        assert success is False
+        assert 'Could not parse' in message
+    
+    def test_no_outs_returns_failure(self, dvc_project):
+        """No outputs in .dvc file returns failure."""
+        dvc_file = dvc_project['project'] / 'empty.dvc'
+        dvc_file.write_text('outs: []\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': []}):
+            success, message = fetch._fetch_non_import(dvc_file)
+        
+        assert success is False
+        assert 'No outputs' in message
+    
+    def test_no_md5_returns_failure(self, dvc_project):
+        """No MD5 hash in .dvc file returns failure."""
+        dvc_file = dvc_project['project'] / 'nomd5.dvc'
+        dvc_file.write_text('outs:\n  - path: data.csv\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'path': 'data.csv'}]}):
+            success, message = fetch._fetch_non_import(dvc_file)
+        
+        assert success is False
+        assert 'No MD5' in message
+    
+    def test_no_cache_returns_failure(self, dvc_project):
+        """No cache configured returns failure."""
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text('outs:\n  - md5: abc123\n    path: data.csv\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': 'abc123'}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=None):
+            success, message = fetch._fetch_non_import(dvc_file)
+        
+        assert success is False
+        assert 'No cache' in message
+    
+    def test_already_in_cache_returns_success(self, dvc_project):
+        """File already in cache returns success."""
+        cache = dvc_project['cache']
+        md5 = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
+        
+        # Create cache file
+        cache_dir = cache / 'files' / 'md5' / md5[:2]
+        cache_dir.mkdir(parents=True)
+        (cache_dir / md5[2:]).write_text('content')
+        
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text(f'outs:\n  - md5: {md5}\n    path: data.csv\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': md5}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=cache / 'files' / 'md5'), \
+             patch('dt.fetch.remote.list_remotes', return_value=[]):
+            success, message = fetch._fetch_non_import(dvc_file)
+        
+        assert success is True
+        assert 'Already in cache' in message
+    
+    def test_local_remote_available_fetches(self, dvc_project):
+        """Fetches from local remote when available."""
+        cache = dvc_project['cache']
+        remote = dvc_project['remote']
+        md5 = 'b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6a1'
+        
+        # Create file in remote but not in cache
+        remote_dir = remote / 'files' / 'md5' / md5[:2]
+        remote_dir.mkdir(parents=True)
+        (remote_dir / md5[2:]).write_text('remote content')
+        
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text(f'outs:\n  - md5: {md5}\n    path: data.csv\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': md5}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=cache / 'files' / 'md5'), \
+             patch('dt.fetch.remote.find_local_remote', return_value=('test-remote', str(remote))), \
+             patch('dt.import_data.is_v3_dvc_file', return_value=True):
+            success, message = fetch._fetch_non_import(dvc_file)
+        
+        assert success is True
+        assert "local remote 'test-remote'" in message
+        
+        # File should be in cache
+        cached = cache / 'files' / 'md5' / md5[:2] / md5[2:]
+        assert cached.exists()
+    
+    def test_no_local_remote_without_network_fails(self, dvc_project):
+        """No local remote without --network returns failure with hint."""
+        cache = dvc_project['cache']
+        md5 = 'c3d4e5f6g7h8i9j0k1l2m3n4o5p6a1b2'
+        
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text(f'outs:\n  - md5: {md5}\n    path: data.csv\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': md5}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=cache / 'files' / 'md5'), \
+             patch('dt.fetch.remote.find_local_remote', return_value=None):
+            success, message = fetch._fetch_non_import(dvc_file, network=False)
+        
+        assert success is False
+        assert 'No local remote' in message
+        assert '--network' in message
+    
+    def test_no_local_remote_with_network_runs_dvc_fetch(self, dvc_project):
+        """No local remote with --network falls back to dvc fetch."""
+        cache = dvc_project['cache']
+        md5 = 'd4e5f6g7h8i9j0k1l2m3n4o5p6a1b2c3'
+        
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text(f'outs:\n  - md5: {md5}\n    path: data.csv\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': md5}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=cache / 'files' / 'md5'), \
+             patch('dt.fetch.remote.find_local_remote', return_value=None), \
+             patch('dt.fetch._run_dvc_fetch') as mock_dvc_fetch:
+            mock_dvc_fetch.return_value = (True, "Fetched via dvc fetch (network)")
+            
+            success, message = fetch._fetch_non_import(dvc_file, network=True)
+        
+        assert success is True
+        assert mock_dvc_fetch.called
+        assert 'network' in message
+    
+    def test_file_not_in_local_remote_with_network(self, dvc_project):
+        """File not in local remote with --network falls back to dvc fetch."""
+        cache = dvc_project['cache']
+        remote = dvc_project['remote']
+        md5 = 'e5f6g7h8i9j0k1l2m3n4o5p6a1b2c3d4'
+        
+        # Remote exists but doesn't have the file
+        
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text(f'outs:\n  - md5: {md5}\n    path: data.csv\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': md5}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=cache / 'files' / 'md5'), \
+             patch('dt.fetch.remote.find_local_remote', return_value=('test-remote', str(remote))), \
+             patch('dt.import_data.is_v3_dvc_file', return_value=True), \
+             patch('dt.fetch._run_dvc_fetch') as mock_dvc_fetch:
+            mock_dvc_fetch.return_value = (True, "Fetched via dvc fetch (network)")
+            
+            success, message = fetch._fetch_non_import(dvc_file, network=True)
+        
+        assert mock_dvc_fetch.called
+
+    def test_directory_fetch_from_local_remote(self, dvc_project):
+        """Directory files are fetched from local remote."""
+        cache = dvc_project['cache']
+        remote = dvc_project['remote']
+        dir_hash = 'f6g7h8i9j0k1l2m3n4o5p6a1b2c3d4e5'
+        file1_hash = 'g7h8i9j0k1l2m3n4o5p6a1b2c3d4e5f6'
+        file2_hash = 'h8i9j0k1l2m3n4o5p6a1b2c3d4e5f6g7'
+        
+        # Create .dir file and individual files in remote
+        remote_dir = remote / 'files' / 'md5' / dir_hash[:2]
+        remote_dir.mkdir(parents=True)
+        dir_manifest = [
+            {'relpath': 'a.txt', 'md5': file1_hash},
+            {'relpath': 'b.txt', 'md5': file2_hash},
+        ]
+        (remote_dir / (dir_hash[2:] + '.dir')).write_text(json.dumps(dir_manifest))
+        
+        # Create individual files
+        for fhash in [file1_hash, file2_hash]:
+            fdir = remote / 'files' / 'md5' / fhash[:2]
+            fdir.mkdir(parents=True, exist_ok=True)
+            (fdir / fhash[2:]).write_text(f'content for {fhash}')
+        
+        dvc_file = dvc_project['project'] / 'mydir.dvc'
+        dvc_file.write_text(f'outs:\n  - md5: {dir_hash}.dir\n    path: mydir\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': f'{dir_hash}.dir'}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=cache / 'files' / 'md5'), \
+             patch('dt.fetch.remote.find_local_remote', return_value=('test-remote', str(remote))), \
+             patch('dt.import_data.is_v3_dvc_file', return_value=True):
+            success, message = fetch._fetch_non_import(dvc_file)
+        
+        assert success is True
+        assert '3 files' in message  # .dir + 2 individual files
+
+
+class TestRunDvcFetch:
+    """Tests for _run_dvc_fetch function."""
+    
+    def test_successful_fetch(self, tmp_path):
+        """Successful dvc fetch returns success."""
+        dvc_file = tmp_path / 'data.dvc'
+        dvc_file.write_text('outs:\n  - md5: abc\n')
+        
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
+            
+            success, message = fetch._run_dvc_fetch(dvc_file)
+        
+        assert success is True
+        assert 'network' in message
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ['dvc', 'fetch', str(dvc_file)]
+    
+    def test_failed_fetch(self, tmp_path):
+        """Failed dvc fetch returns failure with error."""
+        dvc_file = tmp_path / 'data.dvc'
+        dvc_file.write_text('outs:\n  - md5: abc\n')
+        
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='Connection refused')
+            
+            success, message = fetch._run_dvc_fetch(dvc_file)
+        
+        assert success is False
+        assert 'Connection refused' in message
+    
+    def test_exception_during_fetch(self, tmp_path):
+        """Exception during dvc fetch returns failure."""
+        dvc_file = tmp_path / 'data.dvc'
+        dvc_file.write_text('outs:\n  - md5: abc\n')
+        
+        with patch('subprocess.run') as mock_run:
+            mock_run.side_effect = OSError("Command not found")
+            
+            success, message = fetch._run_dvc_fetch(dvc_file)
+        
+        assert success is False
+        assert 'Command not found' in message
+
+
+class TestFetchUrlImport:
+    """Tests for _fetch_url_import function."""
+    
+    @pytest.fixture
+    def dvc_project(self, tmp_path, monkeypatch):
+        """Create a minimal DVC project with cache."""
+        project = tmp_path / 'project'
+        project.mkdir()
+        (project / '.dvc').mkdir()
+        
+        cache = tmp_path / 'cache'
+        (cache / 'files' / 'md5').mkdir(parents=True)
+        
+        monkeypatch.chdir(project)
+        return {'project': project, 'cache': cache}
+    
+    def test_already_in_cache_returns_success(self, dvc_project):
+        """URL import already in cache returns success without running dvc update."""
+        cache = dvc_project['cache']
+        md5 = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
+        
+        # Create cache file (in files/md5 subdirectory)
+        cache_dir = cache / 'files' / 'md5' / md5[:2]
+        cache_dir.mkdir(parents=True)
+        (cache_dir / md5[2:]).write_text('content')
+        
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text(f'outs:\n  - md5: {md5}\n    path: data.csv\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': md5}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=cache / 'files' / 'md5'), \
+             patch('dt.fetch.utils.get_url_import_info', return_value={'url': 's3://bucket/data.csv'}), \
+             patch('subprocess.run') as mock_run:
+            
+            success, message = fetch._fetch_url_import(dvc_file)
+        
+        # Should not call subprocess since file is in cache
+        mock_run.assert_not_called()
+        assert success is True
+        assert 'Already in cache' in message
+    
+    def test_successful_update(self, dvc_project):
+        """Successful dvc update returns success."""
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text('deps:\n  - path: s3://bucket/data.csv\nouts:\n  - md5: abc\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': 'abc'}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=None), \
+             patch('dt.fetch.utils.get_url_import_info', return_value={'url': 's3://bucket/data.csv', 'out': 'data.csv'}), \
+             patch('subprocess.run') as mock_run:
+            
+            mock_run.return_value = MagicMock(returncode=0, stdout='Importing', stderr='')
+            
+            success, message = fetch._fetch_url_import(dvc_file)
+        
+        assert success is True
+        assert 's3://bucket/data.csv' in message
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ['dvc', 'update', str(dvc_file)]
+    
+    def test_failed_update(self, dvc_project):
+        """Failed dvc update returns failure with error."""
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text('deps:\n  - path: s3://bucket/data.csv\nouts:\n  - md5: abc\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': 'abc'}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=None), \
+             patch('dt.fetch.utils.get_url_import_info', return_value={'url': 's3://bucket/data.csv'}), \
+             patch('subprocess.run') as mock_run:
+            
+            mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='Access denied')
+            
+            success, message = fetch._fetch_url_import(dvc_file)
+        
+        assert success is False
+        assert 'dvc update failed' in message
+    
+    def test_source_not_found(self, dvc_project):
+        """Source not accessible returns clear error."""
+        dvc_file = dvc_project['project'] / 'data.dvc'
+        dvc_file.write_text('deps:\n  - path: /nonexistent/path\nouts:\n  - md5: abc\n')
+        
+        with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': 'abc'}]}), \
+             patch('dt.fetch.utils.get_cache_dir', return_value=None), \
+             patch('dt.fetch.utils.get_url_import_info', return_value={'url': '/nonexistent/path'}), \
+             patch('subprocess.run') as mock_run:
+            
+            mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='No such file or directory')
+            
+            success, message = fetch._fetch_url_import(dvc_file)
+        
+        assert success is False
+        assert 'Source not accessible' in message
+
+
+class TestFetchWithUrlImport:
+    """Tests for fetch() function handling URL imports."""
+    
+    @pytest.fixture
+    def dvc_project(self, tmp_path, monkeypatch):
+        """Create a minimal DVC project."""
+        project = tmp_path / 'project'
+        project.mkdir()
+        (project / '.dvc').mkdir()
+        
+        monkeypatch.chdir(project)
+        return project
+    
+    def test_url_import_calls_fetch_url_import(self, dvc_project):
+        """URL import .dvc file triggers _fetch_url_import."""
+        dvc_file = dvc_project / 'data.dvc'
+        dvc_file.write_text('deps:\n  - path: s3://bucket/data.csv\nouts:\n  - md5: abc\n')
+        
+        with patch('dt.fetch.utils.check_dvc'), \
+             patch('dt.fetch.utils.is_repo_import', return_value=False), \
+             patch('dt.fetch.utils.is_url_import', return_value=True), \
+             patch('dt.fetch._fetch_url_import') as mock_fetch_url:
+            
+            mock_fetch_url.return_value = (True, "Fetched from s3://bucket/data.csv")
+            
+            results = fetch.fetch(targets=['data.dvc'])
+        
+        assert len(results) == 1
+        assert mock_fetch_url.called
+        target, success, message = results[0]
+        assert success is True
+        assert 's3://bucket' in message

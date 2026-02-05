@@ -4,8 +4,11 @@ Populates the primary cache with links/symlinks to files from source caches,
 mirroring DVC's fetch concept (remote → cache). After fetch, regular
 `dvc checkout` can link files from cache → workspace.
 
-For import .dvc files (those with a deps section), automatically clones the
-source repository to find a locally-accessible cache.
+For import .dvc files (those with a deps section containing repo.url), 
+automatically clones the source repository to find a locally-accessible cache.
+
+For import-url .dvc files (external URLs like s3://, http://, local paths),
+uses `dvc update` to re-download from the source URL.
 
 This is the "dt" equivalent of `dvc fetch`, but works with local caches
 (other projects' remotes that are accessible on the same filesystem).
@@ -17,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import click
 
+from . import remote
 from . import utils
 from .errors import FetchError, HashMismatchError
 
@@ -469,6 +473,7 @@ def fetch(
     verbose: bool = False,
     update: bool = False,
     show_progress: bool = True,
+    network: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -478,6 +483,10 @@ def fetch(
     For import .dvc files, automatically discovers the source repository's
     local cache and creates symlinks.
     
+    For non-import .dvc files, checks if there's a locally-accessible remote
+    and creates symlinks from it. If no local remote is available and network
+    is True, falls back to `dvc fetch`.
+    
     After fetch, run `dvc checkout` to link files to the workspace.
     
     Args:
@@ -485,6 +494,7 @@ def fetch(
         verbose: Print progress messages.
         update: If True, create .dir file with computed hash and update .dvc file.
         show_progress: If True (and not verbose), show a progress bar.
+        network: If True, fall back to `dvc fetch` when local remote not available.
         
     Returns:
         List of (target, success, message) tuples.
@@ -531,10 +541,10 @@ def fetch(
             results.append((target, False, f"File not found: {target}"))
             continue
         
-        # Check if it's an import file
+        # Check if it's an import from another DVC repo
         if utils.is_repo_import(target_path):
             if verbose:
-                print(f"Fetching import: {target_path}")
+                print(f"Fetching repo import: {target_path}")
             
             try:
                 cache_path, count, failed = fetch_import(
@@ -554,30 +564,272 @@ def fetch(
                     results.append((str(target_path), True, f"Fetched {count} files from {cache_path}"))
             except FetchError as e:
                 results.append((str(target_path), False, str(e)))
+        
+        # Check if it's a URL import (dvc import-url)
+        elif utils.is_url_import(target_path):
+            if verbose:
+                print(f"Fetching URL import: {target_path}")
+            
+            result = _fetch_url_import(
+                dvc_path=target_path,
+                verbose=verbose,
+            )
+            results.append((str(target_path), result[0], result[1]))
+        
         else:
-            # Regular .dvc file - check if it's already in cache
-            dvc_data = utils.parse_dvc_file(target_path)
-            if dvc_data:
-                outs = dvc_data.get('outs', [])
-                if outs:
-                    md5 = outs[0].get('md5', '')
-                    primary_cache = utils.get_cache_dir()
-                    if primary_cache and md5:
-                        hash_clean = md5.replace('.dir', '')
-                        suffix = '.dir' if md5.endswith('.dir') else ''
-                        cache_file = primary_cache / 'files' / 'md5' / hash_clean[:2] / (hash_clean[2:] + suffix)
-                        if cache_file.exists():
-                            results.append((str(target_path), True, "Already in cache"))
-                        else:
-                            results.append((str(target_path), False, "Not an import - use 'dvc fetch' for remote data"))
-                    else:
-                        results.append((str(target_path), False, "No cache configured"))
-                else:
-                    results.append((str(target_path), False, "No outputs in .dvc file"))
-            else:
-                results.append((str(target_path), False, "Could not parse .dvc file"))
+            # Regular .dvc file - try to fetch from local remote
+            result = _fetch_non_import(
+                dvc_path=target_path,
+                verbose=verbose,
+                network=network,
+            )
+            results.append((str(target_path), result[0], result[1]))
     
     return results
+
+
+def _fetch_non_import(
+    dvc_path: Path,
+    verbose: bool = False,
+    network: bool = False,
+) -> Tuple[bool, str]:
+    """Fetch a non-import .dvc file from a local remote.
+    
+    Checks if there's a locally-accessible remote and creates symlinks/reflinks
+    from it. If no local remote is available and network is True, falls back
+    to `dvc fetch`.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        verbose: Print progress messages.
+        network: If True, fall back to `dvc fetch` when local remote not available.
+        
+    Returns:
+        Tuple of (success, message).
+    """
+    from . import import_data as import_mod
+    
+    dvc_data = utils.parse_dvc_file(dvc_path)
+    if not dvc_data:
+        return (False, "Could not parse .dvc file")
+    
+    outs = dvc_data.get('outs', [])
+    if not outs:
+        return (False, "No outputs in .dvc file")
+    
+    md5 = outs[0].get('md5', '')
+    if not md5:
+        return (False, "No MD5 hash in .dvc file")
+    
+    primary_cache = utils.get_cache_dir()
+    if not primary_cache:
+        return (False, "No cache configured")
+    
+    # Check if already in cache
+    # Note: primary_cache from get_cache_dir() already includes files/md5
+    hash_clean = md5.replace('.dir', '')
+    suffix = '.dir' if md5.endswith('.dir') else ''
+    cache_file = primary_cache / hash_clean[:2] / (hash_clean[2:] + suffix)
+    if cache_file.exists():
+        return (True, "Already in cache")
+    
+    # Try to find a local remote
+    remotes = remote.list_remotes()
+    local_remote_info = remote.find_local_remote(remotes)
+    
+    if local_remote_info:
+        remote_name, remote_path = local_remote_info
+        if verbose:
+            print(f"  Using local remote '{remote_name}': {remote_path}")
+        
+        # Detect v2 vs v3 format
+        use_v3_layout = import_mod.is_v3_dvc_file(dvc_data)
+        
+        # Get cache base directory
+        cache_base = str(primary_cache)
+        if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
+            cache_base = str(Path(cache_base).parent.parent)
+        
+        # Fetch the main file/directory hash
+        count = 0
+        failed = 0
+        
+        result = import_mod.populate_cache_file(
+            md5=md5,
+            source_cache=remote_path,
+            dest_cache=cache_base,
+            verbose=verbose,
+            use_v3_layout=use_v3_layout,
+        )
+        
+        if result is True:
+            count += 1
+        elif result is None:
+            # File not in local remote
+            if not md5.endswith('.dir'):
+                failed += 1
+        
+        # For directories, also populate individual files
+        if md5.endswith('.dir'):
+            dir_hash = md5[:-4]
+            
+            # Find the .dir file
+            if use_v3_layout:
+                dest_dir_file = Path(cache_base) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+            else:
+                dest_dir_file = Path(cache_base) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+            
+            dir_file = None
+            if dest_dir_file.exists():
+                dir_file = dest_dir_file
+            else:
+                # Try source remote
+                dir_file_v3 = Path(remote_path) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+                dir_file_v2 = Path(remote_path) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+                if dir_file_v3.exists():
+                    dir_file = dir_file_v3
+                elif dir_file_v2.exists():
+                    dir_file = dir_file_v2
+            
+            if dir_file:
+                try:
+                    import json
+                    entries = json.loads(dir_file.read_text())
+                    for entry in entries:
+                        file_md5 = entry.get('md5', '')
+                        if file_md5:
+                            file_result = import_mod.populate_cache_file(
+                                md5=file_md5,
+                                source_cache=remote_path,
+                                dest_cache=cache_base,
+                                verbose=verbose,
+                                use_v3_layout=use_v3_layout,
+                            )
+                            if file_result is True:
+                                count += 1
+                            elif file_result is None:
+                                failed += 1
+                except (json.JSONDecodeError, OSError) as e:
+                    if verbose:
+                        print(f"  Warning: Could not parse .dir file: {e}")
+                    failed += 1
+            else:
+                if verbose:
+                    print(f"  Warning: .dir file not found in local remote")
+                failed += 1
+        
+        if failed > 0:
+            # Some files not in local remote - fall back to network if enabled
+            if network:
+                return _run_dvc_fetch(dvc_path, verbose)
+            else:
+                return (False, f"Not in local remote '{remote_name}' (use --network to fetch)")
+        elif count == 0:
+            return (True, f"Already in cache (from {remote_name})")
+        else:
+            return (True, f"Fetched {count} files from local remote '{remote_name}'")
+    
+    # No local remote available
+    if network:
+        return _run_dvc_fetch(dvc_path, verbose)
+    else:
+        return (False, "No local remote available (use --network to fetch)")
+
+
+def _run_dvc_fetch(dvc_path: Path, verbose: bool = False) -> Tuple[bool, str]:
+    """Run dvc fetch for a specific target.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        verbose: Print progress messages.
+        
+    Returns:
+        Tuple of (success, message).
+    """
+    cmd = ['dvc', 'fetch', str(dvc_path)]
+    if verbose:
+        print(f"  Running: {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return (True, "Fetched via dvc fetch (network)")
+        else:
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            return (False, f"dvc fetch failed: {error_msg}")
+    except (OSError, FileNotFoundError) as e:
+        return (False, f"dvc fetch failed: {e}")
+
+
+def _fetch_url_import(
+    dvc_path: Path,
+    verbose: bool = False,
+) -> Tuple[bool, str]:
+    """Fetch a URL import by running dvc update.
+    
+    For .dvc files created by `dvc import-url`, the data is typically not
+    pushed to remote storage. Instead, we re-download from the source URL
+    using `dvc update`.
+    
+    If the source has changed, dvc update will update the .dvc file with
+    the new hash.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        verbose: Print progress messages.
+        
+    Returns:
+        Tuple of (success, message).
+    """
+    # First check if already in cache
+    dvc_data = utils.parse_dvc_file(dvc_path)
+    if dvc_data:
+        outs = dvc_data.get('outs', [])
+        if outs:
+            md5 = outs[0].get('md5', '')
+            if md5:
+                primary_cache = utils.get_cache_dir()
+                if primary_cache:
+                    hash_clean = md5.replace('.dir', '')
+                    suffix = '.dir' if md5.endswith('.dir') else ''
+                    cache_file = primary_cache / hash_clean[:2] / (hash_clean[2:] + suffix)
+                    if cache_file.exists():
+                        return (True, "Already in cache (URL import)")
+    
+    # Get URL info for display
+    url_info = utils.get_url_import_info(dvc_path)
+    source_url = url_info.get('url', 'unknown') if url_info else 'unknown'
+    
+    if verbose:
+        print(f"  URL import from: {source_url}")
+        print(f"  Running: dvc update {dvc_path}")
+    
+    cmd = ['dvc', 'update', str(dvc_path)]
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            # Check if the .dvc file was modified (source changed)
+            if 'Importing' in result.stdout or 'importing' in result.stdout.lower():
+                return (True, f"Updated from {source_url}")
+            else:
+                return (True, f"Fetched from {source_url}")
+        else:
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            # Common errors
+            if 'No such file' in error_msg or 'not found' in error_msg.lower():
+                return (False, f"Source not accessible: {source_url}")
+            return (False, f"dvc update failed: {error_msg}")
+    except (OSError, FileNotFoundError) as e:
+        return (False, f"dvc update failed: {e}")
 
 
 # Keep smart_checkout as alias for backwards compatibility during transition

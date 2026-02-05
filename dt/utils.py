@@ -314,6 +314,83 @@ def get_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict
         return None
 
 
+def is_url_import(dvc_path: Path, repo: Optional[Any] = None) -> bool:
+    """Check if a .dvc file is an import-url (external URL dependency).
+    
+    A URL import has deps but no repo field - the path itself is the URL.
+    This is different from a repo import which has deps with a repo.url field.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        repo: Optional DVC Repo object.
+        
+    Returns:
+        True if this .dvc file was created by `dvc import-url`.
+    """
+    try:
+        dvc_file = load_dvc_file(dvc_path, repo)
+        stage = dvc_file.stage
+        
+        # URL imports are not repo imports but have deps
+        if stage.is_repo_import:
+            return False
+        
+        # Check if there are deps (indicating an import)
+        if not stage.deps:
+            return False
+        
+        # For URL imports, the dep doesn't have a repo field
+        # but has a path that is the external URL
+        for dep in stage.deps:
+            # URL imports have deps without def_repo
+            if not hasattr(dep, 'def_repo') or not dep.def_repo:
+                # This is likely a URL import
+                return True
+        
+        return False
+    except DVCFileError:
+        return False
+
+
+def get_url_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+    """Extract URL import information from a .dvc file.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        repo: Optional DVC Repo object.
+        
+    Returns:
+        Dictionary with 'url' and 'out' keys, or None if not a URL import.
+    """
+    try:
+        dvc_file = load_dvc_file(dvc_path, repo)
+        stage = dvc_file.stage
+        
+        # Must not be a repo import
+        if stage.is_repo_import:
+            return None
+        
+        # Must have deps
+        if not stage.deps:
+            return None
+        
+        # Get the first URL dependency
+        for dep in stage.deps:
+            if not hasattr(dep, 'def_repo') or not dep.def_repo:
+                # This is a URL import - the path is the URL
+                url = dep.def_path if hasattr(dep, 'def_path') else str(dep)
+                out_path = None
+                if stage.outs:
+                    out_path = stage.outs[0].def_path if hasattr(stage.outs[0], 'def_path') else None
+                return {
+                    'url': url,
+                    'out': out_path,
+                }
+        return None
+    except DVCFileError:
+        return None
+
+
 # =============================================================================
 # Project utilities
 # =============================================================================

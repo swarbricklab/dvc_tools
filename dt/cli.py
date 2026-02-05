@@ -1046,27 +1046,35 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
+@click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update):
+def fetch(ctx, targets, verbose, no_index_sync, update, network):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
     This is the dt equivalent of `dvc fetch` but for local caches.
     
-    For import .dvc files (created by `dvc import`), automatically clones
+    For repo import .dvc files (created by `dvc import`), automatically clones
     the source repository to find a locally-accessible cache and creates
     symlinks in the primary cache.
     
-    After fetch, run `dvc checkout` to link files to the workspace.
+    For URL import .dvc files (created by `dvc import-url`), re-downloads data
+    from the source URL using `dvc update`. If the source has changed, the .dvc
+    file will be updated with the new hash.
     
-    For non-import files, use `dvc fetch` to download from remotes.
+    For regular .dvc files, checks if there's a locally-accessible remote
+    and creates symlinks from it. If no local remote is available and --network
+    is specified, falls back to `dvc fetch`.
+    
+    After fetch, run `dvc checkout` to link files to the workspace.
     
     \b
     Examples:
-        dt fetch                           # Fetch all import files
+        dt fetch                           # Fetch all .dvc files from local sources
         dt fetch data/external.dvc         # Fetch specific targets
         dt fetch -v                        # Show detailed progress
         dt fetch --update                  # Rebuild .dir files, update .dvc if needed
+        dt fetch --network                 # Fall back to dvc fetch if local remote unavailable
     """
     from . import fetch as fetch_mod
     
@@ -1083,6 +1091,7 @@ def fetch(ctx, targets, verbose, no_index_sync, update):
             targets=list(targets) if targets else None,
             verbose=verbose,
             update=update,
+            network=network,
         )
         
         any_success = False
