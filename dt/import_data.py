@@ -295,16 +295,19 @@ def construct_dir_from_dvc_list(
                 print(f"    New: {actual_hash}")
             new_hash = actual_hash
         else:
-            if verbose:
-                print(f"  ERROR: Constructed .dir hash mismatch!")
-                print(f"    Expected: {expected_hash}")
-                print(f"    Got:      {actual_hash}")
-                print(f"    Files ({len(entries)}):")
-                for entry in entries[:10]:
-                    print(f"      {entry['relpath']}: {entry['md5']}")
-                if len(entries) > 10:
-                    print(f"      ... and {len(entries) - 10} more")
-            return None
+            # Raise specific exception so caller can handle appropriately
+            from .errors import HashMismatchError
+            raise HashMismatchError(
+                expected_hash=expected_hash,
+                actual_hash=actual_hash,
+                message=(
+                    f"Hash mismatch when constructing .dir manifest:\n"
+                    f"  Expected: {expected_hash}\n"
+                    f"  Got:      {actual_hash}\n"
+                    f"  Files found: {len(entries)}\n"
+                    f"Try: dt fetch --update <file> to rebuild and update the .dvc file"
+                )
+            )
     
     # Use actual_hash for file path (in update mode this may differ from expected)
     file_hash = new_hash if new_hash else expected_hash

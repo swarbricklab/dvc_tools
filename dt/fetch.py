@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import utils
-from .errors import FetchError
+from .errors import FetchError, HashMismatchError
 
 
 def _is_ignored(path: Path) -> bool:
@@ -232,16 +232,20 @@ def _populate_cache_from_source(
                         if verbose:
                             print(f"  .dir file not in cache, using dvc list to build manifest...")
                         
-                        result = import_mod.construct_dir_from_dvc_list(
-                            repo_url=source_url,
-                            path=dep_path,
-                            revision=rev_lock,
-                            expected_hash=dir_hash,
-                            dest_cache=cache_base,
-                            use_v3_layout=use_v3_layout,
-                            verbose=verbose,
-                            update=update,
-                        )
+                        try:
+                            result = import_mod.construct_dir_from_dvc_list(
+                                repo_url=source_url,
+                                path=dep_path,
+                                revision=rev_lock,
+                                expected_hash=dir_hash,
+                                dest_cache=cache_base,
+                                use_v3_layout=use_v3_layout,
+                                verbose=verbose,
+                                update=update,
+                            )
+                        except HashMismatchError:
+                            # Re-raise to stop processing - user needs --update
+                            raise
                         
                         if result is None:
                             if verbose:
