@@ -206,7 +206,8 @@ def construct_dir_from_dvc_list(
     dest_cache: str,
     use_v3_layout: bool = True,
     verbose: bool = False,
-) -> Optional[List[Dict[str, str]]]:
+    update: bool = False,
+) -> Optional[Tuple[List[Dict[str, str]], Optional[str]]]:
     """Construct a .dir manifest using 'dvc list' on a remote repository.
     
     This is useful for nested DVC imports where the source directory contains
@@ -221,9 +222,11 @@ def construct_dir_from_dvc_list(
         dest_cache: Path to destination cache base directory.
         use_v3_layout: If True, write .dir file to v3 layout.
         verbose: Print progress messages.
+        update: If True, accept hash mismatch and return new hash for .dvc update.
         
     Returns:
-        List of manifest entries if successful, None on failure.
+        Tuple of (entries, new_hash) if successful, None on failure.
+        new_hash is None if hash matched, or the actual hash if update=True and hash differed.
     """
     import hashlib
     
@@ -280,26 +283,37 @@ def construct_dir_from_dvc_list(
     # Build the manifest content
     manifest_content = build_dir_manifest(entries)
     
-    # Verify hash matches expected
+    # Compute actual hash
     actual_hash = hashlib.md5(manifest_content).hexdigest()
+    new_hash = None  # Will be set if hash differs and update=True
     
     if actual_hash != expected_hash:
-        if verbose:
-            print(f"  ERROR: Constructed .dir hash mismatch!")
-            print(f"    Expected: {expected_hash}")
-            print(f"    Got:      {actual_hash}")
-            print(f"    Files ({len(entries)}):")
-            for entry in entries[:10]:
-                print(f"      {entry['relpath']}: {entry['md5']}")
-            if len(entries) > 10:
-                print(f"      ... and {len(entries) - 10} more")
-        return None
+        if update:
+            if verbose:
+                print(f"  Hash mismatch (update mode):")
+                print(f"    Old: {expected_hash}")
+                print(f"    New: {actual_hash}")
+            new_hash = actual_hash
+        else:
+            if verbose:
+                print(f"  ERROR: Constructed .dir hash mismatch!")
+                print(f"    Expected: {expected_hash}")
+                print(f"    Got:      {actual_hash}")
+                print(f"    Files ({len(entries)}):")
+                for entry in entries[:10]:
+                    print(f"      {entry['relpath']}: {entry['md5']}")
+                if len(entries) > 10:
+                    print(f"      ... and {len(entries) - 10} more")
+            return None
+    
+    # Use actual_hash for file path (in update mode this may differ from expected)
+    file_hash = new_hash if new_hash else expected_hash
     
     # Write .dir file to cache
     if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / 'files' / 'md5' / file_hash[:2] / f"{file_hash[2:]}.dir"
     else:
-        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / file_hash[:2] / f"{file_hash[2:]}.dir"
     
     if not dest_file.exists():
         dest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -307,7 +321,7 @@ def construct_dir_from_dvc_list(
         if verbose:
             print(f"  Created .dir file: {dest_file}")
     
-    return entries
+    return entries, new_hash
 
 
 def construct_dir_file(

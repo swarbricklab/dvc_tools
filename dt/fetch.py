@@ -61,12 +61,49 @@ def _is_ignored(path: Path) -> bool:
     return False
 
 
+def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool = False) -> None:
+    """Update the MD5 hash in a .dvc file.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        old_hash: The old hash to replace.
+        new_hash: The new hash to use.
+        verbose: Print progress messages.
+    """
+    import yaml
+    
+    try:
+        content = dvc_path.read_text()
+        data = yaml.safe_load(content)
+        
+        # Update the outs section
+        modified = False
+        for out in data.get('outs', []):
+            if out.get('md5') == old_hash:
+                out['md5'] = new_hash
+                modified = True
+        
+        if modified:
+            # Write back with same formatting
+            with open(dvc_path, 'w') as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            if verbose:
+                print(f"  Updated .dvc file hash: {old_hash[:12]}... -> {new_hash[:12]}...")
+        elif verbose:
+            print(f"  Warning: Could not find hash {old_hash[:12]}... in .dvc file to update")
+            
+    except Exception as e:
+        if verbose:
+            print(f"  Warning: Could not update .dvc file: {e}")
+
+
 def _populate_cache_from_source(
     dvc_path: Path,
     source_cache: str,
     verbose: bool = False,
     rev_lock: Optional[str] = None,
     source_url: Optional[str] = None,
+    update: bool = False,
 ) -> Tuple[int, int]:
     """Populate the primary cache from a source cache.
     
@@ -82,6 +119,7 @@ def _populate_cache_from_source(
         verbose: Print progress messages.
         rev_lock: Git revision for constructing .dir files via dvc list.
         source_url: URL of the source repository (for dvc list).
+        update: If True, create .dir file with computed hash and update .dvc file.
         
     Returns:
         Tuple of (files_added, files_failed) counts.
@@ -190,7 +228,7 @@ def _populate_cache_from_source(
                         if verbose:
                             print(f"  .dir file not in cache, using dvc list to build manifest...")
                         
-                        entries = import_mod.construct_dir_from_dvc_list(
+                        result = import_mod.construct_dir_from_dvc_list(
                             repo_url=source_url,
                             path=dep_path,
                             revision=rev_lock,
@@ -198,12 +236,19 @@ def _populate_cache_from_source(
                             dest_cache=cache_base,
                             use_v3_layout=use_v3_layout,
                             verbose=verbose,
+                            update=update,
                         )
                         
-                        if entries is None:
+                        if result is None:
                             if verbose:
                                 print(f"  ERROR: Could not construct .dir file from dvc list")
                             failed += 1
+                        else:
+                            entries, new_hash = result
+                            # If hash changed, update the .dvc file
+                            if new_hash and new_hash != dir_hash:
+                                _update_dvc_hash(dvc_path, dir_hash, new_hash, verbose)
+                                dir_hash = new_hash
             else:
                 if verbose:
                     print(f"  .dir file not found in cache and no source URL available")
@@ -249,6 +294,7 @@ def fetch_import(
     dvc_path: Path,
     verbose: bool = False,
     refresh: bool = True,  # Currently unused, kept for API compatibility
+    update: bool = False,
 ) -> Tuple[str, int, int]:
     """Fetch an import .dvc file by finding and linking from the source cache.
     
@@ -259,6 +305,7 @@ def fetch_import(
         dvc_path: Path to the .dvc file.
         verbose: Print progress messages.
         refresh: Whether to refresh the temp clone (currently unused).
+        update: If True, create .dir file with computed hash and update .dvc file.
         
     Returns:
         Tuple of (source_cache_path, files_added_count, files_failed_count).
@@ -309,6 +356,7 @@ def fetch_import(
         dvc_path, cache_path, verbose,
         rev_lock=import_info.get('rev'),
         source_url=source_url,
+        update=update,
     )
     
     return cache_path, count, failed
@@ -318,6 +366,7 @@ def fetch(
     targets: Optional[List[str]] = None,
     verbose: bool = False,
     refresh: bool = True,
+    update: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -333,6 +382,7 @@ def fetch(
         targets: DVC targets to fetch (None for all .dvc files).
         verbose: Print progress messages.
         refresh: Whether to refresh temp clones (default True).
+        update: If True, create .dir file with computed hash and update .dvc file.
         
     Returns:
         List of (target, success, message) tuples.
@@ -389,6 +439,7 @@ def fetch(
                     dvc_path=target_path,
                     verbose=verbose,
                     refresh=refresh,
+                    update=update,
                 )
                 if failed > 0:
                     # Critical failure - files were expected but not found in source cache
