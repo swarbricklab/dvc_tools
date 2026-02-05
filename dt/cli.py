@@ -4,6 +4,7 @@ import click
 
 from . import config as cfg
 from . import clone as clone_mod
+from . import errors
 from . import init as init_mod
 from . import cache as cache_mod
 from . import remote as remote_mod
@@ -1111,7 +1112,10 @@ def fetch(ctx, targets, verbose, no_refresh, no_index_sync, update):
                         click.echo(f"Warning: index sync failed: {e}")
         elif any_failure and not any_success:
             raise SystemExit(1)
-            
+    
+    except errors.HashMismatchError as e:
+        # Clean error message with suggestion
+        raise click.ClickException(str(e))
     except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
 

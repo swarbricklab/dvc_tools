@@ -47,6 +47,24 @@ class DVCFileError(DTError):
     pass
 
 
+class HashMismatchError(DTError):
+    """Hash mismatch during fetch/import operations.
+    
+    Raised when a computed .dir hash doesn't match expected.
+    Suggests using --update flag.
+    """
+    
+    def __init__(self, expected_hash: str, actual_hash: str, message: str = None):
+        self.expected_hash = expected_hash
+        self.actual_hash = actual_hash
+        if message is None:
+            message = (
+                f"Hash mismatch: expected {expected_hash[:12]}..., got {actual_hash[:12]}...\n"
+                f"Try: dt fetch --update <file> to rebuild and update the .dvc file"
+            )
+        super().__init__(message)
+
+
 class FetchError(DTError):
     """Error during fetch operations."""
     pass
