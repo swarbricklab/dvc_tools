@@ -575,28 +575,6 @@ class TestFetchRegular:
 class TestFetchOptions:
     """Test fetch command options."""
 
-    def test_fetch_no_refresh(self, cloned_test_fixtures):
-        """Fetch with --no-refresh skips clone refresh but still populates cache."""
-        repo = cloned_test_fixtures['path']
-        cache = cloned_test_fixtures['cache']
-        
-        # Clear cache to verify fetch works
-        if cache.exists():
-            shutil.rmtree(cache)
-        cache.mkdir()
-        
-        result = run_dt('fetch', '--no-refresh', '-v', 'imported/file.csv.dvc', 
-                       cwd=repo, check=False)
-        
-        # Should complete without errors about refreshing
-        # The flag should be accepted
-        assert '--no-refresh' not in result.stderr  # Flag should be recognized
-        assert result.returncode == 0, f"Fetch with --no-refresh failed: {result.stderr}"
-        
-        # Cache should still be populated even with --no-refresh
-        cache_files = [f for f in cache.rglob('*') if f.is_file()]
-        assert len(cache_files) > 0, "Cache should be populated despite --no-refresh flag"
-
     def test_fetch_no_index_sync(self, cloned_test_fixtures):
         """Fetch with --no-index-sync skips index sync but still populates cache."""
         repo = cloned_test_fixtures['path']

@@ -24,7 +24,6 @@ For **regular `.dvc` files** (created by `dvc add`), use `dvc fetch` to download
 ## Options
 
 - `-v, --verbose`: Show detailed progress messages
-- `--no-refresh`: Skip refreshing temp clones (useful for offline use)
 
 ## Examples
 
@@ -37,9 +36,6 @@ dt fetch data/external.dvc
 
 # Show detailed progress
 dt fetch -v
-
-# Skip refreshing temp clones (for offline use)
-dt fetch --no-refresh
 ```
 
 ## Handling Import Files
