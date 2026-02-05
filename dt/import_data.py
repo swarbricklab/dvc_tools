@@ -81,30 +81,49 @@ def populate_primary_cache(
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         
         try:
-            # Try to hardlink the workspace symlink to the cache
-            # This creates a new directory entry pointing to the same symlink inode
-            os.link(workspace_file, cache_file)
+            # Try to hardlink the actual file (following the symlink)
+            # This creates a hardlink to the same inode as the symlink target
+            actual_file = workspace_file.resolve()
+            os.link(actual_file, cache_file)
             count += 1
             if verbose:
-                print(f"  Cached: {md5[:8]}... ({relpath or workspace_path.name})")
+                print(f"  Cached (hardlink): {md5[:8]}... ({relpath or workspace_path.name})")
         except OSError as e:
-            # Fall back to symlink for cross-device links or permission issues
+            # Hardlink failed - try alternatives
             # EXDEV (18): Cross-device link (different filesystems)
             # EPERM (1): Operation not permitted (common on HPC with quota restrictions)
             # EACCES (13): Permission denied
-            if e.errno in (1, 13, 18):
-                try:
-                    target = os.readlink(workspace_file)
-                    os.symlink(target, cache_file)
-                    count += 1
-                    if verbose:
-                        print(f"  Cached (symlink): {md5[:8]}... ({relpath or workspace_path.name})")
-                except OSError as e2:
-                    if verbose:
-                        print(f"  Warning: Failed to cache {md5[:8]}...: {e2}")
-            else:
+            if e.errno not in (1, 13, 18):
                 if verbose:
                     print(f"  Warning: Failed to cache {md5[:8]}...: {e}")
+                continue
+            
+            # Try reflink (copy-on-write) then regular copy
+            actual_file = workspace_file.resolve()
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ['cp', '--reflink=auto', str(actual_file), str(cache_file)],
+                    capture_output=True
+                )
+                if result.returncode == 0:
+                    count += 1
+                    if verbose:
+                        print(f"  Cached (copy): {md5[:8]}... ({relpath or workspace_path.name})")
+                    continue
+            except (OSError, FileNotFoundError):
+                pass
+            
+            # Fall back to regular copy
+            try:
+                import shutil
+                shutil.copy2(actual_file, cache_file)
+                count += 1
+                if verbose:
+                    print(f"  Cached (copy): {md5[:8]}... ({relpath or workspace_path.name})")
+            except OSError as e2:
+                if verbose:
+                    print(f"  Warning: Failed to copy {md5[:8]}...: {e2}")
     
     return count
 
@@ -171,28 +190,46 @@ def populate_cache_file(
     dest_file.parent.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Try hardlink first
+        # Try hardlink first - same inode, no extra space, works within same project
         os.link(source_file, dest_file)
         if verbose:
-            print(f"  Cached: {md5[:12]}...")
+            print(f"  Cached (hardlink): {md5[:12]}...")
         return True
     except OSError as e:
-        # Fall back to symlink for cross-device links or permission issues
+        # Hardlink failed - try alternatives
         # EXDEV (18): Cross-device link (different filesystems)
         # EPERM (1): Operation not permitted (common on HPC with quota restrictions)
         # EACCES (13): Permission denied
-        if e.errno in (1, 13, 18):
-            try:
-                os.symlink(source_file.resolve(), dest_file)
-                if verbose:
-                    print(f"  Cached (symlink): {md5[:12]}...")
-                return True
-            except OSError as e2:
-                if verbose:
-                    print(f"  ERROR: Failed to cache {md5[:12]}...: {e2}")
-        else:
+        if e.errno not in (1, 13, 18):
             if verbose:
                 print(f"  ERROR: Failed to cache {md5[:12]}...: {e}")
+            return False
+    
+    # Try reflink (copy-on-write) - instant copy, space-efficient on supported FS
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['cp', '--reflink=auto', str(source_file), str(dest_file)],
+            capture_output=True
+        )
+        if result.returncode == 0:
+            if verbose:
+                print(f"  Cached (copy): {md5[:12]}...")
+            return True
+    except (OSError, FileNotFoundError):
+        pass  # cp not available or failed, try shutil
+    
+    # Fall back to regular copy - slower but safe and universally compatible
+    # This creates an independent copy that DVC can work with normally
+    try:
+        import shutil
+        shutil.copy2(source_file, dest_file)
+        if verbose:
+            print(f"  Cached (copy): {md5[:12]}...")
+        return True
+    except OSError as e:
+        if verbose:
+            print(f"  ERROR: Failed to copy {md5[:12]}...: {e}")
     
     return False
 
