@@ -117,10 +117,13 @@ def populate_cache_file(
     Used for .dir files and single file imports where we need to ensure
     the file exists in the primary cache.
     
+    Supports both DVC v3 cache layout (files/md5/XX/hash) and legacy 
+    DVC v2 layout (XX/hash directly in remote root).
+    
     Args:
         md5: The MD5 hash (with optional .dir suffix).
         source_cache: Path to the source cache/remote root (e.g., /path/to/.remote).
-            Should contain files/md5/ structure.
+            May contain files/md5/ structure (v3) or direct hash dirs (v2).
         dest_cache: Path to the destination cache files/md5 directory
             (e.g., from repo.cache.local.path which returns .../files/md5).
         verbose: Print progress messages.
@@ -136,18 +139,30 @@ def populate_cache_file(
         hash_only = md5
         filename = hash_only[2:]
     
-    # Source is a remote/cache root - needs files/md5 added
-    source_file = Path(source_cache) / 'files' / 'md5' / hash_only[:2] / filename
+    # Try DVC v3 path first (files/md5/XX/hash)
+    source_file_v3 = Path(source_cache) / 'files' / 'md5' / hash_only[:2] / filename
+    # Fall back to DVC v2 path (XX/hash directly in remote root)
+    source_file_v2 = Path(source_cache) / hash_only[:2] / filename
+    
+    # Use whichever exists
+    if source_file_v3.exists():
+        source_file = source_file_v3
+    elif source_file_v2.exists():
+        source_file = source_file_v2
+        if verbose:
+            print(f"  Using legacy cache layout for: {md5[:12]}...")
+    else:
+        # Neither exists - this is a critical error, not a warning
+        if verbose:
+            print(f"  ERROR: Source file not found in cache: {md5[:12]}...")
+            print(f"    Checked: {source_file_v3}")
+            print(f"    Checked: {source_file_v2}")
+        return False
     
     # Dest is already the files/md5 directory (from repo.cache.local.path)
     dest_file = Path(dest_cache) / hash_only[:2] / filename
     
     if dest_file.exists():
-        return False
-    
-    if not source_file.exists():
-        if verbose:
-            print(f"  Warning: Source file not found: {md5[:8]}...")
         return False
     
     dest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -168,10 +183,10 @@ def populate_cache_file(
                 return True
             except OSError as e2:
                 if verbose:
-                    print(f"  Warning: Failed to cache {md5[:12]}...: {e2}")
+                    print(f"  ERROR: Failed to cache {md5[:12]}...: {e2}")
         else:
             if verbose:
-                print(f"  Warning: Failed to cache {md5[:12]}...: {e}")
+                print(f"  ERROR: Failed to cache {md5[:12]}...: {e}")
     
     return False
 

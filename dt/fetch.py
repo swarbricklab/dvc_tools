@@ -23,7 +23,7 @@ def _populate_cache_from_source(
     dvc_path: Path,
     source_cache: str,
     verbose: bool = False,
-) -> int:
+) -> Tuple[int, int]:
     """Populate the primary cache from a source cache.
     
     Creates symlinks in the primary cache pointing to files in the source cache.
@@ -34,44 +34,63 @@ def _populate_cache_from_source(
         verbose: Print progress messages.
         
     Returns:
-        Number of files added to cache.
+        Tuple of (files_added, files_failed) counts.
     """
     from . import import_data as import_mod
     
     primary_cache = utils.get_cache_dir()
     if not primary_cache:
-        return 0
+        return 0, 0
     
     # Parse the .dvc file to get output info
     dvc_data = utils.parse_dvc_file(dvc_path)
     if not dvc_data:
-        return 0
+        return 0, 0
     
     outs = dvc_data.get('outs', [])
     if not outs:
-        return 0
+        return 0, 0
     
     out = outs[0]
     md5 = out.get('md5', '')
     
     count = 0
+    failed = 0
     
     # Handle the root hash (.dir file or single file)
     if md5:
-        if import_mod.populate_cache_file(
+        result = import_mod.populate_cache_file(
             md5=md5,
             source_cache=source_cache,
             dest_cache=str(primary_cache),
             verbose=verbose,
-        ):
+        )
+        if result:
             count += 1
+        elif result is False:
+            # populate_cache_file returns False for "not found" or "already exists"
+            # Check if it's actually missing vs already cached
+            hash_clean = md5.replace('.dir', '')
+            suffix = '.dir' if md5.endswith('.dir') else ''
+            dest_file = primary_cache / hash_clean[:2] / (hash_clean[2:] + suffix)
+            if not dest_file.exists():
+                failed += 1
     
     # For directories, also populate individual files
     if md5.endswith('.dir'):
         dir_hash = md5[:-4]  # Remove .dir suffix
-        dir_file = Path(source_cache) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+        # Try DVC v3 path first, then v2 path
+        dir_file_v3 = Path(source_cache) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+        dir_file_v2 = Path(source_cache) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
         
-        if dir_file.exists():
+        if dir_file_v3.exists():
+            dir_file = dir_file_v3
+        elif dir_file_v2.exists():
+            dir_file = dir_file_v2
+        else:
+            dir_file = None
+        
+        if dir_file:
             try:
                 import json
                 entries = json.loads(dir_file.read_text())
@@ -79,26 +98,32 @@ def _populate_cache_from_source(
                 for entry in entries:
                     file_md5 = entry.get('md5', '')
                     if file_md5:
-                        if import_mod.populate_cache_file(
+                        result = import_mod.populate_cache_file(
                             md5=file_md5,
                             source_cache=source_cache,
                             dest_cache=str(primary_cache),
                             verbose=verbose,
-                        ):
+                        )
+                        if result:
                             count += 1
+                        elif result is False:
+                            # Check if missing vs already cached
+                            dest_file = primary_cache / file_md5[:2] / file_md5[2:]
+                            if not dest_file.exists():
+                                failed += 1
                             
             except (json.JSONDecodeError, KeyError) as e:
                 if verbose:
                     print(f"Warning: Could not parse .dir file: {e}")
     
-    return count
+    return count, failed
 
 
 def fetch_import(
     dvc_path: Path,
     verbose: bool = False,
     refresh: bool = True,
-) -> Tuple[str, int]:
+) -> Tuple[str, int, int]:
     """Fetch an import .dvc file by finding and linking from the source cache.
     
     This handles .dvc files created by `dvc import`. It finds a locally-accessible
@@ -110,7 +135,7 @@ def fetch_import(
         refresh: Whether to refresh the temp clone (default True).
         
     Returns:
-        Tuple of (source_cache_path, files_added_count).
+        Tuple of (source_cache_path, files_added_count, files_failed_count).
         
     Raises:
         FetchError: If fetch fails.
@@ -164,9 +189,9 @@ def fetch_import(
     if verbose:
         print(f"Populating primary cache...")
     
-    count = _populate_cache_from_source(dvc_path, cache_path, verbose)
+    count, failed = _populate_cache_from_source(dvc_path, cache_path, verbose)
     
-    return cache_path, count
+    return cache_path, count, failed
 
 
 def fetch(
@@ -232,12 +257,20 @@ def fetch(
                 print(f"Fetching import: {target_path}")
             
             try:
-                cache_path, count = fetch_import(
+                cache_path, count, failed = fetch_import(
                     dvc_path=target_path,
                     verbose=verbose,
                     refresh=refresh,
                 )
-                results.append((str(target_path), True, f"Fetched {count} files from {cache_path}"))
+                if failed > 0:
+                    # Critical failure - files were expected but not found in source cache
+                    results.append((str(target_path), False, 
+                        f"FAILED: {failed} file(s) not found in source cache at {cache_path}"))
+                elif count == 0:
+                    # All files already in cache
+                    results.append((str(target_path), True, f"Already in cache (from {cache_path})"))
+                else:
+                    results.append((str(target_path), True, f"Fetched {count} files from {cache_path}"))
             except FetchError as e:
                 results.append((str(target_path), False, str(e)))
         else:
