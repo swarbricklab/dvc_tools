@@ -80,50 +80,70 @@ def populate_primary_cache(
         # Create parent directory if needed
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         
+        # Follow DVC's preferred order: reflink → hardlink → symlink → copy
+        actual_file = workspace_file.resolve()
+        cached = False
+        
+        # 1. Try reflink (copy-on-write) - best option
         try:
-            # Try to hardlink the actual file (following the symlink)
-            # This creates a hardlink to the same inode as the symlink target
-            actual_file = workspace_file.resolve()
+            import subprocess
+            result = subprocess.run(
+                ['cp', '--reflink=only', str(actual_file), str(cache_file)],
+                capture_output=True
+            )
+            if result.returncode == 0:
+                count += 1
+                cached = True
+                if verbose:
+                    print(f"  Cached (reflink): {md5[:8]}... ({relpath or workspace_path.name})")
+        except (OSError, FileNotFoundError):
+            pass
+        
+        if cached:
+            continue
+        
+        # 2. Try hardlink - same inode, no extra space
+        try:
             os.link(actual_file, cache_file)
             count += 1
+            cached = True
             if verbose:
                 print(f"  Cached (hardlink): {md5[:8]}... ({relpath or workspace_path.name})")
         except OSError as e:
-            # Hardlink failed - try alternatives
-            # EXDEV (18): Cross-device link (different filesystems)
-            # EPERM (1): Operation not permitted (common on HPC with quota restrictions)
+            # EXDEV (18): Cross-device link
+            # EPERM (1): Operation not permitted (HPC quota restrictions)
             # EACCES (13): Permission denied
             if e.errno not in (1, 13, 18):
                 if verbose:
                     print(f"  Warning: Failed to cache {md5[:8]}...: {e}")
                 continue
-            
-            # Try reflink (copy-on-write) then regular copy
-            actual_file = workspace_file.resolve()
-            try:
-                import subprocess
-                result = subprocess.run(
-                    ['cp', '--reflink=auto', str(actual_file), str(cache_file)],
-                    capture_output=True
-                )
-                if result.returncode == 0:
-                    count += 1
-                    if verbose:
-                        print(f"  Cached (copy): {md5[:8]}... ({relpath or workspace_path.name})")
-                    continue
-            except (OSError, FileNotFoundError):
-                pass
-            
-            # Fall back to regular copy
-            try:
-                import shutil
-                shutil.copy2(actual_file, cache_file)
-                count += 1
-                if verbose:
-                    print(f"  Cached (copy): {md5[:8]}... ({relpath or workspace_path.name})")
-            except OSError as e2:
-                if verbose:
-                    print(f"  Warning: Failed to copy {md5[:8]}...: {e2}")
+        
+        if cached:
+            continue
+        
+        # 3. Try symlink - works across filesystems
+        try:
+            os.symlink(actual_file, cache_file)
+            count += 1
+            cached = True
+            if verbose:
+                print(f"  Cached (symlink): {md5[:8]}... ({relpath or workspace_path.name})")
+        except OSError:
+            pass
+        
+        if cached:
+            continue
+        
+        # 4. Fall back to regular copy
+        try:
+            import shutil
+            shutil.copy2(actual_file, cache_file)
+            count += 1
+            if verbose:
+                print(f"  Cached (copy): {md5[:8]}... ({relpath or workspace_path.name})")
+        except OSError as e:
+            if verbose:
+                print(f"  Warning: Failed to copy {md5[:8]}...: {e}")
     
     return count
 
@@ -189,14 +209,30 @@ def populate_cache_file(
     
     dest_file.parent.mkdir(parents=True, exist_ok=True)
     
+    # Follow DVC's preferred order: reflink → hardlink → symlink → copy
+    # See: https://dvc.org/doc/user-guide/data-management/large-dataset-optimization
+    
+    # 1. Try reflink (copy-on-write) - best option: instant, zero space, safe to modify
     try:
-        # Try hardlink first - same inode, no extra space, works within same project
+        import subprocess
+        result = subprocess.run(
+            ['cp', '--reflink=only', str(source_file), str(dest_file)],
+            capture_output=True
+        )
+        if result.returncode == 0:
+            if verbose:
+                print(f"  Cached (reflink): {md5[:12]}...")
+            return True
+    except (OSError, FileNotFoundError):
+        pass  # cp not available or reflink not supported
+    
+    # 2. Try hardlink - same inode, no extra space, works within same filesystem/project
+    try:
         os.link(source_file, dest_file)
         if verbose:
             print(f"  Cached (hardlink): {md5[:12]}...")
         return True
     except OSError as e:
-        # Hardlink failed - try alternatives
         # EXDEV (18): Cross-device link (different filesystems)
         # EPERM (1): Operation not permitted (common on HPC with quota restrictions)
         # EACCES (13): Permission denied
@@ -205,22 +241,17 @@ def populate_cache_file(
                 print(f"  ERROR: Failed to cache {md5[:12]}...: {e}")
             return False
     
-    # Try reflink (copy-on-write) - instant copy, space-efficient on supported FS
+    # 3. Try symlink - pointer to source, no extra space, works across filesystems
     try:
-        import subprocess
-        result = subprocess.run(
-            ['cp', '--reflink=auto', str(source_file), str(dest_file)],
-            capture_output=True
-        )
-        if result.returncode == 0:
-            if verbose:
-                print(f"  Cached (copy): {md5[:12]}...")
-            return True
-    except (OSError, FileNotFoundError):
-        pass  # cp not available or failed, try shutil
+        os.symlink(source_file, dest_file)
+        if verbose:
+            print(f"  Cached (symlink): {md5[:12]}...")
+        return True
+    except OSError as e:
+        if verbose:
+            print(f"  Warning: symlink failed for {md5[:12]}...: {e}")
     
-    # Fall back to regular copy - slower but safe and universally compatible
-    # This creates an independent copy that DVC can work with normally
+    # 4. Fall back to regular copy - slower but universally compatible
     try:
         import shutil
         shutil.copy2(source_file, dest_file)
