@@ -27,6 +27,7 @@ def _populate_cache_from_source(
     """Populate the primary cache from a source cache.
     
     Creates symlinks in the primary cache pointing to files in the source cache.
+    Respects the .dvc file format (v2 vs v3) when determining cache layout.
     
     Args:
         dvc_path: Path to the .dvc file.
@@ -54,6 +55,20 @@ def _populate_cache_from_source(
     out = outs[0]
     md5 = out.get('md5', '')
     
+    # Detect v2 vs v3 format: v3 has explicit 'hash' field, v2 doesn't
+    # This determines where dvc checkout will look for files
+    use_v3_layout = import_mod.is_v3_dvc_file(dvc_data)
+    
+    # Get base cache directory (without files/md5 suffix)
+    # repo.cache.local.path returns .../files/md5, we need the parent
+    cache_base = str(primary_cache)
+    if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
+        cache_base = str(Path(cache_base).parent.parent)
+    
+    if verbose:
+        layout = "v3 (files/md5/)" if use_v3_layout else "v2 (legacy)"
+        print(f"  Using {layout} cache layout")
+    
     count = 0
     failed = 0
     
@@ -62,8 +77,9 @@ def _populate_cache_from_source(
         result = import_mod.populate_cache_file(
             md5=md5,
             source_cache=source_cache,
-            dest_cache=str(primary_cache),
+            dest_cache=cache_base,
             verbose=verbose,
+            use_v3_layout=use_v3_layout,
         )
         if result:
             count += 1
@@ -72,7 +88,10 @@ def _populate_cache_from_source(
             # Check if it's actually missing vs already cached
             hash_clean = md5.replace('.dir', '')
             suffix = '.dir' if md5.endswith('.dir') else ''
-            dest_file = primary_cache / hash_clean[:2] / (hash_clean[2:] + suffix)
+            if use_v3_layout:
+                dest_file = Path(cache_base) / 'files' / 'md5' / hash_clean[:2] / (hash_clean[2:] + suffix)
+            else:
+                dest_file = Path(cache_base) / hash_clean[:2] / (hash_clean[2:] + suffix)
             if not dest_file.exists():
                 failed += 1
     
@@ -101,14 +120,18 @@ def _populate_cache_from_source(
                         result = import_mod.populate_cache_file(
                             md5=file_md5,
                             source_cache=source_cache,
-                            dest_cache=str(primary_cache),
+                            dest_cache=cache_base,
                             verbose=verbose,
+                            use_v3_layout=use_v3_layout,
                         )
                         if result:
                             count += 1
                         elif result is False:
                             # Check if missing vs already cached
-                            dest_file = primary_cache / file_md5[:2] / file_md5[2:]
+                            if use_v3_layout:
+                                dest_file = Path(cache_base) / 'files' / 'md5' / file_md5[:2] / file_md5[2:]
+                            else:
+                                dest_file = Path(cache_base) / file_md5[:2] / file_md5[2:]
                             if not dest_file.exists():
                                 failed += 1
                             

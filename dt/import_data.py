@@ -148,11 +148,33 @@ def populate_primary_cache(
     return count
 
 
+def is_v3_dvc_file(dvc_data: Dict[str, Any]) -> bool:
+    """Detect if a .dvc file uses v3 format based on explicit hash field.
+    
+    DVC v3 format explicitly includes 'hash: md5' in outputs.
+    DVC v2 format only has 'md5:' without the 'hash:' field.
+    
+    Args:
+        dvc_data: Parsed .dvc file contents.
+        
+    Returns:
+        True if v3 format (has explicit hash field), False if v2/legacy.
+    """
+    outs = dvc_data.get('outs', [])
+    if not outs:
+        return True  # Default to v3 for empty/new files
+    
+    # Check first output for explicit hash field
+    out = outs[0]
+    return 'hash' in out
+
+
 def populate_cache_file(
     md5: str,
     source_cache: str,
     dest_cache: str,
     verbose: bool = False,
+    use_v3_layout: bool = True,
 ) -> bool:
     """Copy or link a single file from source cache to destination cache.
     
@@ -166,9 +188,12 @@ def populate_cache_file(
         md5: The MD5 hash (with optional .dir suffix).
         source_cache: Path to the source cache/remote root (e.g., /path/to/.remote).
             May contain files/md5/ structure (v3) or direct hash dirs (v2).
-        dest_cache: Path to the destination cache files/md5 directory
-            (e.g., from repo.cache.local.path which returns .../files/md5).
+        dest_cache: Path to the destination cache base directory.
+            For v3 layout, files go in dest_cache/files/md5/XX/hash.
+            For v2 layout, files go in dest_cache/XX/hash.
         verbose: Print progress messages.
+        use_v3_layout: If True, use v3 layout (files/md5/XX/hash) for destination.
+            If False, use v2 layout (XX/hash). Should match the .dvc file format.
         
     Returns:
         True if file was added to cache, False otherwise.
@@ -201,8 +226,13 @@ def populate_cache_file(
             print(f"    Checked: {source_file_v2}")
         return False
     
-    # Dest is already the files/md5 directory (from repo.cache.local.path)
-    dest_file = Path(dest_cache) / hash_only[:2] / filename
+    # Destination path depends on the .dvc file format
+    # v3 format (.dvc has 'hash: md5') -> files/md5/XX/hash
+    # v2 format (.dvc only has 'md5:') -> XX/hash (at cache root)
+    if use_v3_layout:
+        dest_file = Path(dest_cache) / 'files' / 'md5' / hash_only[:2] / filename
+    else:
+        dest_file = Path(dest_cache) / hash_only[:2] / filename
     
     if dest_file.exists():
         return False

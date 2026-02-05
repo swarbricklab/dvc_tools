@@ -24,18 +24,17 @@ class TestPopulateCacheFile:
         """Create source and destination cache directories.
         
         Source is a remote/cache root (contains files/md5 structure).
-        Dest is the files/md5 path (what repo.cache.local.path returns).
+        Dest is the cache root (populate_cache_file adds files/md5 internally for v3).
         """
         source = tmp_path / 'source_cache'
         dest = tmp_path / 'dest_cache'
         
         # Create cache structure
         (source / 'files' / 'md5').mkdir(parents=True)
-        dest_files_md5 = dest / 'files' / 'md5'
-        dest_files_md5.mkdir(parents=True)
+        dest.mkdir(parents=True)
         
-        # Source is the root, dest is the files/md5 path
-        return {'source': str(source), 'dest': str(dest_files_md5)}
+        # Both source and dest are cache roots
+        return {'source': str(source), 'dest': str(dest)}
     
     def test_single_file_cached_via_hardlink(self, cache_dirs):
         """Single file is cached using hardlink."""
@@ -51,13 +50,14 @@ class TestPopulateCacheFile:
             md5=md5,
             source_cache=cache_dirs['source'],
             dest_cache=cache_dirs['dest'],
+            use_v3_layout=True,
         )
         
         # File should be cached
         assert result is True
         
-        # Destination file should exist (dest already points to files/md5)
-        dest_file = Path(cache_dirs['dest']) / md5[:2] / md5[2:]
+        # Destination file should exist in v3 layout (files/md5/XX/hash)
+        dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / md5[:2] / md5[2:]
         assert dest_file.exists()
         assert dest_file.read_text() == 'test content'
     
@@ -77,12 +77,13 @@ class TestPopulateCacheFile:
             md5=md5,
             source_cache=cache_dirs['source'],
             dest_cache=cache_dirs['dest'],
+            use_v3_layout=True,
         )
         
         assert result is True
         
-        # Destination .dir file should exist (dest already points to files/md5)
-        dest_file = Path(cache_dirs['dest']) / hash_only[:2] / (hash_only[2:] + '.dir')
+        # Destination .dir file should exist in v3 layout
+        dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / hash_only[:2] / (hash_only[2:] + '.dir')
         assert dest_file.exists()
         assert json.loads(dest_file.read_text()) == dir_content
     
@@ -95,8 +96,8 @@ class TestPopulateCacheFile:
         source_dir.mkdir(parents=True, exist_ok=True)
         (source_dir / md5[2:]).write_text('source content')
         
-        # Create dest file (dest already points to files/md5)
-        dest_dir = Path(cache_dirs['dest']) / md5[:2]
+        # Create dest file in v3 layout
+        dest_dir = Path(cache_dirs['dest']) / 'files' / 'md5' / md5[:2]
         dest_dir.mkdir(parents=True, exist_ok=True)
         (dest_dir / md5[2:]).write_text('dest content')
         
@@ -104,6 +105,7 @@ class TestPopulateCacheFile:
             md5=md5,
             source_cache=cache_dirs['source'],
             dest_cache=cache_dirs['dest'],
+            use_v3_layout=True,
         )
         
         # Should return False (already exists)
@@ -118,12 +120,16 @@ class TestPopulateCacheFile:
             source_cache=cache_dirs['source'],
             dest_cache=cache_dirs['dest'],
             verbose=True,
+            use_v3_layout=True,
         )
         
         assert result is False
 
     def test_dvc_v2_layout_fallback(self, cache_dirs):
-        """Falls back to DVC v2 layout (XX/hash directly in root)."""
+        """Falls back to DVC v2 layout (XX/hash directly in root) for source.
+        
+        When source uses v2 layout but .dvc file is v3, dest uses v3 layout.
+        """
         md5 = 'v2layout1234567890abcdef12345678'
         
         # Create source file in v2 layout (directly in root, no files/md5)
@@ -136,17 +142,46 @@ class TestPopulateCacheFile:
             md5=md5,
             source_cache=cache_dirs['source'],
             dest_cache=cache_dirs['dest'],
+            use_v3_layout=True,  # .dvc file is v3 format
         )
         
         assert result is True
         
-        # Destination file should exist
-        dest_file = Path(cache_dirs['dest']) / md5[:2] / md5[2:]
+        # Destination file should exist in v3 layout
+        dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / md5[:2] / md5[2:]
         assert dest_file.exists()
         assert dest_file.read_text() == 'v2 layout content'
 
+    def test_dvc_v2_dest_layout(self, cache_dirs):
+        """Test v2 destination layout for legacy .dvc files."""
+        md5 = 'v2destlayout12345678901234567890'
+        
+        # Create source file in v2 layout
+        source_dir = Path(cache_dirs['source']) / md5[:2]
+        source_dir.mkdir(parents=True)
+        source_file = source_dir / md5[2:]
+        source_file.write_text('v2 content')
+        
+        result = import_data.populate_cache_file(
+            md5=md5,
+            source_cache=cache_dirs['source'],
+            dest_cache=cache_dirs['dest'],
+            use_v3_layout=False,  # .dvc file is v2 format (no 'hash:' field)
+        )
+        
+        assert result is True
+        
+        # Destination file should exist in v2 layout (no files/md5)
+        dest_file = Path(cache_dirs['dest']) / md5[:2] / md5[2:]
+        assert dest_file.exists()
+        assert dest_file.read_text() == 'v2 content'
+        
+        # Should NOT be in v3 layout
+        v3_path = Path(cache_dirs['dest']) / 'files' / 'md5' / md5[:2] / md5[2:]
+        assert not v3_path.exists()
+
     def test_dvc_v3_preferred_over_v2(self, cache_dirs):
-        """DVC v3 layout (files/md5/) is preferred over v2 layout."""
+        """DVC v3 layout (files/md5/) is preferred over v2 layout for source."""
         md5 = 'v3preferred12345678901234567890ab'
         
         # Create source file in BOTH v3 and v2 layouts
@@ -162,12 +197,13 @@ class TestPopulateCacheFile:
             md5=md5,
             source_cache=cache_dirs['source'],
             dest_cache=cache_dirs['dest'],
+            use_v3_layout=True,
         )
         
         assert result is True
         
-        # Should have used v3 content
-        dest_file = Path(cache_dirs['dest']) / md5[:2] / md5[2:]
+        # Should have used v3 content from source, dest in v3 layout
+        dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / md5[:2] / md5[2:]
         assert dest_file.exists()
         assert dest_file.read_text() == 'v3 content'
 
@@ -197,18 +233,18 @@ class TestPopulateCacheFromSource:
         }
     
     def test_single_file_fetch(self, fetch_setup, monkeypatch):
-        """Fetch single file populates cache."""
+        """Fetch single file populates cache (v3 format)."""
         project = fetch_setup['project']
         source_cache = fetch_setup['source_cache']
         cache = fetch_setup['cache']
         
-        # Create .dvc file
+        # Create .dvc file in v3 format (has hash: md5 field)
         md5 = 'abcdef1234567890abcdef1234567890'
-        dvc_content = f'outs:\n  - md5: {md5}\n    path: data.csv\n'
+        dvc_content = f'outs:\n  - md5: {md5}\n    size: 8\n    hash: md5\n    path: data.csv\n'
         dvc_file = project / 'data.csv.dvc'
         dvc_file.write_text(dvc_content)
         
-        # Create source cache file
+        # Create source cache file in v3 layout
         source_dir = source_cache / 'files' / 'md5' / md5[:2]
         source_dir.mkdir(parents=True)
         (source_dir / md5[2:]).write_text('csv,data')
@@ -226,22 +262,22 @@ class TestPopulateCacheFromSource:
         assert count == 1
         assert failed == 0
         
-        # Verify file is in primary cache (cache already points to files/md5)
+        # Verify file is in v3 cache layout (files/md5/XX/hash)
         dest_file = cache / md5[:2] / md5[2:]
         assert dest_file.exists()
     
     def test_directory_fetch(self, fetch_setup, monkeypatch):
-        """Fetch directory populates cache with .dir and files."""
+        """Fetch directory populates cache with .dir and files (v3 format)."""
         project = fetch_setup['project']
         source_cache = fetch_setup['source_cache']
         cache = fetch_setup['cache']
         
-        # Create .dvc file for directory
+        # Create .dvc file for directory in v3 format
         dir_hash = 'abcdef1234567890abcdef1234567890'
         file1_hash = '1111111111111111111111111111111a'
         file2_hash = '2222222222222222222222222222222b'
         
-        dvc_content = f'outs:\n  - md5: {dir_hash}.dir\n    path: mydir\n'
+        dvc_content = f'outs:\n  - md5: {dir_hash}.dir\n    size: 100\n    hash: md5\n    nfiles: 2\n    path: mydir\n'
         dvc_file = project / 'mydir.dvc'
         dvc_file.write_text(dvc_content)
         
@@ -280,7 +316,7 @@ class TestPopulateCacheFromSource:
         
         md5 = 'abcdef1234567890abcdef1234567890'
         dvc_file = project / 'data.csv.dvc'
-        dvc_file.write_text(f'outs:\n  - md5: {md5}\n    path: data.csv\n')
+        dvc_file.write_text(f'outs:\n  - md5: {md5}\n    size: 8\n    hash: md5\n    path: data.csv\n')
         
         monkeypatch.chdir(project)
         
@@ -319,9 +355,9 @@ class TestPopulateCacheFromSource:
         source_cache = fetch_setup['source_cache']
         cache = fetch_setup['cache']
         
-        # Create .dvc file pointing to hash that doesn't exist in source
+        # Create .dvc file pointing to hash that doesn't exist in source (v3 format)
         md5 = 'missing1234567890abcdef1234567890'
-        dvc_content = f'outs:\n  - md5: {md5}\n    path: data.csv\n'
+        dvc_content = f'outs:\n  - md5: {md5}\n    size: 8\n    hash: md5\n    path: data.csv\n'
         dvc_file = project / 'data.csv.dvc'
         dvc_file.write_text(dvc_content)
         
