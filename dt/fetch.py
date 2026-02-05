@@ -65,16 +65,22 @@ def _populate_cache_from_source(
     dvc_path: Path,
     source_cache: str,
     verbose: bool = False,
+    source_clone_path: Optional[Path] = None,
 ) -> Tuple[int, int]:
     """Populate the primary cache from a source cache.
     
     Creates symlinks in the primary cache pointing to files in the source cache.
     Respects the .dvc file format (v2 vs v3) when determining cache layout.
     
+    For directory imports, if the .dir file doesn't exist in the source cache
+    (because the source directory wasn't DVC-tracked), it will be constructed
+    from the source files.
+    
     Args:
         dvc_path: Path to the .dvc file.
         source_cache: Path to the source cache.
         verbose: Print progress messages.
+        source_clone_path: Path to the source repo clone (for constructing .dir files).
         
     Returns:
         Tuple of (files_added, files_failed) counts.
@@ -151,42 +157,74 @@ def _populate_cache_from_source(
         dir_file_v3 = Path(source_cache) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
         dir_file_v2 = Path(source_cache) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
         
+        entries = None
+        
         if dir_file_v3.exists():
             dir_file = dir_file_v3
         elif dir_file_v2.exists():
             dir_file = dir_file_v2
         else:
             dir_file = None
+            # .dir file not in source cache - need to construct it
+            # This happens when importing a directory that wasn't DVC-tracked in source
+            if source_clone_path:
+                # Get the dependency path from the .dvc file
+                deps = dvc_data.get('deps', [])
+                if deps:
+                    dep_path = deps[0].get('path', '')
+                    if dep_path:
+                        source_dir = source_clone_path / dep_path
+                        if verbose:
+                            print(f"  .dir file not in source cache, constructing from: {source_dir}")
+                        
+                        entries = import_mod.construct_dir_file(
+                            source_dir=source_dir,
+                            expected_hash=dir_hash,
+                            dest_cache=cache_base,
+                            use_v3_layout=use_v3_layout,
+                            verbose=verbose,
+                        )
+                        if entries is None:
+                            if verbose:
+                                print(f"  ERROR: Could not construct .dir file")
+                            failed += 1
+            else:
+                if verbose:
+                    print(f"  .dir file not found in source cache and no clone available")
+                failed += 1
         
-        if dir_file:
+        # Read entries from existing .dir file
+        if dir_file and entries is None:
             try:
                 import json
                 entries = json.loads(dir_file.read_text())
-                
-                for entry in entries:
-                    file_md5 = entry.get('md5', '')
-                    if file_md5:
-                        result = import_mod.populate_cache_file(
-                            md5=file_md5,
-                            source_cache=source_cache,
-                            dest_cache=cache_base,
-                            verbose=verbose,
-                            use_v3_layout=use_v3_layout,
-                        )
-                        if result:
-                            count += 1
-                        elif result is False:
-                            # Check if missing vs already cached
-                            if use_v3_layout:
-                                dest_file = Path(cache_base) / 'files' / 'md5' / file_md5[:2] / file_md5[2:]
-                            else:
-                                dest_file = Path(cache_base) / file_md5[:2] / file_md5[2:]
-                            if not dest_file.exists():
-                                failed += 1
-                            
             except (json.JSONDecodeError, KeyError) as e:
                 if verbose:
                     print(f"Warning: Could not parse .dir file: {e}")
+                entries = None
+        
+        # Populate individual files from entries
+        if entries:
+            for entry in entries:
+                file_md5 = entry.get('md5', '')
+                if file_md5:
+                    result = import_mod.populate_cache_file(
+                        md5=file_md5,
+                        source_cache=source_cache,
+                        dest_cache=cache_base,
+                        verbose=verbose,
+                        use_v3_layout=use_v3_layout,
+                    )
+                    if result:
+                        count += 1
+                    elif result is False:
+                        # Check if missing vs already cached
+                        if use_v3_layout:
+                            cache_file = Path(cache_base) / 'files' / 'md5' / file_md5[:2] / file_md5[2:]
+                        else:
+                            cache_file = Path(cache_base) / file_md5[:2] / file_md5[2:]
+                        if not cache_file.exists():
+                            failed += 1
     
     return count, failed
 
@@ -261,7 +299,9 @@ def fetch_import(
     if verbose:
         print(f"Populating primary cache...")
     
-    count, failed = _populate_cache_from_source(dvc_path, cache_path, verbose)
+    count, failed = _populate_cache_from_source(
+        dvc_path, cache_path, verbose, source_clone_path=clone_path
+    )
     
     return cache_path, count, failed
 

@@ -169,6 +169,120 @@ def is_v3_dvc_file(dvc_data: Dict[str, Any]) -> bool:
     return 'hash' in out
 
 
+def build_dir_manifest(entries: List[Dict[str, str]]) -> bytes:
+    """Build a .dir manifest file content in exact DVC format.
+    
+    DVC uses a specific JSON format for .dir files that must be reproduced
+    exactly to match the expected hash. The format is:
+    - JSON array, no trailing newline
+    - Compact format with `: ` after colons and `, ` between entries
+    - Keys in order: md5, relpath
+    - Entries sorted by relpath
+    
+    Args:
+        entries: List of dicts with 'md5' and 'relpath' keys.
+        
+    Returns:
+        Bytes content of the .dir file.
+    """
+    # Sort by relpath
+    sorted_entries = sorted(entries, key=lambda x: x['relpath'])
+    
+    # Build JSON with exact DVC format
+    # DVC uses: [{"md5": "...", "relpath": "..."}, {"md5": "...", "relpath": "..."}]
+    parts = []
+    for entry in sorted_entries:
+        parts.append(f'{{"md5": "{entry["md5"]}", "relpath": "{entry["relpath"]}"}}')
+    
+    content = '[' + ', '.join(parts) + ']'
+    return content.encode('utf-8')
+
+
+def construct_dir_file(
+    source_dir: Path,
+    expected_hash: str,
+    dest_cache: str,
+    use_v3_layout: bool = True,
+    verbose: bool = False,
+) -> Optional[List[Dict[str, str]]]:
+    """Construct a .dir manifest file from source directory contents.
+    
+    When importing a directory that is not DVC-tracked in the source repo,
+    the .dir file only exists in the importing repo's cache. This function
+    reconstructs it by scanning the source directory and calculating hashes.
+    
+    Args:
+        source_dir: Path to the source directory to scan.
+        expected_hash: The expected MD5 hash of the .dir file (without .dir suffix).
+        dest_cache: Path to destination cache base directory.
+        use_v3_layout: If True, write .dir file to v3 layout.
+        verbose: Print progress messages.
+        
+    Returns:
+        List of manifest entries if successful, None if hash mismatch.
+    """
+    import hashlib
+    
+    if not source_dir.exists() or not source_dir.is_dir():
+        if verbose:
+            print(f"  ERROR: Source directory not found: {source_dir}")
+        return None
+    
+    entries = []
+    
+    # Scan directory recursively
+    for file_path in sorted(source_dir.rglob('*')):
+        if file_path.is_file():
+            # Calculate MD5 hash
+            hasher = hashlib.md5()
+            try:
+                with open(file_path, 'rb') as f:
+                    for chunk in iter(lambda: f.read(8192), b''):
+                        hasher.update(chunk)
+                file_hash = hasher.hexdigest()
+                
+                # Get relative path from source_dir
+                relpath = str(file_path.relative_to(source_dir))
+                entries.append({'md5': file_hash, 'relpath': relpath})
+            except OSError as e:
+                if verbose:
+                    print(f"  Warning: Could not hash {file_path}: {e}")
+                continue
+    
+    if not entries:
+        if verbose:
+            print(f"  Warning: No files found in {source_dir}")
+        return None
+    
+    # Build the manifest content
+    manifest_content = build_dir_manifest(entries)
+    
+    # Verify hash matches expected
+    actual_hash = hashlib.md5(manifest_content).hexdigest()
+    
+    if actual_hash != expected_hash:
+        if verbose:
+            print(f"  ERROR: Constructed .dir hash mismatch!")
+            print(f"    Expected: {expected_hash}")
+            print(f"    Got:      {actual_hash}")
+            print(f"    This may indicate the source directory has changed since import.")
+        return None
+    
+    # Write .dir file to cache
+    if use_v3_layout:
+        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+    else:
+        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+    
+    if not dest_file.exists():
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        dest_file.write_bytes(manifest_content)
+        if verbose:
+            print(f"  Constructed .dir file: {expected_hash[:12]}...")
+    
+    return entries
+
+
 def populate_cache_file(
     md5: str,
     source_cache: str,
