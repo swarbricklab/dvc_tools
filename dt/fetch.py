@@ -187,7 +187,7 @@ def _populate_cache_from_source(
         elif result is None:
             # Source file not found
             if verbose:
-                print(f"  ERROR: Source file not found in cache: {md5[:12]}...")
+                print(f"  ERROR: Source file not found in cache: {md5}")
             failed += 1
         # result is False means already cached - that's fine
     
@@ -284,7 +284,7 @@ def _populate_cache_from_source(
                     elif result is None:
                         # Source file not found
                         if verbose:
-                            print(f"  ERROR: File not found in source cache: {relpath} ({file_md5[:12]}...)")
+                            print(f"  ERROR: File not found in source cache: {relpath} ({file_md5})")
                         failed += 1
                     # result is False means already cached - that's fine
     
