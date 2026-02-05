@@ -186,9 +186,11 @@ def _populate_cache_from_source(
             count += 1
         elif result is None:
             # Source file not found
-            if verbose:
-                print(f"  ERROR: Source file not found in cache: {md5}")
-            failed += 1
+            # For .dir files, we'll try to construct it later - don't count as failure yet
+            if not md5.endswith('.dir'):
+                if verbose:
+                    print(f"  ERROR: Source file not found in cache: {md5}")
+                failed += 1
         # result is False means already cached - that's fine
     
     # For directories, also populate individual files
@@ -287,6 +289,11 @@ def _populate_cache_from_source(
                             print(f"  ERROR: File not found in source cache: {relpath} ({file_md5})")
                         failed += 1
                     # result is False means already cached - that's fine
+            
+            # Show summary
+            if verbose:
+                already_cached = len(entries) - count - failed
+                print(f"  Summary: {len(entries)} files in manifest, {count} fetched, {already_cached} already cached, {failed} missing")
     
     return count, failed
 
