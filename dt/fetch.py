@@ -15,6 +15,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import click
+
 from . import utils
 from .errors import FetchError, HashMismatchError
 
@@ -162,6 +164,7 @@ def _populate_cache_from_source(
     rev_lock: Optional[str] = None,
     source_url: Optional[str] = None,
     update: bool = False,
+    show_progress: bool = False,
 ) -> Tuple[int, int]:
     """Populate the primary cache from a source cache.
     
@@ -178,6 +181,7 @@ def _populate_cache_from_source(
         rev_lock: Git revision for constructing .dir files via dvc list.
         source_url: URL of the source repository (for dvc list).
         update: If True, create .dir file with computed hash and update .dvc file.
+        show_progress: If True (and not verbose), show a progress bar.
         
     Returns:
         Tuple of (files_added, files_failed) counts.
@@ -325,7 +329,11 @@ def _populate_cache_from_source(
         
         # Populate individual files from entries
         if entries:
-            for entry in entries:
+            # Use progress bar in non-verbose mode
+            use_progressbar = show_progress and not verbose and len(entries) > 1
+            
+            def process_entry(entry):
+                nonlocal count, failed
                 file_md5 = entry.get('md5', '')
                 relpath = entry.get('relpath', file_md5[:12])  # Use relpath if available
                 if file_md5:
@@ -345,6 +353,19 @@ def _populate_cache_from_source(
                         failed += 1
                     # result is False means already cached - that's fine
             
+            if use_progressbar:
+                with click.progressbar(
+                    entries,
+                    label=f"  Fetching {len(entries)} files",
+                    show_pos=True,
+                    show_percent=True,
+                ) as bar:
+                    for entry in bar:
+                        process_entry(entry)
+            else:
+                for entry in entries:
+                    process_entry(entry)
+            
             # Show summary
             if verbose:
                 already_cached = len(entries) - count - failed
@@ -358,6 +379,7 @@ def fetch_import(
     verbose: bool = False,
     refresh: bool = True,  # Currently unused, kept for API compatibility
     update: bool = False,
+    show_progress: bool = False,
 ) -> Tuple[str, int, int]:
     """Fetch an import .dvc file by finding and linking from the source cache.
     
@@ -369,6 +391,7 @@ def fetch_import(
         verbose: Print progress messages.
         refresh: Whether to refresh the temp clone (currently unused).
         update: If True, create .dir file with computed hash and update .dvc file.
+        show_progress: If True (and not verbose), show a progress bar.
         
     Returns:
         Tuple of (source_cache_path, files_added_count, files_failed_count).
@@ -420,6 +443,7 @@ def fetch_import(
         rev_lock=import_info.get('rev'),
         source_url=source_url,
         update=update,
+        show_progress=show_progress,
     )
     
     return cache_path, count, failed
@@ -430,6 +454,7 @@ def fetch(
     verbose: bool = False,
     refresh: bool = True,
     update: bool = False,
+    show_progress: bool = True,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -446,6 +471,7 @@ def fetch(
         verbose: Print progress messages.
         refresh: Whether to refresh temp clones (default True).
         update: If True, create .dir file with computed hash and update .dvc file.
+        show_progress: If True (and not verbose), show a progress bar.
         
     Returns:
         List of (target, success, message) tuples.
@@ -503,6 +529,7 @@ def fetch(
                     verbose=verbose,
                     refresh=refresh,
                     update=update,
+                    show_progress=show_progress,
                 )
                 if failed > 0:
                     # Critical failure - files were expected but not found in source cache
