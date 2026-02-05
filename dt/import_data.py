@@ -257,6 +257,10 @@ def construct_dir_file(
                     print(f"  ERROR: Constructed .dir hash mismatch!")
                     print(f"    Expected: {expected_hash}")
                     print(f"    Got:      {actual_hash}")
+                    print(f"    Source dir: {source_dir}")
+                    print(f"    Files found ({len(entries)}):")
+                    for entry in entries:
+                        print(f"      {entry.get('relpath')}: {entry.get('md5')}")
                     print(f"    This may indicate the source directory has changed since import.")
                 return None
             
