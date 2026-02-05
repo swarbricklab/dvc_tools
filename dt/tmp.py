@@ -333,3 +333,74 @@ def get_repo_dvc_config(repo_spec: str, owner: Optional[str] = None) -> Optional
         return config_path
     
     return None
+
+
+def checkout_path_at_revision(
+    repo_path: Path,
+    path: str,
+    revision: str,
+    verbose: bool = False,
+) -> bool:
+    """Checkout a specific path at a specific revision in a clone.
+    
+    This is used when we need to access source files at the exact revision
+    that was used for an import (rev_lock).
+    
+    Args:
+        repo_path: Path to the git repository clone.
+        path: Path within the repo to checkout.
+        revision: Git revision (commit hash) to checkout.
+        verbose: Print progress messages.
+        
+    Returns:
+        True if successful, False otherwise.
+    """
+    # First, fetch the specific commit (it may not be in our shallow clone)
+    if verbose:
+        print(f"  Fetching revision {revision[:12]}...")
+    
+    result = subprocess.run(
+        ['git', 'fetch', '--depth', '1', 'origin', revision],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        if verbose:
+            print(f"  Warning: Could not fetch revision: {result.stderr.strip()}")
+        return False
+    
+    # Add the path to sparse-checkout
+    if verbose:
+        print(f"  Adding {path} to sparse checkout...")
+    
+    result = subprocess.run(
+        ['git', 'sparse-checkout', 'add', path],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        if verbose:
+            print(f"  Warning: Could not add to sparse checkout: {result.stderr.strip()}")
+        return False
+    
+    # Checkout the specific revision
+    if verbose:
+        print(f"  Checking out {path} at {revision[:12]}...")
+    
+    result = subprocess.run(
+        ['git', 'checkout', revision, '--', path],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        if verbose:
+            print(f"  Warning: Could not checkout path: {result.stderr.strip()}")
+        return False
+    
+    return True

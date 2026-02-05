@@ -66,6 +66,7 @@ def _populate_cache_from_source(
     source_cache: str,
     verbose: bool = False,
     source_clone_path: Optional[Path] = None,
+    rev_lock: Optional[str] = None,
 ) -> Tuple[int, int]:
     """Populate the primary cache from a source cache.
     
@@ -74,18 +75,20 @@ def _populate_cache_from_source(
     
     For directory imports, if the .dir file doesn't exist in the source cache
     (because the source directory wasn't DVC-tracked), it will be constructed
-    from the source files.
+    from the source files at the specified revision.
     
     Args:
         dvc_path: Path to the .dvc file.
         source_cache: Path to the source cache.
         verbose: Print progress messages.
         source_clone_path: Path to the source repo clone (for constructing .dir files).
+        rev_lock: Git revision to checkout when constructing .dir files.
         
     Returns:
         Tuple of (files_added, files_failed) counts.
     """
     from . import import_data as import_mod
+    from . import tmp as tmp_mod
     
     primary_cache = utils.get_cache_dir()
     if not primary_cache:
@@ -174,20 +177,54 @@ def _populate_cache_from_source(
                     dep_path = deps[0].get('path', '')
                     if dep_path:
                         source_dir = source_clone_path / dep_path
-                        if verbose:
-                            print(f"  .dir file not in source cache, constructing from: {source_dir}")
                         
-                        entries = import_mod.construct_dir_file(
-                            source_dir=source_dir,
-                            expected_hash=dir_hash,
-                            dest_cache=cache_base,
-                            use_v3_layout=use_v3_layout,
-                            verbose=verbose,
-                        )
-                        if entries is None:
+                        # Need to checkout the source files at rev_lock
+                        if rev_lock:
                             if verbose:
-                                print(f"  ERROR: Could not construct .dir file")
-                            failed += 1
+                                print(f"  .dir file not in source cache, checking out {dep_path} at {rev_lock[:12]}...")
+                            
+                            checkout_ok = tmp_mod.checkout_path_at_revision(
+                                repo_path=source_clone_path,
+                                path=dep_path,
+                                revision=rev_lock,
+                                verbose=verbose,
+                            )
+                            
+                            if not checkout_ok:
+                                if verbose:
+                                    print(f"  ERROR: Could not checkout source files at revision {rev_lock[:12]}")
+                                failed += 1
+                            elif source_dir.exists():
+                                entries = import_mod.construct_dir_file(
+                                    source_dir=source_dir,
+                                    expected_hash=dir_hash,
+                                    dest_cache=cache_base,
+                                    use_v3_layout=use_v3_layout,
+                                    verbose=verbose,
+                                )
+                                if entries is None:
+                                    if verbose:
+                                        print(f"  ERROR: Could not construct .dir file")
+                                    failed += 1
+                            else:
+                                if verbose:
+                                    print(f"  ERROR: Source directory not found after checkout: {source_dir}")
+                                failed += 1
+                        else:
+                            if verbose:
+                                print(f"  WARNING: No rev_lock to checkout source files, trying current state")
+                            if source_dir.exists():
+                                entries = import_mod.construct_dir_file(
+                                    source_dir=source_dir,
+                                    expected_hash=dir_hash,
+                                    dest_cache=cache_base,
+                                    use_v3_layout=use_v3_layout,
+                                    verbose=verbose,
+                                )
+                            if entries is None:
+                                if verbose:
+                                    print(f"  ERROR: Could not construct .dir file (source may have changed)")
+                                failed += 1
             else:
                 if verbose:
                     print(f"  .dir file not found in source cache and no clone available")
@@ -300,7 +337,9 @@ def fetch_import(
         print(f"Populating primary cache...")
     
     count, failed = _populate_cache_from_source(
-        dvc_path, cache_path, verbose, source_clone_path=clone_path
+        dvc_path, cache_path, verbose,
+        source_clone_path=clone_path,
+        rev_lock=import_info.get('rev'),
     )
     
     return cache_path, count, failed
