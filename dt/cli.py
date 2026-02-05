@@ -1042,8 +1042,9 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
+@click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_refresh, no_index_sync):
+def fetch(ctx, targets, verbose, no_refresh, no_index_sync, update):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1063,6 +1064,7 @@ def fetch(ctx, targets, verbose, no_refresh, no_index_sync):
         dt fetch data/external.dvc         # Fetch specific targets
         dt fetch -v                        # Show detailed progress
         dt fetch --no-refresh              # Skip refreshing temp clones
+        dt fetch --update                  # Rebuild .dir files, update .dvc if needed
     """
     from . import fetch as fetch_mod
     
@@ -1079,6 +1081,7 @@ def fetch(ctx, targets, verbose, no_refresh, no_index_sync):
             targets=list(targets) if targets else None,
             verbose=verbose,
             refresh=not no_refresh,
+            update=update,
         )
         
         any_success = False
