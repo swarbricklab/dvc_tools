@@ -208,6 +208,119 @@ class TestPopulateCacheFile:
         assert dest_file.read_text() == 'v3 content'
 
 
+class TestBuildDirManifest:
+    """Tests for build_dir_manifest function."""
+    
+    def test_builds_correct_format(self):
+        """Test manifest is built with correct DVC JSON format."""
+        entries = [
+            {'md5': 'aaaa', 'relpath': 'b.txt'},
+            {'md5': 'bbbb', 'relpath': 'a.txt'},
+        ]
+        
+        content = import_data.build_dir_manifest(entries)
+        
+        # Should be sorted by relpath
+        expected = b'[{"md5": "bbbb", "relpath": "a.txt"}, {"md5": "aaaa", "relpath": "b.txt"}]'
+        assert content == expected
+    
+    def test_hash_is_deterministic(self):
+        """Test same entries produce same hash."""
+        import hashlib
+        
+        entries = [
+            {'md5': '7320ddd77a276f2ecd73ed18e631ee2b', 'relpath': 'a.csv'},
+            {'md5': 'c2ad4b026e39ec2257321d20373b9f47', 'relpath': 'b.csv'},
+        ]
+        
+        content = import_data.build_dir_manifest(entries)
+        actual_hash = hashlib.md5(content).hexdigest()
+        
+        # This is the actual hash from dt-test-registry's data/dir
+        expected_hash = 'bc894c83412ff34cbc40f9bcb5983258'
+        assert actual_hash == expected_hash
+
+
+class TestConstructDirFile:
+    """Tests for construct_dir_file function."""
+    
+    @pytest.fixture
+    def source_dir_setup(self, tmp_path):
+        """Create a source directory with files for testing."""
+        source_dir = tmp_path / 'source_dir'
+        source_dir.mkdir()
+        
+        # Create files with known content (matching dt-test-registry)
+        (source_dir / 'a.csv').write_text('header\na,1,2\na,2,3\na,3,4\n')
+        (source_dir / 'b.csv').write_text('header\nb,1,2\nb,2,3\n')
+        
+        cache = tmp_path / 'cache'
+        cache.mkdir()
+        
+        return {
+            'source_dir': source_dir,
+            'cache': cache,
+        }
+    
+    def test_constructs_dir_file_with_matching_hash(self, source_dir_setup):
+        """Test .dir file is constructed with correct hash."""
+        import hashlib
+        
+        source_dir = source_dir_setup['source_dir']
+        cache = source_dir_setup['cache']
+        
+        # Calculate expected hash from the files
+        entries = []
+        for file in sorted(source_dir.iterdir()):
+            content = file.read_bytes()
+            md5 = hashlib.md5(content).hexdigest()
+            entries.append({'md5': md5, 'relpath': file.name})
+        
+        manifest_content = import_data.build_dir_manifest(entries)
+        expected_hash = hashlib.md5(manifest_content).hexdigest()
+        
+        # Now construct and verify it matches
+        result = import_data.construct_dir_file(
+            source_dir=source_dir,
+            expected_hash=expected_hash,
+            dest_cache=str(cache),
+            use_v3_layout=True,
+        )
+        
+        assert result is not None
+        assert len(result) == 2
+        
+        # Verify .dir file was created
+        dir_file = cache / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        assert dir_file.exists()
+    
+    def test_returns_none_on_hash_mismatch(self, source_dir_setup):
+        """Test returns None when constructed hash doesn't match expected."""
+        source_dir = source_dir_setup['source_dir']
+        cache = source_dir_setup['cache']
+        
+        # Use a wrong expected hash
+        result = import_data.construct_dir_file(
+            source_dir=source_dir,
+            expected_hash='0000000000000000000000000000000',
+            dest_cache=str(cache),
+            use_v3_layout=True,
+        )
+        
+        assert result is None
+    
+    def test_returns_none_for_nonexistent_dir(self, tmp_path):
+        """Test returns None when source directory doesn't exist."""
+        result = import_data.construct_dir_file(
+            source_dir=tmp_path / 'nonexistent',
+            expected_hash='abc123',
+            dest_cache=str(tmp_path / 'cache'),
+            use_v3_layout=True,
+        )
+        
+        assert result is None
+
+
 class TestPopulateCacheFromSource:
     """Tests for _populate_cache_from_source function."""
     
