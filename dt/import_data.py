@@ -205,11 +205,11 @@ def construct_dir_file(
     use_v3_layout: bool = True,
     verbose: bool = False,
 ) -> Optional[List[Dict[str, str]]]:
-    """Construct a .dir manifest file from source directory contents.
+    """Construct a .dir manifest file from source directory using DVC internals.
     
     When importing a directory that is not DVC-tracked in the source repo,
     the .dir file only exists in the importing repo's cache. This function
-    reconstructs it by scanning the source directory and calculating hashes.
+    uses DVC's internal build() function to construct it correctly.
     
     Args:
         source_dir: Path to the source directory to scan.
@@ -221,12 +221,88 @@ def construct_dir_file(
     Returns:
         List of manifest entries if successful, None if hash mismatch.
     """
-    import hashlib
+    import tempfile
     
     if not source_dir.exists() or not source_dir.is_dir():
         if verbose:
             print(f"  ERROR: Source directory not found: {source_dir}")
         return None
+    
+    try:
+        # Use DVC internals to build the directory hash
+        from dvc_data.hashfile.build import build
+        from dvc_data.hashfile.db.local import LocalHashFileDB
+        from dvc_data.hashfile.tree import Tree
+        from dvc.fs import LocalFileSystem
+        
+        fs = LocalFileSystem()
+        
+        # Create a temp cache for the ODB
+        with tempfile.TemporaryDirectory() as tmpdir:
+            odb = LocalHashFileDB(fs, tmpdir)
+            
+            # Build the tree (dry_run=True means just compute hashes, don't save)
+            _, _, hash_file = build(odb, str(source_dir), fs, 'md5', dry_run=True)
+            
+            if not isinstance(hash_file, Tree):
+                if verbose:
+                    print(f"  ERROR: DVC build did not produce a Tree object")
+                return None
+            
+            # Get the computed hash (without .dir suffix)
+            actual_hash = hash_file.hash_info.value.replace('.dir', '')
+            
+            if actual_hash != expected_hash:
+                if verbose:
+                    print(f"  ERROR: Constructed .dir hash mismatch!")
+                    print(f"    Expected: {expected_hash}")
+                    print(f"    Got:      {actual_hash}")
+                    print(f"    This may indicate the source directory has changed since import.")
+                return None
+            
+            # Get manifest content and entries
+            manifest_content = hash_file.as_bytes()
+            entries = hash_file.as_list()
+            
+            if verbose:
+                print(f"  DVC computed .dir hash: {actual_hash[:12]}... ({len(entries)} files)")
+    
+    except ImportError as e:
+        # Fall back to manual implementation if DVC internals not available
+        if verbose:
+            print(f"  Warning: DVC internals not available, using fallback: {e}")
+        return _construct_dir_file_fallback(
+            source_dir, expected_hash, dest_cache, use_v3_layout, verbose
+        )
+    except Exception as e:
+        if verbose:
+            print(f"  ERROR: DVC build failed: {e}")
+        return None
+    
+    # Write .dir file to cache
+    if use_v3_layout:
+        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+    else:
+        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+    
+    if not dest_file.exists():
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        dest_file.write_bytes(manifest_content)
+        if verbose:
+            print(f"  Constructed .dir file: {expected_hash[:12]}...")
+    
+    return entries
+
+
+def _construct_dir_file_fallback(
+    source_dir: Path,
+    expected_hash: str,
+    dest_cache: str,
+    use_v3_layout: bool = True,
+    verbose: bool = False,
+) -> Optional[List[Dict[str, str]]]:
+    """Fallback implementation using manual hashing (for when DVC internals unavailable)."""
+    import hashlib
     
     entries = []
     
@@ -265,7 +341,6 @@ def construct_dir_file(
             print(f"  ERROR: Constructed .dir hash mismatch!")
             print(f"    Expected: {expected_hash}")
             print(f"    Got:      {actual_hash}")
-            print(f"    This may indicate the source directory has changed since import.")
         return None
     
     # Write .dir file to cache
@@ -278,7 +353,7 @@ def construct_dir_file(
         dest_file.parent.mkdir(parents=True, exist_ok=True)
         dest_file.write_bytes(manifest_content)
         if verbose:
-            print(f"  Constructed .dir file: {expected_hash[:12]}...")
+            print(f"  Constructed .dir file (fallback): {expected_hash[:12]}...")
     
     return entries
 
