@@ -27,8 +27,8 @@ This enables pulling data from repositories that were imported with `dvc import`
 | `-w N`, `--workers N` | Distribute pull across N compute nodes via qxub |
 | `-r NAME`, `--remote NAME` | Pull from specific remote |
 | `-f`, `--force` | Delete `.dir` manifests before pulling to force re-fetch |
+| `--update` | Rebuild `.dir` files and update `.dvc` hashes if mismatched |
 | `--no-wait` | Submit worker jobs and exit without waiting for completion |
-| `--no-refresh` | Skip refreshing temp clones (for offline use) |
 
 All other options are passed through to `dvc pull`. See `dvc pull --help` for available options.
 

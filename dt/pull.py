@@ -592,7 +592,6 @@ def pull(
     targets: Optional[List[str]] = None,
     verbose: bool = False,
     dvc_args: Optional[List[str]] = None,
-    refresh: bool = True,
     force: bool = False,
 ) -> bool:
     """Pull DVC-tracked files, handling imports automatically.
@@ -601,7 +600,6 @@ def pull(
         targets: Specific targets to pull. If None, pulls all.
         verbose: Print detailed progress.
         dvc_args: Additional arguments to pass to dvc pull.
-        refresh: Whether to refresh temp clones (default True).
         force: Delete .dir manifests from cache before pulling.
                This forces re-fetch of directory contents, useful
                after dt cache validate --fix removed corrupted files.
@@ -657,7 +655,6 @@ def pull(
                     fetch(
                         targets=[str(dvc_file)],
                         verbose=verbose,
-                        refresh=refresh,
                     )
                     # Then checkout the fetched files
                     if verbose:
