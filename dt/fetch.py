@@ -182,19 +182,14 @@ def _populate_cache_from_source(
             verbose=verbose,
             use_v3_layout=use_v3_layout,
         )
-        if result:
+        if result is True:
             count += 1
-        elif result is False:
-            # populate_cache_file returns False for "not found" or "already exists"
-            # Check if it's actually missing vs already cached
-            hash_clean = md5.replace('.dir', '')
-            suffix = '.dir' if md5.endswith('.dir') else ''
-            if use_v3_layout:
-                dest_file = Path(cache_base) / 'files' / 'md5' / hash_clean[:2] / (hash_clean[2:] + suffix)
-            else:
-                dest_file = Path(cache_base) / hash_clean[:2] / (hash_clean[2:] + suffix)
-            if not dest_file.exists():
-                failed += 1
+        elif result is None:
+            # Source file not found
+            if verbose:
+                print(f"  ERROR: Source file not found in cache: {md5[:12]}...")
+            failed += 1
+        # result is False means already cached - that's fine
     
     # For directories, also populate individual files
     if md5.endswith('.dir'):
@@ -284,18 +279,14 @@ def _populate_cache_from_source(
                         verbose=verbose,
                         use_v3_layout=use_v3_layout,
                     )
-                    if result:
+                    if result is True:
                         count += 1
-                    elif result is False:
-                        # Check if missing vs already cached
-                        if use_v3_layout:
-                            cache_file = Path(cache_base) / 'files' / 'md5' / file_md5[:2] / file_md5[2:]
-                        else:
-                            cache_file = Path(cache_base) / file_md5[:2] / file_md5[2:]
-                        if not cache_file.exists():
-                            if verbose:
-                                print(f"  ERROR: File not found in source cache: {relpath} ({file_md5[:12]}...)")
-                            failed += 1
+                    elif result is None:
+                        # Source file not found
+                        if verbose:
+                            print(f"  ERROR: File not found in source cache: {relpath} ({file_md5[:12]}...)")
+                        failed += 1
+                    # result is False means already cached - that's fine
     
     return count, failed
 
