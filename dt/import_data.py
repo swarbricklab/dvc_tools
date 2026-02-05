@@ -88,8 +88,11 @@ def populate_primary_cache(
             if verbose:
                 print(f"  Cached: {md5[:8]}... ({relpath or workspace_path.name})")
         except OSError as e:
-            if e.errno == 18:  # EXDEV: Invalid cross-device link
-                # Fall back to creating a symlink with the same target
+            # Fall back to symlink for cross-device links or permission issues
+            # EXDEV (18): Cross-device link (different filesystems)
+            # EPERM (1): Operation not permitted (common on HPC with quota restrictions)
+            # EACCES (13): Permission denied
+            if e.errno in (1, 13, 18):
                 try:
                     target = os.readlink(workspace_file)
                     os.symlink(target, cache_file)
@@ -174,8 +177,11 @@ def populate_cache_file(
             print(f"  Cached: {md5[:12]}...")
         return True
     except OSError as e:
-        if e.errno == 18:  # EXDEV: Invalid cross-device link
-            # Fall back to symlink
+        # Fall back to symlink for cross-device links or permission issues
+        # EXDEV (18): Cross-device link (different filesystems)
+        # EPERM (1): Operation not permitted (common on HPC with quota restrictions)
+        # EACCES (13): Permission denied
+        if e.errno in (1, 13, 18):
             try:
                 os.symlink(source_file.resolve(), dest_file)
                 if verbose:
