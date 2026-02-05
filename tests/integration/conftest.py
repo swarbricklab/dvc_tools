@@ -65,13 +65,22 @@ def git_repo(tmp_path, monkeypatch):
 @pytest.fixture
 def git_repo_with_commits(git_repo):
     """Create git repo with some commits."""
+    # Env vars to bypass GPG passphrase prompt
+    git_env = {
+        **os.environ,
+        'GIT_COMMITTER_NAME': 'Test',
+        'GIT_COMMITTER_EMAIL': 'test@test.com',
+        'GIT_AUTHOR_NAME': 'Test',
+        'GIT_AUTHOR_EMAIL': 'test@test.com',
+    }
+    
     # Initial commit
     readme = git_repo / 'README.md'
     readme.write_text('# Test Project\n')
     subprocess.run(['git', 'add', 'README.md'], check=True, capture_output=True)
     subprocess.run(
         ['git', 'commit', '-m', 'Initial commit'],
-        check=True, capture_output=True
+        check=True, capture_output=True, env=git_env
     )
     
     return git_repo
