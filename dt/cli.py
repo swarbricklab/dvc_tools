@@ -20,6 +20,7 @@ from . import summary as summary_mod
 from . import du as du_mod
 from . import ls as ls_mod
 from . import index as index_mod
+from . import update as update_mod
 from . import utils
 
 
@@ -1626,6 +1627,81 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
             click.echo(f"Using cache: {cache_path}")
             
     except import_mod.ImportError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command()
+@click.argument('targets', nargs=-1, type=click.Path())
+@click.option('--rev', default=None, help='Git revision (commit, branch, tag) to update to. Defaults to HEAD.')
+@click.option('-R', '--recursive', is_flag=True, help='Update all stages in specified directory')
+@click.option('--no-download', is_flag=True, help='Update .dvc file only, do not download data')
+@click.option('--to-remote', is_flag=True, help='Update data directly on the remote')
+@click.option('-r', '--remote', help='Remote storage to perform updates to')
+@click.option('-j', '--jobs', type=int, help='Number of parallel jobs')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
+def update(targets, rev, recursive, no_download, to_remote, remote, jobs, verbose, no_index_sync):
+    """Update imported data to a specific revision.
+    
+    Updates .dvc files created by `dvc import` or `dt import` to reference
+    a different revision of the source repository. By default updates to
+    the latest HEAD of the source repo.
+    
+    This is the dt equivalent of `dvc update` with better defaults.
+    
+    \b
+    Examples:
+        dt update                              # Update all imports to HEAD
+        dt update data/external.dvc            # Update specific file
+        dt update --rev v1.2.0                 # Update to specific tag
+        dt update --rev main                   # Update to branch HEAD
+        dt update --rev abc1234                # Update to specific commit
+        dt update --no-download                # Update .dvc file only
+    """
+    try:
+        # Sync index from mirror before update (if configured)
+        if not no_index_sync and index_mod.is_auto_sync_enabled():
+            try:
+                index_mod.pull(quiet=not verbose, verbose=verbose)
+            except Exception as e:
+                if verbose:
+                    click.echo(f"Warning: index sync failed: {e}")
+        
+        results = update_mod.update(
+            targets=list(targets) if targets else None,
+            rev=rev,
+            recursive=recursive,
+            no_download=no_download,
+            to_remote=to_remote,
+            remote=remote,
+            jobs=jobs,
+            verbose=verbose,
+        )
+        
+        any_success = False
+        any_failure = False
+        
+        for target, success, message in results:
+            status = "✓" if success else "✗"
+            click.echo(f"{status} {target}: {message}")
+            
+            if success:
+                any_success = True
+            else:
+                any_failure = True
+        
+        # Sync index to mirror after update (if configured)
+        if any_success and not no_index_sync and index_mod.is_auto_sync_enabled():
+            try:
+                index_mod.push(quiet=not verbose, verbose=verbose)
+            except Exception as e:
+                if verbose:
+                    click.echo(f"Warning: index sync failed: {e}")
+        
+        if any_failure and not any_success:
+            raise SystemExit(1)
+    
+    except update_mod.UpdateError as e:
         raise click.ClickException(str(e))
 
 
