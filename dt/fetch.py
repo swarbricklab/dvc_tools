@@ -19,6 +19,48 @@ from . import utils
 from .errors import FetchError
 
 
+def _is_ignored(path: Path) -> bool:
+    """Check if a path is ignored by git or dvc.
+    
+    Args:
+        path: Path to check.
+        
+    Returns:
+        True if the path is ignored, False otherwise.
+    """
+    # Check git ignore
+    try:
+        result = subprocess.run(
+            ['git', 'check-ignore', '-q', str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return True
+    except (OSError, FileNotFoundError):
+        pass
+    
+    # Check dvc ignore (.dvcignore)
+    # DVC doesn't have a dedicated command, so check common patterns
+    dvcignore = Path('.dvcignore')
+    if dvcignore.exists():
+        try:
+            patterns = dvcignore.read_text().splitlines()
+            path_str = str(path)
+            for pattern in patterns:
+                pattern = pattern.strip()
+                if not pattern or pattern.startswith('#'):
+                    continue
+                # Simple glob matching
+                import fnmatch
+                if fnmatch.fnmatch(path_str, pattern) or fnmatch.fnmatch(path_str, f'*/{pattern}'):
+                    return True
+        except OSError:
+            pass
+    
+    return False
+
+
 def _populate_cache_from_source(
     dvc_path: Path,
     source_cache: str,
@@ -65,9 +107,16 @@ def _populate_cache_from_source(
     if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
         cache_base = str(Path(cache_base).parent.parent)
     
+    # Show cache destination path in verbose mode
+    if use_v3_layout:
+        cache_dest_path = Path(cache_base) / 'files' / 'md5'
+    else:
+        cache_dest_path = Path(cache_base)
+    
     if verbose:
         layout = "v3 (files/md5/)" if use_v3_layout else "v2 (legacy)"
-        print(f"  Using {layout} cache layout")
+        print(f"  DVC file format: {layout}")
+        print(f"  Cache destination: {cache_dest_path}")
     
     count = 0
     failed = 0
@@ -251,7 +300,15 @@ def fetch(
     # If no targets specified, find all .dvc files
     if not targets:
         try:
-            targets = [str(p) for p in Path('.').rglob('*.dvc') if not str(p).startswith('.dvc/')]
+            all_dvc_files = [p for p in Path('.').rglob('*.dvc') if not str(p).startswith('.dvc/')]
+            # Filter out ignored files
+            targets = []
+            for p in all_dvc_files:
+                if _is_ignored(p):
+                    if verbose:
+                        print(f"Skipping ignored file: {p}")
+                else:
+                    targets.append(str(p))
         except Exception as e:
             raise FetchError(f"Failed to find .dvc files: {e}")
     
