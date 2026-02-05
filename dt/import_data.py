@@ -228,6 +228,25 @@ def construct_dir_file(
             print(f"  ERROR: Source directory not found: {source_dir}")
         return None
     
+    # Check for nested DVC structure (directory containing .dvc files)
+    dvc_files_in_source = list(source_dir.rglob('*.dvc'))
+    if dvc_files_in_source:
+        if verbose:
+            print(f"  ERROR: Source directory contains DVC files - cannot reconstruct .dir")
+            print(f"    Found {len(dvc_files_in_source)} .dvc file(s):")
+            for f in dvc_files_in_source[:5]:
+                print(f"      {f.relative_to(source_dir)}")
+            if len(dvc_files_in_source) > 5:
+                print(f"      ... and {len(dvc_files_in_source) - 5} more")
+            print()
+            print("    This is a nested DVC import - the source directory itself contains")
+            print("    DVC-tracked data that would need 'dvc checkout' to materialize.")
+            print()
+            print("    The .dir file must be copied from the machine where 'dvc import'")
+            print("    was originally run. Look in that machine's cache at:")
+            print(f"      .dvc/cache/files/md5/{expected_hash[:2]}/{expected_hash[2:]}.dir")
+        return None
+    
     try:
         # Use DVC internals to build the directory hash
         from dvc_data.hashfile.build import build
@@ -254,21 +273,26 @@ def construct_dir_file(
             
             if actual_hash != expected_hash:
                 if verbose:
+                    # Get entries for debug output
+                    debug_entries = hash_file.as_list()
                     print(f"  ERROR: Constructed .dir hash mismatch!")
                     print(f"    Expected: {expected_hash}")
                     print(f"    Got:      {actual_hash}")
                     print(f"    Source dir: {source_dir}")
-                    print(f"    Files found ({len(entries)}):")
-                    for entry in entries:
+                    print(f"    Files found ({len(debug_entries)}):")
+                    for entry in debug_entries[:20]:  # Limit to first 20
                         print(f"      {entry.get('relpath')}: {entry.get('md5')}")
+                    if len(debug_entries) > 20:
+                        print(f"      ... and {len(debug_entries) - 20} more files")
                     print()
                     print("    This can happen when:")
-                    print("    1. The source directory has changed since the import was created")
-                    print("    2. The import was created with DVC v2 (dos2unix hashing) but we're")
-                    print("       using DVC v3 (raw hashing) to reconstruct - these are incompatible")
+                    print("    1. The source directory contains DVC-tracked files (nested DVC)")
+                    print("       In this case, 'dt fetch' cannot reconstruct the .dir file")
+                    print("       because it would need to run 'dvc checkout' on the source repo")
+                    print("    2. The source directory has changed since the import was created")
                     print()
-                    print("    Solution: Use 'dvc pull' to fetch the .dir file from the remote,")
-                    print("    or ensure the .dir file is in your local cache before using 'dt fetch'.")
+                    print("    Solution: Copy the .dir file from a machine that has it cached")
+                    print("    (likely the machine where 'dvc import' was originally run)")
                 return None
             
             # Get manifest content and entries
