@@ -146,3 +146,8 @@ class WorktreeError(DTError):
 class AddError(DTError):
     """Error during add operations."""
     pass
+
+
+class UpdateError(DTError):
+    """Error during update operations."""
+    pass
