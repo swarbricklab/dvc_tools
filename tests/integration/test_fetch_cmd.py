@@ -424,6 +424,90 @@ class TestFetchImport:
 
 
 # =============================================================================
+# DVC v2/v3 Cache Layout Compatibility Tests
+# =============================================================================
+
+@pytest.mark.integration
+@requires_git
+@requires_dvc
+class TestFetchCacheCompatibility:
+    """Test fetch works with both DVC v2 and v3 cache layouts."""
+
+    def test_fetch_from_dvc_v2_layout(self, tmp_path):
+        """Fetch works with DVC v2 cache layout (XX/hash in root, no files/md5/)."""
+        # Set up git config for commits (disable signing, set identity)
+        def git_init_repo(path):
+            subprocess.run(['git', 'init'], cwd=path, check=True, capture_output=True)
+            subprocess.run(['git', 'config', 'user.email', 'test@test.com'], 
+                          cwd=path, check=True, capture_output=True)
+            subprocess.run(['git', 'config', 'user.name', 'Test'], 
+                          cwd=path, check=True, capture_output=True)
+            subprocess.run(['git', 'config', 'commit.gpgsign', 'false'], 
+                          cwd=path, check=True, capture_output=True)
+        
+        # Create a minimal DVC project
+        project = tmp_path / 'project'
+        project.mkdir()
+        git_init_repo(project)
+        subprocess.run(['dvc', 'init'], cwd=project, check=True, capture_output=True)
+        
+        # Create a v2-style remote (files directly at XX/hash, no files/md5 prefix)
+        v2_remote = tmp_path / 'v2-remote'
+        v2_remote.mkdir()
+        
+        # Create test file hash and content
+        test_content = 'test data for v2 layout'
+        import hashlib
+        test_hash = hashlib.md5(test_content.encode()).hexdigest()
+        
+        # Store in v2 layout: <remote>/XX/XXXXXX (no files/md5)
+        hash_dir = v2_remote / test_hash[:2]
+        hash_dir.mkdir()
+        (hash_dir / test_hash[2:]).write_text(test_content)
+        
+        # Create source registry repo
+        registry = tmp_path / 'registry'
+        registry.mkdir()
+        git_init_repo(registry)
+        subprocess.run(['dvc', 'init'], cwd=registry, check=True, capture_output=True)
+        subprocess.run(['dvc', 'remote', 'add', 'local', str(v2_remote)], 
+                       cwd=registry, check=True, capture_output=True)
+        subprocess.run(['git', 'add', '.'], cwd=registry, check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'init'], cwd=registry, check=True, capture_output=True)
+        
+        # Create import .dvc file in project pointing to registry
+        import_dvc = project / 'data.csv.dvc'
+        import_content = f'''deps:
+  - path: source/data.csv
+    repo:
+      url: {registry}
+outs:
+  - md5: {test_hash}
+    path: data.csv
+'''
+        import_dvc.write_text(import_content)
+        
+        # Configure project with its own cache
+        project_cache = tmp_path / 'project-cache'
+        project_cache.mkdir()
+        subprocess.run(['dvc', 'cache', 'dir', str(project_cache)], 
+                       cwd=project, check=True, capture_output=True)
+        
+        # Run dt fetch
+        result = run_dt('fetch', 'data.csv.dvc', '-v', cwd=project, check=False)
+        
+        # Should succeed by falling back to v2 layout
+        assert result.returncode == 0 or 'legacy' in result.stdout.lower(), \
+            f"Fetch from v2 layout failed: {result.stdout}\n{result.stderr}"
+        
+        # Check that file was populated in cache
+        cache_files = list(project_cache.rglob('*'))
+        cache_files_only = [f for f in cache_files if f.is_file()]
+        assert len(cache_files_only) > 0, \
+            f"Cache should have file from v2 layout remote: {list(project_cache.rglob('*'))}"
+
+
+# =============================================================================
 # Regular File Fetch Tests
 # =============================================================================
 

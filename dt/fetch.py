@@ -15,173 +15,23 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import click
-
 from . import utils
-from .errors import FetchError, HashMismatchError
-
-
-def _is_ignored(path: Path) -> bool:
-    """Check if a path is ignored by git or dvc.
-    
-    Args:
-        path: Path to check.
-        
-    Returns:
-        True if the path is ignored, False otherwise.
-    """
-    # Check git ignore
-    try:
-        result = subprocess.run(
-            ['git', 'check-ignore', '-q', str(path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return True
-    except (OSError, FileNotFoundError):
-        pass
-    
-    # Check dvc ignore (.dvcignore)
-    # DVC doesn't have a dedicated command, so check common patterns
-    dvcignore = Path('.dvcignore')
-    if dvcignore.exists():
-        try:
-            patterns = dvcignore.read_text().splitlines()
-            path_str = str(path)
-            for pattern in patterns:
-                pattern = pattern.strip()
-                if not pattern or pattern.startswith('#'):
-                    continue
-                # Simple glob matching
-                import fnmatch
-                if fnmatch.fnmatch(path_str, pattern) or fnmatch.fnmatch(path_str, f'*/{pattern}'):
-                    return True
-        except OSError:
-            pass
-    
-    return False
-
-
-def _is_autostage_enabled() -> bool:
-    """Check if DVC core.autostage is enabled.
-    
-    Returns:
-        True if autostage is enabled, False otherwise.
-    """
-    try:
-        result = subprocess.run(
-            ['dvc', 'config', 'core.autostage'],
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0 and result.stdout.strip().lower() == 'true'
-    except (OSError, FileNotFoundError):
-        return False
-
-
-def _git_stage_file(path: Path, verbose: bool = False) -> None:
-    """Stage a file with git add.
-    
-    Args:
-        path: Path to file to stage.
-        verbose: Print progress messages.
-    """
-    try:
-        result = subprocess.run(
-            ['git', 'add', str(path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            if verbose:
-                print(f"  Staged {path.name} (core.autostage enabled)")
-        elif verbose:
-            print(f"  Warning: Could not stage {path.name}: {result.stderr.strip()}")
-    except (OSError, FileNotFoundError) as e:
-        if verbose:
-            print(f"  Warning: Could not stage {path.name}: {e}")
-
-
-def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool = False) -> bool:
-    """Update the MD5 hash in a .dvc file.
-    
-    For import files, the hash is in outs with a .dir suffix (e.g., "abc123.dir").
-    
-    Args:
-        dvc_path: Path to the .dvc file.
-        old_hash: The old hash to replace (without .dir suffix).
-        new_hash: The new hash to use.
-        verbose: Print progress messages.
-        
-    Returns:
-        True if the file was modified, False otherwise.
-    """
-    import yaml
-    
-    try:
-        content = dvc_path.read_text()
-        data = yaml.safe_load(content)
-        
-        # Update the outs section - check for both exact hash and hash.dir format
-        modified = False
-        for out in data.get('outs', []):
-            out_md5 = out.get('md5', '')
-            # Handle both "hash" and "hash.dir" formats
-            if out_md5 == old_hash:
-                out['md5'] = new_hash
-                modified = True
-            elif out_md5 == f"{old_hash}.dir":
-                out['md5'] = f"{new_hash}.dir"
-                modified = True
-        
-        if modified:
-            # Write back with same formatting
-            with open(dvc_path, 'w') as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-            if verbose:
-                print(f"  Updated .dvc file hash: {old_hash[:12]}... -> {new_hash[:12]}...")
-            
-            # Stage file if autostage is enabled
-            if _is_autostage_enabled():
-                _git_stage_file(dvc_path, verbose)
-            
-            return True
-        elif verbose:
-            print(f"  Warning: Could not find hash {old_hash[:12]}... in .dvc file to update")
-        return False
-            
-    except Exception as e:
-        if verbose:
-            print(f"  Warning: Could not update .dvc file: {e}")
-        return False
+from .errors import FetchError
 
 
 def _populate_cache_from_source(
     dvc_path: Path,
     source_cache: str,
     verbose: bool = False,
-    rev_lock: Optional[str] = None,
-    source_url: Optional[str] = None,
-    update: bool = False,
-    show_progress: bool = False,
 ) -> Tuple[int, int]:
     """Populate the primary cache from a source cache.
     
     Creates symlinks in the primary cache pointing to files in the source cache.
-    Respects the .dvc file format (v2 vs v3) when determining cache layout.
-    
-    For directory imports, if the .dir file doesn't exist in the source cache,
-    it will be constructed using 'dvc list' to query the source repository.
     
     Args:
         dvc_path: Path to the .dvc file.
         source_cache: Path to the source cache.
         verbose: Print progress messages.
-        rev_lock: Git revision for constructing .dir files via dvc list.
-        source_url: URL of the source repository (for dvc list).
-        update: If True, create .dir file with computed hash and update .dvc file.
-        show_progress: If True (and not verbose), show a progress bar.
         
     Returns:
         Tuple of (files_added, files_failed) counts.
@@ -204,27 +54,6 @@ def _populate_cache_from_source(
     out = outs[0]
     md5 = out.get('md5', '')
     
-    # Detect v2 vs v3 format: v3 has explicit 'hash' field, v2 doesn't
-    # This determines where dvc checkout will look for files
-    use_v3_layout = import_mod.is_v3_dvc_file(dvc_data)
-    
-    # Get base cache directory (without files/md5 suffix)
-    # repo.cache.local.path returns .../files/md5, we need the parent
-    cache_base = str(primary_cache)
-    if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
-        cache_base = str(Path(cache_base).parent.parent)
-    
-    # Show cache destination path in verbose mode
-    if use_v3_layout:
-        cache_dest_path = Path(cache_base) / 'files' / 'md5'
-    else:
-        cache_dest_path = Path(cache_base)
-    
-    if verbose:
-        layout = "v3 (files/md5/)" if use_v3_layout else "v2 (legacy)"
-        print(f"  DVC file format: {layout}")
-        print(f"  Cache destination: {cache_dest_path}")
-    
     count = 0
     failed = 0
     
@@ -233,151 +62,59 @@ def _populate_cache_from_source(
         result = import_mod.populate_cache_file(
             md5=md5,
             source_cache=source_cache,
-            dest_cache=cache_base,
+            dest_cache=str(primary_cache),
             verbose=verbose,
-            use_v3_layout=use_v3_layout,
         )
-        if result is True:
+        if result:
             count += 1
-        elif result is None:
-            # Source file not found
-            # For .dir files, we'll try to construct it later - don't count as failure yet
-            if not md5.endswith('.dir'):
-                if verbose:
-                    print(f"  ERROR: Source file not found in cache: {md5}")
+        elif result is False:
+            # populate_cache_file returns False for "not found" or "already exists"
+            # Check if it's actually missing vs already cached
+            hash_clean = md5.replace('.dir', '')
+            suffix = '.dir' if md5.endswith('.dir') else ''
+            dest_file = primary_cache / hash_clean[:2] / (hash_clean[2:] + suffix)
+            if not dest_file.exists():
                 failed += 1
-        # result is False means already cached - that's fine
     
     # For directories, also populate individual files
     if md5.endswith('.dir'):
         dir_hash = md5[:-4]  # Remove .dir suffix
+        # Try DVC v3 path first, then v2 path
+        dir_file_v3 = Path(source_cache) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+        dir_file_v2 = Path(source_cache) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
         
-        # First check if .dir file already exists in destination cache
-        # (it may have been created by the original dvc import)
-        if use_v3_layout:
-            dest_dir_file = Path(cache_base) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+        if dir_file_v3.exists():
+            dir_file = dir_file_v3
+        elif dir_file_v2.exists():
+            dir_file = dir_file_v2
         else:
-            dest_dir_file = Path(cache_base) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+            dir_file = None
         
-        dir_file = None
-        entries = None
-        
-        if dest_dir_file.exists():
-            if verbose:
-                print(f"  .dir file already in primary cache: {dest_dir_file}")
-            dir_file = dest_dir_file
-        else:
-            # Try DVC v3 path first, then v2 path in source cache
-            dir_file_v3 = Path(source_cache) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
-            dir_file_v2 = Path(source_cache) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
-            
-            if dir_file_v3.exists():
-                dir_file = dir_file_v3
-            elif dir_file_v2.exists():
-                dir_file = dir_file_v2
-        
-        if dir_file is None:
-            # .dir file not in source cache or dest cache - construct it using dvc list
-            # This works for both regular directories and nested DVC imports
-            if source_url:
-                deps = dvc_data.get('deps', [])
-                if deps:
-                    dep_path = deps[0].get('path', '')
-                    if dep_path:
-                        if verbose:
-                            print(f"  .dir file not in cache, using dvc list to build manifest...")
-                        elif show_progress:
-                            click.echo(f"  Building file manifest...", nl=False)
-                        
-                        try:
-                            result = import_mod.construct_dir_from_dvc_list(
-                                repo_url=source_url,
-                                path=dep_path,
-                                revision=rev_lock,
-                                expected_hash=dir_hash,
-                                dest_cache=cache_base,
-                                use_v3_layout=use_v3_layout,
-                                verbose=verbose,
-                                update=update,
-                            )
-                        except HashMismatchError:
-                            if show_progress and not verbose:
-                                click.echo()  # Finish the line
-                            # Re-raise to stop processing - user needs --update
-                            raise
-                        
-                        if result is None:
-                            if verbose:
-                                print(f"  ERROR: Could not construct .dir file from dvc list")
-                            elif show_progress:
-                                click.echo(" failed")
-                            failed += 1
-                        else:
-                            entries, new_hash = result
-                            if show_progress and not verbose:
-                                click.echo(f" {len(entries)} files")
-                            # If hash changed, update the .dvc file
-                            if new_hash and new_hash != dir_hash:
-                                _update_dvc_hash(dvc_path, dir_hash, new_hash, verbose)
-                                dir_hash = new_hash
-            else:
-                if verbose:
-                    print(f"  .dir file not found in cache and no source URL available")
-                failed += 1
-        
-        # Read entries from existing .dir file
-        if dir_file and entries is None:
+        if dir_file:
             try:
                 import json
                 entries = json.loads(dir_file.read_text())
+                
+                for entry in entries:
+                    file_md5 = entry.get('md5', '')
+                    if file_md5:
+                        result = import_mod.populate_cache_file(
+                            md5=file_md5,
+                            source_cache=source_cache,
+                            dest_cache=str(primary_cache),
+                            verbose=verbose,
+                        )
+                        if result:
+                            count += 1
+                        elif result is False:
+                            # Check if missing vs already cached
+                            dest_file = primary_cache / file_md5[:2] / file_md5[2:]
+                            if not dest_file.exists():
+                                failed += 1
+                            
             except (json.JSONDecodeError, KeyError) as e:
                 if verbose:
                     print(f"Warning: Could not parse .dir file: {e}")
-                entries = None
-        
-        # Populate individual files from entries
-        if entries:
-            # Use progress bar in non-verbose mode
-            use_progressbar = show_progress and not verbose and len(entries) > 1
-            
-            def process_entry(entry):
-                nonlocal count, failed
-                file_md5 = entry.get('md5', '')
-                relpath = entry.get('relpath', file_md5[:12])  # Use relpath if available
-                if file_md5:
-                    result = import_mod.populate_cache_file(
-                        md5=file_md5,
-                        source_cache=source_cache,
-                        dest_cache=cache_base,
-                        verbose=verbose,
-                        use_v3_layout=use_v3_layout,
-                    )
-                    if result is True:
-                        count += 1
-                    elif result is None:
-                        # Source file not found
-                        if verbose:
-                            print(f"  ERROR: File not found in source cache: {relpath} ({file_md5})")
-                        failed += 1
-                    # result is False means already cached - that's fine
-            
-            if use_progressbar:
-                with click.progressbar(
-                    entries,
-                    label=f"  Fetching {len(entries)} files",
-                    show_pos=True,
-                    show_percent=True,
-                ) as bar:
-                    for entry in bar:
-                        process_entry(entry)
-            else:
-                for entry in entries:
-                    process_entry(entry)
-            
-            # Show summary
-            if verbose:
-                already_cached = len(entries) - count - failed
-                print(f"  Summary: {len(entries)} files in manifest, {count} fetched, {already_cached} already cached, {failed} missing")
     
     return count, failed
 
@@ -385,9 +122,7 @@ def _populate_cache_from_source(
 def fetch_import(
     dvc_path: Path,
     verbose: bool = False,
-    refresh: bool = True,  # Currently unused, kept for API compatibility
-    update: bool = False,
-    show_progress: bool = False,
+    refresh: bool = True,
 ) -> Tuple[str, int, int]:
     """Fetch an import .dvc file by finding and linking from the source cache.
     
@@ -397,9 +132,7 @@ def fetch_import(
     Args:
         dvc_path: Path to the .dvc file.
         verbose: Print progress messages.
-        refresh: Whether to refresh the temp clone (currently unused).
-        update: If True, create .dir file with computed hash and update .dvc file.
-        show_progress: If True (and not verbose), show a progress bar.
+        refresh: Whether to refresh the temp clone (default True).
         
     Returns:
         Tuple of (source_cache_path, files_added_count, files_failed_count).
@@ -408,6 +141,7 @@ def fetch_import(
         FetchError: If fetch fails.
     """
     from . import remote as remote_mod
+    from . import tmp as tmp_mod
     
     import_info = utils.get_import_info(dvc_path)
     if not import_info:
@@ -421,21 +155,23 @@ def fetch_import(
         print(f"Import from: {source_url}")
         if import_info.get('path'):
             print(f"  Path: {import_info['path']}")
-    elif show_progress:
-        # Brief status in non-verbose mode
-        click.echo(f"  Source: {source_url}", nl=False)
     
-    # Step 1: Find a local remote from the source repo (clones if needed)
+    # Step 1: Clone the source repo to access its DVC config
+    if verbose:
+        print(f"Cloning source repository...")
+    
+    try:
+        clone_path = tmp_mod.clone_repo(source_url, refresh=refresh, verbose=verbose)
+    except tmp_mod.TmpError as e:
+        raise FetchError(f"Failed to clone source repository: {e}")
+    
+    # Step 2: Find a local remote from the source repo
     if verbose:
         print(f"Looking for local cache...")
-    elif show_progress:
-        click.echo(" → finding cache...", nl=False)
     
     result = remote_mod.find_local_remote_from_repo(repo_spec=source_url)
     
     if not result:
-        if show_progress and not verbose:
-            click.echo()  # Finish the line
         raise FetchError(
             f"No locally-accessible cache found for {source_url}.\n"
             f"The source repository's remote may not be on this filesystem.\n"
@@ -448,20 +184,12 @@ def fetch_import(
     
     if verbose:
         print(f"Found local cache: {cache_path} (from remote '{remote_name}')")
-    elif show_progress:
-        click.echo(" → fetching...")  # Finish the line
     
-    # Step 2: Populate primary cache with symlinks
+    # Step 3: Populate primary cache with symlinks
     if verbose:
         print(f"Populating primary cache...")
     
-    count, failed = _populate_cache_from_source(
-        dvc_path, cache_path, verbose,
-        rev_lock=import_info.get('rev'),
-        source_url=source_url,
-        update=update,
-        show_progress=show_progress,
-    )
+    count, failed = _populate_cache_from_source(dvc_path, cache_path, verbose)
     
     return cache_path, count, failed
 
@@ -470,8 +198,6 @@ def fetch(
     targets: Optional[List[str]] = None,
     verbose: bool = False,
     refresh: bool = True,
-    update: bool = False,
-    show_progress: bool = True,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -487,8 +213,6 @@ def fetch(
         targets: DVC targets to fetch (None for all .dvc files).
         verbose: Print progress messages.
         refresh: Whether to refresh temp clones (default True).
-        update: If True, create .dir file with computed hash and update .dvc file.
-        show_progress: If True (and not verbose), show a progress bar.
         
     Returns:
         List of (target, success, message) tuples.
@@ -504,15 +228,7 @@ def fetch(
     # If no targets specified, find all .dvc files
     if not targets:
         try:
-            all_dvc_files = [p for p in Path('.').rglob('*.dvc') if not str(p).startswith('.dvc/')]
-            # Filter out ignored files
-            targets = []
-            for p in all_dvc_files:
-                if _is_ignored(p):
-                    if verbose:
-                        print(f"Skipping ignored file: {p}")
-                else:
-                    targets.append(str(p))
+            targets = [str(p) for p in Path('.').rglob('*.dvc') if not str(p).startswith('.dvc/')]
         except Exception as e:
             raise FetchError(f"Failed to find .dvc files: {e}")
     
@@ -545,8 +261,6 @@ def fetch(
                     dvc_path=target_path,
                     verbose=verbose,
                     refresh=refresh,
-                    update=update,
-                    show_progress=show_progress,
                 )
                 if failed > 0:
                     # Critical failure - files were expected but not found in source cache
