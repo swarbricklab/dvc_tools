@@ -411,29 +411,6 @@ class TestPullVerbose:
 
 
 # =============================================================================
-# No-Refresh Option Tests
-# =============================================================================
-
-@pytest.mark.integration
-@requires_git
-@requires_dvc
-@requires_network
-class TestPullNoRefresh:
-    """Test dt pull --no-refresh option."""
-
-    def test_no_refresh_skips_clone_refresh(self, pull_test_fixtures):
-        """No-refresh option skips refreshing temp clones."""
-        repo = pull_test_fixtures['path']
-        
-        # Use no-refresh on import target
-        result = run_dt('pull', '--no-refresh', 'imported/file.csv.dvc', '-v', cwd=repo, check=False)
-        
-        # Should complete without trying to refresh/fetch from network
-        combined_output = result.stdout + result.stderr
-        assert len(combined_output) > 0  # Should produce output
-
-
-# =============================================================================
 # Error Handling Tests
 # =============================================================================
 

@@ -1043,11 +1043,10 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 ))
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_refresh, no_index_sync, update):
+def fetch(ctx, targets, verbose, no_index_sync, update):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1066,7 +1065,6 @@ def fetch(ctx, targets, verbose, no_refresh, no_index_sync, update):
         dt fetch                           # Fetch all import files
         dt fetch data/external.dvc         # Fetch specific targets
         dt fetch -v                        # Show detailed progress
-        dt fetch --no-refresh              # Skip refreshing temp clones
         dt fetch --update                  # Rebuild .dir files, update .dvc if needed
     """
     from . import fetch as fetch_mod
@@ -1083,7 +1081,6 @@ def fetch(ctx, targets, verbose, no_refresh, no_index_sync, update):
         results = fetch_mod.fetch(
             targets=list(targets) if targets else None,
             verbose=verbose,
-            refresh=not no_refresh,
             update=update,
         )
         
@@ -1276,10 +1273,9 @@ def mv(src, dst, verbose):
 @click.option('--dry', '--dry-run', is_flag=True,
               help='Show what would be pulled without actually pulling.')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clones (for offline use)')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.pass_context
-def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, no_refresh, no_index_sync):
+def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, no_index_sync):
     """Pull DVC-tracked files, handling imports automatically.
     
     For targets tracked by import .dvc files (those with deps.repo),
@@ -1312,7 +1308,6 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, n
         dt pull --workers 16               # Distributed via 16 qxub jobs
         dt pull -w 8 -r myremote data.dvc  # Pull target from remote using 8 jobs
         dt pull -w 16 --no-wait            # Submit jobs and exit
-        dt pull --no-refresh               # Skip refreshing temp clones
         dt pull --force data/              # Force re-fetch (after cache validate --fix)
     """
     from pathlib import Path
@@ -1397,7 +1392,6 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, n
                             targets=[str(dvc_file)],
                             cache=None,
                             verbose=verbose,
-                            refresh=not no_refresh,
                         )
         
         # --- Step 3: Handle regular targets (dry-run, parallel, or standard) ---

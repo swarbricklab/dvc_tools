@@ -28,7 +28,6 @@ This enables pulling data from repositories that were imported with `dvc import`
 | `-r NAME`, `--remote NAME` | Pull from specific remote |
 | `-f`, `--force` | Delete `.dir` manifests before pulling to force re-fetch |
 | `--no-wait` | Submit worker jobs and exit without waiting for completion |
-| `--no-refresh` | Skip refreshing temp clones (for offline use) |
 
 All other options are passed through to `dvc pull`. See `dvc pull --help` for available options.
 

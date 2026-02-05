@@ -385,7 +385,6 @@ def _populate_cache_from_source(
 def fetch_import(
     dvc_path: Path,
     verbose: bool = False,
-    refresh: bool = True,  # Currently unused, kept for API compatibility
     update: bool = False,
     show_progress: bool = False,
 ) -> Tuple[str, int, int]:
@@ -397,7 +396,6 @@ def fetch_import(
     Args:
         dvc_path: Path to the .dvc file.
         verbose: Print progress messages.
-        refresh: Whether to refresh the temp clone (currently unused).
         update: If True, create .dir file with computed hash and update .dvc file.
         show_progress: If True (and not verbose), show a progress bar.
         
@@ -469,7 +467,6 @@ def fetch_import(
 def fetch(
     targets: Optional[List[str]] = None,
     verbose: bool = False,
-    refresh: bool = True,
     update: bool = False,
     show_progress: bool = True,
 ) -> List[Tuple[str, bool, str]]:
@@ -486,7 +483,6 @@ def fetch(
     Args:
         targets: DVC targets to fetch (None for all .dvc files).
         verbose: Print progress messages.
-        refresh: Whether to refresh temp clones (default True).
         update: If True, create .dir file with computed hash and update .dvc file.
         show_progress: If True (and not verbose), show a progress bar.
         
@@ -544,7 +540,6 @@ def fetch(
                 cache_path, count, failed = fetch_import(
                     dvc_path=target_path,
                     verbose=verbose,
-                    refresh=refresh,
                     update=update,
                     show_progress=show_progress,
                 )
@@ -591,7 +586,6 @@ def smart_checkout(
     extra_args: Optional[List[str]] = None,
     verbose: bool = False,
     cache: Optional[str] = None,
-    refresh: bool = True,
 ) -> List[Tuple[str, bool, str]]:
     """Deprecated: Use fetch() + dvc checkout instead.
     
@@ -602,7 +596,6 @@ def smart_checkout(
     results = fetch(
         targets=targets,
         verbose=verbose,
-        refresh=refresh,
     )
     
     # Then run dvc checkout
