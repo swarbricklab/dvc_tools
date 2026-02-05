@@ -261,7 +261,14 @@ def construct_dir_file(
                     print(f"    Files found ({len(entries)}):")
                     for entry in entries:
                         print(f"      {entry.get('relpath')}: {entry.get('md5')}")
-                    print(f"    This may indicate the source directory has changed since import.")
+                    print()
+                    print("    This can happen when:")
+                    print("    1. The source directory has changed since the import was created")
+                    print("    2. The import was created with DVC v2 (dos2unix hashing) but we're")
+                    print("       using DVC v3 (raw hashing) to reconstruct - these are incompatible")
+                    print()
+                    print("    Solution: Use 'dvc pull' to fetch the .dir file from the remote,")
+                    print("    or ensure the .dir file is in your local cache before using 'dt fetch'.")
                 return None
             
             # Get manifest content and entries
