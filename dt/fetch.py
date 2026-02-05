@@ -286,6 +286,8 @@ def _populate_cache_from_source(
                     if dep_path:
                         if verbose:
                             print(f"  .dir file not in cache, using dvc list to build manifest...")
+                        elif show_progress:
+                            click.echo(f"  Building file manifest...", nl=False)
                         
                         try:
                             result = import_mod.construct_dir_from_dvc_list(
@@ -299,15 +301,21 @@ def _populate_cache_from_source(
                                 update=update,
                             )
                         except HashMismatchError:
+                            if show_progress and not verbose:
+                                click.echo()  # Finish the line
                             # Re-raise to stop processing - user needs --update
                             raise
                         
                         if result is None:
                             if verbose:
                                 print(f"  ERROR: Could not construct .dir file from dvc list")
+                            elif show_progress:
+                                click.echo(" failed")
                             failed += 1
                         else:
                             entries, new_hash = result
+                            if show_progress and not verbose:
+                                click.echo(f" {len(entries)} files")
                             # If hash changed, update the .dvc file
                             if new_hash and new_hash != dir_hash:
                                 _update_dvc_hash(dvc_path, dir_hash, new_hash, verbose)
@@ -413,14 +421,21 @@ def fetch_import(
         print(f"Import from: {source_url}")
         if import_info.get('path'):
             print(f"  Path: {import_info['path']}")
+    elif show_progress:
+        # Brief status in non-verbose mode
+        click.echo(f"  Source: {source_url}", nl=False)
     
     # Step 1: Find a local remote from the source repo (clones if needed)
     if verbose:
         print(f"Looking for local cache...")
+    elif show_progress:
+        click.echo(" → finding cache...", nl=False)
     
     result = remote_mod.find_local_remote_from_repo(repo_spec=source_url)
     
     if not result:
+        if show_progress and not verbose:
+            click.echo()  # Finish the line
         raise FetchError(
             f"No locally-accessible cache found for {source_url}.\n"
             f"The source repository's remote may not be on this filesystem.\n"
@@ -433,6 +448,8 @@ def fetch_import(
     
     if verbose:
         print(f"Found local cache: {cache_path} (from remote '{remote_name}')")
+    elif show_progress:
+        click.echo(" → fetching...")  # Finish the line
     
     # Step 2: Populate primary cache with symlinks
     if verbose:
