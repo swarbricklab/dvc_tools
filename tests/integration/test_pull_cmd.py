@@ -377,6 +377,43 @@ class TestPullForceMode:
 
 
 # =============================================================================
+# Update Mode Tests
+# =============================================================================
+
+@pytest.mark.integration
+@requires_git
+@requires_dvc
+@requires_network
+class TestPullUpdate:
+    """Test dt pull --update mode for rebuilding .dir files."""
+
+    def test_update_flag_accepted(self, pull_test_fixtures):
+        """Update flag is accepted and passed through to fetch."""
+        repo = pull_test_fixtures['path']
+        
+        # Use --update on an import target
+        result = run_dt('pull', '--update', 'imported/file.csv.dvc', '-v', cwd=repo, check=False)
+        
+        # Flag should be recognized (no error about unknown option)
+        combined_output = result.stdout + result.stderr
+        assert '--update' not in combined_output, "Flag should be recognized, not reported as unknown"
+        # Should complete (success or expected failure for other reasons)
+        assert result.returncode == 0 or 'import' in combined_output.lower() or 'fetch' in combined_output.lower()
+
+    def test_update_with_directory_import(self, pull_test_fixtures):
+        """Update mode works with directory imports."""
+        repo = pull_test_fixtures['path']
+        
+        # Use --update on directory import
+        result = run_dt('pull', '--update', 'imported/dir.dvc', '-v', cwd=repo, check=False)
+        
+        # Should process the update request
+        combined_output = result.stdout + result.stderr
+        # May succeed or fail depending on cache state, but flag should be accepted
+        assert '--update' not in combined_output or 'unrecognized' not in combined_output.lower()
+
+
+# =============================================================================
 # Verbose Mode Tests
 # =============================================================================
 

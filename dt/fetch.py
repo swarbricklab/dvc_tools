@@ -586,6 +586,7 @@ def smart_checkout(
     extra_args: Optional[List[str]] = None,
     verbose: bool = False,
     cache: Optional[str] = None,
+    update: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Deprecated: Use fetch() + dvc checkout instead.
     
@@ -596,6 +597,7 @@ def smart_checkout(
     results = fetch(
         targets=targets,
         verbose=verbose,
+        update=update,
     )
     
     # Then run dvc checkout

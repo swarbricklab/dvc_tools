@@ -1273,9 +1273,10 @@ def mv(src, dst, verbose):
 @click.option('--dry', '--dry-run', is_flag=True,
               help='Show what would be pulled without actually pulling.')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.pass_context
-def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, no_index_sync):
+def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, update, no_index_sync):
     """Pull DVC-tracked files, handling imports automatically.
     
     For targets tracked by import .dvc files (those with deps.repo),
@@ -1309,6 +1310,7 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, n
         dt pull -w 8 -r myremote data.dvc  # Pull target from remote using 8 jobs
         dt pull -w 16 --no-wait            # Submit jobs and exit
         dt pull --force data/              # Force re-fetch (after cache validate --fix)
+        dt pull --update                   # Rebuild .dir files, update .dvc if needed
     """
     from pathlib import Path
     
@@ -1392,6 +1394,7 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, n
                             targets=[str(dvc_file)],
                             cache=None,
                             verbose=verbose,
+                            update=update,
                         )
         
         # --- Step 3: Handle regular targets (dry-run, parallel, or standard) ---
