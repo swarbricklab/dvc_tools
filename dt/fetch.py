@@ -156,20 +156,36 @@ def _populate_cache_from_source(
     # For directories, also populate individual files
     if md5.endswith('.dir'):
         dir_hash = md5[:-4]  # Remove .dir suffix
-        # Try DVC v3 path first, then v2 path
-        dir_file_v3 = Path(source_cache) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
-        dir_file_v2 = Path(source_cache) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
         
+        # First check if .dir file already exists in destination cache
+        # (it may have been created by the original dvc import)
+        if use_v3_layout:
+            dest_dir_file = Path(cache_base) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+        else:
+            dest_dir_file = Path(cache_base) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+        
+        dir_file = None
         entries = None
         
-        if dir_file_v3.exists():
-            dir_file = dir_file_v3
-        elif dir_file_v2.exists():
-            dir_file = dir_file_v2
+        if dest_dir_file.exists():
+            if verbose:
+                print(f"  .dir file already in primary cache: {dest_dir_file}")
+            dir_file = dest_dir_file
         else:
-            dir_file = None
-            # .dir file not in source cache - need to construct it
+            # Try DVC v3 path first, then v2 path in source cache
+            dir_file_v3 = Path(source_cache) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+            dir_file_v2 = Path(source_cache) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+            
+            if dir_file_v3.exists():
+                dir_file = dir_file_v3
+            elif dir_file_v2.exists():
+                dir_file = dir_file_v2
+        
+        if dir_file is None:
+            # .dir file not in source cache or dest cache - need to construct it
             # This happens when importing a directory that wasn't DVC-tracked in source
+            # NOTE: This may fail if the import was created with DVC v2 (dos2unix hashing)
+            # and we're using DVC v3 (raw hashing) to reconstruct
             if source_clone_path:
                 # Get the dependency path from the .dvc file
                 deps = dvc_data.get('deps', [])
