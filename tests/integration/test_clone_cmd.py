@@ -83,7 +83,7 @@ class TestCloneFullUrl:
         assert (repo_path / '.git').is_dir()
 
     def test_clone_creates_dvc_structure(self, isolated_dir):
-        """Cloned repo has DVC structure."""
+        """Cloned repo has DVC structure with .dvc files."""
         run_dt(
             'clone',
             'https://github.com/swarbricklab/dt-test-fixtures',
@@ -95,7 +95,13 @@ class TestCloneFullUrl:
         assert (repo_path / '.dvc').is_dir()
         # dt-test-fixtures has .dvc files
         dvc_files = list(repo_path.rglob('*.dvc'))
-        assert len(dvc_files) > 0
+        assert len(dvc_files) > 0, "Expected at least one .dvc file in the cloned repo"
+        
+        # Verify specific expected .dvc files exist
+        expected_dvc_files = ['single_file/data.txt.dvc', 'directory/data.dvc']
+        for expected_file in expected_dvc_files:
+            expected_path = repo_path / expected_file
+            assert expected_path.exists(), f"Expected {expected_file} to exist"
 
 
 # =============================================================================
@@ -235,7 +241,7 @@ class TestCloneOptions:
             capture_output=True, text=True, cwd=repo_path
         )
         commit_count = int(result.stdout.strip())
-        assert commit_count == 1  # --depth 1 means 1 commit
+        assert commit_count == 1, f"Shallow clone should have 1 commit, got {commit_count}"
 
     def test_clone_no_submodules(self, isolated_dir):
         """Clone with --no-submodules skips submodule init."""
@@ -250,6 +256,64 @@ class TestCloneOptions:
         )
         
         assert result.returncode == 0
+
+
+# =============================================================================
+# Clone Cache Configuration Tests
+# =============================================================================
+
+@pytest.mark.integration
+@requires_git
+@requires_network
+class TestCloneCacheConfiguration:
+    """Test that clone properly configures external cache."""
+
+    def test_clone_configures_cache_with_repo_name(self, isolated_dir, tmp_path):
+        """Clone configures external cache using repository name."""
+        # Pre-configure cache root
+        cache_root = tmp_path / 'caches'
+        cache_root.mkdir()
+        
+        # We need a DVC repo to set config in first
+        run_dt('init', '--no-cache', '--no-remote', cwd=isolated_dir)
+        run_dt('config', 'set', 'cache.root', str(cache_root), cwd=isolated_dir)
+        
+        # Now clone - cache should be configured based on repo name
+        result = run_dt(
+            'clone',
+            'https://github.com/swarbricklab/dt-test-fixtures',
+            '--shallow',
+            cwd=isolated_dir
+        )
+        
+        assert result.returncode == 0
+        repo_path = isolated_dir / 'dt-test-fixtures'
+        
+        # Check that cache directory was created
+        expected_cache = cache_root / 'dt-test-fixtures'
+        assert expected_cache.exists(), f"Cache directory {expected_cache} should be created"
+
+    def test_clone_with_custom_cache_name(self, isolated_dir, tmp_path):
+        """Clone with --cache-name uses custom cache directory."""
+        cache_root = tmp_path / 'caches'
+        cache_root.mkdir()
+        
+        run_dt('init', '--no-cache', '--no-remote', cwd=isolated_dir)
+        run_dt('config', 'set', 'cache.root', str(cache_root), cwd=isolated_dir)
+        
+        result = run_dt(
+            'clone',
+            'https://github.com/swarbricklab/dt-test-fixtures',
+            '--cache-name', 'my-custom-cache',
+            '--shallow',
+            cwd=isolated_dir
+        )
+        
+        assert result.returncode == 0
+        
+        # Check that custom cache directory was created
+        expected_cache = cache_root / 'my-custom-cache'
+        assert expected_cache.exists(), f"Custom cache directory {expected_cache} should be created"
 
 
 # =============================================================================
@@ -272,9 +336,12 @@ class TestCloneErrors:
         )
         
         assert result.returncode != 0
+        # Should not have created any directory
+        nonexistent_path = isolated_dir / 'nonexistent-repo-12345'
+        assert not nonexistent_path.exists(), "Failed clone should not create directory"
 
     def test_clone_to_existing_directory(self, isolated_dir):
-        """Clone to existing directory fails."""
+        """Clone to existing directory fails with appropriate error."""
         # First clone
         run_dt(
             'clone',
@@ -293,6 +360,9 @@ class TestCloneErrors:
         )
         
         assert result.returncode != 0
+        # Error should mention the directory already exists
+        combined_output = result.stdout + result.stderr
+        assert 'exist' in combined_output.lower() or 'fatal' in combined_output.lower()
 
 
 # =============================================================================
@@ -306,7 +376,7 @@ class TestCloneOutput:
     """Test clone command output."""
 
     def test_clone_shows_next_steps(self, isolated_dir):
-        """Clone output includes helpful next steps."""
+        """Clone output includes helpful next steps with specific commands."""
         result = run_dt(
             'clone',
             'https://github.com/swarbricklab/dt-test-fixtures',
@@ -315,11 +385,13 @@ class TestCloneOutput:
         )
         
         assert result.returncode == 0
-        # Should show next steps
-        assert 'cd' in result.stdout or 'dvc pull' in result.stdout
+        # Should show directory change instruction
+        assert 'cd' in result.stdout, "Output should include cd instruction"
+        # Should suggest dvc pull
+        assert 'dvc pull' in result.stdout, "Output should suggest dvc pull command"
 
     def test_clone_shows_resolved_url(self, isolated_dir):
-        """Clone with short name shows resolved URL."""
+        """Clone with short name shows resolved URL in output."""
         result = run_dt(
             'clone',
             'dt-test-fixtures',
@@ -329,8 +401,36 @@ class TestCloneOutput:
         )
         
         assert result.returncode == 0
-        # Should show the resolved URL
-        assert 'swarbricklab' in result.stdout
+        # Should show the resolved URL or owner in the output
+        assert 'swarbricklab' in result.stdout, "Output should show resolved owner"
+
+
+# =============================================================================
+# Clone No-Init Option Tests
+# =============================================================================
+
+@pytest.mark.integration
+@requires_git
+@requires_network
+class TestCloneNoInit:
+    """Test --no-init option skips dt init steps."""
+
+    def test_clone_no_init_skips_cache_setup(self, isolated_dir):
+        """Clone with --no-init skips cache initialization."""
+        result = run_dt(
+            'clone',
+            'https://github.com/swarbricklab/dt-test-fixtures',
+            '--no-init',
+            '--shallow',
+            cwd=isolated_dir
+        )
+        
+        assert result.returncode == 0
+        repo_path = isolated_dir / 'dt-test-fixtures'
+        assert repo_path.is_dir()
+        assert (repo_path / '.git').is_dir()
+        # DVC should still exist from the cloned repo itself
+        assert (repo_path / '.dvc').is_dir()
 
 
 # =============================================================================

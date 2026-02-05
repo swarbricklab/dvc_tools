@@ -37,13 +37,14 @@ def cli():
 @cli.command()
 @click.option('--name', help='Override the project name (defaults to current directory name)')
 @click.option('--owner', help='Override the GitHub owner (user or organization)')
+@click.option('--team', help='GitHub team for access (only valid if owner is an org)')
 @click.option('--cache-root', help='Override the cache root directory')
 @click.option('--remote-root', help='Override the remote root directory')
 @click.option('--no-git', is_flag=True, help='Skip git initialization')
 @click.option('--no-dvc', is_flag=True, help='Skip DVC initialization')
 @click.option('--no-cache', is_flag=True, help='Skip cache setup')
 @click.option('--no-remote', is_flag=True, help='Skip remote setup')
-def init(name, owner, cache_root, remote_root, no_git, no_dvc, no_cache, no_remote):
+def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, no_remote):
     """Initialize a new DVC project with proper cache and remote setup.
     
     This command creates a complete DVC project with git, DVC, external cache,
@@ -53,6 +54,7 @@ def init(name, owner, cache_root, remote_root, no_git, no_dvc, no_cache, no_remo
         init_mod.init_project(
             name=name,
             owner=owner,
+            team=team,
             cache_root=cache_root,
             remote_root=remote_root,
             no_git=no_git,
