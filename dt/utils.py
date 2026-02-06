@@ -18,22 +18,22 @@ from .errors import DependencyError, DVCFileError
 # Network utilities
 # =============================================================================
 
-def check_network_access(timeout: float = 3.0) -> bool:
+def check_network_access(timeout: float = 1.0) -> bool:
     """Check if network/internet access is available.
     
     Attempts to connect to common reliable hosts to detect network connectivity.
+    Uses aggressive timeouts to fail fast on isolated nodes.
     
     Args:
-        timeout: Connection timeout in seconds.
+        timeout: Connection timeout in seconds per host (default 1s).
         
     Returns:
         True if network is accessible, False otherwise.
     """
-    # Try a few reliable hosts
+    # Try a few reliable hosts - use IP addresses to avoid DNS delays
     test_hosts = [
-        ("github.com", 443),
-        ("8.8.8.8", 53),  # Google DNS
-        ("1.1.1.1", 53),  # Cloudflare DNS
+        ("8.8.8.8", 53),      # Google DNS (fastest to check)
+        ("1.1.1.1", 53),      # Cloudflare DNS
     ]
     
     for host, port in test_hosts:

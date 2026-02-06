@@ -331,6 +331,7 @@ def get_local_hosts() -> List[str]:
         List of hostnames considered local.
     """
     import socket
+    import signal
     
     hosts = []
     
@@ -338,12 +339,23 @@ def get_local_hosts() -> List[str]:
     hostname = socket.gethostname()
     hosts.append(hostname)
     
-    # Try to get FQDN
+    # Try to get FQDN with timeout (can hang on nodes without DNS)
+    def _timeout_handler(signum, frame):
+        raise TimeoutError("FQDN lookup timed out")
+    
     try:
-        fqdn = socket.getfqdn()
-        if fqdn and fqdn != hostname:
-            hosts.append(fqdn)
-    except Exception:
+        # Set a 2-second timeout for FQDN lookup
+        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(2)
+        try:
+            fqdn = socket.getfqdn()
+            if fqdn and fqdn != hostname:
+                hosts.append(fqdn)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    except (TimeoutError, Exception):
+        # FQDN lookup failed or timed out - continue without it
         pass
     
     # Configured SSH host (used for remote URLs)
