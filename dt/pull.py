@@ -612,20 +612,30 @@ def pull(
     verbose: bool = False,
     dvc_args: Optional[List[str]] = None,
     force: bool = False,
+    update: bool = False,
 ) -> bool:
     """Pull DVC-tracked files, handling imports automatically.
     
     Args:
-        targets: Specific targets to pull. If None, pulls all.
+        targets: Specific targets to pull. Can be:
+            - .dvc file paths (e.g., 'data.dvc')
+            - Pipeline stage names (e.g., 'transform')
+            - Output paths (e.g., 'pipeline/output.txt')
+            - None for all stages
         verbose: Print detailed progress.
         dvc_args: Additional arguments to pass to dvc pull.
         force: Delete .dir manifests from cache before pulling.
                This forces re-fetch of directory contents, useful
                after dt cache validate --fix removed corrupted files.
+        update: If True, rebuild .dir files and update .dvc hashes
+                for URL imports if the source has changed.
         
     Returns:
         True if all operations succeeded.
     """
+    from dvc.stage import PipelineStage
+    from dvc.scm import SCMError
+    
     success = True
     
     # If force mode, delete .dir manifests first
@@ -641,12 +651,147 @@ def pull(
         except Exception as e:
             print(f"Warning: failed to delete .dir manifests: {e}")
     
-    # If no targets specified, find all .dvc files
+    # Collect stages using DVC's internal index
+    # Falls back to file-based approach if not in a git repo
+    use_stages = True
+    stages = []
+    
+    try:
+        stages = utils.collect_stages(targets=targets, verbose=verbose)
+    except SCMError:
+        use_stages = False
+        if verbose:
+            print("Not in a git repository, using file-based discovery")
+    except Exception as e:
+        use_stages = False
+        if verbose:
+            print(f"Could not use DVC index ({e}), using file-based discovery")
+    
+    if use_stages:
+        return _pull_from_stages(
+            stages=stages,
+            verbose=verbose,
+            dvc_args=dvc_args,
+            update=update,
+        )
+    else:
+        return _pull_from_files(
+            targets=targets,
+            verbose=verbose,
+            dvc_args=dvc_args,
+            update=update,
+        )
+
+
+def _pull_from_stages(
+    stages: List[Any],
+    verbose: bool = False,
+    dvc_args: Optional[List[str]] = None,
+    update: bool = False,
+) -> bool:
+    """Pull using DVC Stage objects.
+    
+    This is the primary implementation using DVC internals.
+    """
+    from dvc.stage import PipelineStage
+    
+    success = True
+    
+    if not stages:
+        print("No stages found")
+        return True
+    
+    if verbose:
+        print(f"Found {len(stages)} stage(s) to process")
+    
+    # Separate imports from regular stages
+    import_stages = []
+    regular_stages = []
+    
+    for stage in stages:
+        if stage.is_import:
+            import_stages.append(stage)
+        else:
+            regular_stages.append(stage)
+    
+    # Handle imports with smart_checkout (supports update flag)
+    if import_stages:
+        if verbose:
+            print(f"\nHandling {len(import_stages)} import stage(s)...")
+        
+        for stage in import_stages:
+            stage_name = stage.addressing
+            stage_path = Path(stage.path) if hasattr(stage, 'path') else None
+            
+            if not stage_path:
+                print(f"Error: could not get path for {stage_name}")
+                success = False
+                continue
+            
+            try:
+                if verbose:
+                    print(f"  smart_checkout {stage_name}")
+                smart_checkout(
+                    targets=[str(stage_path)],
+                    cache=None,
+                    verbose=verbose,
+                    update=update,
+                )
+            except FetchError as e:
+                print(f"Error fetching {stage_name}: {e}")
+                success = False
+    
+    # Handle regular stages with dvc pull
+    if regular_stages:
+        if verbose:
+            print(f"\nPulling {len(regular_stages)} regular stage(s)...")
+        
+        # Build target list for dvc pull
+        pull_targets = []
+        for stage in regular_stages:
+            is_pipeline = isinstance(stage, PipelineStage)
+            if is_pipeline:
+                # For pipeline stages, use the stage name
+                pull_targets.append(stage.addressing)
+            else:
+                # For .dvc files, use the file path
+                pull_targets.append(stage.addressing)
+        
+        cmd = ['dvc', 'pull']
+        if dvc_args:
+            cmd.extend(dvc_args)
+        cmd.extend(pull_targets)
+        
+        if verbose:
+            print(f"  Running: {' '.join(cmd)}")
+        
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            success = False
+    elif verbose:
+        print("\nNo regular stages to pull")
+    
+    return success
+
+
+def _pull_from_files(
+    targets: Optional[List[str]] = None,
+    verbose: bool = False,
+    dvc_args: Optional[List[str]] = None,
+    update: bool = False,
+) -> bool:
+    """Pull using file-based discovery (fallback for non-git repos).
+    
+    This preserves the original behavior for environments without git.
+    """
+    success = True
+    
+    # Find .dvc files using fallback method
     if not targets:
         if verbose:
             print("Discovering .dvc files...")
-        all_dvc_files = find_all_dvc_files(verbose=verbose)
-        targets = [str(f) for f in all_dvc_files]
+        dvc_files = utils.find_dvc_files_fallback(targets=None, verbose=verbose)
+        targets = [str(f) for f in dvc_files]
         if verbose:
             print(f"  Found {len(targets)} .dvc files")
     
@@ -659,7 +804,7 @@ def pull(
         print("Resolving targets...")
     import_targets, regular_targets = separate_targets(targets, verbose)
     
-    # Handle imports with dt fetch + dvc checkout
+    # Handle imports with smart_checkout (supports update flag)
     if import_targets:
         if verbose:
             print(f"\nHandling {len(import_targets)} import target(s)...")
@@ -670,15 +815,13 @@ def pull(
                 dvc_file = resolve_to_dvc_file(target)
                 if dvc_file:
                     if verbose:
-                        print(f"  dt fetch {dvc_file}")
-                    fetch(
+                        print(f"  smart_checkout {dvc_file}")
+                    smart_checkout(
                         targets=[str(dvc_file)],
+                        cache=None,
                         verbose=verbose,
+                        update=update,
                     )
-                    # Then checkout the fetched files
-                    if verbose:
-                        print(f"  dvc checkout {dvc_file}")
-                    subprocess.run(['dvc', 'checkout', str(dvc_file)], check=False)
             except FetchError as e:
                 print(f"Error fetching {target}: {e}")
                 success = False

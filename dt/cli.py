@@ -1347,12 +1347,42 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, u
                 raise SystemExit(1)
             return
         
-        # --- Step 1: Discover and separate targets ---
-        # Extract targets from extra args (non-option args)
+        # Extract targets and dvc_args from ctx.args
         targets = [arg for arg in ctx.args if not arg.startswith('-')]
+        dvc_args = [arg for arg in ctx.args if arg.startswith('-')]
         
-        # If no targets specified, find all .dvc files
+        # Use targets=None to mean "all stages"
         if not targets:
+            targets = None
+        
+        # Standard pull mode: delegate to pull_mod.pull() which uses DVC stages
+        # This handles imports, regular files, and pipeline stages
+        if not dry and workers is None:
+            success = pull_mod.pull(
+                targets=targets,
+                verbose=verbose,
+                dvc_args=dvc_args,
+                force=force,
+                update=update,
+            )
+            
+            if not success:
+                raise SystemExit(1)
+            
+            # Sync index to mirror after pull (if configured)
+            if not no_index_sync and index_mod.is_auto_sync_enabled():
+                try:
+                    index_mod.push(quiet=not verbose, verbose=verbose)
+                except Exception as e:
+                    if verbose:
+                        click.echo(f"Warning: index sync failed: {e}")
+            return
+        
+        # --- Dry run or parallel mode: need file-based discovery for manifests ---
+        # These modes need to know which files would be pulled and their sizes
+        
+        # Discover targets if not specified
+        if targets is None:
             if verbose:
                 click.echo("Discovering .dvc files...")
             all_dvc_files = pull_mod.find_all_dvc_files()
@@ -1472,34 +1502,6 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, u
                 click.echo(f"\nManifest: {manifest_dir}")
                 click.echo("Monitor with: qxub monitor --summary " + " ".join(job_ids))
             return
-        
-        # Standard pull mode for regular targets
-        if verbose:
-            click.echo(f"\nPulling {len(regular_targets)} regular target(s)...")
-        
-        # Build dvc_args from remaining ctx.args (options only)
-        dvc_args = [arg for arg in ctx.args if arg.startswith('-')]
-        
-        cmd = ['dvc', 'pull']
-        if dvc_args:
-            cmd.extend(dvc_args)
-        cmd.extend(regular_targets)
-        
-        if verbose:
-            click.echo(f"  Running: {' '.join(cmd)}")
-        
-        import subprocess
-        result = subprocess.run(cmd)
-        if result.returncode != 0:
-            raise SystemExit(1)
-        
-        # Sync index to mirror after pull (if configured)
-        if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.push(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
             
     except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
