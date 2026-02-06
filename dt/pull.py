@@ -588,6 +588,12 @@ def separate_targets(
     regular_targets = []
     
     for target in targets:
+        # Check if target is git/dvc ignored (e.g., temp clone .dvc files)
+        if utils.is_ignored(Path(target)):
+            if verbose:
+                print(f"  Skipping ignored file: {target}")
+            continue
+        
         is_import, dvc_file = is_import_target(target)
         if is_import:
             if verbose:

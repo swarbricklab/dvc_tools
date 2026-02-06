@@ -500,6 +500,13 @@ def fetch(
             results.append((target, False, f"File not found: {target}"))
             continue
         
+        # Check if target is git/dvc ignored (e.g., temp clone .dvc files)
+        if utils.is_ignored(target_path):
+            if verbose:
+                print(f"Skipping ignored file: {target_path}")
+            results.append((str(target_path), True, "Skipped (git/dvc ignored)"))
+            continue
+        
         # Check if it's an import from another DVC repo
         if utils.is_repo_import(target_path):
             if verbose:
