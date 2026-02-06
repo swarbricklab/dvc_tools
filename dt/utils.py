@@ -427,6 +427,7 @@ def collect_stages(
         
     Raises:
         StageFileDoesNotExistError: If a target doesn't exist
+        SCMError: If not in a git repository
         
     Example:
         # Get all stages
@@ -458,6 +459,55 @@ def collect_stages(
         raise
     finally:
         repo.close()
+
+
+def find_dvc_files_fallback(
+    targets: Optional[List[str]] = None,
+    verbose: bool = False,
+) -> List[Path]:
+    """Fallback function to find .dvc files when DVC Repo is unavailable.
+    
+    Used when not in a proper git/DVC repository (e.g., unit tests).
+    
+    Args:
+        targets: Optional list of target paths. If None, finds all .dvc files.
+        verbose: If True, print debug information.
+        
+    Returns:
+        List of Path objects to .dvc files.
+    """
+    if targets:
+        result = []
+        for target in targets:
+            target_path = Path(target)
+            if target_path.suffix == '.dvc' and target_path.exists():
+                result.append(target_path)
+            elif Path(str(target) + '.dvc').exists():
+                result.append(Path(str(target) + '.dvc'))
+        return result
+    
+    # Find all .dvc files
+    cwd = Path.cwd()
+    candidates = [
+        f for f in cwd.rglob('*.dvc') 
+        if f.is_file() and '.dt' not in f.parts and f.name != '.dvc'
+        and not str(f).startswith('.dvc/')
+    ]
+    
+    # Filter out ignored files if possible
+    result = []
+    for f in candidates:
+        try:
+            if is_ignored(f):
+                if verbose:
+                    print(f"  Skipping ignored file: {f}")
+            else:
+                result.append(f)
+        except Exception:
+            # If we can't check ignore status, include the file
+            result.append(f)
+    
+    return sorted(result)
 
 
 def get_stage_info(stage: Any) -> Dict[str, Any]:
