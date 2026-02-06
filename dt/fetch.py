@@ -555,29 +555,42 @@ def _fetch_from_stages(
     # Phase 2: Bulk check regular stages
     # Collect all needed hashes and check cache in one operation
     if regular_stages:
+        if verbose:
+            print(f"\nPhase 2: Processing {len(regular_stages)} regular stages...")
         results.extend(_fetch_regular_stages_bulk(
             stages=regular_stages,
             verbose=verbose,
             show_progress=show_progress,
             network=network,
         ))
+        if verbose:
+            print(f"  Regular stages complete.")
     
     # Phase 3: Handle import stages (each needs its own source repo)
-    for stage in import_stages:
-        result = _fetch_import_stage(
-            stage=stage,
-            verbose=verbose,
-            update=update,
-            show_progress=show_progress,
-        )
-        results.append(result)
+    if import_stages:
+        if verbose:
+            print(f"\nPhase 3: Processing {len(import_stages)} import stages...")
+        for i, stage in enumerate(import_stages):
+            if verbose:
+                print(f"  [{i+1}/{len(import_stages)}] {stage.addressing}")
+            result = _fetch_import_stage(
+                stage=stage,
+                verbose=verbose,
+                update=update,
+                show_progress=show_progress,
+            )
+            results.append(result)
+        if verbose:
+            print(f"  Import stages complete.")
     
     # Phase 4: Handle URL imports
     if url_import_stages:
+        if verbose:
+            print(f"\nPhase 4: Processing {len(url_import_stages)} URL imports...")
         # Check network access before attempting URL imports
         # This avoids hanging on each one if there's no network
         if verbose:
-            print("\nChecking network connectivity...")
+            print("Checking network connectivity...")
         has_network = utils.check_network_access(timeout=1.0)
         if verbose:
             if has_network:
@@ -674,6 +687,8 @@ def _fetch_regular_stages_bulk(
     if verbose:
         print("\nChecking remote access...")
     remotes = remote.list_remotes()
+    if verbose:
+        print(f"  Found {len(remotes)} remote(s)")
     local_remote_info, access_error = remote.check_remote_access(remotes)
     
     if not local_remote_info and not network:
@@ -681,9 +696,17 @@ def _fetch_regular_stages_bulk(
         if access_error:
             if verbose:
                 print(f"  {access_error}")
+                # Check if it looks like an unmounted volume
+                if '/g/data/' in access_error or '/scratch/' in access_error:
+                    print("  Hint: Check if the volume is mounted on this node.")
             error_msg = access_error
         else:
+            if verbose:
+                print("  No local remote configured")
             error_msg = "No local remote available (use --network)"
+        
+        if verbose:
+            print(f"\nReporting errors for {len(missing)} missing hashes...")
         
         for h in missing:
             for stage, out in hash_to_stages.get(h, []):
@@ -692,6 +715,9 @@ def _fetch_regular_stages_bulk(
                         click.echo(f"{stage.addressing}: ✗ ({error_msg})")
                     results.append((stage.addressing, False, error_msg))
                     cached_stages.add(stage.addressing)  # Mark as handled
+        
+        if verbose:
+            print(f"  Done. Returning {len(results)} results.")
         return results
     
     # Fetch missing files
