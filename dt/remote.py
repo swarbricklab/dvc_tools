@@ -272,9 +272,10 @@ def list_remotes_from_repo(
         return _run_dvc_remote_list(local_repo)
     
     # Remote repo - clone it first
+    # Use refresh=False to avoid network operations when clone already exists
     from . import tmp as tmp_mod
     
-    repo_path = tmp_mod.clone_repo(repo_spec, owner=owner, refresh=True, verbose=False)
+    repo_path = tmp_mod.clone_repo(repo_spec, owner=owner, refresh=False, verbose=False)
     return _run_dvc_remote_list(repo_path)
 
 

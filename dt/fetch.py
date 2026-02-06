@@ -570,6 +570,19 @@ def _fetch_from_stages(
     if import_stages:
         if verbose:
             print(f"\nPhase 3: Processing {len(import_stages)} import stages...")
+        
+        # Group by source URL to avoid repeated lookups
+        source_urls = set()
+        for stage in import_stages:
+            stage_path = Path(stage.path) if hasattr(stage, 'path') else None
+            if stage_path:
+                import_info = utils.get_import_info(stage_path)
+                if import_info and import_info.get('url'):
+                    source_urls.add(import_info['url'])
+        
+        if verbose and len(source_urls) > 1:
+            print(f"  Found {len(source_urls)} unique source repositories")
+        
         for i, stage in enumerate(import_stages):
             if verbose:
                 print(f"  [{i+1}/{len(import_stages)}] {stage.addressing}")
