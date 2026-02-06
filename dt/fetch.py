@@ -520,124 +520,349 @@ def _fetch_from_stages(
     show_progress: bool = True,
     network: bool = False,
 ) -> List[Tuple[str, bool, str]]:
-    """Fetch from DVC Stage objects.
+    """Fetch from DVC Stage objects using bulk operations.
     
-    This is the primary implementation using DVC internals.
-    Uses DVC's cache checking to skip stages that are already cached.
+    Uses DVC's bulk cache checking to efficiently determine which
+    objects need to be fetched, then fetches only the missing ones.
     """
     from dvc.stage import PipelineStage
+    from dvc.repo import Repo
     
     results = []
     
+    if not stages:
+        return results
+    
+    # Phase 1: Categorize stages
+    import_stages = []      # Repo imports (need special handling)
+    url_import_stages = []  # URL imports (dvc import-url)
+    regular_stages = []     # Regular .dvc files and pipeline outputs
+    
     for stage in stages:
-        stage_name = stage.addressing
-        stage_path = Path(stage.path) if hasattr(stage, 'path') else None
-        is_pipeline = isinstance(stage, PipelineStage)
-        
-        # Check if outputs are already cached using DVC internals
-        # This avoids unnecessary fetches for cached files
-        needs_fetch = False
-        cache_status = "Already in cache"
-        
-        if stage.outs:
-            for out in stage.outs:
-                if out.use_cache and out.hash_info:
-                    if out.changed_cache():
-                        needs_fetch = True
-                        break
-        else:
-            # No outputs means nothing to fetch
-            if show_progress and not verbose:
-                click.echo(f"{stage_name}: No outputs")
-            results.append((stage_name, True, "No outputs"))
-            continue
-        
-        if not needs_fetch:
-            # Already in cache - show brief status and skip
-            if show_progress and not verbose:
-                click.echo(f"{stage_name}: ✓ (cached)")
-            elif verbose:
-                print(f"{stage_name}: Already in cache")
-            results.append((stage_name, True, cache_status))
-            continue
-        
-        # Needs fetch - show stage name and proceed
-        if show_progress and not verbose:
-            click.echo(f"{stage_name}: ", nl=False)
-        
-        # Check if it's an import from another DVC repo
         if stage.is_repo_import:
-            if verbose:
-                print(f"Fetching repo import: {stage_name}")
-            
-            if not stage_path or is_pipeline:
-                if show_progress and not verbose:
-                    click.echo("Error (repo imports must be .dvc files)")
-                results.append((stage_name, False, "Repo imports must be .dvc files"))
-                continue
-            
-            try:
-                cache_path, count, failed = fetch_import(
-                    dvc_path=stage_path,
-                    verbose=verbose,
-                    update=update,
-                    show_progress=show_progress,
-                )
-                if failed > 0:
-                    results.append((stage_name, False, 
-                        f"FAILED: {failed} file(s) not found in source cache at {cache_path}"))
-                elif count == 0:
-                    results.append((stage_name, True, f"Already in cache (from {cache_path})"))
-                else:
-                    results.append((stage_name, True, f"Fetched {count} files from {cache_path}"))
-            except FetchError as e:
-                if show_progress and not verbose:
-                    click.echo(f"Error: {e}")
-                results.append((stage_name, False, str(e)))
-        
-        # Check if it's a URL import (dvc import-url) - is_import but not is_repo_import
-        elif stage.is_import and not stage.is_repo_import:
-            if verbose:
-                print(f"Fetching URL import: {stage_name}")
-            
-            if not stage_path or is_pipeline:
-                if show_progress and not verbose:
-                    click.echo("Error (URL imports must be .dvc files)")
-                results.append((stage_name, False, "URL imports must be .dvc files"))
-                continue
-            
-            result = _fetch_url_import(
-                dvc_path=stage_path,
-                verbose=verbose,
-            )
-            if show_progress and not verbose:
-                if result[0]:
-                    click.echo(f"✓ ({result[1]})")
-                else:
-                    click.echo(f"Error: {result[1]}")
-            results.append((stage_name, result[0], result[1]))
-        
+            import_stages.append(stage)
+        elif stage.is_import:
+            url_import_stages.append(stage)
         else:
-            # Regular stage (.dvc file or pipeline output) - try to fetch from local remote
-            if verbose:
-                if is_pipeline:
-                    print(f"Fetching pipeline output: {stage_name}")
-                else:
-                    print(f"Fetching: {stage_name}")
-            
-            result = _fetch_stage(
-                stage=stage,
-                verbose=verbose,
-                network=network,
-            )
-            if show_progress and not verbose:
-                if result[0]:
-                    click.echo(f"✓ ({result[1]})")
-                else:
-                    click.echo(f"Error: {result[1]}")
-            results.append((stage_name, result[0], result[1]))
+            regular_stages.append(stage)
+    
+    if verbose:
+        print(f"Stage breakdown:")
+        print(f"  Regular stages: {len(regular_stages)}")
+        print(f"  Repo imports: {len(import_stages)}")
+        print(f"  URL imports: {len(url_import_stages)}")
+    
+    # Phase 2: Bulk check regular stages
+    # Collect all needed hashes and check cache in one operation
+    if regular_stages:
+        results.extend(_fetch_regular_stages_bulk(
+            stages=regular_stages,
+            verbose=verbose,
+            show_progress=show_progress,
+            network=network,
+        ))
+    
+    # Phase 3: Handle import stages (each needs its own source repo)
+    for stage in import_stages:
+        result = _fetch_import_stage(
+            stage=stage,
+            verbose=verbose,
+            update=update,
+            show_progress=show_progress,
+        )
+        results.append(result)
+    
+    # Phase 4: Handle URL imports
+    for stage in url_import_stages:
+        result = _fetch_url_import_stage(
+            stage=stage,
+            verbose=verbose,
+        )
+        results.append(result)
     
     return results
+
+
+def _fetch_regular_stages_bulk(
+    stages: List[Any],
+    verbose: bool = False,
+    show_progress: bool = True,
+    network: bool = False,
+) -> List[Tuple[str, bool, str]]:
+    """Fetch regular stages using bulk cache checking.
+    
+    Collects all needed hashes, checks which are missing from cache
+    in one bulk operation, then fetches only the missing files.
+    """
+    from dvc.repo import Repo
+    from dvc.stage import PipelineStage
+    from . import import_data as import_mod
+    
+    results = []
+    
+    # Collect all hashes and map them back to stages
+    hash_to_stages = {}  # hash -> list of (stage, out)
+    all_hashes = set()
+    
+    for stage in stages:
+        if not stage.outs:
+            results.append((stage.addressing, True, "No outputs"))
+            continue
+        
+        for out in stage.outs:
+            if out.use_cache and out.hash_info and out.hash_info.value:
+                h = out.hash_info.value
+                all_hashes.add(h)
+                if h not in hash_to_stages:
+                    hash_to_stages[h] = []
+                hash_to_stages[h].append((stage, out))
+    
+    if not all_hashes:
+        return results
+    
+    # Bulk check which hashes are in cache
+    try:
+        repo = Repo()
+        cache = repo.cache.local
+        existing = set(cache.oids_exist(all_hashes))
+        missing = all_hashes - existing
+    except Exception as e:
+        if verbose:
+            print(f"Could not use bulk cache check: {e}")
+        # Fall back to per-stage checking
+        for stage in stages:
+            result = _fetch_stage(stage, verbose=verbose, network=network)
+            results.append((stage.addressing, result[0], result[1]))
+        return results
+    
+    if verbose:
+        print(f"\nCache status:")
+        print(f"  Total unique hashes: {len(all_hashes)}")
+        print(f"  Already in cache: {len(existing)}")
+        print(f"  Missing: {len(missing)}")
+    
+    # Mark fully-cached stages as done
+    cached_stages = set()
+    for stage in stages:
+        if not stage.outs:
+            continue
+        stage_hashes = {out.hash_info.value for out in stage.outs 
+                       if out.use_cache and out.hash_info and out.hash_info.value}
+        if stage_hashes and stage_hashes.issubset(existing):
+            cached_stages.add(stage.addressing)
+            if show_progress and not verbose:
+                click.echo(f"{stage.addressing}: ✓ (cached)")
+            results.append((stage.addressing, True, "Already in cache"))
+    
+    if not missing:
+        return results
+    
+    # Find a local remote for fetching
+    remotes = remote.list_remotes()
+    local_remote_info = remote.find_local_remote(remotes)
+    
+    if not local_remote_info and not network:
+        # No local remote and network disabled
+        for h in missing:
+            for stage, out in hash_to_stages.get(h, []):
+                if stage.addressing not in cached_stages:
+                    if show_progress and not verbose:
+                        click.echo(f"{stage.addressing}: ✗ (no local remote)")
+                    results.append((stage.addressing, False, 
+                        "No local remote available (use --network)"))
+                    cached_stages.add(stage.addressing)  # Mark as handled
+        return results
+    
+    # Fetch missing files
+    if local_remote_info:
+        remote_name, remote_path = local_remote_info
+        if verbose:
+            print(f"\nFetching from local remote '{remote_name}': {remote_path}")
+        
+        # Get cache base path
+        cache_base = str(cache.path)
+        if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
+            cache_base = str(Path(cache.path).parent.parent)
+        
+        # Detect layout (v3 preferred)
+        use_v3_layout = True
+        
+        # Fetch with progress bar (when not verbose and multiple files)
+        fetched = 0
+        failed_hashes = set()
+        
+        if not verbose and show_progress and len(missing) > 1:
+            with click.progressbar(
+                missing,
+                label=f"Fetching {len(missing)} objects",
+                show_pos=True,
+                show_percent=True,
+            ) as bar:
+                for h in bar:
+                    result = import_mod.populate_cache_file(
+                        md5=h,
+                        source_cache=remote_path,
+                        dest_cache=cache_base,
+                        verbose=False,  # Quiet during progress
+                        use_v3_layout=use_v3_layout,
+                    )
+                    if result is True:
+                        fetched += 1
+                    elif result is None:
+                        failed_hashes.add(h)
+        else:
+            for h in missing:
+                if verbose:
+                    print(f"  Fetching {h[:12]}...")
+                result = import_mod.populate_cache_file(
+                    md5=h,
+                    source_cache=remote_path,
+                    dest_cache=cache_base,
+                    verbose=verbose,
+                    use_v3_layout=use_v3_layout,
+                )
+                if result is True:
+                    fetched += 1
+                elif result is None:
+                    failed_hashes.add(h)
+        
+        if verbose:
+            print(f"\nFetch summary: {fetched} fetched, {len(failed_hashes)} failed")
+        
+        # Build results for stages with missing hashes
+        for stage in stages:
+            if stage.addressing in cached_stages:
+                continue  # Already handled
+            
+            stage_hashes = {out.hash_info.value for out in stage.outs 
+                          if out.use_cache and out.hash_info and out.hash_info.value}
+            stage_missing = stage_hashes & missing
+            stage_failed = stage_missing & failed_hashes
+            
+            if stage_failed:
+                if show_progress and not verbose:
+                    click.echo(f"{stage.addressing}: ✗ ({len(stage_failed)} files not in remote)")
+                results.append((stage.addressing, False, 
+                    f"Failed: {len(stage_failed)} files not found in remote"))
+            else:
+                if show_progress and not verbose:
+                    click.echo(f"{stage.addressing}: ✓ (fetched)")
+                results.append((stage.addressing, True, 
+                    f"Fetched {len(stage_missing)} files from {remote_name}"))
+    
+    elif network:
+        # Fall back to dvc fetch for network mode
+        if verbose:
+            print("\nNo local remote, using dvc fetch...")
+        
+        for stage in stages:
+            if stage.addressing in cached_stages:
+                continue
+            
+            success, msg = _run_dvc_fetch(stage.addressing, verbose)
+            if show_progress and not verbose:
+                status = "✓" if success else "✗"
+                click.echo(f"{stage.addressing}: {status} ({msg})")
+            results.append((stage.addressing, success, msg))
+    
+    return results
+
+
+def _fetch_import_stage(
+    stage: Any,
+    verbose: bool = False,
+    update: bool = False,
+    show_progress: bool = True,
+) -> Tuple[str, bool, str]:
+    """Fetch a repo import stage."""
+    from dvc.stage import PipelineStage
+    
+    stage_name = stage.addressing
+    stage_path = Path(stage.path) if hasattr(stage, 'path') else None
+    is_pipeline = isinstance(stage, PipelineStage)
+    
+    # Check if already cached
+    if stage.outs:
+        needs_fetch = False
+        for out in stage.outs:
+            if out.use_cache and out.hash_info:
+                if out.changed_cache():
+                    needs_fetch = True
+                    break
+        
+        if not needs_fetch:
+            if show_progress and not verbose:
+                click.echo(f"{stage_name}: ✓ (cached)")
+            return (stage_name, True, "Already in cache")
+    
+    if show_progress and not verbose:
+        click.echo(f"{stage_name}: ", nl=False)
+    
+    if not stage_path or is_pipeline:
+        if show_progress and not verbose:
+            click.echo("Error (repo imports must be .dvc files)")
+        return (stage_name, False, "Repo imports must be .dvc files")
+    
+    try:
+        cache_path, count, failed = fetch_import(
+            dvc_path=stage_path,
+            verbose=verbose,
+            update=update,
+            show_progress=show_progress,
+        )
+        if failed > 0:
+            return (stage_name, False, 
+                f"FAILED: {failed} file(s) not found in source cache at {cache_path}")
+        elif count == 0:
+            return (stage_name, True, f"Already in cache (from {cache_path})")
+        else:
+            return (stage_name, True, f"Fetched {count} files from {cache_path}")
+    except FetchError as e:
+        if show_progress and not verbose:
+            click.echo(f"Error: {e}")
+        return (stage_name, False, str(e))
+
+
+def _fetch_url_import_stage(
+    stage: Any,
+    verbose: bool = False,
+) -> Tuple[str, bool, str]:
+    """Fetch a URL import stage."""
+    from dvc.stage import PipelineStage
+    
+    stage_name = stage.addressing
+    stage_path = Path(stage.path) if hasattr(stage, 'path') else None
+    is_pipeline = isinstance(stage, PipelineStage)
+    
+    # Check if already cached
+    if stage.outs:
+        needs_fetch = False
+        for out in stage.outs:
+            if out.use_cache and out.hash_info:
+                if out.changed_cache():
+                    needs_fetch = True
+                    break
+        
+        if not needs_fetch:
+            click.echo(f"{stage_name}: ✓ (cached)")
+            return (stage_name, True, "Already in cache")
+    
+    click.echo(f"{stage_name}: ", nl=False)
+    
+    if not stage_path or is_pipeline:
+        click.echo("Error (URL imports must be .dvc files)")
+        return (stage_name, False, "URL imports must be .dvc files")
+    
+    result = _fetch_url_import(
+        dvc_path=stage_path,
+        verbose=verbose,
+    )
+    if result[0]:
+        click.echo(f"✓ ({result[1]})")
+    else:
+        click.echo(f"Error: {result[1]}")
+    return (stage_name, result[0], result[1])
+
 
 
 def _fetch_from_files(
