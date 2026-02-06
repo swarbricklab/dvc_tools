@@ -354,12 +354,31 @@ def get_local_hosts() -> List[str]:
     return hosts
 
 
+def _get_domain(hostname: str) -> Optional[str]:
+    """Extract the domain from a hostname.
+    
+    Args:
+        hostname: A hostname like 'gadi-dm-0001.nci.org.au'
+        
+    Returns:
+        The domain suffix (e.g., 'nci.org.au') or None if no domain.
+    """
+    parts = hostname.split('.')
+    if len(parts) >= 3:
+        # Return last 2-3 parts as domain (e.g., 'nci.org.au')
+        return '.'.join(parts[-3:]) if len(parts) >= 3 else '.'.join(parts[-2:])
+    elif len(parts) == 2:
+        return '.'.join(parts)
+    return None
+
+
 def is_local_host(host: str) -> bool:
     """Check if a hostname should be considered 'local'.
     
     A host is considered local if:
-    - It matches the current hostname
-    - It matches any configured local hosts (core.local_hosts)
+    - It matches the current hostname exactly
+    - It shares the same domain suffix (e.g., both end with '.nci.org.au')
+    - It matches the configured ssh.host
     
     Args:
         host: Hostname to check
@@ -376,11 +395,20 @@ def is_local_host(host: str) -> bool:
     if host in local_hosts:
         return True
     
-    # Check for partial match (e.g., 'gadi-dm' matches 'gadi-dm.nci.org.au')
+    # Check for same short hostname (e.g., 'gadi-dm' matches 'gadi-dm.nci.org.au')
+    host_short = host.split('.')[0]
     for local in local_hosts:
-        if host.startswith(local.split('.')[0]) or local.startswith(host.split('.')[0]):
-            # Same short hostname
-            if host.split('.')[0] == local.split('.')[0]:
+        if host_short == local.split('.')[0]:
+            return True
+    
+    # Check for same domain suffix
+    # If remote is 'gadi-dm.nci.org.au' and we're on 'gadi-dm-0001.nci.org.au',
+    # both share the domain 'nci.org.au' so consider it local
+    host_domain = _get_domain(host)
+    if host_domain:
+        for local in local_hosts:
+            local_domain = _get_domain(local)
+            if local_domain and host_domain == local_domain:
                 return True
     
     return False
