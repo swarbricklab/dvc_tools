@@ -1094,24 +1094,23 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network):
             network=network,
         )
         
-        any_success = False
-        any_failure = False
+        # Count successes and failures
+        successes = sum(1 for _, success, _ in results if success)
+        failures = [(target, msg) for target, success, msg in results if not success]
         
-        for target, success, message in results:
-            if verbose or not success:
-                status = "✓" if success else "✗"
-                click.echo(f"{status} {target}: {message}")
-            elif success:
-                click.echo(f"✓ {target}")
-            
-            if success:
-                any_success = True
-            else:
-                any_failure = True
+        # In verbose mode, results were already printed during fetch
+        # In non-verbose mode, progress was shown inline
+        # Just show failures and final summary here
+        if failures:
+            click.echo()
+            for target, msg in failures:
+                click.echo(f"✗ {target}: {msg}")
         
         # Report summary
-        if any_success and not any_failure:
-            click.echo("\nFetch complete. Run 'dvc checkout' to link files to workspace.")
+        if failures:
+            click.echo(f"\nFetch complete with {len(failures)} error(s).")
+        else:
+            click.echo(f"\n✓ {successes} stages processed")
             # Sync index to mirror after fetch (if configured)
             if not no_index_sync and index_mod.is_auto_sync_enabled():
                 try:
@@ -1119,7 +1118,8 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network):
                 except Exception as e:
                     if verbose:
                         click.echo(f"Warning: index sync failed: {e}")
-        elif any_failure and not any_success:
+        
+        if failures and successes == 0:
             raise SystemExit(1)
     
     except errors.HashMismatchError as e:
