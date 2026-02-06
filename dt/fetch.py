@@ -507,6 +507,10 @@ def fetch(
             results.append((str(target_path), True, "Skipped (git/dvc ignored)"))
             continue
         
+        # Show which file we're processing (in non-verbose mode with progress)
+        if show_progress and not verbose:
+            click.echo(f"{target_path}:")
+        
         # Check if it's an import from another DVC repo
         if utils.is_repo_import(target_path):
             if verbose:
