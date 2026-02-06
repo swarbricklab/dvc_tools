@@ -25,48 +25,6 @@ from . import utils
 from .errors import FetchError, HashMismatchError
 
 
-def _is_ignored(path: Path) -> bool:
-    """Check if a path is ignored by git or dvc.
-    
-    Args:
-        path: Path to check.
-        
-    Returns:
-        True if the path is ignored, False otherwise.
-    """
-    # Check git ignore
-    try:
-        result = subprocess.run(
-            ['git', 'check-ignore', '-q', str(path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return True
-    except (OSError, FileNotFoundError):
-        pass
-    
-    # Check dvc ignore (.dvcignore)
-    # DVC doesn't have a dedicated command, so check common patterns
-    dvcignore = Path('.dvcignore')
-    if dvcignore.exists():
-        try:
-            patterns = dvcignore.read_text().splitlines()
-            path_str = str(path)
-            for pattern in patterns:
-                pattern = pattern.strip()
-                if not pattern or pattern.startswith('#'):
-                    continue
-                # Simple glob matching
-                import fnmatch
-                if fnmatch.fnmatch(path_str, pattern) or fnmatch.fnmatch(path_str, f'*/{pattern}'):
-                    return True
-        except OSError:
-            pass
-    
-    return False
-
-
 def _is_autostage_enabled() -> bool:
     """Check if DVC core.autostage is enabled.
     
@@ -514,7 +472,7 @@ def fetch(
             # Filter out ignored files
             targets = []
             for p in all_dvc_files:
-                if _is_ignored(p):
+                if utils.is_ignored(p):
                     if verbose:
                         print(f"Skipping ignored file: {p}")
                 else:

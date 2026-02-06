@@ -541,21 +541,34 @@ def is_import_target(target: str) -> Tuple[bool, Optional[Path]]:
     return False, dvc_file
 
 
-def find_all_dvc_files() -> List[Path]:
+def find_all_dvc_files(verbose: bool = False) -> List[Path]:
     """Find all .dvc files in the current directory tree.
     
     Returns:
-        List of paths to .dvc files (excludes .dvc/ directory and .dt/ temp clones).
+        List of paths to .dvc files (excludes .dvc/ directory, .dt/ temp clones,
+        and git/dvc ignored files).
     """
     cwd = Path.cwd()
     # Exclude:
     # - .dvc/ directory itself (not a .dvc file)
     # - .dt/ directory (temp clones, manifests, etc.)
     # - Must be a file, not a directory
-    return sorted(
+    # - Git/dvc ignored files
+    candidates = [
         f for f in cwd.rglob('*.dvc') 
         if f.is_file() and '.dt' not in f.parts and f.name != '.dvc'
-    )
+    ]
+    
+    # Filter out ignored files
+    result = []
+    for f in candidates:
+        if utils.is_ignored(f):
+            if verbose:
+                print(f"  Skipping ignored file: {f}")
+        else:
+            result.append(f)
+    
+    return sorted(result)
 
 
 def separate_targets(
@@ -626,7 +639,7 @@ def pull(
     if not targets:
         if verbose:
             print("Discovering .dvc files...")
-        all_dvc_files = find_all_dvc_files()
+        all_dvc_files = find_all_dvc_files(verbose=verbose)
         targets = [str(f) for f in all_dvc_files]
         if verbose:
             print(f"  Found {len(targets)} .dvc files")

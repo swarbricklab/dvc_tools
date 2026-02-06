@@ -439,6 +439,50 @@ def check_git() -> None:
     check_command('git')
 
 
+def is_ignored(path: Path) -> bool:
+    """Check if a path is ignored by git or dvc.
+    
+    Args:
+        path: Path to check.
+        
+    Returns:
+        True if the path is ignored, False otherwise.
+    """
+    import fnmatch
+    import subprocess
+    
+    # Check git ignore
+    try:
+        result = subprocess.run(
+            ['git', 'check-ignore', '-q', str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return True
+    except (OSError, FileNotFoundError):
+        pass
+    
+    # Check dvc ignore (.dvcignore)
+    # DVC doesn't have a dedicated command, so check common patterns
+    dvcignore = Path('.dvcignore')
+    if dvcignore.exists():
+        try:
+            patterns = dvcignore.read_text().splitlines()
+            path_str = str(path)
+            for pattern in patterns:
+                pattern = pattern.strip()
+                if not pattern or pattern.startswith('#'):
+                    continue
+                # Simple glob matching
+                if fnmatch.fnmatch(path_str, pattern) or fnmatch.fnmatch(path_str, f'*/{pattern}'):
+                    return True
+        except OSError:
+            pass
+    
+    return False
+
+
 def update_gitignore(pattern: str, gitignore_path: Optional[Path] = None) -> bool:
     """Add a pattern to .gitignore if not already present.
     
