@@ -573,12 +573,19 @@ def _fetch_from_stages(
         results.append(result)
     
     # Phase 4: Handle URL imports
-    for stage in url_import_stages:
-        result = _fetch_url_import_stage(
-            stage=stage,
-            verbose=verbose,
-        )
-        results.append(result)
+    if url_import_stages:
+        # Check network access before attempting URL imports
+        # This avoids hanging on each one if there's no network
+        has_network = utils.check_network_access(timeout=3.0)
+        if not has_network and verbose:
+            print("\nNote: No network access detected. URL imports may fail.")
+        
+        for stage in url_import_stages:
+            result = _fetch_url_import_stage(
+                stage=stage,
+                verbose=verbose,
+            )
+            results.append(result)
     
     return results
 
@@ -659,17 +666,21 @@ def _fetch_regular_stages_bulk(
     
     # Find a local remote for fetching
     remotes = remote.list_remotes()
-    local_remote_info = remote.find_local_remote(remotes)
+    local_remote_info, access_error = remote.check_remote_access(remotes)
     
     if not local_remote_info and not network:
-        # No local remote and network disabled
+        # No local remote and network disabled - provide useful error message
+        if access_error:
+            error_msg = access_error
+        else:
+            error_msg = "No local remote available (use --network)"
+        
         for h in missing:
             for stage, out in hash_to_stages.get(h, []):
                 if stage.addressing not in cached_stages:
                     if show_progress and not verbose:
-                        click.echo(f"{stage.addressing}: ✗ (no local remote)")
-                    results.append((stage.addressing, False, 
-                        "No local remote available (use --network)"))
+                        click.echo(f"{stage.addressing}: ✗ ({error_msg})")
+                    results.append((stage.addressing, False, error_msg))
                     cached_stages.add(stage.addressing)  # Mark as handled
         return results
     
@@ -1221,6 +1232,7 @@ def _run_dvc_fetch(dvc_path: Path, verbose: bool = False) -> Tuple[bool, str]:
 def _fetch_url_import(
     dvc_path: Path,
     verbose: bool = False,
+    timeout: int = 60,
 ) -> Tuple[bool, str]:
     """Fetch a URL import by running dvc update.
     
@@ -1234,6 +1246,7 @@ def _fetch_url_import(
     Args:
         dvc_path: Path to the .dvc file.
         verbose: Print progress messages.
+        timeout: Timeout in seconds for the update operation (default 60).
         
     Returns:
         Tuple of (success, message).
@@ -1257,6 +1270,11 @@ def _fetch_url_import(
     url_info = utils.get_url_import_info(dvc_path)
     source_url = url_info.get('url', 'unknown') if url_info else 'unknown'
     
+    # Check network access before attempting download
+    if source_url.startswith(('http://', 'https://', 's3://', 'gs://')):
+        if not utils.check_network_access(timeout=3.0):
+            return (False, f"No network access (cannot fetch from {source_url})")
+    
     if verbose:
         print(f"  URL import from: {source_url}")
         print(f"  Running: dvc update {dvc_path}")
@@ -1268,6 +1286,7 @@ def _fetch_url_import(
             cmd,
             capture_output=True,
             text=True,
+            timeout=timeout,
         )
         if result.returncode == 0:
             # Check if the .dvc file was modified (source changed)
@@ -1280,7 +1299,11 @@ def _fetch_url_import(
             # Common errors
             if 'No such file' in error_msg or 'not found' in error_msg.lower():
                 return (False, f"Source not accessible: {source_url}")
+            if 'timeout' in error_msg.lower():
+                return (False, f"Timeout fetching from {source_url}")
             return (False, f"dvc update failed: {error_msg}")
+    except subprocess.TimeoutExpired:
+        return (False, f"Timeout after {timeout}s fetching from {source_url}")
     except (OSError, FileNotFoundError) as e:
         return (False, f"dvc update failed: {e}")
 

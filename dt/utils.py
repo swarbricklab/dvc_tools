@@ -5,12 +5,49 @@ Common functions used across multiple modules.
 
 import os
 import shutil
+import socket
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from dvc.repo import Repo
 
 from .errors import DependencyError, DVCFileError
+
+
+# =============================================================================
+# Network utilities
+# =============================================================================
+
+def check_network_access(timeout: float = 3.0) -> bool:
+    """Check if network/internet access is available.
+    
+    Attempts to connect to common reliable hosts to detect network connectivity.
+    
+    Args:
+        timeout: Connection timeout in seconds.
+        
+    Returns:
+        True if network is accessible, False otherwise.
+    """
+    # Try a few reliable hosts
+    test_hosts = [
+        ("github.com", 443),
+        ("8.8.8.8", 53),  # Google DNS
+        ("1.1.1.1", 53),  # Cloudflare DNS
+    ]
+    
+    for host, port in test_hosts:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result == 0:
+                return True
+        except (socket.error, socket.timeout, OSError):
+            continue
+    
+    return False
 
 
 # =============================================================================

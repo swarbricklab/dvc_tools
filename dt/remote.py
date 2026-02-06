@@ -475,6 +475,40 @@ def find_local_remote(
     return None
 
 
+def check_remote_access(
+    remotes: List[Tuple[str, str, bool]],
+) -> Tuple[Optional[Tuple[str, str]], Optional[str]]:
+    """Check remote access and return detailed error if not accessible.
+    
+    Similar to find_local_remote but provides detailed error messages
+    when remotes look like they should be local but aren't accessible.
+    
+    Args:
+        remotes: List of (name, url, is_default) tuples
+        
+    Returns:
+        Tuple of:
+        - (remote_name, local_path) if found and accessible, None otherwise
+        - Error message if remote looks local but not accessible, None otherwise
+    """
+    local_but_inaccessible = []
+    
+    for name, url, is_default in remotes:
+        local_path = extract_local_path(url)
+        if local_path:
+            if Path(local_path).exists():
+                return ((name, local_path), None)
+            else:
+                local_but_inaccessible.append((name, local_path, url))
+    
+    if local_but_inaccessible:
+        # Remote looks local but path doesn't exist
+        name, path, url = local_but_inaccessible[0]
+        return (None, f"Remote '{name}' path not accessible: {path} (from {url})")
+    
+    return (None, None)
+
+
 def find_local_remote_from_repo(
     repo_spec: str,
     owner: Optional[str] = None,
