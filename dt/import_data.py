@@ -207,6 +207,7 @@ def construct_dir_from_dvc_list(
     use_v3_layout: bool = True,
     verbose: bool = False,
     update: bool = False,
+    dvc_file: str = None,
 ) -> Optional[Tuple[List[Dict[str, str]], Optional[str]]]:
     """Construct a .dir manifest using 'dvc list' on a remote repository.
     
@@ -223,6 +224,7 @@ def construct_dir_from_dvc_list(
         use_v3_layout: If True, write .dir file to v3 layout.
         verbose: Print progress messages.
         update: If True, accept hash mismatch and return new hash for .dvc update.
+        dvc_file: Path to the .dvc file for error reporting.
         
     Returns:
         Tuple of (entries, new_hash) if successful, None on failure.
@@ -297,15 +299,17 @@ def construct_dir_from_dvc_list(
         else:
             # Raise specific exception so caller can handle appropriately
             from .errors import HashMismatchError
+            file_info = f"\n  File: {dvc_file}" if dvc_file else ""
             raise HashMismatchError(
                 expected_hash=expected_hash,
                 actual_hash=actual_hash,
+                dvc_file=dvc_file,
                 message=(
-                    f"Hash mismatch when constructing .dir manifest:\n"
+                    f"Hash mismatch when constructing .dir manifest:{file_info}\n"
                     f"  Expected: {expected_hash}\n"
                     f"  Got:      {actual_hash}\n"
                     f"  Files found: {len(entries)}\n"
-                    f"Try: dt fetch --update <file> to rebuild and update the .dvc file"
+                    f"Try: dt fetch --update {dvc_file or '<file>'} to rebuild and update the .dvc file"
                 )
             )
     

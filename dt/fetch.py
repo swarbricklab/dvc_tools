@@ -261,6 +261,7 @@ def _populate_cache_from_source(
                                 use_v3_layout=use_v3_layout,
                                 verbose=verbose,
                                 update=update,
+                                dvc_file=str(dvc_path),
                             )
                         except HashMismatchError:
                             if show_progress and not verbose:
