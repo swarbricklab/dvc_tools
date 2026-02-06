@@ -396,6 +396,119 @@ def get_url_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[
 
 
 # =============================================================================
+# Stage collection
+# =============================================================================
+
+def collect_stages(
+    targets: Optional[List[str]] = None,
+    recursive: bool = False,
+    verbose: bool = False,
+) -> List[Any]:
+    """Collect DVC stages using DVC's internal index.
+    
+    This uses the same mechanism as `dvc fetch` and `dvc pull` to discover
+    stages. It handles:
+    - .dvc files (from `dvc add` or `dvc import`)
+    - Pipeline stages (from dvc.yaml/dvc.lock)
+    - Targets by file path, stage name, or output path
+    
+    Args:
+        targets: Optional list of targets. If None, collects all stages.
+                 Can be .dvc file paths, stage names, or output paths.
+        recursive: If True, recursively find stages in directories.
+        verbose: If True, print debug information.
+        
+    Returns:
+        List of Stage objects. Each stage has:
+        - addressing: Stage name (e.g., 'data.dvc' or 'transform')
+        - is_import: True if this is a `dvc import` stage
+        - outs: List of Output objects with hash_info, def_path, fs_path
+        - deps: List of dependencies (for imports, includes def_repo)
+        
+    Raises:
+        StageFileDoesNotExistError: If a target doesn't exist
+        
+    Example:
+        # Get all stages
+        stages = collect_stages()
+        
+        # Get specific targets (mixed formats work)
+        stages = collect_stages(['data.dvc', 'transform', 'output.txt'])
+        
+        # Get stages in a directory
+        stages = collect_stages(['imported'], recursive=True)
+    """
+    from dvc.repo import Repo
+    from dvc.stage.exceptions import StageFileDoesNotExistError
+    
+    repo = Repo()
+    
+    try:
+        view = repo.index.targets_view(targets=targets, recursive=recursive)
+        stages = list(view.stages)
+        
+        if verbose:
+            print(f"Collected {len(stages)} stages")
+            for stage in stages:
+                print(f"  {stage.addressing} (import={stage.is_import})")
+                
+        return stages
+        
+    except StageFileDoesNotExistError:
+        raise
+    finally:
+        repo.close()
+
+
+def get_stage_info(stage: Any) -> Dict[str, Any]:
+    """Extract useful information from a DVC Stage object.
+    
+    Args:
+        stage: A DVC Stage object from collect_stages()
+        
+    Returns:
+        Dictionary with stage information:
+        - name: Stage addressing (name)
+        - is_import: Whether this is a dvc import
+        - is_pipeline: Whether this is from dvc.yaml
+        - outs: List of output dicts with path, md5, is_dir
+        - import_info: For imports, contains url, rev, path
+    """
+    from dvc.stage import PipelineStage
+    
+    info = {
+        'name': stage.addressing,
+        'is_import': stage.is_import,
+        'is_pipeline': isinstance(stage, PipelineStage),
+        'outs': [],
+        'import_info': None,
+    }
+    
+    # Extract output information
+    for out in stage.outs:
+        out_info = {
+            'path': out.def_path,
+            'fs_path': str(out.fs_path) if hasattr(out, 'fs_path') else None,
+            'md5': out.hash_info.value if out.hash_info else None,
+            'is_dir': out.hash_info.isdir if out.hash_info else False,
+        }
+        info['outs'].append(out_info)
+    
+    # Extract import information if applicable
+    if stage.is_import and hasattr(stage, 'deps') and stage.deps:
+        for dep in stage.deps:
+            if hasattr(dep, 'def_repo') and dep.def_repo:
+                info['import_info'] = {
+                    'url': dep.def_repo.get('url'),
+                    'rev': dep.def_repo.get('rev_lock') or dep.def_repo.get('rev'),
+                    'path': dep.def_path,
+                }
+                break
+    
+    return info
+
+
+# =============================================================================
 # Project utilities
 # =============================================================================
 
