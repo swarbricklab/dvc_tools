@@ -278,7 +278,9 @@ def is_repo_import(dvc_path: Path, repo: Optional[Any] = None) -> bool:
     try:
         dvc_file = load_dvc_file(dvc_path, repo)
         return dvc_file.stage.is_repo_import
-    except DVCFileError:
+    except (DVCFileError, Exception):
+        # Catch all exceptions including DVC's StageFileDoesNotExistError
+        # for dvc-ignored files
         return False
 
 
@@ -348,7 +350,9 @@ def is_url_import(dvc_path: Path, repo: Optional[Any] = None) -> bool:
                 return True
         
         return False
-    except DVCFileError:
+    except (DVCFileError, Exception):
+        # Catch all exceptions including DVC's StageFileDoesNotExistError
+        # for dvc-ignored files
         return False
 
 
