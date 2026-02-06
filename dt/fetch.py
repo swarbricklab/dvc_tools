@@ -576,9 +576,15 @@ def _fetch_from_stages(
     if url_import_stages:
         # Check network access before attempting URL imports
         # This avoids hanging on each one if there's no network
-        has_network = utils.check_network_access(timeout=3.0)
-        if not has_network and verbose:
-            print("\nNote: No network access detected. URL imports may fail.")
+        if verbose:
+            print("\nChecking network connectivity...")
+        has_network = utils.check_network_access(timeout=1.0)
+        if verbose:
+            if has_network:
+                print("  Network access: available")
+            else:
+                print("  Network access: not available")
+                print("  Note: URL imports may fail without network access.")
         
         for stage in url_import_stages:
             result = _fetch_url_import_stage(
@@ -665,12 +671,16 @@ def _fetch_regular_stages_bulk(
         return results
     
     # Find a local remote for fetching
+    if verbose:
+        print("\nChecking remote access...")
     remotes = remote.list_remotes()
     local_remote_info, access_error = remote.check_remote_access(remotes)
     
     if not local_remote_info and not network:
         # No local remote and network disabled - provide useful error message
         if access_error:
+            if verbose:
+                print(f"  {access_error}")
             error_msg = access_error
         else:
             error_msg = "No local remote available (use --network)"
