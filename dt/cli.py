@@ -1048,8 +1048,11 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
 @click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
 @click.option('--dry', is_flag=True, help='Show stage categorization without fetching (for troubleshooting)')
+@click.option('--imports', is_flag=True, help='Only fetch repo imports (from dvc import)')
+@click.option('--urls', is_flag=True, help='Only fetch URL imports (from dvc import-url)')
+@click.option('--regular', is_flag=True, help='Only fetch regular stages (non-imports)')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update, network, dry):
+def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, urls, regular):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1070,6 +1073,12 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry):
     After fetch, run `dvc checkout` to link files to the workspace.
     
     \b
+    Stage type filters (combinable, default is all types):
+        --imports    Only repo imports (dvc import)
+        --urls       Only URL imports (dvc import-url)  
+        --regular    Only regular stages (non-imports)
+    
+    \b
     Examples:
         dt fetch                           # Fetch all .dvc files from local sources
         dt fetch data/external.dvc         # Fetch specific targets
@@ -1078,6 +1087,9 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry):
         dt fetch --network                 # Fall back to dvc fetch if local remote unavailable
         dt fetch --dry                     # Show what would be fetched without actually fetching
         dt fetch --dry -v                  # Show detailed categorization
+        dt fetch --imports                 # Only fetch repo imports
+        dt fetch --urls --imports          # Only fetch imports (both types)
+        dt fetch --regular                 # Only fetch regular stages
     """
     from . import fetch as fetch_mod
     
@@ -1096,6 +1108,9 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry):
             update=update,
             network=network,
             dry=dry,
+            imports=imports,
+            urls=urls,
+            regular=regular,
         )
         
         # In dry mode, just exit (summary already printed)

@@ -538,6 +538,9 @@ def fetch(
     show_progress: bool = True,
     network: bool = False,
     dry: bool = False,
+    imports: bool = False,
+    urls: bool = False,
+    regular: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -564,6 +567,9 @@ def fetch(
         show_progress: If True (and not verbose), show a progress bar.
         network: If True, fall back to `dvc fetch` when local remote not available.
         dry: If True, only collect and categorize stages without fetching.
+        imports: If True, only fetch repo imports. Can combine with urls/regular.
+        urls: If True, only fetch URL imports. Can combine with imports/regular.
+        regular: If True, only fetch regular stages. Can combine with imports/urls.
         
     Returns:
         List of (target, success, message) tuples.
@@ -575,6 +581,9 @@ def fetch(
     from dvc.stage.exceptions import StageFileDoesNotExistError
     from dvc.scm import SCMError
     from . import doctor
+    
+    # If none of the type filters are specified, fetch all
+    fetch_all = not (imports or urls or regular)
     
     # Run environment checks
     env = doctor.check_environment()
@@ -613,6 +622,9 @@ def fetch(
         update=update,
         show_progress=show_progress,
         network=network,
+        include_imports=fetch_all or imports,
+        include_urls=fetch_all or urls,
+        include_regular=fetch_all or regular,
     )
 
 
@@ -622,6 +634,9 @@ def _fetch_from_stages(
     update: bool = False,
     show_progress: bool = True,
     network: bool = False,
+    include_imports: bool = True,
+    include_urls: bool = True,
+    include_regular: bool = True,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch from categorized stages using bulk operations.
     
@@ -634,6 +649,9 @@ def _fetch_from_stages(
         update: If True, rebuild .dir files and update .dvc hashes.
         show_progress: If True, show progress bar.
         network: If True, fall back to dvc fetch for stages without local cache.
+        include_imports: If True, process repo imports.
+        include_urls: If True, process URL imports.
+        include_regular: If True, process regular stages.
         
     Returns:
         List of (target, success, message) tuples.
@@ -647,12 +665,15 @@ def _fetch_from_stages(
     
     if verbose:
         print(f"Stage breakdown:")
-        print(f"  Regular stages: {len(categorization.regular_stages)}")
-        print(f"  Repo imports: {categorization.repo_import_count}")
-        print(f"  URL imports: {len(categorization.url_imports)}")
+        if include_regular:
+            print(f"  Regular stages: {len(categorization.regular_stages)}")
+        if include_imports:
+            print(f"  Repo imports: {categorization.repo_import_count}")
+        if include_urls:
+            print(f"  URL imports: {len(categorization.url_imports)}")
     
     # Phase 1: Bulk fetch regular stages
-    if categorization.regular_stages:
+    if include_regular and categorization.regular_stages:
         if verbose:
             print(f"\nPhase 1: Processing {len(categorization.regular_stages)} regular stages...")
         results.extend(_fetch_regular_stages_bulk(
@@ -665,7 +686,7 @@ def _fetch_from_stages(
             print(f"  Regular stages complete.")
     
     # Phase 2: Handle repo imports (grouped by source repo)
-    if categorization.repo_imports:
+    if include_imports and categorization.repo_imports:
         if verbose:
             print(f"\nPhase 2: Processing {categorization.repo_import_count} repo imports...")
             print(f"  From {len(categorization.repo_imports)} source repositories")
@@ -690,7 +711,7 @@ def _fetch_from_stages(
             print(f"  Repo imports complete.")
     
     # Phase 3: Handle URL imports
-    if categorization.url_imports:
+    if include_urls and categorization.url_imports:
         if verbose:
             print(f"\nPhase 3: Processing {len(categorization.url_imports)} URL imports...")
         # Check network access before attempting URL imports
