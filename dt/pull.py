@@ -18,7 +18,7 @@ from dvc.repo import Repo
 
 from . import hpc
 from . import utils
-from .fetch import fetch, smart_checkout
+from .fetch import fetch
 from .errors import FetchError, PullError
 
 
@@ -730,12 +730,18 @@ def _pull_from_stages(
             
             try:
                 if verbose:
-                    print(f"  smart_checkout {stage_name}")
-                smart_checkout(
+                    print(f"  fetch {stage_name}")
+                fetch(
                     targets=[str(stage_path)],
-                    cache=None,
                     verbose=verbose,
                     update=update,
+                    show_progress=not verbose,
+                )
+                # Checkout after fetch
+                subprocess.run(
+                    ['dvc', 'checkout', str(stage_path)],
+                    capture_output=not verbose,
+                    text=True,
                 )
             except FetchError as e:
                 print(f"Error fetching {stage_name}: {e}")
@@ -815,12 +821,18 @@ def _pull_from_files(
                 dvc_file = resolve_to_dvc_file(target)
                 if dvc_file:
                     if verbose:
-                        print(f"  smart_checkout {dvc_file}")
-                    smart_checkout(
+                        print(f"  fetch {dvc_file}")
+                    fetch(
                         targets=[str(dvc_file)],
-                        cache=None,
                         verbose=verbose,
                         update=update,
+                        show_progress=not verbose,
+                    )
+                    # Checkout after fetch
+                    subprocess.run(
+                        ['dvc', 'checkout', str(dvc_file)],
+                        capture_output=not verbose,
+                        text=True,
                     )
             except FetchError as e:
                 print(f"Error fetching {target}: {e}")

@@ -1,15 +1,77 @@
 """Diagnostic checks for DVC Tools.
 
 Verifies environment setup and common configuration issues.
+Provides centralized environment checks used by fetch and other commands.
 """
 
 import os
+import socket
 import subprocess
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from . import config as cfg
+
+
+@dataclass
+class EnvironmentStatus:
+    """Results of environment checks for fetch operations.
+    
+    This class consolidates all pre-flight checks that fetch needs:
+    - Repository status (git, dvc, dt)
+    - Network connectivity
+    - Remote accessibility
+    
+    Use `check_environment()` to populate this.
+    """
+    # Repository checks
+    in_git_repo: bool = False
+    in_dvc_repo: bool = False
+    in_dt_repo: bool = False
+    git_root: Optional[Path] = None
+    dvc_root: Optional[Path] = None
+    
+    # Network checks  
+    has_network: bool = False
+    network_checked: bool = False
+    
+    # Remote access checks
+    local_remote_name: Optional[str] = None
+    local_remote_path: Optional[str] = None
+    remote_accessible: bool = False
+    remote_error: Optional[str] = None
+    
+    # Error messages for failures
+    errors: List[str] = field(default_factory=list)
+    
+    def require_git_repo(self) -> None:
+        """Raise error if not in a git repository."""
+        if not self.in_git_repo:
+            from .errors import FetchError
+            raise FetchError(
+                "Not in a git repository. This command requires a git repository.\n"
+                "Run 'git init' to initialize one, or cd to an existing repo."
+            )
+    
+    def require_dvc_repo(self) -> None:
+        """Raise error if not in a DVC repository."""
+        if not self.in_dvc_repo:
+            from .errors import FetchError
+            raise FetchError(
+                "Not in a DVC repository. This command requires DVC to be initialized.\n"
+                "Run 'dvc init' to initialize DVC in this repository."
+            )
+    
+    def require_network(self) -> None:
+        """Raise error if network is not available."""
+        if not self.has_network:
+            from .errors import FetchError
+            raise FetchError(
+                "No network connectivity. This operation requires network access.\n"
+                "Check your network connection or try again later."
+            )
 
 
 class DiagnosticResult:
@@ -215,6 +277,221 @@ def check_remote_root() -> DiagnosticResult:
         )
 
 
+# =============================================================================
+# Environment checks (used by fetch and other commands)
+# =============================================================================
+
+def check_in_git_repo() -> Tuple[bool, Optional[Path]]:
+    """Check if we're inside a git repository.
+    
+    Returns:
+        Tuple of (is_in_repo, git_root_path)
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return True, Path(result.stdout.strip())
+        return False, None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False, None
+
+
+def check_in_dvc_repo() -> Tuple[bool, Optional[Path]]:
+    """Check if we're inside a DVC repository.
+    
+    Returns:
+        Tuple of (is_in_repo, dvc_root_path)
+    """
+    # Check for .dvc directory
+    cwd = Path.cwd()
+    for parent in [cwd] + list(cwd.parents):
+        if (parent / '.dvc').is_dir():
+            return True, parent
+    return False, None
+
+
+def check_in_dt_repo() -> bool:
+    """Check if this appears to be a dt-initialized repository.
+    
+    A dt repo has .dvc and typically has dt-specific config.
+    """
+    in_dvc, _ = check_in_dvc_repo()
+    if not in_dvc:
+        return False
+    
+    # Check for dt-specific markers (e.g., dt config file or cache.root set)
+    # For now, having DVC is sufficient
+    return True
+
+
+def check_network_connectivity(timeout: float = 1.0) -> bool:
+    """Check if network/internet access is available.
+    
+    Attempts to connect to common reliable hosts to detect network connectivity.
+    Uses aggressive timeouts to fail fast on isolated nodes.
+    
+    Args:
+        timeout: Connection timeout in seconds per host (default 1s).
+        
+    Returns:
+        True if network is accessible, False otherwise.
+    """
+    # Try a few reliable hosts - use IP addresses to avoid DNS delays
+    test_hosts = [
+        ("8.8.8.8", 53),      # Google DNS (fastest to check)
+        ("1.1.1.1", 53),      # Cloudflare DNS
+    ]
+    
+    for host, port in test_hosts:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result == 0:
+                return True
+        except (socket.error, socket.timeout, OSError):
+            continue
+    
+    return False
+
+
+def check_local_remote_access() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Check if a local remote is accessible.
+    
+    Returns:
+        Tuple of (remote_name, remote_path, error_message)
+        - If accessible: (name, path, None)
+        - If not accessible: (None, None, error_message)
+    """
+    from . import remote as remote_mod
+    
+    try:
+        remotes = remote_mod.list_remotes()
+        if not remotes:
+            return None, None, "No DVC remotes configured"
+        
+        result, error = remote_mod.check_remote_access(remotes)
+        if result:
+            return result[0], result[1], None
+        elif error:
+            return None, None, error
+        else:
+            return None, None, "No locally-accessible remote found"
+    except Exception as e:
+        return None, None, f"Error checking remotes: {e}"
+
+
+def check_environment(
+    check_network: bool = False,
+    check_remote: bool = False,
+    network_timeout: float = 1.0,
+) -> EnvironmentStatus:
+    """Run environment checks and return status.
+    
+    This is the main entry point for pre-flight checks. It efficiently
+    checks the environment and caches results in an EnvironmentStatus object.
+    
+    Args:
+        check_network: If True, check network connectivity (may be slow).
+        check_remote: If True, check local remote accessibility.
+        network_timeout: Timeout for network check in seconds.
+        
+    Returns:
+        EnvironmentStatus with all check results.
+    """
+    status = EnvironmentStatus()
+    
+    # Git repo check
+    status.in_git_repo, status.git_root = check_in_git_repo()
+    if not status.in_git_repo:
+        status.errors.append("Not in a git repository")
+    
+    # DVC repo check
+    status.in_dvc_repo, status.dvc_root = check_in_dvc_repo()
+    if not status.in_dvc_repo:
+        status.errors.append("Not in a DVC repository")
+    
+    # DT repo check
+    status.in_dt_repo = check_in_dt_repo()
+    
+    # Network check (optional, can be slow)
+    if check_network:
+        status.has_network = check_network_connectivity(timeout=network_timeout)
+        status.network_checked = True
+    
+    # Remote access check (optional)
+    if check_remote and status.in_dvc_repo:
+        name, path, error = check_local_remote_access()
+        if name and path:
+            status.local_remote_name = name
+            status.local_remote_path = path
+            status.remote_accessible = True
+        else:
+            status.remote_error = error
+    
+    return status
+
+
+def check_git_repo() -> DiagnosticResult:
+    """Check if we're in a git repository (for dt doctor output)."""
+    in_repo, root = check_in_git_repo()
+    if in_repo:
+        return DiagnosticResult("git_repo", True, f"In git repository ({root})")
+    else:
+        return DiagnosticResult(
+            "git_repo", False, "Not in a git repository",
+            "Run 'git init' or cd to a git repository"
+        )
+
+
+def check_dvc_repo() -> DiagnosticResult:
+    """Check if we're in a DVC repository (for dt doctor output)."""
+    in_repo, root = check_in_dvc_repo()
+    if in_repo:
+        return DiagnosticResult("dvc_repo", True, f"In DVC repository ({root})")
+    else:
+        return DiagnosticResult(
+            "dvc_repo", False, "Not in a DVC repository",
+            "Run 'dvc init' to initialize DVC"
+        )
+
+
+def check_network() -> DiagnosticResult:
+    """Check network connectivity (for dt doctor output)."""
+    has_network = check_network_connectivity(timeout=2.0)
+    if has_network:
+        return DiagnosticResult("network", True, "Network connectivity available")
+    else:
+        return DiagnosticResult(
+            "network", False, "No network connectivity",
+            "Check your network connection"
+        )
+
+
+def check_local_remote() -> DiagnosticResult:
+    """Check local remote accessibility (for dt doctor output)."""
+    name, path, error = check_local_remote_access()
+    if name and path:
+        return DiagnosticResult(
+            "local_remote", True, 
+            f"Local remote accessible: '{name}' at {path}"
+        )
+    elif error:
+        return DiagnosticResult("local_remote", False, error)
+    else:
+        return DiagnosticResult(
+            "local_remote", False,
+            "No locally-accessible remote configured",
+            "Configure a DVC remote with 'dvc remote add'"
+        )
+
+
 def run_diagnostics(verbose: bool = False) -> list[DiagnosticResult]:
     """Run all diagnostic checks.
     
@@ -238,6 +515,15 @@ def run_diagnostics(verbose: bool = False) -> list[DiagnosticResult]:
     # Configuration checks
     results.append(check_cache_root())
     results.append(check_remote_root())
+    
+    # Repository context checks
+    results.append(check_git_repo())
+    results.append(check_dvc_repo())
+    
+    # Environment checks (may be slow)
+    if verbose:
+        results.append(check_network())
+        results.append(check_local_remote())
     
     return results
 

@@ -16,6 +16,7 @@ from typing import Optional, Tuple, Dict, Any, List
 
 import yaml
 
+from . import cache_ops
 from . import remote as remote_mod
 from . import tmp as tmp_mod
 from . import utils
@@ -73,77 +74,12 @@ def populate_primary_cache(
         # Cache file location (hash-based)
         cache_file = cache_base / md5[:2] / md5[2:]
         
-        # Skip if already exists in cache
-        if cache_file.exists():
-            continue
-        
-        # Create parent directory if needed
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Follow DVC's preferred order: reflink → hardlink → symlink → copy
+        # Resolve symlink to actual file and use shared link function
         actual_file = workspace_file.resolve()
-        cached = False
-        
-        # 1. Try reflink (copy-on-write) - best option
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['cp', '--reflink=only', str(actual_file), str(cache_file)],
-                capture_output=True
-            )
-            if result.returncode == 0:
-                count += 1
-                cached = True
-                if verbose:
-                    print(f"  Cached (reflink): {md5[:8]}... ({relpath or workspace_path.name})")
-        except (OSError, FileNotFoundError):
-            pass
-        
-        if cached:
-            continue
-        
-        # 2. Try hardlink - same inode, no extra space
-        try:
-            os.link(actual_file, cache_file)
+        label = f"{md5[:8]}... ({relpath or workspace_path.name})"
+        success, _ = cache_ops.link_file(actual_file, cache_file, verbose=verbose, label=label)
+        if success:
             count += 1
-            cached = True
-            if verbose:
-                print(f"  Cached (hardlink): {md5[:8]}... ({relpath or workspace_path.name})")
-        except OSError as e:
-            # EXDEV (18): Cross-device link
-            # EPERM (1): Operation not permitted (HPC quota restrictions)
-            # EACCES (13): Permission denied
-            if e.errno not in (1, 13, 18):
-                if verbose:
-                    print(f"  Warning: Failed to cache {md5[:8]}...: {e}")
-                continue
-        
-        if cached:
-            continue
-        
-        # 3. Try symlink - works across filesystems
-        try:
-            os.symlink(actual_file, cache_file)
-            count += 1
-            cached = True
-            if verbose:
-                print(f"  Cached (symlink): {md5[:8]}... ({relpath or workspace_path.name})")
-        except OSError:
-            pass
-        
-        if cached:
-            continue
-        
-        # 4. Fall back to regular copy
-        try:
-            import shutil
-            shutil.copy2(actual_file, cache_file)
-            count += 1
-            if verbose:
-                print(f"  Cached (copy): {md5[:8]}... ({relpath or workspace_path.name})")
-        except OSError as e:
-            if verbose:
-                print(f"  Warning: Failed to copy {md5[:8]}...: {e}")
     
     return count
 
@@ -535,119 +471,27 @@ def populate_cache_file(
 ) -> Optional[bool]:
     """Copy or link a single file from source cache to destination cache.
     
-    Used for .dir files and single file imports where we need to ensure
-    the file exists in the primary cache.
-    
-    Supports both DVC v3 cache layout (files/md5/XX/hash) and legacy 
-    DVC v2 layout (XX/hash directly in remote root).
+    Thin wrapper around cache_ops.populate_cache_file() for backwards compatibility.
     
     Args:
         md5: The MD5 hash (with optional .dir suffix).
-        source_cache: Path to the source cache/remote root (e.g., /path/to/.remote).
-            May contain files/md5/ structure (v3) or direct hash dirs (v2).
+        source_cache: Path to the source cache/remote root.
         dest_cache: Path to the destination cache base directory.
-            For v3 layout, files go in dest_cache/files/md5/XX/hash.
-            For v2 layout, files go in dest_cache/XX/hash.
         verbose: Print progress messages.
-        use_v3_layout: If True, use v3 layout (files/md5/XX/hash) for destination.
-            If False, use v2 layout (XX/hash). Should match the .dvc file format.
+        use_v3_layout: If True, use v3 layout for destination.
         
     Returns:
         True if file was added to cache.
         False if file already exists in cache.
         None if source file not found (error case).
     """
-    # Handle .dir suffix
-    if md5.endswith('.dir'):
-        hash_only = md5[:-4]
-        filename = hash_only[2:] + '.dir'
-    else:
-        hash_only = md5
-        filename = hash_only[2:]
-    
-    # Try DVC v3 path first (files/md5/XX/hash)
-    source_file_v3 = Path(source_cache) / 'files' / 'md5' / hash_only[:2] / filename
-    # Fall back to DVC v2 path (XX/hash directly in remote root)
-    source_file_v2 = Path(source_cache) / hash_only[:2] / filename
-    
-    # Use whichever exists
-    if source_file_v3.exists():
-        source_file = source_file_v3
-    elif source_file_v2.exists():
-        source_file = source_file_v2
-        if verbose:
-            print(f"  Using legacy cache layout for: {md5[:12]}...")
-    else:
-        # Neither exists - return None to indicate source not found
-        return None
-    
-    # Destination path depends on the .dvc file format
-    # v3 format (.dvc has 'hash: md5') -> files/md5/XX/hash
-    # v2 format (.dvc only has 'md5:') -> XX/hash (at cache root)
-    if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / hash_only[:2] / filename
-    else:
-        dest_file = Path(dest_cache) / hash_only[:2] / filename
-    
-    if dest_file.exists():
-        return False
-    
-    dest_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Follow DVC's preferred order: reflink → hardlink → symlink → copy
-    # See: https://dvc.org/doc/user-guide/data-management/large-dataset-optimization
-    
-    # 1. Try reflink (copy-on-write) - best option: instant, zero space, safe to modify
-    try:
-        import subprocess
-        result = subprocess.run(
-            ['cp', '--reflink=only', str(source_file), str(dest_file)],
-            capture_output=True
-        )
-        if result.returncode == 0:
-            if verbose:
-                print(f"  Cached (reflink): {md5[:12]}...")
-            return True
-    except (OSError, FileNotFoundError):
-        pass  # cp not available or reflink not supported
-    
-    # 2. Try hardlink - same inode, no extra space, works within same filesystem/project
-    try:
-        os.link(source_file, dest_file)
-        if verbose:
-            print(f"  Cached (hardlink): {md5[:12]}...")
-        return True
-    except OSError as e:
-        # EXDEV (18): Cross-device link (different filesystems)
-        # EPERM (1): Operation not permitted (common on HPC with quota restrictions)
-        # EACCES (13): Permission denied
-        if e.errno not in (1, 13, 18):
-            if verbose:
-                print(f"  ERROR: Failed to cache {md5[:12]}...: {e}")
-            return False
-    
-    # 3. Try symlink - pointer to source, no extra space, works across filesystems
-    try:
-        os.symlink(source_file, dest_file)
-        if verbose:
-            print(f"  Cached (symlink): {md5[:12]}...")
-        return True
-    except OSError as e:
-        if verbose:
-            print(f"  Warning: symlink failed for {md5[:12]}...: {e}")
-    
-    # 4. Fall back to regular copy - slower but universally compatible
-    try:
-        import shutil
-        shutil.copy2(source_file, dest_file)
-        if verbose:
-            print(f"  Cached (copy): {md5[:12]}...")
-        return True
-    except OSError as e:
-        if verbose:
-            print(f"  ERROR: Failed to copy {md5[:12]}...: {e}")
-    
-    return False
+    return cache_ops.populate_cache_file(
+        md5=md5,
+        source_cache=source_cache,
+        dest_cache=dest_cache,
+        verbose=verbose,
+        use_v3_layout=use_v3_layout,
+    )
 
 
 def configure_clone_cache(clone_path: Path, cache_path: str) -> None:

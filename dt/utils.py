@@ -961,3 +961,101 @@ def get_commit_info(commit: str) -> Dict[str, str]:
         'message': '',
         'author': '',
     }
+
+
+# =============================================================================
+# DVC file manipulation utilities
+# =============================================================================
+
+def is_autostage_enabled() -> bool:
+    """Check if DVC core.autostage is enabled.
+    
+    Returns:
+        True if autostage is enabled, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            ['dvc', 'config', 'core.autostage'],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and result.stdout.strip().lower() == 'true'
+    except (OSError, FileNotFoundError):
+        return False
+
+
+def git_stage_file(path: Path, verbose: bool = False) -> None:
+    """Stage a file with git add.
+    
+    Args:
+        path: Path to file to stage.
+        verbose: Print progress messages.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'add', str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            if verbose:
+                print(f"  Staged {path.name} (core.autostage enabled)")
+        elif verbose:
+            print(f"  Warning: Could not stage {path.name}: {result.stderr.strip()}")
+    except (OSError, FileNotFoundError) as e:
+        if verbose:
+            print(f"  Warning: Could not stage {path.name}: {e}")
+
+
+def update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool = False) -> bool:
+    """Update the MD5 hash in a .dvc file.
+    
+    For import files, the hash is in outs with a .dir suffix (e.g., "abc123.dir").
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        old_hash: The old hash to replace (without .dir suffix).
+        new_hash: The new hash to use.
+        verbose: Print progress messages.
+        
+    Returns:
+        True if the file was modified, False otherwise.
+    """
+    import yaml
+    
+    try:
+        content = dvc_path.read_text()
+        data = yaml.safe_load(content)
+        
+        # Update the outs section - check for both exact hash and hash.dir format
+        modified = False
+        for out in data.get('outs', []):
+            out_md5 = out.get('md5', '')
+            # Handle both "hash" and "hash.dir" formats
+            if out_md5 == old_hash:
+                out['md5'] = new_hash
+                modified = True
+            elif out_md5 == f"{old_hash}.dir":
+                out['md5'] = f"{new_hash}.dir"
+                modified = True
+        
+        if modified:
+            # Write back with same formatting
+            with open(dvc_path, 'w') as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            if verbose:
+                print(f"  Updated .dvc file hash: {old_hash[:12]}... -> {new_hash[:12]}...")
+            
+            # Stage file if autostage is enabled
+            if is_autostage_enabled():
+                git_stage_file(dvc_path, verbose)
+            
+            return True
+        elif verbose:
+            print(f"  Warning: Could not find hash {old_hash[:12]}... in .dvc file to update")
+        return False
+            
+    except Exception as e:
+        if verbose:
+            print(f"  Warning: Could not update .dvc file: {e}")
+        return False

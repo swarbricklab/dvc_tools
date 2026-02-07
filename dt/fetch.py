@@ -15,6 +15,7 @@ This is the "dt" equivalent of `dvc fetch`, but works with local caches
 """
 
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,98 +26,188 @@ from . import utils
 from .errors import FetchError, HashMismatchError
 
 
-def _is_autostage_enabled() -> bool:
-    """Check if DVC core.autostage is enabled.
+# =============================================================================
+# Stage Categorization
+# =============================================================================
+
+@dataclass
+class RepoImportGroup:
+    """Group of repo import stages from the same source repository."""
+    url: str
+    rev: Optional[str]
+    stages: List[Any] = field(default_factory=list)
+    local_cache: Optional[Path] = None
+    has_local_cache: bool = False
     
-    Returns:
-        True if autostage is enabled, False otherwise.
+    def add_stage(self, stage: Any) -> None:
+        """Add a stage to this group."""
+        self.stages.append(stage)
+    
+    @property
+    def count(self) -> int:
+        """Number of stages in this group."""
+        return len(self.stages)
+    
+    @property
+    def short_name(self) -> str:
+        """Short display name for this repo (last component of URL)."""
+        if not self.url:
+            return "unknown"
+        # Handle both git URLs and paths
+        name = self.url.rstrip('/').split('/')[-1]
+        # Remove .git suffix if present
+        if name.endswith('.git'):
+            name = name[:-4]
+        return name
+
+
+@dataclass
+class StageCategorization:
+    """Categorized stages for fetch operations.
+    
+    Divides stages into three categories:
+    1. URL imports (dvc import-url) - external URLs
+    2. Repo imports (dvc import) - grouped by source repository
+    3. Regular stages - non-import .dvc files and pipeline stages
     """
-    try:
-        result = subprocess.run(
-            ['dvc', 'config', 'core.autostage'],
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0 and result.stdout.strip().lower() == 'true'
-    except (OSError, FileNotFoundError):
-        return False
+    url_imports: List[Any] = field(default_factory=list)
+    repo_imports: Dict[str, RepoImportGroup] = field(default_factory=dict)
+    regular_stages: List[Any] = field(default_factory=list)
+    
+    @property
+    def total_stages(self) -> int:
+        """Total number of stages across all categories."""
+        repo_import_count = sum(g.count for g in self.repo_imports.values())
+        return len(self.url_imports) + repo_import_count + len(self.regular_stages)
+    
+    @property
+    def repo_import_count(self) -> int:
+        """Total number of repo import stages."""
+        return sum(g.count for g in self.repo_imports.values())
+    
+    def summary_lines(self, verbose: bool = False) -> List[str]:
+        """Generate summary lines for display.
+        
+        Args:
+            verbose: If True, include individual stage names.
+            
+        Returns:
+            List of formatted strings for display.
+        """
+        lines = []
+        
+        # URL imports
+        if self.url_imports:
+            lines.append(f"URL imports: {len(self.url_imports)}")
+            if verbose:
+                for stage in self.url_imports:
+                    lines.append(f"    {stage.addressing}")
+        
+        # Repo imports (grouped by source)
+        if self.repo_imports:
+            lines.append(f"Repo imports: {self.repo_import_count}")
+            for url, group in sorted(self.repo_imports.items(), key=lambda x: x[1].short_name):
+                cache_status = "✓ local cache" if group.has_local_cache else "✗ no local cache"
+                lines.append(f"    {group.short_name}: {group.count} ({cache_status})")
+                if verbose:
+                    for stage in group.stages:
+                        lines.append(f"        {stage.addressing}")
+        
+        # Regular stages
+        if self.regular_stages:
+            lines.append(f"Regular stages: {len(self.regular_stages)}")
+            if verbose:
+                for stage in self.regular_stages:
+                    lines.append(f"    {stage.addressing}")
+        
+        return lines
+    
+    def print_summary(self, verbose: bool = False) -> None:
+        """Print summary to stdout."""
+        lines = self.summary_lines(verbose=verbose)
+        for line in lines:
+            print(line)
 
 
-def _git_stage_file(path: Path, verbose: bool = False) -> None:
-    """Stage a file with git add.
+def categorize_stages(
+    stages: List[Any],
+    verbose: bool = False,
+) -> StageCategorization:
+    """Categorize stages by type for fetch operations.
+    
+    Divides stages into:
+    1. URL imports (dvc import-url)
+    2. Repo imports (dvc import) - grouped by source repository
+    3. Regular stages (non-import)
+    
+    For repo imports, also checks if a local cache is accessible.
     
     Args:
-        path: Path to file to stage.
-        verbose: Print progress messages.
+        stages: List of DVC Stage objects.
+        verbose: Print progress information.
+        
+    Returns:
+        StageCategorization with stages organized by type.
     """
-    try:
-        result = subprocess.run(
-            ['git', 'add', str(path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            if verbose:
-                print(f"  Staged {path.name} (core.autostage enabled)")
-        elif verbose:
-            print(f"  Warning: Could not stage {path.name}: {result.stderr.strip()}")
-    except (OSError, FileNotFoundError) as e:
-        if verbose:
-            print(f"  Warning: Could not stage {path.name}: {e}")
+    from . import clone
+    
+    result = StageCategorization()
+    
+    for stage in stages:
+        if stage.is_repo_import:
+            # Get import info to group by source repo
+            stage_path = Path(stage.path) if hasattr(stage, 'path') else None
+            if stage_path:
+                import_info = utils.get_import_info(stage_path)
+                if import_info:
+                    url = import_info.get('url', '')
+                    rev = import_info.get('rev')
+                    
+                    # Get or create group for this URL
+                    if url not in result.repo_imports:
+                        group = RepoImportGroup(url=url, rev=rev)
+                        # Check if we have a local cache for this repo
+                        try:
+                            source_cache = clone.find_source_cache(url)
+                            if source_cache:
+                                group.local_cache = Path(source_cache)
+                                group.has_local_cache = True
+                        except Exception:
+                            pass
+                        result.repo_imports[url] = group
+                    
+                    result.repo_imports[url].add_stage(stage)
+                else:
+                    # Couldn't get import info, still a repo import but unknown source
+                    if '' not in result.repo_imports:
+                        result.repo_imports[''] = RepoImportGroup(url='', rev=None)
+                    result.repo_imports[''].add_stage(stage)
+            else:
+                # No path, unknown source
+                if '' not in result.repo_imports:
+                    result.repo_imports[''] = RepoImportGroup(url='', rev=None)
+                result.repo_imports[''].add_stage(stage)
+        elif stage.is_import:
+            # URL import (dvc import-url)
+            result.url_imports.append(stage)
+        else:
+            # Regular stage
+            result.regular_stages.append(stage)
+    
+    if verbose:
+        print(f"Categorized {result.total_stages} stages:")
+        result.print_summary(verbose=False)
+    
+    return result
 
+
+# =============================================================================
+# Cache Population
+# =============================================================================
 
 def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool = False) -> bool:
-    """Update the MD5 hash in a .dvc file.
-    
-    For import files, the hash is in outs with a .dir suffix (e.g., "abc123.dir").
-    
-    Args:
-        dvc_path: Path to the .dvc file.
-        old_hash: The old hash to replace (without .dir suffix).
-        new_hash: The new hash to use.
-        verbose: Print progress messages.
-        
-    Returns:
-        True if the file was modified, False otherwise.
-    """
-    import yaml
-    
-    try:
-        content = dvc_path.read_text()
-        data = yaml.safe_load(content)
-        
-        # Update the outs section - check for both exact hash and hash.dir format
-        modified = False
-        for out in data.get('outs', []):
-            out_md5 = out.get('md5', '')
-            # Handle both "hash" and "hash.dir" formats
-            if out_md5 == old_hash:
-                out['md5'] = new_hash
-                modified = True
-            elif out_md5 == f"{old_hash}.dir":
-                out['md5'] = f"{new_hash}.dir"
-                modified = True
-        
-        if modified:
-            # Write back with same formatting
-            with open(dvc_path, 'w') as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-            if verbose:
-                print(f"  Updated .dvc file hash: {old_hash[:12]}... -> {new_hash[:12]}...")
-            
-            # Stage file if autostage is enabled
-            if _is_autostage_enabled():
-                _git_stage_file(dvc_path, verbose)
-            
-            return True
-        elif verbose:
-            print(f"  Warning: Could not find hash {old_hash[:12]}... in .dvc file to update")
-        return False
-            
-    except Exception as e:
-        if verbose:
-            print(f"  Warning: Could not update .dvc file: {e}")
-        return False
+    """Update the MD5 hash in a .dvc file. Wrapper for utils.update_dvc_hash."""
+    return utils.update_dvc_hash(dvc_path, old_hash, new_hash, verbose)
 
 
 def _populate_cache_from_source(
@@ -431,6 +522,7 @@ def fetch(
     update: bool = False,
     show_progress: bool = True,
     network: bool = False,
+    dry: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -456,109 +548,100 @@ def fetch(
         update: If True, create .dir file with computed hash and update .dvc file.
         show_progress: If True (and not verbose), show a progress bar.
         network: If True, fall back to `dvc fetch` when local remote not available.
+        dry: If True, only collect and categorize stages without fetching.
         
     Returns:
         List of (target, success, message) tuples.
+        In dry mode, returns empty list (summary is printed instead).
         
     Raises:
         FetchError: If fetch fails.
     """
-    from dvc.stage import PipelineStage
     from dvc.stage.exceptions import StageFileDoesNotExistError
     from dvc.scm import SCMError
+    from . import doctor
     
+    # Run environment checks
+    env = doctor.check_environment()
+    env.require_git_repo()
+    
+    # Also verify DVC is installed
     try:
         utils.check_dvc()
     except utils.DependencyError as e:
         raise FetchError(str(e))
     
     # Collect stages using DVC's internal index
-    # Falls back to file-based approach if not in a git repo
-    use_stages = True
-    stages = []
-    
     try:
         stages = utils.collect_stages(targets=targets, verbose=verbose)
     except StageFileDoesNotExistError as e:
         raise FetchError(str(e))
     except SCMError:
-        # Not in a git repository - fall back to file-based approach
-        use_stages = False
-        if verbose:
-            print("Not in a git repository, using file-based discovery")
-    except Exception as e:
-        # Other errors - try fallback
-        use_stages = False
-        if verbose:
-            print(f"Could not use DVC index ({e}), using file-based discovery")
+        # This shouldn't happen since we checked above, but handle it anyway
+        env.require_git_repo()
     
-    if use_stages:
-        if verbose:
-            print(f"Found {len(stages)} stage(s) to process")
-        return _fetch_from_stages(
-            stages=stages,
-            verbose=verbose,
-            update=update,
-            show_progress=show_progress,
-            network=network,
-        )
-    else:
-        # Fallback: use file-based approach
-        return _fetch_from_files(
-            targets=targets,
-            verbose=verbose,
-            update=update,
-            show_progress=show_progress,
-            network=network,
-        )
+    if verbose:
+        print(f"Found {len(stages)} stage(s) to process")
+    
+    # Categorize stages
+    categorization = categorize_stages(stages, verbose=False)
+    
+    # In dry mode, just print the summary and return
+    if dry:
+        print(f"\nStage categorization ({categorization.total_stages} total):")
+        categorization.print_summary(verbose=verbose)
+        return []
+    
+    return _fetch_from_stages(
+        categorization=categorization,
+        verbose=verbose,
+        update=update,
+        show_progress=show_progress,
+        network=network,
+    )
 
 
 def _fetch_from_stages(
-    stages: List[Any],
+    categorization: StageCategorization,
     verbose: bool = False,
     update: bool = False,
     show_progress: bool = True,
     network: bool = False,
 ) -> List[Tuple[str, bool, str]]:
-    """Fetch from DVC Stage objects using bulk operations.
+    """Fetch from categorized stages using bulk operations.
     
     Uses DVC's bulk cache checking to efficiently determine which
     objects need to be fetched, then fetches only the missing ones.
+    
+    Args:
+        categorization: Pre-categorized stages from categorize_stages().
+        verbose: Print progress information.
+        update: If True, rebuild .dir files and update .dvc hashes.
+        show_progress: If True, show progress bar.
+        network: If True, fall back to dvc fetch for stages without local cache.
+        
+    Returns:
+        List of (target, success, message) tuples.
     """
-    from dvc.stage import PipelineStage
-    from dvc.repo import Repo
+    from . import doctor
     
     results = []
     
-    if not stages:
+    if categorization.total_stages == 0:
         return results
-    
-    # Phase 1: Categorize stages
-    import_stages = []      # Repo imports (need special handling)
-    url_import_stages = []  # URL imports (dvc import-url)
-    regular_stages = []     # Regular .dvc files and pipeline outputs
-    
-    for stage in stages:
-        if stage.is_repo_import:
-            import_stages.append(stage)
-        elif stage.is_import:
-            url_import_stages.append(stage)
-        else:
-            regular_stages.append(stage)
     
     if verbose:
         print(f"Stage breakdown:")
-        print(f"  Regular stages: {len(regular_stages)}")
-        print(f"  Repo imports: {len(import_stages)}")
-        print(f"  URL imports: {len(url_import_stages)}")
+        print(f"  Regular stages: {len(categorization.regular_stages)}")
+        print(f"  Repo imports: {categorization.repo_import_count}")
+        print(f"  URL imports: {len(categorization.url_imports)}")
     
-    # Phase 2: Bulk check regular stages
-    # Collect all needed hashes and check cache in one operation
-    if regular_stages:
+    # Phase 1: Bulk fetch regular stages
+    if categorization.regular_stages:
         if verbose:
-            print(f"\nPhase 2: Processing {len(regular_stages)} regular stages...")
+            print(f"\nPhase 1: Processing {len(categorization.regular_stages)} regular stages...")
         results.extend(_fetch_regular_stages_bulk(
-            stages=regular_stages,
+            stages=categorization.regular_stages,
             verbose=verbose,
             show_progress=show_progress,
             network=network,
@@ -566,45 +649,37 @@ def _fetch_from_stages(
         if verbose:
             print(f"  Regular stages complete.")
     
-    # Phase 3: Handle import stages (each needs its own source repo)
-    if import_stages:
+    # Phase 2: Handle repo imports (grouped by source repo)
+    if categorization.repo_imports:
         if verbose:
-            print(f"\nPhase 3: Processing {len(import_stages)} import stages...")
+            print(f"\nPhase 2: Processing {categorization.repo_import_count} repo imports...")
+            print(f"  From {len(categorization.repo_imports)} source repositories")
         
-        # Group by source URL to avoid repeated lookups
-        source_urls = set()
-        for stage in import_stages:
-            stage_path = Path(stage.path) if hasattr(stage, 'path') else None
-            if stage_path:
-                import_info = utils.get_import_info(stage_path)
-                if import_info and import_info.get('url'):
-                    source_urls.add(import_info['url'])
-        
-        if verbose and len(source_urls) > 1:
-            print(f"  Found {len(source_urls)} unique source repositories")
-        
-        for i, stage in enumerate(import_stages):
+        for url, group in categorization.repo_imports.items():
             if verbose:
-                print(f"  [{i+1}/{len(import_stages)}] {stage.addressing}")
-            result = _fetch_import_stage(
-                stage=stage,
-                verbose=verbose,
-                update=update,
-                show_progress=show_progress,
-            )
-            results.append(result)
+                cache_status = "has local cache" if group.has_local_cache else "no local cache"
+                print(f"  {group.short_name} ({group.count} stages, {cache_status})")
+            
+            for i, stage in enumerate(group.stages):
+                if verbose:
+                    print(f"    [{i+1}/{group.count}] {stage.addressing}")
+                result = _fetch_import_stage(
+                    stage=stage,
+                    verbose=verbose,
+                    update=update,
+                    show_progress=show_progress,
+                )
+                results.append(result)
+        
         if verbose:
-            print(f"  Import stages complete.")
+            print(f"  Repo imports complete.")
     
-    # Phase 4: Handle URL imports
-    if url_import_stages:
+    # Phase 3: Handle URL imports
+    if categorization.url_imports:
         if verbose:
-            print(f"\nPhase 4: Processing {len(url_import_stages)} URL imports...")
+            print(f"\nPhase 3: Processing {len(categorization.url_imports)} URL imports...")
         # Check network access before attempting URL imports
-        # This avoids hanging on each one if there's no network
-        if verbose:
-            print("Checking network connectivity...")
-        has_network = utils.check_network_access(timeout=1.0)
+        has_network = doctor.check_network_connectivity(timeout=1.0)
         if verbose:
             if has_network:
                 print("  Network access: available")
@@ -612,7 +687,7 @@ def _fetch_from_stages(
                 print("  Network access: not available")
                 print("  Note: URL imports may fail without network access.")
         
-        for stage in url_import_stages:
+        for stage in categorization.url_imports:
             result = _fetch_url_import_stage(
                 stage=stage,
                 verbose=verbose,
@@ -663,16 +738,21 @@ def _fetch_regular_stages_bulk(
     try:
         repo = Repo()
         cache = repo.cache.local
+        if cache is None:
+            raise FetchError(
+                "DVC cache not configured.\n"
+                "Run 'dvc cache dir' to check your cache configuration."
+            )
         existing = set(cache.oids_exist(all_hashes))
         missing = all_hashes - existing
+    except FetchError:
+        raise
     except Exception as e:
-        if verbose:
-            print(f"Could not use bulk cache check: {e}")
-        # Fall back to per-stage checking
-        for stage in stages:
-            result = _fetch_stage(stage, verbose=verbose, network=network)
-            results.append((stage.addressing, result[0], result[1]))
-        return results
+        raise FetchError(
+            f"Failed to check cache status: {e}\n"
+            f"This may indicate a corrupted DVC cache or configuration issue.\n"
+            f"Try running 'dt doctor' to diagnose the problem."
+        )
     
     if verbose:
         print(f"\nCache status:")
@@ -924,329 +1004,97 @@ def _fetch_url_import_stage(
     return (stage_name, result[0], result[1])
 
 
-
-def _fetch_from_files(
-    targets: Optional[List[str]] = None,
+def _fetch_directory_from_remote(
+    remote_path: str,
+    cache_base: str,
+    md5: str,
     verbose: bool = False,
-    update: bool = False,
-    show_progress: bool = True,
-    network: bool = False,
-) -> List[Tuple[str, bool, str]]:
-    """Fetch using file-based discovery (fallback for non-git repos).
+    use_v3_layout: bool = True,
+) -> Tuple[int, int]:
+    """Fetch a directory and its contents from a remote.
     
-    This preserves the original behavior for environments without git.
-    """
-    # Find .dvc files using fallback method
-    dvc_files = utils.find_dvc_files_fallback(targets=targets, verbose=verbose)
-    
-    if not dvc_files and targets:
-        # If specific targets were given but not found, report errors
-        results = []
-        for target in targets:
-            results.append((target, False, f"File not found: {target}"))
-        return results
-    
-    results = []
-    
-    for target_path in dvc_files:
-        # Show which file we're processing (in non-verbose mode with progress)
-        if show_progress and not verbose:
-            click.echo(f"{target_path}:")
-        
-        # Check if it's an import from another DVC repo
-        if utils.is_repo_import(target_path):
-            if verbose:
-                print(f"Fetching repo import: {target_path}")
-            
-            try:
-                cache_path, count, failed = fetch_import(
-                    dvc_path=target_path,
-                    verbose=verbose,
-                    update=update,
-                    show_progress=show_progress,
-                )
-                if failed > 0:
-                    results.append((str(target_path), False, 
-                        f"FAILED: {failed} file(s) not found in source cache at {cache_path}"))
-                elif count == 0:
-                    results.append((str(target_path), True, f"Already in cache (from {cache_path})"))
-                else:
-                    results.append((str(target_path), True, f"Fetched {count} files from {cache_path}"))
-            except FetchError as e:
-                results.append((str(target_path), False, str(e)))
-        
-        # Check if it's a URL import (dvc import-url)
-        elif utils.is_url_import(target_path):
-            if verbose:
-                print(f"Fetching URL import: {target_path}")
-            
-            result = _fetch_url_import(
-                dvc_path=target_path,
-                verbose=verbose,
-            )
-            results.append((str(target_path), result[0], result[1]))
-        
-        else:
-            # Regular .dvc file - try to fetch from local remote
-            result = _fetch_non_import(
-                dvc_path=target_path,
-                verbose=verbose,
-                network=network,
-            )
-            results.append((str(target_path), result[0], result[1]))
-    
-    return results
-
-
-def _fetch_stage(
-    stage: Any,
-    verbose: bool = False,
-    network: bool = False,
-) -> Tuple[bool, str]:
-    """Fetch a regular stage (non-import) from a local remote.
-    
-    Works with both .dvc file stages and pipeline stages from dvc.yaml.
+    Fetches the .dir manifest file and all individual files listed in it.
     
     Args:
-        stage: A DVC Stage object.
+        remote_path: Path to the source remote/cache.
+        cache_base: Path to the destination cache base directory.
+        md5: The directory hash (with .dir suffix).
         verbose: Print progress messages.
-        network: If True, fall back to `dvc fetch` when local remote not available.
+        use_v3_layout: Use v3 cache layout (files/md5/).
         
     Returns:
-        Tuple of (success, message).
+        Tuple of (files_fetched, files_failed) counts.
     """
-    from . import import_data as import_mod
-    from dvc.stage import PipelineStage
-    
-    is_pipeline = isinstance(stage, PipelineStage)
-    stage_name = stage.addressing
-    
-    # Get output info from stage
-    if not stage.outs:
-        return (False, "No outputs in stage")
-    
-    out = stage.outs[0]
-    if not out.hash_info or not out.hash_info.value:
-        return (False, "No hash in stage output")
-    
-    md5 = out.hash_info.value
-    
-    primary_cache = utils.get_cache_dir()
-    if not primary_cache:
-        return (False, "No cache configured")
-    
-    # Check if already in cache
-    hash_clean = md5.replace('.dir', '')
-    suffix = '.dir' if md5.endswith('.dir') else ''
-    cache_file = primary_cache / hash_clean[:2] / (hash_clean[2:] + suffix)
-    if cache_file.exists():
-        return (True, "Already in cache")
-    
-    # Try to find a local remote
-    remotes = remote.list_remotes()
-    local_remote_info = remote.find_local_remote(remotes)
-    
-    if local_remote_info:
-        remote_name, remote_path = local_remote_info
-        if verbose:
-            print(f"  Using local remote '{remote_name}': {remote_path}")
-        
-        # Detect v2 vs v3 format - for pipeline stages, assume v3
-        if is_pipeline:
-            use_v3_layout = True
-        else:
-            dvc_data = utils.parse_dvc_file(Path(stage.path))
-            use_v3_layout = import_mod.is_v3_dvc_file(dvc_data) if dvc_data else True
-        
-        # Get cache base directory
-        cache_base = str(primary_cache)
-        if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
-            cache_base = str(primary_cache.parent.parent)
-        
-        # Fetch the file(s)
-        if md5.endswith('.dir'):
-            # Directory - need to fetch .dir file and all contents
-            count, failed = _fetch_directory_from_remote(
-                remote_path=remote_path,
-                cache_base=cache_base,
-                md5=md5,
-                verbose=verbose,
-                use_v3_layout=use_v3_layout,
-            )
-            if failed > 0:
-                return (False, f"Failed to fetch {failed} file(s)")
-            return (True, f"Fetched {count} files from {remote_name}")
-        else:
-            # Single file
-            result = import_mod.populate_cache_file(
-                md5=md5,
-                source_cache=remote_path,
-                dest_cache=cache_base,
-                verbose=verbose,
-                use_v3_layout=use_v3_layout,
-            )
-            if result is True:
-                return (True, f"Fetched from {remote_name}")
-            elif result is None:
-                return (False, f"File not in remote '{remote_name}'")
-            else:
-                return (True, "Already in cache")
-    
-    # No local remote available
-    if not network:
-        return (False, "No local remote available (use --network to fetch from remote)")
-    
-    # Fall back to dvc fetch
-    success, msg = _run_dvc_fetch(stage_name, verbose)
-    return (success, msg)
-
-
-def _fetch_non_import(
-    dvc_path: Path,
-    verbose: bool = False,
-    network: bool = False,
-) -> Tuple[bool, str]:
-    """Fetch a non-import .dvc file from a local remote.
-    
-    Checks if there's a locally-accessible remote and creates symlinks/reflinks
-    from it. If no local remote is available and network is True, falls back
-    to `dvc fetch`.
-    
-    Args:
-        dvc_path: Path to the .dvc file.
-        verbose: Print progress messages.
-        network: If True, fall back to `dvc fetch` when local remote not available.
-        
-    Returns:
-        Tuple of (success, message).
-    """
+    import json
     from . import import_data as import_mod
     
-    dvc_data = utils.parse_dvc_file(dvc_path)
-    if not dvc_data:
-        return (False, "Could not parse .dvc file")
+    count = 0
+    failed = 0
     
-    outs = dvc_data.get('outs', [])
-    if not outs:
-        return (False, "No outputs in .dvc file")
-    
-    md5 = outs[0].get('md5', '')
-    if not md5:
-        return (False, "No MD5 hash in .dvc file")
-    
-    primary_cache = utils.get_cache_dir()
-    if not primary_cache:
-        return (False, "No cache configured")
-    
-    # Check if already in cache
-    # Note: primary_cache from get_cache_dir() already includes files/md5
-    hash_clean = md5.replace('.dir', '')
-    suffix = '.dir' if md5.endswith('.dir') else ''
-    cache_file = primary_cache / hash_clean[:2] / (hash_clean[2:] + suffix)
-    if cache_file.exists():
-        return (True, "Already in cache")
-    
-    # Try to find a local remote
-    remotes = remote.list_remotes()
-    local_remote_info = remote.find_local_remote(remotes)
-    
-    if local_remote_info:
-        remote_name, remote_path = local_remote_info
+    # First fetch the .dir file itself
+    result = import_mod.populate_cache_file(
+        md5=md5,
+        source_cache=remote_path,
+        dest_cache=cache_base,
+        verbose=verbose,
+        use_v3_layout=use_v3_layout,
+    )
+    if result is True:
+        count += 1
+    elif result is None:
+        # .dir file not found - can't proceed
         if verbose:
-            print(f"  Using local remote '{remote_name}': {remote_path}")
-        
-        # Detect v2 vs v3 format
-        use_v3_layout = import_mod.is_v3_dvc_file(dvc_data)
-        
-        # Get cache base directory
-        cache_base = str(primary_cache)
-        if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
-            cache_base = str(Path(cache_base).parent.parent)
-        
-        # Fetch the main file/directory hash
-        count = 0
-        failed = 0
-        
-        result = import_mod.populate_cache_file(
-            md5=md5,
-            source_cache=remote_path,
-            dest_cache=cache_base,
-            verbose=verbose,
-            use_v3_layout=use_v3_layout,
-        )
-        
-        if result is True:
-            count += 1
-        elif result is None:
-            # File not in local remote
-            if not md5.endswith('.dir'):
-                failed += 1
-        
-        # For directories, also populate individual files
-        if md5.endswith('.dir'):
-            dir_hash = md5[:-4]
-            
-            # Find the .dir file
-            if use_v3_layout:
-                dest_dir_file = Path(cache_base) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
-            else:
-                dest_dir_file = Path(cache_base) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
-            
-            dir_file = None
-            if dest_dir_file.exists():
-                dir_file = dest_dir_file
-            else:
-                # Try source remote
-                dir_file_v3 = Path(remote_path) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
-                dir_file_v2 = Path(remote_path) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
-                if dir_file_v3.exists():
-                    dir_file = dir_file_v3
-                elif dir_file_v2.exists():
-                    dir_file = dir_file_v2
-            
-            if dir_file:
-                try:
-                    import json
-                    entries = json.loads(dir_file.read_text())
-                    for entry in entries:
-                        file_md5 = entry.get('md5', '')
-                        if file_md5:
-                            file_result = import_mod.populate_cache_file(
-                                md5=file_md5,
-                                source_cache=remote_path,
-                                dest_cache=cache_base,
-                                verbose=verbose,
-                                use_v3_layout=use_v3_layout,
-                            )
-                            if file_result is True:
-                                count += 1
-                            elif file_result is None:
-                                failed += 1
-                except (json.JSONDecodeError, OSError) as e:
-                    if verbose:
-                        print(f"  Warning: Could not parse .dir file: {e}")
-                    failed += 1
-            else:
-                if verbose:
-                    print(f"  Warning: .dir file not found in local remote")
-                failed += 1
-        
-        if failed > 0:
-            # Some files not in local remote - fall back to network if enabled
-            if network:
-                return _run_dvc_fetch(dvc_path, verbose)
-            else:
-                return (False, f"Not in local remote '{remote_name}' (use --network to fetch)")
-        elif count == 0:
-            return (True, f"Already in cache (from {remote_name})")
-        else:
-            return (True, f"Fetched {count} files from local remote '{remote_name}'")
+            print(f"  ERROR: .dir file not found in remote: {md5}")
+        return (0, 1)
     
-    # No local remote available
-    if network:
-        return _run_dvc_fetch(dvc_path, verbose)
+    # Find the .dir file to read entries
+    dir_hash = md5[:-4]  # Remove .dir suffix
+    
+    if use_v3_layout:
+        dest_dir_file = Path(cache_base) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
     else:
-        return (False, "No local remote available (use --network to fetch)")
+        dest_dir_file = Path(cache_base) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+    
+    dir_file = None
+    if dest_dir_file.exists():
+        dir_file = dest_dir_file
+    else:
+        # Try source remote
+        dir_file_v3 = Path(remote_path) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+        dir_file_v2 = Path(remote_path) / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+        if dir_file_v3.exists():
+            dir_file = dir_file_v3
+        elif dir_file_v2.exists():
+            dir_file = dir_file_v2
+    
+    if not dir_file:
+        if verbose:
+            print(f"  Warning: .dir file not found after fetch")
+        return (count, 1)
+    
+    # Read entries and fetch each file
+    try:
+        entries = json.loads(dir_file.read_text())
+        for entry in entries:
+            file_md5 = entry.get('md5', '')
+            if file_md5:
+                file_result = import_mod.populate_cache_file(
+                    md5=file_md5,
+                    source_cache=remote_path,
+                    dest_cache=cache_base,
+                    verbose=verbose,
+                    use_v3_layout=use_v3_layout,
+                )
+                if file_result is True:
+                    count += 1
+                elif file_result is None:
+                    failed += 1
+    except (json.JSONDecodeError, OSError) as e:
+        if verbose:
+            print(f"  Warning: Could not parse .dir file: {e}")
+        failed += 1
+    
+    return (count, failed)
 
 
 def _run_dvc_fetch(dvc_path: Path, verbose: bool = False) -> Tuple[bool, str]:
@@ -1321,7 +1169,8 @@ def _fetch_url_import(
     
     # Check network access before attempting download
     if source_url.startswith(('http://', 'https://', 's3://', 'gs://')):
-        if not utils.check_network_access(timeout=3.0):
+        from . import doctor
+        if not doctor.check_network_connectivity(timeout=3.0):
             return (False, f"No network access (cannot fetch from {source_url})")
     
     if verbose:
@@ -1356,46 +1205,3 @@ def _fetch_url_import(
     except (OSError, FileNotFoundError) as e:
         return (False, f"dvc update failed: {e}")
 
-
-# Keep smart_checkout as alias for backwards compatibility during transition
-def smart_checkout(
-    targets: Optional[List[str]] = None,
-    extra_args: Optional[List[str]] = None,
-    verbose: bool = False,
-    cache: Optional[str] = None,
-    update: bool = False,
-) -> List[Tuple[str, bool, str]]:
-    """Deprecated: Use fetch() + dvc checkout instead.
-    
-    This function is kept for backwards compatibility during the transition.
-    It runs fetch() and then dvc checkout.
-    """
-    # Run fetch first
-    results = fetch(
-        targets=targets,
-        verbose=verbose,
-        update=update,
-    )
-    
-    # Then run dvc checkout
-    cmd = ['dvc', 'checkout']
-    if targets:
-        cmd.extend(targets)
-    if extra_args:
-        cmd.extend(extra_args)
-    
-    try:
-        checkout_result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
-        if checkout_result.returncode != 0:
-            results.append(('dvc checkout', False, checkout_result.stderr.strip()))
-        elif verbose:
-            if checkout_result.stdout.strip():
-                print(checkout_result.stdout.strip())
-    except Exception as e:
-        results.append(('dvc checkout', False, str(e)))
-    
-    return results

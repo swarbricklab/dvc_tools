@@ -1047,8 +1047,9 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
 @click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
+@click.option('--dry', is_flag=True, help='Show stage categorization without fetching (for troubleshooting)')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update, network):
+def fetch(ctx, targets, verbose, no_index_sync, update, network, dry):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1075,12 +1076,14 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network):
         dt fetch -v                        # Show detailed progress
         dt fetch --update                  # Rebuild .dir files, update .dvc if needed
         dt fetch --network                 # Fall back to dvc fetch if local remote unavailable
+        dt fetch --dry                     # Show what would be fetched without actually fetching
+        dt fetch --dry -v                  # Show detailed categorization
     """
     from . import fetch as fetch_mod
     
     try:
         # Sync index from mirror before fetch (if configured)
-        if not no_index_sync and index_mod.is_auto_sync_enabled():
+        if not dry and not no_index_sync and index_mod.is_auto_sync_enabled():
             try:
                 index_mod.pull(quiet=not verbose, verbose=verbose)
             except Exception as e:
@@ -1092,7 +1095,12 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network):
             verbose=verbose,
             update=update,
             network=network,
+            dry=dry,
         )
+        
+        # In dry mode, just exit (summary already printed)
+        if dry:
+            return
         
         # Count successes and failures
         successes = sum(1 for _, success, _ in results if success)
@@ -1430,11 +1438,17 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, u
                     if dvc_file:
                         if verbose:
                             click.echo(f"  dt fetch {dvc_file}")
-                        pull_mod.smart_checkout(
+                        fetch_mod.fetch(
                             targets=[str(dvc_file)],
-                            cache=None,
                             verbose=verbose,
                             update=update,
+                            show_progress=not verbose,
+                        )
+                        # Checkout after fetch
+                        subprocess.run(
+                            ['dvc', 'checkout', str(dvc_file)],
+                            capture_output=not verbose,
+                            text=True,
                         )
         
         # --- Step 3: Handle regular targets (dry-run, parallel, or standard) ---
