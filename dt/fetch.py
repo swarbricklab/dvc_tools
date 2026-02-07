@@ -1524,7 +1524,6 @@ def _run_dvc_fetch(dvc_path: Path, verbose: bool = False) -> Tuple[bool, str]:
 def _fetch_url_import(
     dvc_path: Path,
     verbose: bool = False,
-    timeout: int = 60,
 ) -> Tuple[bool, str]:
     """Fetch a URL import by running dvc update.
     
@@ -1538,7 +1537,6 @@ def _fetch_url_import(
     Args:
         dvc_path: Path to the .dvc file.
         verbose: Print progress messages.
-        timeout: Timeout in seconds for the update operation (default 60).
         
     Returns:
         Tuple of (success, message).
@@ -1579,7 +1577,6 @@ def _fetch_url_import(
             cmd,
             capture_output=True,
             text=True,
-            timeout=timeout,
         )
         if result.returncode == 0:
             # Check if the .dvc file was modified (source changed)
@@ -1592,11 +1589,7 @@ def _fetch_url_import(
             # Common errors
             if 'No such file' in error_msg or 'not found' in error_msg.lower():
                 return (False, f"Source not accessible: {source_url}")
-            if 'timeout' in error_msg.lower():
-                return (False, f"Timeout fetching from {source_url}")
             return (False, f"dvc update failed: {error_msg}")
-    except subprocess.TimeoutExpired:
-        return (False, f"Timeout after {timeout}s fetching from {source_url}")
     except (OSError, FileNotFoundError) as e:
         return (False, f"dvc update failed: {e}")
 
