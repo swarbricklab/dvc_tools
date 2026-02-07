@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import click
 
+from . import cache_ops
 from . import remote
 from . import utils
 from .errors import FetchError, HashMismatchError
@@ -217,7 +218,361 @@ def categorize_stages(
 
 
 # =============================================================================
-# Cache Population
+# Fetch Plan: Hash-based fetch model
+# =============================================================================
+
+@dataclass
+class SourceGroup:
+    """Group of hashes to fetch from a single source cache."""
+    source_path: Path
+    source_name: str  # Display name (e.g., remote name or repo short name)
+    hashes: set = field(default_factory=set)
+    
+    def add_hash(self, h: str) -> None:
+        """Add a hash to fetch from this source."""
+        self.hashes.add(h)
+    
+    def add_hashes(self, hashes: set) -> None:
+        """Add multiple hashes to fetch from this source."""
+        self.hashes.update(hashes)
+
+
+@dataclass 
+class FetchPlan:
+    """Plan for fetching hashes from multiple sources.
+    
+    Groups hashes by source cache, allowing efficient bulk fetching.
+    URL imports are handled separately (require network download).
+    """
+    sources: Dict[str, SourceGroup] = field(default_factory=dict)
+    url_imports: List[Any] = field(default_factory=list)
+    no_source: List[Any] = field(default_factory=list)  # Stages with no local source
+    
+    def add_source(self, source_path: Path, source_name: str) -> SourceGroup:
+        """Get or create a source group."""
+        key = str(source_path)
+        if key not in self.sources:
+            self.sources[key] = SourceGroup(source_path=source_path, source_name=source_name)
+        return self.sources[key]
+    
+    @property
+    def total_hashes(self) -> int:
+        """Total unique hashes across all sources."""
+        return sum(len(g.hashes) for g in self.sources.values())
+    
+    def summary_lines(self) -> List[str]:
+        """Generate summary for display."""
+        lines = []
+        for source_path, group in self.sources.items():
+            lines.append(f"{group.source_name}: {len(group.hashes)} hashes from {source_path}")
+        if self.url_imports:
+            lines.append(f"URL imports: {len(self.url_imports)} (require network)")
+        if self.no_source:
+            lines.append(f"No local source: {len(self.no_source)} stages")
+        return lines
+
+
+def _create_source_cache_db(source_path: Path):
+    """Create a LocalHashFileDB for reading from a source cache.
+    
+    Handles both v2 and v3 cache layouts.
+    
+    Args:
+        source_path: Path to the remote/cache root.
+        
+    Returns:
+        LocalHashFileDB instance, or None if path doesn't exist.
+    """
+    from dvc.fs import LocalFileSystem
+    from dvc_data.hashfile.db.local import LocalHashFileDB
+    
+    if not source_path.exists():
+        return None
+    
+    # Check for v3 layout (files/md5)
+    v3_path = source_path / "files" / "md5"
+    if v3_path.exists():
+        cache_path = v3_path
+    else:
+        cache_path = source_path
+    
+    local_fs = LocalFileSystem()
+    return LocalHashFileDB(local_fs, cache_path, tmp_dir=source_path / "tmp")
+
+
+def _expand_dir_hash(
+    dir_hash: str,
+    source_db,
+) -> set:
+    """Expand a .dir hash to get all child file hashes.
+    
+    Uses DVC's Tree.load() to read the directory manifest.
+    
+    Args:
+        dir_hash: The directory hash (with .dir suffix).
+        source_db: LocalHashFileDB to read the .dir file from.
+        
+    Returns:
+        Set of child file hashes (not including the .dir hash itself).
+    """
+    from dvc_data.hashfile.tree import Tree
+    from dvc_data.hashfile.hash_info import HashInfo
+    
+    child_hashes = set()
+    
+    try:
+        hi = HashInfo("md5", dir_hash)
+        tree = Tree.load(source_db, hi)
+        for key, (meta, hash_info) in tree.iteritems():
+            child_hashes.add(hash_info.value)
+    except Exception:
+        # If we can't load the tree, we'll just fetch the .dir hash
+        # and handle expansion later
+        pass
+    
+    return child_hashes
+
+
+def _collect_hashes_from_stage(stage: Any) -> set:
+    """Extract all hashes from a stage's outputs.
+    
+    Args:
+        stage: DVC Stage object.
+        
+    Returns:
+        Set of hash strings (may include .dir hashes).
+    """
+    hashes = set()
+    for out in stage.outs:
+        if out.use_cache and out.hash_info and out.hash_info.value:
+            hashes.add(out.hash_info.value)
+    return hashes
+
+
+def build_fetch_plan(
+    categorization: StageCategorization,
+    verbose: bool = False,
+) -> FetchPlan:
+    """Build a fetch plan from categorized stages.
+    
+    Groups all hashes by their source cache, expanding .dir hashes
+    to include child files.
+    
+    Args:
+        categorization: Result from categorize_stages().
+        verbose: Print progress information.
+        
+    Returns:
+        FetchPlan with hashes grouped by source.
+    """
+    plan = FetchPlan()
+    
+    # Handle regular stages - all from the primary local remote
+    if categorization.regular_stages:
+        if categorization.has_local_remote:
+            remotes = remote.list_remotes()
+            local_remote = remote.find_local_remote(remotes)
+            if local_remote:
+                remote_name, remote_path = local_remote
+                source_path = Path(remote_path)
+                group = plan.add_source(source_path, remote_name)
+                source_db = _create_source_cache_db(source_path)
+                
+                for stage in categorization.regular_stages:
+                    stage_hashes = _collect_hashes_from_stage(stage)
+                    for h in stage_hashes:
+                        group.add_hash(h)
+                        # Expand directory hashes
+                        if h.endswith('.dir') and source_db:
+                            child_hashes = _expand_dir_hash(h, source_db)
+                            group.add_hashes(child_hashes)
+        else:
+            # No local remote available
+            plan.no_source.extend(categorization.regular_stages)
+    
+    # Handle repo imports - grouped by source repository
+    for url, import_group in categorization.repo_imports.items():
+        if import_group.has_local_cache and import_group.local_cache:
+            source_path = import_group.local_cache
+            group = plan.add_source(source_path, import_group.short_name)
+            source_db = _create_source_cache_db(source_path)
+            
+            for stage in import_group.stages:
+                stage_hashes = _collect_hashes_from_stage(stage)
+                for h in stage_hashes:
+                    group.add_hash(h)
+                    # Expand directory hashes
+                    if h.endswith('.dir') and source_db:
+                        child_hashes = _expand_dir_hash(h, source_db)
+                        group.add_hashes(child_hashes)
+        else:
+            # No local cache for this repo
+            plan.no_source.extend(import_group.stages)
+    
+    # URL imports are handled separately
+    plan.url_imports = categorization.url_imports
+    
+    if verbose:
+        print(f"\nFetch plan: {plan.total_hashes} hashes from {len(plan.sources)} sources")
+        for line in plan.summary_lines():
+            print(f"  {line}")
+    
+    return plan
+
+
+def fetch_from_plan(
+    plan: FetchPlan,
+    verbose: bool = False,
+    show_progress: bool = True,
+    network: bool = False,
+) -> List[Tuple[str, bool, str]]:
+    """Execute a fetch plan, linking hashes from sources to primary cache.
+    
+    Args:
+        plan: The FetchPlan to execute.
+        verbose: Print detailed progress.
+        show_progress: Show progress bar.
+        network: Fall back to dvc fetch for stages without local source.
+        
+    Returns:
+        List of (source_name, success, message) tuples.
+    """
+    results = []
+    total_fetched = 0
+    total_failed = 0
+    
+    # Handle stages with no local source first (doesn't need Repo)
+    if plan.no_source:
+        if network:
+            if verbose:
+                print(f"\nFalling back to dvc fetch for {len(plan.no_source)} stages...")
+            for stage in plan.no_source:
+                success, msg = _run_dvc_fetch(stage.addressing, verbose)
+                results.append((stage.addressing, success, msg))
+        else:
+            for stage in plan.no_source:
+                results.append((stage.addressing, False, "No local source (use --network)"))
+    
+    # Handle URL imports (doesn't need local cache)
+    if plan.url_imports:
+        if verbose:
+            print(f"\nProcessing {len(plan.url_imports)} URL imports...")
+        for stage in plan.url_imports:
+            result = _fetch_url_import_stage(stage, verbose=verbose)
+            results.append(result)
+    
+    # Early return if no sources with hashes to fetch
+    if plan.total_hashes == 0:
+        if verbose and not results:
+            print("No hashes to fetch")
+        return results
+    
+    # Now we need the DVC cache for fetching from sources
+    from dvc.repo import Repo
+    
+    repo = Repo()
+    cache = repo.cache.local
+    if cache is None:
+        raise FetchError("DVC cache not configured.")
+    
+    # Get cache base path (strip files/md5 suffix if present)
+    cache_base = str(cache.path)
+    if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
+        cache_base = str(Path(cache.path).parent.parent)
+    
+    # Collect all hashes and check what's already cached
+    all_hashes = set()
+    for group in plan.sources.values():
+        all_hashes.update(group.hashes)
+    
+    existing = set(cache.oids_exist(all_hashes))
+    total_missing = len(all_hashes) - len(existing)
+    
+    if verbose:
+        print(f"\nCache status:")
+        print(f"  Total hashes: {len(all_hashes)}")
+        print(f"  Already cached: {len(existing)}")
+        print(f"  Missing: {total_missing}")
+    
+    if total_missing == 0:
+        results.append(("all", True, f"All {len(all_hashes)} hashes already cached"))
+        return results
+    
+    # Fetch from each source
+    for source_path, group in plan.sources.items():
+        missing_from_source = group.hashes - existing
+        if not missing_from_source:
+            continue
+        
+        source_label = f"{group.source_name} ({len(missing_from_source)} files)"
+        
+        if verbose:
+            print(f"\nFetching from {group.source_name}: {len(missing_from_source)} files")
+            print(f"  Source: {source_path}")
+        
+        fetched = 0
+        failed = 0
+        
+        # Use progress bar for non-verbose mode
+        if show_progress and not verbose:
+            with click.progressbar(
+                sorted(missing_from_source),
+                label=source_label,
+                show_pos=True,
+                show_percent=True,
+            ) as bar:
+                for h in bar:
+                    result = cache_ops.populate_cache_file(
+                        md5=h,
+                        source_cache=source_path,
+                        dest_cache=cache_base,
+                        verbose=False,
+                        use_v3_layout=True,
+                    )
+                    if result is True:
+                        fetched += 1
+                    elif result is None:
+                        failed += 1
+        else:
+            for h in sorted(missing_from_source):
+                if verbose:
+                    print(f"  {h[:12]}...", end=" ")
+                result = cache_ops.populate_cache_file(
+                    md5=h,
+                    source_cache=source_path,
+                    dest_cache=cache_base,
+                    verbose=False,
+                    use_v3_layout=True,
+                )
+                if result is True:
+                    fetched += 1
+                    if verbose:
+                        print("✓")
+                elif result is None:
+                    failed += 1
+                    if verbose:
+                        print("✗ (not found)")
+                else:
+                    if verbose:
+                        print("(exists)")
+        
+        total_fetched += fetched
+        total_failed += failed
+        
+        if failed > 0:
+            results.append((group.source_name, False, f"Fetched {fetched}, failed {failed}"))
+        else:
+            results.append((group.source_name, True, f"Fetched {fetched} files"))
+    
+    # Summary
+    if verbose:
+        print(f"\nFetch complete: {total_fetched} fetched, {total_failed} failed")
+    
+    return results
+
+
+# =============================================================================
+# Cache Population (legacy - to be removed)
 # =============================================================================
 
 def _update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool = False) -> bool:
@@ -610,21 +965,28 @@ def fetch(
     # Categorize stages
     categorization = categorize_stages(stages, verbose=False)
     
+    # Apply type filters
+    if not fetch_all:
+        if not imports:
+            categorization.repo_imports = {}
+        if not urls:
+            categorization.url_imports = []
+        if not regular:
+            categorization.regular_stages = []
+    
     # In dry mode, just print the summary and return
     if dry:
         print(f"\nStage categorization ({categorization.total_stages} total):")
         categorization.print_summary(verbose=verbose)
         return []
     
-    return _fetch_from_stages(
-        categorization=categorization,
+    # Build and execute fetch plan (new simplified model)
+    plan = build_fetch_plan(categorization, verbose=verbose)
+    return fetch_from_plan(
+        plan=plan,
         verbose=verbose,
-        update=update,
         show_progress=show_progress,
         network=network,
-        include_imports=fetch_all or imports,
-        include_urls=fetch_all or urls,
-        include_regular=fetch_all or regular,
     )
 
 

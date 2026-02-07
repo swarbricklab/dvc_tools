@@ -599,8 +599,8 @@ class TestFetch:
         
         assert results == []
     
-    def test_import_stage_calls_fetch_import(self, dvc_project):
-        """Import stage triggers fetch_import via _fetch_import_stage."""
+    def test_import_stage_without_local_cache_fails(self, dvc_project):
+        """Import stage without local cache returns 'no local source' error."""
         from dt import doctor
         project, cache = dvc_project
         
@@ -620,20 +620,18 @@ class TestFetch:
         with patch.object(doctor, 'check_environment', return_value=mock_env), \
              patch('dt.fetch.utils.check_dvc'), \
              patch('dt.fetch.utils.collect_stages', return_value=[mock_stage]), \
-             patch('dt.fetch.fetch_import') as mock_fetch_import:
-            
-            mock_fetch_import.return_value = ('/path/to/cache', 5, 0)  # cache_path, count, failed
+             patch('dt.fetch.utils.get_import_info', return_value=None):
             
             results = fetch.fetch(targets=['imported.csv.dvc'])
         
+        # Without local cache info, import goes to no_source and fails
         assert len(results) == 1
-        assert mock_fetch_import.called
         target, success, message = results[0]
-        assert success is True
-        assert '5 files' in message
+        assert success is False
+        assert 'No local source' in message
 
-    def test_import_file_with_missing_source_fails(self, dvc_project):
-        """Import stage with missing source files reports failure."""
+    def test_import_stage_without_local_cache_uses_network(self, dvc_project):
+        """Import stage without local cache can use --network flag."""
         from dt import doctor
         project, cache = dvc_project
         
@@ -653,18 +651,18 @@ class TestFetch:
         with patch.object(doctor, 'check_environment', return_value=mock_env), \
              patch('dt.fetch.utils.check_dvc'), \
              patch('dt.fetch.utils.collect_stages', return_value=[mock_stage]), \
-             patch('dt.fetch.fetch_import') as mock_fetch_import:
+             patch('dt.fetch.utils.get_import_info', return_value=None), \
+             patch('dt.fetch._run_dvc_fetch') as mock_dvc_fetch:
             
-            # Simulate 1 file missing from source cache
-            mock_fetch_import.return_value = ('/path/to/cache', 0, 1)  # cache_path, count, failed
+            # Simulate successful network fetch
+            mock_dvc_fetch.return_value = (True, 'Fetched via network')
             
-            results = fetch.fetch(targets=['imported.csv.dvc'])
+            results = fetch.fetch(targets=['imported.csv.dvc'], network=True)
         
         assert len(results) == 1
+        assert mock_dvc_fetch.called
         target, success, message = results[0]
-        assert success is False  # Should be failure now
-        assert 'FAILED' in message
-        assert '1 file' in message
+        assert success is True
 
 
 class TestRunDvcFetch:
