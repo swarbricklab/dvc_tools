@@ -513,8 +513,8 @@ def fetch_from_plan(
         fetched = 0
         failed = 0
         
-        # Use progress bar for non-verbose mode
-        if show_progress and not verbose:
+        # Always use progress bar when show_progress is True (even in verbose mode)
+        if show_progress:
             with click.progressbar(
                 sorted(missing_from_source),
                 label=source_label,
@@ -534,9 +534,8 @@ def fetch_from_plan(
                     elif result is None:
                         failed += 1
         else:
+            # No progress bar - just process silently
             for h in sorted(missing_from_source):
-                if verbose:
-                    print(f"  {h[:12]}...", end=" ")
                 result = cache_ops.populate_cache_file(
                     md5=h,
                     source_cache=source_path,
@@ -546,15 +545,8 @@ def fetch_from_plan(
                 )
                 if result is True:
                     fetched += 1
-                    if verbose:
-                        print("✓")
                 elif result is None:
                     failed += 1
-                    if verbose:
-                        print("✗ (not found)")
-                else:
-                    if verbose:
-                        print("(exists)")
         
         total_fetched += fetched
         total_failed += failed
@@ -940,6 +932,10 @@ def fetch(
     # If none of the type filters are specified, fetch all
     fetch_all = not (imports or urls or regular)
     
+    # Show initial status so user knows we're working
+    if verbose:
+        print("Collecting stages...")
+    
     # Run environment checks
     env = doctor.check_environment()
     env.require_git_repo()
@@ -960,7 +956,8 @@ def fetch(
         env.require_git_repo()
     
     if verbose:
-        print(f"Found {len(stages)} stage(s) to process")
+        print(f"Found {len(stages)} stage(s)")
+        print("Categorizing stages...")
     
     # Categorize stages
     categorization = categorize_stages(stages, verbose=False)
