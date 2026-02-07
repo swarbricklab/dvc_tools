@@ -577,8 +577,8 @@ def fetch_from_plan(
         total_fetched += fetched
         total_failed += failed
         
-        # Report failures in verbose mode
-        if verbose and failed_hashes:
+        # Report failures (always show, not just verbose mode)
+        if failed_hashes:
             # Separate .dir failures (which may need dt update) from other failures
             dir_failures = [(h, r) for h, r in failed_hashes if h.endswith('.dir')]
             other_failures = [(h, r) for h, r in failed_hashes if not h.endswith('.dir')]
