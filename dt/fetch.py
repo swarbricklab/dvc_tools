@@ -155,8 +155,6 @@ def categorize_stages(
     Returns:
         StageCategorization with stages organized by type.
     """
-    from . import clone
-    
     result = StageCategorization()
     
     for stage in stages:
@@ -172,11 +170,11 @@ def categorize_stages(
                     # Get or create group for this URL
                     if url not in result.repo_imports:
                         group = RepoImportGroup(url=url, rev=rev)
-                        # Check if we have a local cache for this repo
+                        # Check if we have a locally-accessible remote for this repo
                         try:
-                            source_cache = clone.find_source_cache(url)
-                            if source_cache:
-                                group.local_cache = Path(source_cache)
+                            local_remote = remote.find_local_remote_from_repo(url)
+                            if local_remote:
+                                group.local_cache = Path(local_remote[1])
                                 group.has_local_cache = True
                         except Exception:
                             pass
