@@ -512,6 +512,7 @@ def fetch_from_plan(
         
         fetched = 0
         failed = 0
+        failed_hashes = []  # Track (hash, reason) for verbose reporting
         
         # Always use progress bar when show_progress is True (even in verbose mode)
         if show_progress:
@@ -522,6 +523,13 @@ def fetch_from_plan(
                 show_percent=True,
             ) as bar:
                 for h in bar:
+                    # Check source exists first so we can report why it failed
+                    source_file = cache_ops.find_source_file(h, Path(source_path))
+                    if source_file is None:
+                        failed += 1
+                        failed_hashes.append((h, "not found in source"))
+                        continue
+                    
                     result = cache_ops.populate_cache_file(
                         md5=h,
                         source_cache=source_path,
@@ -533,9 +541,16 @@ def fetch_from_plan(
                         fetched += 1
                     elif result is None:
                         failed += 1
+                        failed_hashes.append((h, "link failed"))
         else:
             # No progress bar - just process silently
             for h in sorted(missing_from_source):
+                source_file = cache_ops.find_source_file(h, Path(source_path))
+                if source_file is None:
+                    failed += 1
+                    failed_hashes.append((h, "not found in source"))
+                    continue
+                
                 result = cache_ops.populate_cache_file(
                     md5=h,
                     source_cache=source_path,
@@ -547,9 +562,16 @@ def fetch_from_plan(
                     fetched += 1
                 elif result is None:
                     failed += 1
+                    failed_hashes.append((h, "link failed"))
         
         total_fetched += fetched
         total_failed += failed
+        
+        # Report failures in verbose mode
+        if verbose and failed_hashes:
+            print(f"  Failed files ({len(failed_hashes)}):")
+            for h, reason in failed_hashes:
+                print(f"    {h}: {reason}")
         
         if failed > 0:
             results.append((group.source_name, False, f"Fetched {fetched}, failed {failed}"))
