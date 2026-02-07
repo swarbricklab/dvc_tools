@@ -73,6 +73,8 @@ class StageCategorization:
     url_imports: List[Any] = field(default_factory=list)
     repo_imports: Dict[str, RepoImportGroup] = field(default_factory=dict)
     regular_stages: List[Any] = field(default_factory=list)
+    has_local_remote: bool = False
+    local_remote_name: Optional[str] = None
     
     @property
     def total_stages(self) -> int:
@@ -107,7 +109,7 @@ class StageCategorization:
         if self.repo_imports:
             lines.append(f"Repo imports: {self.repo_import_count}")
             for url, group in sorted(self.repo_imports.items(), key=lambda x: x[1].short_name):
-                cache_status = "✓ local cache" if group.has_local_cache else "✗ no local cache"
+                cache_status = "✓ local" if group.has_local_cache else "✗ remote not locally accessible"
                 lines.append(f"    {group.short_name}: {group.count} ({cache_status})")
                 if verbose:
                     for stage in group.stages:
@@ -115,7 +117,11 @@ class StageCategorization:
         
         # Regular stages
         if self.regular_stages:
-            lines.append(f"Regular stages: {len(self.regular_stages)}")
+            if self.has_local_remote:
+                cache_status = f"✓ local via '{self.local_remote_name}'"
+            else:
+                cache_status = "✗ remote not locally accessible"
+            lines.append(f"Regular stages: {len(self.regular_stages)} ({cache_status})")
             if verbose:
                 for stage in self.regular_stages:
                     lines.append(f"    {stage.addressing}")
@@ -193,6 +199,17 @@ def categorize_stages(
         else:
             # Regular stage
             result.regular_stages.append(stage)
+    
+    # Check if there's a locally-accessible remote for regular stages
+    if result.regular_stages:
+        try:
+            remotes = remote.list_remotes()
+            local_remote = remote.find_local_remote(remotes)
+            if local_remote:
+                result.has_local_remote = True
+                result.local_remote_name = local_remote[0]
+        except Exception:
+            pass
     
     if verbose:
         print(f"Categorized {result.total_stages} stages:")
