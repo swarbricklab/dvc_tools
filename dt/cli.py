@@ -1673,7 +1673,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
 @cli.command()
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('--rev', default=None, help='Git revision to update to. If not specified, checks for changes and auto-upgrades to HEAD if safe.')
-@click.option('--push-dir', is_flag=True, help='Push rebuilt .dir file to source remote')
+@click.option('--push-dir/--no-push-dir', default=None, help='Push rebuilt .dir file to source remote. Default from update.push_dir config.')
 @click.option('--no-download', is_flag=True, help='Rebuild .dir only, do not run dt fetch')
 @click.option('--dry-run', is_flag=True, help='Show what would be done without making changes')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
@@ -1707,7 +1707,15 @@ def update(targets, rev, push_dir, no_download, dry_run, verbose, no_index_sync)
         dt update --no-download      # Rebuild .dir only
         dt update --push-dir         # Push .dir to source remote
         dt update --dry-run          # Show what would be done
+    
+    \b
+    Configuration:
+        dt config set update.push_dir true   # Always push .dir by default
     """
+    # Determine push_dir from config if not explicitly set
+    if push_dir is None:
+        push_dir = cfg.get_value('update.push_dir', False)
+    
     try:
         # Sync index from mirror before update (if configured)
         if not no_index_sync and index_mod.is_auto_sync_enabled():
