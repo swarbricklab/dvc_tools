@@ -1672,31 +1672,41 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
 
 @cli.command()
 @click.argument('targets', nargs=-1, type=click.Path())
-@click.option('--rev', default=None, help='Git revision (commit, branch, tag) to update to. Defaults to HEAD.')
-@click.option('-R', '--recursive', is_flag=True, help='Update all stages in specified directory')
-@click.option('--no-download', is_flag=True, help='Update .dvc file only, do not download data')
-@click.option('--to-remote', is_flag=True, help='Update data directly on the remote')
-@click.option('-r', '--remote', help='Remote storage to perform updates to')
-@click.option('-j', '--jobs', type=int, help='Number of parallel jobs')
+@click.option('--rev', default=None, help='Git revision to update to. If not specified, checks for changes and auto-upgrades to HEAD if safe.')
+@click.option('--push-dir', is_flag=True, help='Push rebuilt .dir file to source remote')
+@click.option('--no-download', is_flag=True, help='Rebuild .dir only, do not run dt fetch')
+@click.option('--dry-run', is_flag=True, help='Show what would be done without making changes')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-def update(targets, rev, recursive, no_download, to_remote, remote, jobs, verbose, no_index_sync):
-    """Update imported data to a specific revision.
+def update(targets, rev, push_dir, no_download, dry_run, verbose, no_index_sync):
+    """Update imported data by rebuilding .dir manifests.
     
-    Updates .dvc files created by `dvc import` or `dt import` to reference
-    a different revision of the source repository. By default updates to
-    the latest HEAD of the source repo.
+    Rebuilds .dir files for repo imports where the directory manifest
+    doesn't exist or is stale. This fixes the metadata so dt fetch can
+    populate the cache correctly.
     
-    This is the dt equivalent of `dvc update` with better defaults.
+    \b
+    Smart Revision Detection:
+    When --rev is not specified, dt update checks if the source data
+    has changed between the locked revision and HEAD:
+    
+    - If no changes: safely upgrades to HEAD
+    - If data changed: stops and shows options (--rev locked or --rev HEAD)
+    
+    Use --rev to explicitly specify a version:
+    - --rev HEAD: update to latest
+    - --rev v1.2.0: update to a tag
+    - --rev abc1234: update to a specific commit
+    - --rev <current>: refresh .dir without changing version
     
     \b
     Examples:
-        dt update                              # Update all imports to HEAD
-        dt update data/external.dvc            # Update specific file
-        dt update --rev v1.2.0                 # Update to specific tag
-        dt update --rev main                   # Update to branch HEAD
-        dt update --rev abc1234                # Update to specific commit
-        dt update --no-download                # Update .dvc file only
+        dt update                    # Smart update all imports
+        dt update data/external.dvc  # Update specific file
+        dt update --rev HEAD         # Force update to latest
+        dt update --no-download      # Rebuild .dir only
+        dt update --push-dir         # Push .dir to source remote
+        dt update --dry-run          # Show what would be done
     """
     try:
         # Sync index from mirror before update (if configured)
@@ -1710,12 +1720,10 @@ def update(targets, rev, recursive, no_download, to_remote, remote, jobs, verbos
         results = update_mod.update(
             targets=list(targets) if targets else None,
             rev=rev,
-            recursive=recursive,
-            no_download=no_download,
-            to_remote=to_remote,
-            remote=remote,
-            jobs=jobs,
             verbose=verbose,
+            push_dir=push_dir,
+            no_download=no_download,
+            dry_run=dry_run,
         )
         
         any_success = False
