@@ -370,12 +370,28 @@ def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
         
     Returns:
         List of (hash, path) tuples (may include .dir hashes).
+        Paths are relative to the repo root.
     """
     hash_paths = []
+    # Get repo root to make paths relative
+    repo_root = None
+    if hasattr(stage, 'repo') and stage.repo:
+        repo_root = Path(stage.repo.root)
+    
     for out in stage.outs:
         if out.use_cache and out.hash_info and out.hash_info.value:
             # DVC uses fspath for the filesystem path
-            path = str(out.fspath) if hasattr(out, 'fspath') else None
+            path = None
+            if hasattr(out, 'fspath') and out.fspath:
+                abs_path = Path(out.fspath)
+                # Make relative to repo root if possible
+                if repo_root and abs_path.is_absolute():
+                    try:
+                        path = str(abs_path.relative_to(repo_root))
+                    except ValueError:
+                        path = str(abs_path)
+                else:
+                    path = str(abs_path)
             hash_paths.append((out.hash_info.value, path))
     return hash_paths
 
@@ -687,8 +703,10 @@ def fetch_from_plan(
                 for h, reason in other_failures:
                     stage_name = group.get_stage_for_hash(h)
                     path = group.get_path_for_hash(h)
-                    # Show path if available, fall back to stage name
-                    if path:
+                    # Show both stage name and path when available
+                    if stage_name and path:
+                        print(f"    {h} ({stage_name}: {path}): {reason}")
+                    elif path:
                         print(f"    {h} ({path}): {reason}")
                     elif stage_name:
                         print(f"    {h} ({stage_name}): {reason}")
@@ -713,8 +731,10 @@ def fetch_from_plan(
                 if non_recoverable_dirs:
                     print(f"  Failed .dir manifests ({len(non_recoverable_dirs)}):")
                     for h, reason, stage_name, path in non_recoverable_dirs:
-                        # Show path if available, fall back to stage name
-                        if path:
+                        # Show both stage name and path when available
+                        if stage_name and path:
+                            print(f"    {h} ({stage_name}: {path}): {reason}")
+                        elif path:
                             print(f"    {h} ({path}): {reason}")
                         elif stage_name:
                             print(f"    {h} ({stage_name}): {reason}")
@@ -725,8 +745,10 @@ def fetch_from_plan(
                 if recoverable_dirs and not update:
                     print(f"  Failed .dir manifests ({len(recoverable_dirs)}):")
                     for h, reason, stage_name, path in recoverable_dirs:
-                        # Show path if available, fall back to stage name
-                        if path:
+                        # Show both stage name and path when available
+                        if stage_name and path:
+                            print(f"    {h} ({stage_name}: {path}): {reason}")
+                        elif path:
                             print(f"    {h} ({path}): {reason}")
                         else:
                             print(f"    {h} ({stage_name}): {reason}")
