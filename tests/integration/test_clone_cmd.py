@@ -387,8 +387,8 @@ class TestCloneOutput:
         assert result.returncode == 0
         # Should show directory change instruction
         assert 'cd' in result.stdout, "Output should include cd instruction"
-        # Should suggest dvc pull
-        assert 'dvc pull' in result.stdout, "Output should suggest dvc pull command"
+        # Should suggest dt pull
+        assert 'dt pull' in result.stdout, "Output should suggest dt pull command"
 
     def test_clone_shows_resolved_url(self, isolated_dir):
         """Clone with short name shows resolved URL in output."""

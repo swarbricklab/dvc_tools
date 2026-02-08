@@ -72,6 +72,7 @@ def clone_repository(
     remote_name: Optional[str] = None,
     shallow: bool = False,
     verbose: bool = True,
+    do_pull: bool = False,
 ) -> Path:
     """Clone a DVC repository with proper cache setup.
     
@@ -84,6 +85,7 @@ def clone_repository(
         remote_name: Override remote directory name
         shallow: Perform shallow clone
         verbose: Print progress messages
+        do_pull: Run dt pull after cloning to fetch data
         
     Returns:
         Path to the cloned repository
@@ -140,11 +142,37 @@ def clone_repository(
         if verbose:
             print(f"Warning: {e}")
     
-    if verbose:
-        print(f"\nCloned to {target_dir}/")
-        print(f"\nNext steps:")
-        print(f"  cd {target_dir}")
-        print(f"  dvc pull          # Download all data files")
-        print(f"  dvc pull <target> # Download selected files (faster)")
+    # Run dt pull if requested
+    if do_pull:
+        if verbose:
+            print(f"\nPulling data...")
+        
+        import os
+        from . import pull as pull_mod
+        
+        # Change to the cloned directory for pull
+        original_dir = os.getcwd()
+        try:
+            os.chdir(target_dir)
+            success, fetched, failed = pull_mod.pull(
+                verbose=verbose,
+                network=True,  # Allow network fetch for full pull
+            )
+            if not success:
+                print(f"Warning: Pull completed with {failed} failure(s)")
+        except pull_mod.PullError as e:
+            print(f"Warning: Pull failed: {e}")
+        finally:
+            os.chdir(original_dir)
+        
+        if verbose:
+            print(f"\nCloned and pulled to {target_dir}/")
+    else:
+        if verbose:
+            print(f"\nCloned to {target_dir}/")
+            print(f"\nNext steps:")
+            print(f"  cd {target_dir}")
+            print(f"  dt pull           # Download all data files")
+            print(f"  dt pull <target>  # Download selected files (faster)")
     
     return target_dir
