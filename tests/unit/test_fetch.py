@@ -175,11 +175,12 @@ class TestSourceGroup:
         assert group.hashes == {'abc123', 'def456'}
     
     def test_add_hashes_bulk(self):
-        """add_hashes adds multiple hashes."""
+        """add_hashes_with_paths adds multiple hashes with paths."""
         group = fetch.SourceGroup(source_path=Path('/cache'), source_name='remote')
-        group.add_hashes({'hash1', 'hash2', 'hash3'})
+        group.add_hashes_with_paths([('hash1', 'path1'), ('hash2', 'path2'), ('hash3', 'path3')])
         
         assert len(group.hashes) == 3
+        assert group.get_path_for_hash('hash1') == 'path1'
     
     def test_hashes_are_deduplicated(self):
         """Same hash added twice only stored once."""
@@ -226,10 +227,10 @@ class TestFetchPlan:
         plan = fetch.FetchPlan()
         
         g1 = plan.add_source(Path('/cache/a'), 'a')
-        g1.add_hashes({'h1', 'h2'})
+        g1.add_hashes_with_paths([('h1', 'p1'), ('h2', 'p2')])
         
         g2 = plan.add_source(Path('/cache/b'), 'b')
-        g2.add_hashes({'h3', 'h4', 'h5'})
+        g2.add_hashes_with_paths([('h3', 'p3'), ('h4', 'p4'), ('h5', 'p5')])
         
         assert plan.total_hashes == 5
     
@@ -238,7 +239,7 @@ class TestFetchPlan:
         plan = fetch.FetchPlan()
         
         g = plan.add_source(Path('/cache/a'), 'remote-a')
-        g.add_hashes({'h1', 'h2'})
+        g.add_hashes_with_paths([('h1', 'p1'), ('h2', 'p2')])
         
         plan.url_imports = [MagicMock()]
         plan.no_source = [MagicMock(), MagicMock()]
@@ -323,51 +324,58 @@ class TestExpandDirHash:
     """Tests for _expand_dir_hash function."""
     
     def test_returns_empty_on_error(self):
-        """Returns empty set if tree load fails."""
+        """Returns empty list if tree load fails."""
         mock_db = MagicMock()
         
         with patch('dvc_data.hashfile.tree.Tree.load', side_effect=Exception("Not found")):
             result = fetch._expand_dir_hash('abc123.dir', mock_db)
         
-        assert result == set()
+        assert result == []
 
 
 class TestCollectHashesFromStage:
     """Tests for _collect_hashes_from_stage function."""
     
     def test_collects_hashes_from_outs(self):
-        """Collects hash values from stage outputs."""
+        """Collects hash values and paths from stage outputs."""
         out1 = MagicMock()
         out1.use_cache = True
         out1.hash_info.value = 'hash1'
+        out1.path = 'path1'
         
         out2 = MagicMock()
         out2.use_cache = True
         out2.hash_info.value = 'hash2'
+        out2.path = 'path2'
         
         stage = MagicMock()
         stage.outs = [out1, out2]
         
         result = fetch._collect_hashes_from_stage(stage)
         
-        assert result == {'hash1', 'hash2'}
+        # Returns list of (hash, path) tuples
+        hashes = {h for h, p in result}
+        assert hashes == {'hash1', 'hash2'}
     
     def test_skips_non_cached_outputs(self):
         """Skips outputs with use_cache=False."""
         out1 = MagicMock()
         out1.use_cache = True
         out1.hash_info.value = 'cached'
+        out1.path = 'path1'
         
         out2 = MagicMock()
         out2.use_cache = False
         out2.hash_info.value = 'not_cached'
+        out2.path = 'path2'
         
         stage = MagicMock()
         stage.outs = [out1, out2]
         
         result = fetch._collect_hashes_from_stage(stage)
         
-        assert result == {'cached'}
+        hashes = {h for h, p in result}
+        assert hashes == {'cached'}
     
     def test_handles_missing_hash_info(self):
         """Handles outputs without hash_info."""
@@ -380,7 +388,7 @@ class TestCollectHashesFromStage:
         
         result = fetch._collect_hashes_from_stage(stage)
         
-        assert result == set()
+        assert result == []
 
 
 # =============================================================================

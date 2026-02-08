@@ -229,23 +229,33 @@ class SourceGroup:
     hashes: set = field(default_factory=set)
     # Track which stage each hash came from (for error reporting)
     hash_stages: Dict[str, str] = field(default_factory=dict)
+    # Track the path for each hash (for error reporting)
+    hash_paths: Dict[str, str] = field(default_factory=dict)
     
-    def add_hash(self, h: str, stage_name: str = None) -> None:
+    def add_hash(self, h: str, stage_name: str = None, path: str = None) -> None:
         """Add a hash to fetch from this source."""
         self.hashes.add(h)
         if stage_name:
             self.hash_stages[h] = stage_name
+        if path:
+            self.hash_paths[h] = path
     
-    def add_hashes(self, hashes: set, stage_name: str = None) -> None:
-        """Add multiple hashes to fetch from this source."""
-        self.hashes.update(hashes)
-        if stage_name:
-            for h in hashes:
+    def add_hashes_with_paths(self, hash_path_pairs: List[Tuple[str, str]], stage_name: str = None) -> None:
+        """Add multiple hashes with their paths to fetch from this source."""
+        for h, path in hash_path_pairs:
+            self.hashes.add(h)
+            if stage_name:
                 self.hash_stages[h] = stage_name
+            if path:
+                self.hash_paths[h] = path
     
     def get_stage_for_hash(self, h: str) -> Optional[str]:
         """Get the stage name that a hash came from."""
         return self.hash_stages.get(h)
+    
+    def get_path_for_hash(self, h: str) -> Optional[str]:
+        """Get the path that a hash came from."""
+        return self.hash_paths.get(h)
 
 
 @dataclass 
@@ -314,50 +324,59 @@ def _create_source_cache_db(source_path: Path):
 def _expand_dir_hash(
     dir_hash: str,
     source_db,
-) -> set:
-    """Expand a .dir hash to get all child file hashes.
+    base_path: str = None,
+) -> List[Tuple[str, str]]:
+    """Expand a .dir hash to get all child file hashes with their paths.
     
     Uses DVC's Tree.load() to read the directory manifest.
     
     Args:
         dir_hash: The directory hash (with .dir suffix).
         source_db: LocalHashFileDB to read the .dir file from.
+        base_path: Base path to prepend to child paths.
         
     Returns:
-        Set of child file hashes (not including the .dir hash itself).
+        List of (hash, path) tuples for child files.
     """
     from dvc_data.hashfile.tree import Tree
     from dvc_data.hashfile.hash_info import HashInfo
     
-    child_hashes = set()
+    child_files = []
     
     try:
         hi = HashInfo("md5", dir_hash)
         tree = Tree.load(source_db, hi)
         for key, (meta, hash_info) in tree.iteritems():
-            child_hashes.add(hash_info.value)
+            # key is a tuple of path components, e.g., ('subdir', 'file.txt')
+            rel_path = '/'.join(key) if key else ''
+            if base_path:
+                full_path = f"{base_path}/{rel_path}" if rel_path else base_path
+            else:
+                full_path = rel_path
+            child_files.append((hash_info.value, full_path))
     except Exception:
         # If we can't load the tree, we'll just fetch the .dir hash
         # and handle expansion later
         pass
     
-    return child_hashes
+    return child_files
 
 
-def _collect_hashes_from_stage(stage: Any) -> set:
-    """Extract all hashes from a stage's outputs.
+def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
+    """Extract all hashes from a stage's outputs with their paths.
     
     Args:
         stage: DVC Stage object.
         
     Returns:
-        Set of hash strings (may include .dir hashes).
+        List of (hash, path) tuples (may include .dir hashes).
     """
-    hashes = set()
+    hash_paths = []
     for out in stage.outs:
         if out.use_cache and out.hash_info and out.hash_info.value:
-            hashes.add(out.hash_info.value)
-    return hashes
+            path = str(out.path) if hasattr(out, 'path') else None
+            hash_paths.append((out.hash_info.value, path))
+    return hash_paths
 
 
 def build_fetch_plan(
@@ -390,14 +409,14 @@ def build_fetch_plan(
                 source_db = _create_source_cache_db(source_path)
                 
                 for stage in categorization.regular_stages:
-                    stage_hashes = _collect_hashes_from_stage(stage)
+                    stage_hash_paths = _collect_hashes_from_stage(stage)
                     stage_name = stage.addressing
-                    for h in stage_hashes:
-                        group.add_hash(h, stage_name=stage_name)
+                    for h, path in stage_hash_paths:
+                        group.add_hash(h, stage_name=stage_name, path=path)
                         # Expand directory hashes
                         if h.endswith('.dir') and source_db:
-                            child_hashes = _expand_dir_hash(h, source_db)
-                            group.add_hashes(child_hashes, stage_name=stage_name)
+                            child_files = _expand_dir_hash(h, source_db, base_path=path)
+                            group.add_hashes_with_paths(child_files, stage_name=stage_name)
         else:
             # No local remote available
             plan.no_source.extend(categorization.regular_stages)
@@ -410,14 +429,14 @@ def build_fetch_plan(
             source_db = _create_source_cache_db(source_path)
             
             for stage in import_group.stages:
-                stage_hashes = _collect_hashes_from_stage(stage)
+                stage_hash_paths = _collect_hashes_from_stage(stage)
                 stage_name = stage.addressing
-                for h in stage_hashes:
-                    group.add_hash(h, stage_name=stage_name)
+                for h, path in stage_hash_paths:
+                    group.add_hash(h, stage_name=stage_name, path=path)
                     # Expand directory hashes
                     if h.endswith('.dir') and source_db:
-                        child_hashes = _expand_dir_hash(h, source_db)
-                        group.add_hashes(child_hashes, stage_name=stage_name)
+                        child_files = _expand_dir_hash(h, source_db, base_path=path)
+                        group.add_hashes_with_paths(child_files, stage_name=stage_name)
         else:
             # No local cache for this repo
             plan.no_source.extend(import_group.stages)
@@ -666,7 +685,11 @@ def fetch_from_plan(
                 print(f"  Failed files ({len(other_failures)}):")
                 for h, reason in other_failures:
                     stage_name = group.get_stage_for_hash(h)
-                    if stage_name:
+                    path = group.get_path_for_hash(h)
+                    # Show path if available, fall back to stage name
+                    if path:
+                        print(f"    {h} ({path}): {reason}")
+                    elif stage_name:
                         print(f"    {h} ({stage_name}): {reason}")
                     else:
                         print(f"    {h}: {reason}")
@@ -677,18 +700,22 @@ def fetch_from_plan(
                 non_recoverable_dirs = []
                 for h, reason in dir_failures:
                     stage_name = group.get_stage_for_hash(h)
+                    path = group.get_path_for_hash(h)
                     # Only repo imports (ending in .dvc) can be recovered via dt update
                     if stage_name and stage_name.endswith('.dvc'):
                         recoverable_dir_failures.append((h, stage_name))
-                        recoverable_dirs.append((h, reason, stage_name))
+                        recoverable_dirs.append((h, reason, stage_name, path))
                     else:
-                        non_recoverable_dirs.append((h, reason, stage_name))
+                        non_recoverable_dirs.append((h, reason, stage_name, path))
                 
                 # Always report non-recoverable .dir failures (pipeline stages)
                 if non_recoverable_dirs:
                     print(f"  Failed .dir manifests ({len(non_recoverable_dirs)}):")
-                    for h, reason, stage_name in non_recoverable_dirs:
-                        if stage_name:
+                    for h, reason, stage_name, path in non_recoverable_dirs:
+                        # Show path if available, fall back to stage name
+                        if path:
+                            print(f"    {h} ({path}): {reason}")
+                        elif stage_name:
                             print(f"    {h} ({stage_name}): {reason}")
                         else:
                             print(f"    {h}: {reason}")
@@ -696,8 +723,12 @@ def fetch_from_plan(
                 # Report recoverable .dir failures only if --update is not set
                 if recoverable_dirs and not update:
                     print(f"  Failed .dir manifests ({len(recoverable_dirs)}):")
-                    for h, reason, stage_name in recoverable_dirs:
-                        print(f"    {h} ({stage_name}): {reason}")
+                    for h, reason, stage_name, path in recoverable_dirs:
+                        # Show path if available, fall back to stage name
+                        if path:
+                            print(f"    {h} ({path}): {reason}")
+                        else:
+                            print(f"    {h} ({stage_name}): {reason}")
                     print(f"  Hint: .dir files may need rebuilding. Try: dt fetch --update")
         
         # Count .dir failures separately if --update will handle them
