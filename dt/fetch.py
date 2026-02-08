@@ -575,13 +575,18 @@ def fetch_from_plan(
             for stage in plan.no_source:
                 results.append((stage.addressing, False, "No local source (use --network)"))
     
-    # Handle URL imports (doesn't need local cache)
+    # Handle URL imports (require network access)
     if plan.url_imports:
-        if verbose:
-            print(f"\nProcessing {len(plan.url_imports)} URL imports...")
-        for stage in plan.url_imports:
-            result = _fetch_url_import_stage(stage, verbose=verbose)
-            results.append(result)
+        if network:
+            if verbose:
+                print(f"\nProcessing {len(plan.url_imports)} URL imports...")
+            for stage in plan.url_imports:
+                result = _fetch_url_import_stage(stage, verbose=verbose)
+                results.append(result)
+        else:
+            # Skip URL imports when network=False
+            for stage in plan.url_imports:
+                results.append((stage.addressing, False, "URL import requires network (use --network)"))
     
     # Early return if no sources with hashes to fetch
     if plan.total_hashes == 0:
