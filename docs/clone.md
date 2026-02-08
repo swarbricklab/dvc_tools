@@ -23,6 +23,7 @@ dt clone [options] <repository> [path]
 - `--cache-name <name>`: Override cache directory name (defaults to repository name)
 - `--remote-name <name>`: Override remote directory name (defaults to repository name)
 - `--shallow`: Perform a shallow clone (only recent history)
+- `--pull`: Run `dt pull` after cloning to fetch all data files
 
 ## Short Name Feature
 
@@ -66,6 +67,9 @@ This operation includes the following steps:
 # First, set your default owner
 dt config set owner myorg
 
+# Clone and pull in one step - ready to work immediately
+dt clone --pull myproject
+
 # Clone using just the repository name
 dt clone myproject
 
@@ -104,12 +108,15 @@ cd /scratch/$PROJECT/$USER/
 # Set up your owner (one-time)
 dt config set owner myorg
 
-# Clone an existing analysis using short name
-dt clone single-cell-analysis
-
-# Start working
+# Clone and pull data in one step (recommended)
+dt clone --pull single-cell-analysis
 cd single-cell-analysis
-dvc pull  # Download data files
+# Ready to work - data files already checked out
+
+# Or clone first, then pull manually
+dt clone single-cell-analysis
+cd single-cell-analysis
+dt pull  # Download data files
 ```
 
 ## Cache Sharing
@@ -157,7 +164,7 @@ cd neochemo
 dt remote init
 
 # Download data
-dvc pull
+dt pull
 ```
 
 ## Related Commands
