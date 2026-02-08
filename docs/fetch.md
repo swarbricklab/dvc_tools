@@ -41,6 +41,8 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | `--urls` | Only fetch URL imports (from `dvc import-url`) |
 | `--regular` | Only fetch regular stages (non-imports) |
 | `--no-index-sync` | Skip automatic index mirror sync |
+| `--source PATH` | Explicit source cache path (overrides auto-discovery) |
+| `--destination PATH` | Explicit destination cache path (overrides primary cache) |
 
 ### Stage Type Filters
 
@@ -59,6 +61,26 @@ dt fetch --imports --urls
 # If no filter specified, all stage types are fetched
 dt fetch
 ```
+
+### Explicit Cache Paths
+
+The `--source` and `--destination` options allow you to specify explicit cache paths instead of using auto-discovery:
+
+```bash
+# Fetch from an explicit source cache
+dt fetch --source /path/to/source/cache
+
+# Fetch into an explicit destination cache (instead of primary cache)
+dt fetch --destination /path/to/dest/cache
+
+# Combine both for full control over source and destination
+dt fetch --source /shared/project-cache --destination /local/cache
+```
+
+This is useful when:
+- The source cache is not configured as a DVC remote
+- You want to populate a different cache than the primary one
+- You're copying data between caches on shared filesystems
 
 ## Examples
 
