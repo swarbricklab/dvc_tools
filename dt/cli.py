@@ -76,7 +76,8 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
 @click.option('--cache-name', help='Override cache directory name')
 @click.option('--remote-name', help='Override remote directory name')
 @click.option('--shallow', is_flag=True, help='Perform a shallow clone')
-def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow):
+@click.option('--pull', 'do_pull', is_flag=True, help='Run dt pull after cloning to fetch data')
+def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow, do_pull):
     """Clone an existing DVC project from GitHub.
     
     REPOSITORY can be either:
@@ -99,7 +100,7 @@ def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_na
     with proper cache and remote setup.
     """
     try:
-        clone_mod.clone_repository(
+        target_dir = clone_mod.clone_repository(
             repository=repository,
             path=path,
             owner=owner,
@@ -107,6 +108,7 @@ def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_na
             cache_name=cache_name,
             remote_name=remote_name,
             shallow=shallow,
+            do_pull=do_pull,
         )
     except clone_mod.CloneError as e:
         raise click.ClickException(str(e))
