@@ -1,6 +1,6 @@
 # dt update
 
-Update imported DVC data to a specific revision.
+Rebuild `.dir` manifests and update imported DVC data.
 
 ## Synopsis
 
@@ -10,9 +10,22 @@ dt update [OPTIONS] [TARGETS]...
 
 ## Description
 
-Updates .dvc files created by `dvc import` or `dt import` to reference a different revision of the source repository. By default, updates to the latest HEAD of the source repo.
+`dt update` serves two primary purposes:
 
-This is the dt equivalent of `dvc update` with better defaults and integration with dt's index sync features.
+1. **Rebuild `.dir` manifests** for directory imports when the manifest is missing from the source remote
+2. **Update imports** to a different revision of the source repository
+
+This is particularly useful for recovering from `.dir` fetch failures, which can occur when data was pushed with older DVC versions or when `dvc update --no-download` was used without re-pushing.
+
+## Smart Revision Detection
+
+When `--rev` is not specified, `dt update` intelligently determines the best revision to use:
+
+- If the .dvc file has a `rev_lock`, uses that (rebuilds at the currently locked revision)
+- If the .dvc file has a `rev` field (branch/tag), updates to the latest HEAD of that ref
+- Otherwise, updates to the default branch HEAD
+
+This means running `dt update` without `--rev` will **not** accidentally update to the latest version—it respects the locked revision.
 
 ## Arguments
 
@@ -24,27 +37,27 @@ This is the dt equivalent of `dvc update` with better defaults and integration w
 
 | Option | Description |
 |--------|-------------|
-| `--rev TEXT` | Git revision (commit, branch, tag) to update to. Defaults to HEAD. |
-| `-R, --recursive` | Update all stages in specified directory. |
-| `--no-download` | Update .dvc file only, do not download data. |
-| `--to-remote` | Update data directly on the remote. |
-| `-r, --remote TEXT` | Remote storage to perform updates to. |
-| `-j, --jobs INTEGER` | Number of parallel jobs. |
+| `--rev TEXT` | Git revision (commit, branch, tag) to update to. |
+| `--push-dir / --no-push-dir` | Push the rebuilt .dir file to the remote (default: configurable) |
+| `--no-download` | Rebuild .dir file only, do not download data. |
+| `--dry-run` | Show what would be updated without making changes. |
 | `-v, --verbose` | Show detailed progress. |
 | `--no-index-sync` | Skip automatic index mirror sync. |
 
 ## Examples
 
-### Update all imports to HEAD
+### Rebuild .dir manifests at locked revision
 
-```bash
-dt update
-```
-
-### Update specific import file
+The most common use case—rebuild missing `.dir` files without changing the locked revision:
 
 ```bash
 dt update data/external.dvc
+```
+
+### Preview what would be updated
+
+```bash
+dt update --dry-run
 ```
 
 ### Update to specific tag
@@ -65,10 +78,20 @@ dt update --rev main
 dt update --rev abc1234
 ```
 
-### Update .dvc file only (no data download)
+### Update without downloading data
+
+Rebuild the `.dir` manifest without downloading the actual files:
 
 ```bash
-dt update --no-download
+dt update --no-download data/external.dvc
+```
+
+### Push rebuilt .dir to remote
+
+After rebuilding, push the `.dir` file so others don't have the same problem:
+
+```bash
+dt update --push-dir data/external.dvc
 ```
 
 ### Update with verbose output
@@ -77,23 +100,51 @@ dt update --no-download
 dt update -v data/external.dvc
 ```
 
+## Configuration
+
+| Option | Description |
+|--------|-------------|
+| `update.push_dir` | Default behavior for `--push-dir` flag. Set to `true` to always push rebuilt .dir files. |
+
+Example:
+
+```bash
+# Set default to always push rebuilt .dir files
+dt config update.push_dir true
+```
+
 ## Workflow
 
-### Typical usage
+### Recovering from .dir failures
 
-1. **Import data** from another repository:
+When `dt fetch` fails because a `.dir` manifest is missing:
+
+```bash
+# Fetch fails with hint about .dir files
+dt fetch imported/dir.dvc
+# Output: Failed .dir manifests (1): abc123.dir ...
+# Hint: .dir files may need rebuilding. Try: dt fetch --update
+
+# Option 1: Use dt fetch --update (automatic recovery)
+dt fetch --update imported/dir.dvc
+
+# Option 2: Run dt update manually
+dt update imported/dir.dvc
+dt fetch imported/dir.dvc
+```
+
+### Updating to a new version
+
+When you want the latest version from upstream:
+
+1. **Update to new revision**:
    ```bash
-   dt import other-project data/shared.csv
+   dt update --rev main data/shared.csv.dvc
    ```
 
-2. **Later, update** to get the latest version:
+2. **Fetch and checkout** the new data:
    ```bash
-   dt update data/shared.csv.dvc
-   ```
-
-3. **Or update to specific version**:
-   ```bash
-   dt update --rev v2.0.0 data/shared.csv.dvc
+   dt pull data/shared.csv.dvc
    ```
 
 ### Update without downloading
@@ -104,13 +155,19 @@ For CI/CD or when you only want to update the reference:
 dt update --no-download --rev main
 ```
 
-This updates the .dvc file to point to the new revision but doesn't download the actual data.
+This updates the .dvc file to point to the new revision and rebuilds the `.dir` manifest, but doesn't download the actual data files.
 
 ## How it works
 
 1. **Find import files**: If no targets specified, finds all .dvc files with a `deps.repo` section (imports)
-2. **Run dvc update**: Calls `dvc update` with the specified options
-3. **Sync index**: If index mirror is configured, syncs before and after update
+2. **Determine revision**: Uses `--rev` if specified, otherwise uses the locked revision (`rev_lock`) from the .dvc file
+3. **Clone source repo**: Clones the source repository at the target revision (cached in `.dt/tmp/`)
+4. **Checkout data**: Checks out the data at the target revision to access the files
+5. **Rebuild .dir**: For directories, rebuilds the `.dir` manifest file by scanning the directory contents
+6. **Cache data**: Adds the data (and `.dir` file) to the local cache
+7. **Update .dvc file**: Updates the .dvc file with the new hashes
+8. **Push .dir** (optional): If `--push-dir` is set, pushes the `.dir` file to the remote
+9. **Sync index**: If index mirror is configured, syncs after update
 
 ## Import detection
 
@@ -129,10 +186,12 @@ outs:
   md5: ghi789
 ```
 
+For directory imports, DVC creates a `.dir` manifest file that lists all files in the directory. This manifest is stored in the cache with a `.dir` extension. If the `.dir` file is missing from the remote (e.g., because it wasn't pushed), `dt update` can rebuild it by checking out the source data.
+
 Regular .dvc files (without `deps.repo`) cannot be updated with `dt update`.
 
 ## See also
 
+- [dt fetch](fetch.md) - Fetch imported data to cache (with `--update` for auto-recovery)
 - [dt import](import.md) - Import data from remote repository
-- [dt fetch](fetch.md) - Fetch imported data to cache
 - [dt pull](pull.md) - Pull data to workspace

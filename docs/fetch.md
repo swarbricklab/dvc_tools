@@ -34,9 +34,31 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | Option | Description |
 |--------|-------------|
 | `-v, --verbose` | Show detailed progress messages |
-| `--update` | Rebuild .dir files and update .dvc hashes if mismatched |
+| `--update` | Recover from .dir failures by rebuilding manifests with `dt update` |
 | `--network` | Fall back to `dvc fetch` (network) if local remote not available |
+| `--dry` | Show stage categorization without fetching (for troubleshooting) |
+| `--imports` | Only fetch repo imports (from `dvc import`) |
+| `--urls` | Only fetch URL imports (from `dvc import-url`) |
+| `--regular` | Only fetch regular stages (non-imports) |
 | `--no-index-sync` | Skip automatic index mirror sync |
+
+### Stage Type Filters
+
+The `--imports`, `--urls`, and `--regular` flags can be combined to fetch specific types of stages:
+
+```bash
+# Only fetch repo imports
+dt fetch --imports
+
+# Only fetch URL imports
+dt fetch --urls
+
+# Fetch both imports and URL imports (skip regular stages)
+dt fetch --imports --urls
+
+# If no filter specified, all stage types are fetched
+dt fetch
+```
 
 ## Examples
 
@@ -124,6 +146,35 @@ dt fetch -v data.csv.dvc
 
 **Note**: URL imports are typically not pushed to remote storage, so `dvc fetch` wouldn't find them. `dt fetch` automatically detects these and uses `dvc update` to re-download from the source URL.
 
+## Recovering from .dir Failures
+
+When fetching directory imports, the `.dir` manifest file may be missing from the source remote (a common issue when data was pushed with older DVC versions or `dvc update --no-download` was used). Use `--update` to automatically recover:
+
+```bash
+# Fetch fails because .dir file is missing
+dt fetch imported/dir.dvc
+
+# Output:
+# nci (3 files)
+#   Failed .dir manifests (1):
+#     abc123.dir (imported/dir.dvc: imported/dir): not found in source
+#   Hint: .dir files may need rebuilding. Try: dt fetch --update
+
+# Recover by rebuilding the .dir manifest
+dt fetch --update imported/dir.dvc
+
+# Output:
+# Rebuilding 1 missing .dir manifests...
+# imported/dir.dvc:
+#   Source: /projects/source-repo
+#   Path: data/dir
+#   Locked rev: abc123...
+#   Created .dir file with 5 entries
+# ✓ 1 stages processed
+```
+
+The `--update` flag calls `dt update` with the locked revision to rebuild the `.dir` manifest, then retries the fetch.
+
 ## How it works
 
 1. **For repo import files** (from `dvc import`): `dt fetch` clones the source repository (cached in `.dt/tmp/`) to access its DVC configuration, finds a locally-accessible remote, and creates symlinks in the primary cache.
@@ -165,6 +216,7 @@ dvc checkout data/dataset.csv.dvc
 ## See also
 
 - [dt pull](pull.md) - Pull files (fetch + checkout in one step)
+- [dt update](update.md) - Rebuild .dir manifests for imports
 - [dt import](import.md) - Import data from other repositories
 - [dt cache](cache.md) - Manage the cache
 - [dt tmp](tmp.md) - Manage temporary repository clones
