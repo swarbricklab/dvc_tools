@@ -54,12 +54,14 @@ class HashMismatchError(DTError):
     Suggests using --update flag.
     """
     
-    def __init__(self, expected_hash: str, actual_hash: str, message: str = None):
+    def __init__(self, expected_hash: str, actual_hash: str, message: str = None, dvc_file: str = None):
         self.expected_hash = expected_hash
         self.actual_hash = actual_hash
+        self.dvc_file = dvc_file
         if message is None:
+            file_info = f" in {dvc_file}" if dvc_file else ""
             message = (
-                f"Hash mismatch: expected {expected_hash[:12]}..., got {actual_hash[:12]}...\n"
+                f"Hash mismatch{file_info}: expected {expected_hash[:12]}..., got {actual_hash[:12]}...\n"
                 f"Try: dt fetch --update <file> to rebuild and update the .dvc file"
             )
         super().__init__(message)

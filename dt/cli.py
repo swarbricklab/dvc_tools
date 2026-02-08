@@ -1045,34 +1045,57 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-@click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
+@click.option('--update', is_flag=True, help='Recover from .dir failures by rebuilding manifests with dt update')
+@click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
+@click.option('--dry', is_flag=True, help='Show stage categorization without fetching (for troubleshooting)')
+@click.option('--imports', is_flag=True, help='Only fetch repo imports (from dvc import)')
+@click.option('--urls', is_flag=True, help='Only fetch URL imports (from dvc import-url)')
+@click.option('--regular', is_flag=True, help='Only fetch regular stages (non-imports)')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update):
+def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, urls, regular):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
     This is the dt equivalent of `dvc fetch` but for local caches.
     
-    For import .dvc files (created by `dvc import`), automatically clones
+    For repo import .dvc files (created by `dvc import`), automatically clones
     the source repository to find a locally-accessible cache and creates
     symlinks in the primary cache.
     
+    For URL import .dvc files (created by `dvc import-url`), re-downloads data
+    from the source URL using `dvc update`. If the source has changed, the .dvc
+    file will be updated with the new hash.
+    
+    For regular .dvc files, checks if there's a locally-accessible remote
+    and creates symlinks from it. If no local remote is available and --network
+    is specified, falls back to `dvc fetch`.
+    
     After fetch, run `dvc checkout` to link files to the workspace.
     
-    For non-import files, use `dvc fetch` to download from remotes.
+    \b
+    Stage type filters (combinable, default is all types):
+        --imports    Only repo imports (dvc import)
+        --urls       Only URL imports (dvc import-url)  
+        --regular    Only regular stages (non-imports)
     
     \b
     Examples:
-        dt fetch                           # Fetch all import files
+        dt fetch                           # Fetch all .dvc files from local sources
         dt fetch data/external.dvc         # Fetch specific targets
         dt fetch -v                        # Show detailed progress
         dt fetch --update                  # Rebuild .dir files, update .dvc if needed
+        dt fetch --network                 # Fall back to dvc fetch if local remote unavailable
+        dt fetch --dry                     # Show what would be fetched without actually fetching
+        dt fetch --dry -v                  # Show detailed categorization
+        dt fetch --imports                 # Only fetch repo imports
+        dt fetch --urls --imports          # Only fetch imports (both types)
+        dt fetch --regular                 # Only fetch regular stages
     """
     from . import fetch as fetch_mod
     
     try:
         # Sync index from mirror before fetch (if configured)
-        if not no_index_sync and index_mod.is_auto_sync_enabled():
+        if not dry and not no_index_sync and index_mod.is_auto_sync_enabled():
             try:
                 index_mod.pull(quiet=not verbose, verbose=verbose)
             except Exception as e:
@@ -1083,26 +1106,34 @@ def fetch(ctx, targets, verbose, no_index_sync, update):
             targets=list(targets) if targets else None,
             verbose=verbose,
             update=update,
+            network=network,
+            dry=dry,
+            imports=imports,
+            urls=urls,
+            regular=regular,
         )
         
-        any_success = False
-        any_failure = False
+        # In dry mode, just exit (summary already printed)
+        if dry:
+            return
         
-        for target, success, message in results:
-            if verbose or not success:
-                status = "✓" if success else "✗"
-                click.echo(f"{status} {target}: {message}")
-            elif success:
-                click.echo(f"✓ {target}")
-            
-            if success:
-                any_success = True
-            else:
-                any_failure = True
+        # Count successes and failures
+        successes = sum(1 for _, success, _ in results if success)
+        failures = [(target, msg) for target, success, msg in results if not success]
+        
+        # In verbose mode, results were already printed during fetch
+        # In non-verbose mode, progress was shown inline
+        # Just show failures and final summary here
+        if failures:
+            click.echo()
+            for target, msg in failures:
+                click.echo(f"✗ {target}: {msg}")
         
         # Report summary
-        if any_success and not any_failure:
-            click.echo("\nFetch complete. Run 'dvc checkout' to link files to workspace.")
+        if failures:
+            click.echo(f"\nFetch complete with {len(failures)} error(s).")
+        else:
+            click.echo(f"\n✓ {successes} stages processed")
             # Sync index to mirror after fetch (if configured)
             if not no_index_sync and index_mod.is_auto_sync_enabled():
                 try:
@@ -1110,7 +1141,8 @@ def fetch(ctx, targets, verbose, no_index_sync, update):
                 except Exception as e:
                     if verbose:
                         click.echo(f"Warning: index sync failed: {e}")
-        elif any_failure and not any_success:
+        
+        if failures and successes == 0:
             raise SystemExit(1)
     
     except errors.HashMismatchError as e:
@@ -1338,12 +1370,42 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, u
                 raise SystemExit(1)
             return
         
-        # --- Step 1: Discover and separate targets ---
-        # Extract targets from extra args (non-option args)
+        # Extract targets and dvc_args from ctx.args
         targets = [arg for arg in ctx.args if not arg.startswith('-')]
+        dvc_args = [arg for arg in ctx.args if arg.startswith('-')]
         
-        # If no targets specified, find all .dvc files
+        # Use targets=None to mean "all stages"
         if not targets:
+            targets = None
+        
+        # Standard pull mode: delegate to pull_mod.pull() which uses DVC stages
+        # This handles imports, regular files, and pipeline stages
+        if not dry and workers is None:
+            success = pull_mod.pull(
+                targets=targets,
+                verbose=verbose,
+                dvc_args=dvc_args,
+                force=force,
+                update=update,
+            )
+            
+            if not success:
+                raise SystemExit(1)
+            
+            # Sync index to mirror after pull (if configured)
+            if not no_index_sync and index_mod.is_auto_sync_enabled():
+                try:
+                    index_mod.push(quiet=not verbose, verbose=verbose)
+                except Exception as e:
+                    if verbose:
+                        click.echo(f"Warning: index sync failed: {e}")
+            return
+        
+        # --- Dry run or parallel mode: need file-based discovery for manifests ---
+        # These modes need to know which files would be pulled and their sizes
+        
+        # Discover targets if not specified
+        if targets is None:
             if verbose:
                 click.echo("Discovering .dvc files...")
             all_dvc_files = pull_mod.find_all_dvc_files()
@@ -1391,11 +1453,17 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, u
                     if dvc_file:
                         if verbose:
                             click.echo(f"  dt fetch {dvc_file}")
-                        pull_mod.smart_checkout(
+                        fetch_mod.fetch(
                             targets=[str(dvc_file)],
-                            cache=None,
                             verbose=verbose,
                             update=update,
+                            show_progress=not verbose,
+                        )
+                        # Checkout after fetch
+                        subprocess.run(
+                            ['dvc', 'checkout', str(dvc_file)],
+                            capture_output=not verbose,
+                            text=True,
                         )
         
         # --- Step 3: Handle regular targets (dry-run, parallel, or standard) ---
@@ -1463,34 +1531,6 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, u
                 click.echo(f"\nManifest: {manifest_dir}")
                 click.echo("Monitor with: qxub monitor --summary " + " ".join(job_ids))
             return
-        
-        # Standard pull mode for regular targets
-        if verbose:
-            click.echo(f"\nPulling {len(regular_targets)} regular target(s)...")
-        
-        # Build dvc_args from remaining ctx.args (options only)
-        dvc_args = [arg for arg in ctx.args if arg.startswith('-')]
-        
-        cmd = ['dvc', 'pull']
-        if dvc_args:
-            cmd.extend(dvc_args)
-        cmd.extend(regular_targets)
-        
-        if verbose:
-            click.echo(f"  Running: {' '.join(cmd)}")
-        
-        import subprocess
-        result = subprocess.run(cmd)
-        if result.returncode != 0:
-            raise SystemExit(1)
-        
-        # Sync index to mirror after pull (if configured)
-        if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.push(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
             
     except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
@@ -1632,32 +1672,50 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
 
 @cli.command()
 @click.argument('targets', nargs=-1, type=click.Path())
-@click.option('--rev', default=None, help='Git revision (commit, branch, tag) to update to. Defaults to HEAD.')
-@click.option('-R', '--recursive', is_flag=True, help='Update all stages in specified directory')
-@click.option('--no-download', is_flag=True, help='Update .dvc file only, do not download data')
-@click.option('--to-remote', is_flag=True, help='Update data directly on the remote')
-@click.option('-r', '--remote', help='Remote storage to perform updates to')
-@click.option('-j', '--jobs', type=int, help='Number of parallel jobs')
+@click.option('--rev', default=None, help='Git revision to update to. If not specified, checks for changes and auto-upgrades to HEAD if safe.')
+@click.option('--push-dir/--no-push-dir', default=None, help='Push rebuilt .dir file to source remote. Default from update.push_dir config.')
+@click.option('--no-download', is_flag=True, help='Rebuild .dir only, do not run dt fetch')
+@click.option('--dry-run', is_flag=True, help='Show what would be done without making changes')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-def update(targets, rev, recursive, no_download, to_remote, remote, jobs, verbose, no_index_sync):
-    """Update imported data to a specific revision.
+def update(targets, rev, push_dir, no_download, dry_run, verbose, no_index_sync):
+    """Update imported data by rebuilding .dir manifests.
     
-    Updates .dvc files created by `dvc import` or `dt import` to reference
-    a different revision of the source repository. By default updates to
-    the latest HEAD of the source repo.
+    Rebuilds .dir files for repo imports where the directory manifest
+    doesn't exist or is stale. This fixes the metadata so dt fetch can
+    populate the cache correctly.
     
-    This is the dt equivalent of `dvc update` with better defaults.
+    \b
+    Smart Revision Detection:
+    When --rev is not specified, dt update checks if the source data
+    has changed between the locked revision and HEAD:
+    
+    - If no changes: safely upgrades to HEAD
+    - If data changed: stops and shows options (--rev locked or --rev HEAD)
+    
+    Use --rev to explicitly specify a version:
+    - --rev HEAD: update to latest
+    - --rev v1.2.0: update to a tag
+    - --rev abc1234: update to a specific commit
+    - --rev <current>: refresh .dir without changing version
     
     \b
     Examples:
-        dt update                              # Update all imports to HEAD
-        dt update data/external.dvc            # Update specific file
-        dt update --rev v1.2.0                 # Update to specific tag
-        dt update --rev main                   # Update to branch HEAD
-        dt update --rev abc1234                # Update to specific commit
-        dt update --no-download                # Update .dvc file only
+        dt update                    # Smart update all imports
+        dt update data/external.dvc  # Update specific file
+        dt update --rev HEAD         # Force update to latest
+        dt update --no-download      # Rebuild .dir only
+        dt update --push-dir         # Push .dir to source remote
+        dt update --dry-run          # Show what would be done
+    
+    \b
+    Configuration:
+        dt config set update.push_dir true   # Always push .dir by default
     """
+    # Determine push_dir from config if not explicitly set
+    if push_dir is None:
+        push_dir = cfg.get_value('update.push_dir', False)
+    
     try:
         # Sync index from mirror before update (if configured)
         if not no_index_sync and index_mod.is_auto_sync_enabled():
@@ -1670,12 +1728,10 @@ def update(targets, rev, recursive, no_download, to_remote, remote, jobs, verbos
         results = update_mod.update(
             targets=list(targets) if targets else None,
             rev=rev,
-            recursive=recursive,
-            no_download=no_download,
-            to_remote=to_remote,
-            remote=remote,
-            jobs=jobs,
             verbose=verbose,
+            push_dir=push_dir,
+            no_download=no_download,
+            dry_run=dry_run,
         )
         
         any_success = False
