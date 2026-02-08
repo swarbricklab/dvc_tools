@@ -1045,7 +1045,7 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-@click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
+@click.option('--update', is_flag=True, help='Recover from .dir failures by rebuilding manifests with dt update')
 @click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
 @click.option('--dry', is_flag=True, help='Show stage categorization without fetching (for troubleshooting)')
 @click.option('--imports', is_flag=True, help='Only fetch repo imports (from dvc import)')

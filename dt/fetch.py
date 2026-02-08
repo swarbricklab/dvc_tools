@@ -430,11 +430,80 @@ def build_fetch_plan(
     return plan
 
 
+def _recover_dir_failures(
+    failures: List[Tuple[str, str]],
+    verbose: bool = False,
+    show_progress: bool = True,
+) -> List[Tuple[str, bool, str]]:
+    """Attempt to recover from .dir failures by running dt update.
+    
+    For each failed .dir, runs dt update with --rev set to the current
+    locked revision (no HEAD check), then re-fetches the stage.
+    
+    Args:
+        failures: List of (hash, stage_name) tuples for failed .dir hashes.
+        verbose: Print detailed progress.
+        show_progress: Show progress bar for re-fetch.
+        
+    Returns:
+        List of (target, success, message) tuples for recovery attempts.
+    """
+    from . import update as update_mod
+    
+    results = []
+    
+    # Group failures by stage (multiple .dir hashes might come from same stage, though unlikely)
+    stages_to_recover = set(stage_name for _, stage_name in failures)
+    
+    print(f"\nAttempting recovery for {len(stages_to_recover)} stages with missing .dir files...")
+    
+    for stage_name in sorted(stages_to_recover):
+        # Get the rev_lock from the .dvc file to avoid HEAD checks
+        stage_path = Path(stage_name)
+        import_info = utils.get_import_info(stage_path)
+        
+        if not import_info:
+            results.append((stage_name, False, "Could not read import info"))
+            continue
+        
+        rev_lock = import_info.get('rev')
+        if not rev_lock:
+            results.append((stage_name, False, "No rev_lock in .dvc file"))
+            continue
+        
+        if verbose:
+            print(f"  {stage_name}: rebuilding .dir at rev {rev_lock[:12]}...")
+        
+        # Run dt update with explicit --rev to skip HEAD comparison
+        try:
+            update_results = update_mod.update(
+                targets=[stage_name],
+                rev=rev_lock,  # Use locked rev, not HEAD
+                verbose=verbose,
+                push_dir=False,  # Don't push during recovery
+                no_download=False,  # Let update call fetch after rebuilding
+                dry_run=False,
+            )
+            
+            # Check if update succeeded
+            for target, success, msg in update_results:
+                if success:
+                    results.append((target, True, f"Recovered: {msg}"))
+                else:
+                    results.append((target, False, f"Recovery failed: {msg}"))
+                    
+        except Exception as e:
+            results.append((stage_name, False, f"Recovery error: {e}"))
+    
+    return results
+
+
 def fetch_from_plan(
     plan: FetchPlan,
     verbose: bool = False,
     show_progress: bool = True,
     network: bool = False,
+    update: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Execute a fetch plan, linking hashes from sources to primary cache.
     
@@ -443,6 +512,7 @@ def fetch_from_plan(
         verbose: Print detailed progress.
         show_progress: Show progress bar.
         network: Fall back to dvc fetch for stages without local source.
+        update: If True, attempt to recover from .dir failures by running dt update.
         
     Returns:
         List of (source_name, success, message) tuples.
@@ -450,6 +520,9 @@ def fetch_from_plan(
     results = []
     total_fetched = 0
     total_failed = 0
+    
+    # Track .dir failures for potential recovery with --update
+    recoverable_dir_failures = []  # List of (hash, stage_name) tuples
     
     # Handle stages with no local source first (doesn't need Repo)
     if plan.no_source:
@@ -594,14 +667,26 @@ def fetch_from_plan(
                     stage_name = group.get_stage_for_hash(h)
                     if stage_name:
                         print(f"    {h} ({stage_name}): {reason}")
+                        # Track for potential recovery
+                        recoverable_dir_failures.append((h, stage_name))
                     else:
                         print(f"    {h}: {reason}")
-                print(f"  Hint: .dir files may need rebuilding. Try: dt update <stage>")
+                if not update:
+                    print(f"  Hint: .dir files may need rebuilding. Try: dt fetch --update")
         
         if failed > 0:
             results.append((group.source_name, False, f"Fetched {fetched}, failed {failed}"))
         else:
             results.append((group.source_name, True, f"Fetched {fetched} files"))
+    
+    # Attempt recovery for .dir failures if --update is set
+    if update and recoverable_dir_failures:
+        recovery_results = _recover_dir_failures(
+            failures=recoverable_dir_failures,
+            verbose=verbose,
+            show_progress=show_progress,
+        )
+        results.extend(recovery_results)
     
     # Summary
     if verbose:
@@ -1031,6 +1116,7 @@ def fetch(
         verbose=verbose,
         show_progress=show_progress,
         network=network,
+        update=update,
     )
 
 
