@@ -151,12 +151,27 @@ class TestCategorizeStages:
         mock_stage.is_import = False
         
         with patch('dt.fetch.remote.list_remotes', return_value={'local': '/path/to/remote'}), \
-             patch('dt.fetch.remote.find_local_remote', return_value=('local', '/path/to/remote')):
+             patch('dt.fetch.remote.check_remote_access', return_value=(('local', '/path/to/remote'), None)):
             
             result = fetch.categorize_stages([mock_stage])
         
         assert result.has_local_remote is True
         assert result.local_remote_name == 'local'
+
+    def test_captures_local_remote_error_when_volume_not_mounted(self):
+        """Error captured when remote looks local but path doesn't exist."""
+        mock_stage = MagicMock()
+        mock_stage.is_repo_import = False
+        mock_stage.is_import = False
+        
+        error_msg = "Remote 'storage' path not accessible: /Volumes/Data/remote (from /Volumes/Data/remote)"
+        with patch('dt.fetch.remote.list_remotes', return_value={'storage': '/Volumes/Data/remote'}), \
+             patch('dt.fetch.remote.check_remote_access', return_value=(None, error_msg)):
+            
+            result = fetch.categorize_stages([mock_stage])
+        
+        assert result.has_local_remote is False
+        assert result.local_remote_error == error_msg
 
 
 # =============================================================================

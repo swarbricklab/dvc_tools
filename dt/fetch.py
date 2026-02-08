@@ -39,6 +39,7 @@ class RepoImportGroup:
     stages: List[Any] = field(default_factory=list)
     local_cache: Optional[Path] = None
     has_local_cache: bool = False
+    local_cache_error: Optional[str] = None  # Error if remote looks local but not accessible
     
     def add_stage(self, stage: Any) -> None:
         """Add a stage to this group."""
@@ -76,6 +77,7 @@ class StageCategorization:
     regular_stages: List[Any] = field(default_factory=list)
     has_local_remote: bool = False
     local_remote_name: Optional[str] = None
+    local_remote_error: Optional[str] = None  # Error if remote looks local but not accessible
     
     @property
     def total_stages(self) -> int:
@@ -173,10 +175,13 @@ def categorize_stages(
                         group = RepoImportGroup(url=url, rev=rev)
                         # Check if we have a locally-accessible remote for this repo
                         try:
-                            local_remote = remote.find_local_remote_from_repo(url)
-                            if local_remote:
-                                group.local_cache = Path(local_remote[1])
+                            found, error = remote.check_remote_access_from_repo(url)
+                            if found:
+                                group.local_cache = Path(found[1])
                                 group.has_local_cache = True
+                            elif error:
+                                # Remote looks local but path doesn't exist
+                                group.local_cache_error = error
                         except Exception:
                             pass
                         result.repo_imports[url] = group
@@ -203,10 +208,13 @@ def categorize_stages(
     if result.regular_stages:
         try:
             remotes = remote.list_remotes()
-            local_remote = remote.find_local_remote(remotes)
-            if local_remote:
+            found, error = remote.check_remote_access(remotes)
+            if found:
                 result.has_local_remote = True
-                result.local_remote_name = local_remote[0]
+                result.local_remote_name = found[0]
+            elif error:
+                # Remote looks local but path doesn't exist (e.g., unmounted volume)
+                result.local_remote_error = error
         except Exception:
             pass
     
@@ -268,6 +276,7 @@ class FetchPlan:
     sources: Dict[str, SourceGroup] = field(default_factory=dict)
     url_imports: List[Any] = field(default_factory=list)
     no_source: List[Any] = field(default_factory=list)  # Stages with no local source
+    no_source_errors: Dict[str, str] = field(default_factory=dict)  # Stage addressing -> error message
     
     def add_source(self, source_path: Path, source_name: str) -> SourceGroup:
         """Get or create a source group."""
@@ -435,8 +444,11 @@ def build_fetch_plan(
                             child_files = _expand_dir_hash(h, source_db, base_path=path)
                             group.add_hashes_with_paths(child_files, stage_name=stage_name)
         else:
-            # No local remote available
-            plan.no_source.extend(categorization.regular_stages)
+            # No local remote available - track with error message if available
+            for stage in categorization.regular_stages:
+                plan.no_source.append(stage)
+                if categorization.local_remote_error:
+                    plan.no_source_errors[stage.addressing] = categorization.local_remote_error
     
     # Handle repo imports - grouped by source repository
     for url, import_group in categorization.repo_imports.items():
@@ -455,8 +467,11 @@ def build_fetch_plan(
                         child_files = _expand_dir_hash(h, source_db, base_path=path)
                         group.add_hashes_with_paths(child_files, stage_name=stage_name)
         else:
-            # No local cache for this repo
-            plan.no_source.extend(import_group.stages)
+            # No local cache for this repo - track with error message if available
+            for stage in import_group.stages:
+                plan.no_source.append(stage)
+                if import_group.local_cache_error:
+                    plan.no_source_errors[stage.addressing] = import_group.local_cache_error
     
     # URL imports are handled separately
     plan.url_imports = categorization.url_imports
@@ -572,8 +587,19 @@ def fetch_from_plan(
                 success, msg = _run_dvc_fetch(stage.addressing, verbose)
                 results.append((stage.addressing, success, msg))
         else:
+            # Show detailed errors for stages that look like they should be local
+            shown_errors = set()
             for stage in plan.no_source:
-                results.append((stage.addressing, False, "No local source (use --network)"))
+                error = plan.no_source_errors.get(stage.addressing)
+                if error:
+                    # Show unique errors only once
+                    if error not in shown_errors:
+                        print(f"Warning: {error}")
+                        print("  (Check if the required volume is mounted)")
+                        shown_errors.add(error)
+                    results.append((stage.addressing, False, error))
+                else:
+                    results.append((stage.addressing, False, "No local source (use --network)"))
     
     # Handle URL imports (require network access)
     if plan.url_imports:

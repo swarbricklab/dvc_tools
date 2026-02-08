@@ -539,3 +539,26 @@ def find_local_remote_from_repo(
     """
     remotes = list_remotes_from_repo(repo_spec, owner=owner)
     return find_local_remote(remotes, check_exists=check_exists)
+
+
+def check_remote_access_from_repo(
+    repo_spec: str,
+    owner: Optional[str] = None,
+) -> Tuple[Optional[Tuple[str, str]], Optional[str]]:
+    """Check remote access for a remote repository with detailed error messages.
+    
+    Like find_local_remote_from_repo, but provides detailed error messages
+    when remotes look like they should be local but aren't accessible
+    (e.g., when a volume is not mounted).
+    
+    Args:
+        repo_spec: Repository URL or short name
+        owner: Optional owner for short names
+        
+    Returns:
+        Tuple of:
+        - (remote_name, local_path) if found and accessible, None otherwise
+        - Error message if remote looks local but not accessible, None otherwise
+    """
+    remotes = list_remotes_from_repo(repo_spec, owner=owner)
+    return check_remote_access(remotes)
