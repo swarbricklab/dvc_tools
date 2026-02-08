@@ -455,7 +455,7 @@ def _recover_dir_failures(
     # Group failures by stage (multiple .dir hashes might come from same stage, though unlikely)
     stages_to_recover = set(stage_name for _, stage_name in failures)
     
-    print(f"\nAttempting recovery for {len(stages_to_recover)} stages with missing .dir files...")
+    print(f"\nRebuilding {len(stages_to_recover)} missing .dir manifests...")
     
     for stage_name in sorted(stages_to_recover):
         # Get the rev_lock from the .dvc file to avoid HEAD checks
@@ -488,12 +488,12 @@ def _recover_dir_failures(
             # Check if update succeeded
             for target, success, msg in update_results:
                 if success:
-                    results.append((target, True, f"Recovered: {msg}"))
+                    results.append((target, True, f"Rebuilt .dir: {msg}"))
                 else:
-                    results.append((target, False, f"Recovery failed: {msg}"))
+                    results.append((target, False, f"Failed to rebuild .dir: {msg}"))
                     
         except Exception as e:
-            results.append((stage_name, False, f"Recovery error: {e}"))
+            results.append((stage_name, False, f"Failed to rebuild .dir: {e}"))
     
     return results
 
@@ -651,6 +651,9 @@ def fetch_from_plan(
         total_failed += failed
         
         # Report failures (always show, not just verbose mode)
+        dir_failures = []
+        other_failures = []
+        
         if failed_hashes:
             # Separate .dir failures (which may need dt update) from other failures
             dir_failures = [(h, r) for h, r in failed_hashes if h.endswith('.dir')]
@@ -662,20 +665,30 @@ def fetch_from_plan(
                     print(f"    {h}: {reason}")
             
             if dir_failures:
-                print(f"  Failed .dir manifests ({len(dir_failures)}):")
+                # Track for potential recovery
                 for h, reason in dir_failures:
                     stage_name = group.get_stage_for_hash(h)
                     if stage_name:
-                        print(f"    {h} ({stage_name}): {reason}")
-                        # Track for potential recovery
                         recoverable_dir_failures.append((h, stage_name))
-                    else:
-                        print(f"    {h}: {reason}")
+                
+                # Only report as failures if --update is not set
                 if not update:
+                    print(f"  Failed .dir manifests ({len(dir_failures)}):")
+                    for h, reason in dir_failures:
+                        stage_name = group.get_stage_for_hash(h)
+                        if stage_name:
+                            print(f"    {h} ({stage_name}): {reason}")
+                        else:
+                            print(f"    {h}: {reason}")
                     print(f"  Hint: .dir files may need rebuilding. Try: dt fetch --update")
         
-        if failed > 0:
-            results.append((group.source_name, False, f"Fetched {fetched}, failed {failed}"))
+        # Count .dir failures separately if --update will handle them
+        effective_failed = failed
+        if update and dir_failures:
+            effective_failed = len(other_failures)
+        
+        if effective_failed > 0:
+            results.append((group.source_name, False, f"Fetched {fetched}, failed {effective_failed}"))
         else:
             results.append((group.source_name, True, f"Fetched {fetched} files"))
     
