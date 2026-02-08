@@ -6,6 +6,7 @@ Common functions used across multiple modules.
 import os
 import shutil
 import socket
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 

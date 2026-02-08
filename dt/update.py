@@ -352,6 +352,10 @@ def _update_dvc_file(
         if modified:
             with open(dvc_path, 'w') as f:
                 yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            
+            # Auto-stage if core.autostage is enabled
+            if utils.is_autostage_enabled():
+                utils.git_stage_file(dvc_path, verbose=verbose)
         
         return modified
     
