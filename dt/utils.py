@@ -5,12 +5,50 @@ Common functions used across multiple modules.
 
 import os
 import shutil
+import socket
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from dvc.repo import Repo
 
 from .errors import DependencyError, DVCFileError
+
+
+# =============================================================================
+# Network utilities
+# =============================================================================
+
+def check_network_access(timeout: float = 1.0) -> bool:
+    """Check if network/internet access is available.
+    
+    Attempts to connect to common reliable hosts to detect network connectivity.
+    Uses aggressive timeouts to fail fast on isolated nodes.
+    
+    Args:
+        timeout: Connection timeout in seconds per host (default 1s).
+        
+    Returns:
+        True if network is accessible, False otherwise.
+    """
+    # Try a few reliable hosts - use IP addresses to avoid DNS delays
+    test_hosts = [
+        ("8.8.8.8", 53),      # Google DNS (fastest to check)
+        ("1.1.1.1", 53),      # Cloudflare DNS
+    ]
+    
+    for host, port in test_hosts:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result == 0:
+                return True
+        except (socket.error, socket.timeout, OSError):
+            continue
+    
+    return False
 
 
 # =============================================================================
@@ -278,7 +316,9 @@ def is_repo_import(dvc_path: Path, repo: Optional[Any] = None) -> bool:
     try:
         dvc_file = load_dvc_file(dvc_path, repo)
         return dvc_file.stage.is_repo_import
-    except DVCFileError:
+    except (DVCFileError, Exception):
+        # Catch all exceptions including DVC's StageFileDoesNotExistError
+        # for dvc-ignored files
         return False
 
 
@@ -312,6 +352,248 @@ def get_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict
         return None
     except DVCFileError:
         return None
+
+
+def is_url_import(dvc_path: Path, repo: Optional[Any] = None) -> bool:
+    """Check if a .dvc file is an import-url (external URL dependency).
+    
+    A URL import has deps but no repo field - the path itself is the URL.
+    This is different from a repo import which has deps with a repo.url field.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        repo: Optional DVC Repo object.
+        
+    Returns:
+        True if this .dvc file was created by `dvc import-url`.
+    """
+    try:
+        dvc_file = load_dvc_file(dvc_path, repo)
+        stage = dvc_file.stage
+        
+        # URL imports are not repo imports but have deps
+        if stage.is_repo_import:
+            return False
+        
+        # Check if there are deps (indicating an import)
+        if not stage.deps:
+            return False
+        
+        # For URL imports, the dep doesn't have a repo field
+        # but has a path that is the external URL
+        for dep in stage.deps:
+            # URL imports have deps without def_repo
+            if not hasattr(dep, 'def_repo') or not dep.def_repo:
+                # This is likely a URL import
+                return True
+        
+        return False
+    except (DVCFileError, Exception):
+        # Catch all exceptions including DVC's StageFileDoesNotExistError
+        # for dvc-ignored files
+        return False
+
+
+def get_url_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+    """Extract URL import information from a .dvc file.
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        repo: Optional DVC Repo object.
+        
+    Returns:
+        Dictionary with 'url' and 'out' keys, or None if not a URL import.
+    """
+    try:
+        dvc_file = load_dvc_file(dvc_path, repo)
+        stage = dvc_file.stage
+        
+        # Must not be a repo import
+        if stage.is_repo_import:
+            return None
+        
+        # Must have deps
+        if not stage.deps:
+            return None
+        
+        # Get the first URL dependency
+        for dep in stage.deps:
+            if not hasattr(dep, 'def_repo') or not dep.def_repo:
+                # This is a URL import - the path is the URL
+                url = dep.def_path if hasattr(dep, 'def_path') else str(dep)
+                out_path = None
+                if stage.outs:
+                    out_path = stage.outs[0].def_path if hasattr(stage.outs[0], 'def_path') else None
+                return {
+                    'url': url,
+                    'out': out_path,
+                }
+        return None
+    except DVCFileError:
+        return None
+
+
+# =============================================================================
+# Stage collection
+# =============================================================================
+
+def collect_stages(
+    targets: Optional[List[str]] = None,
+    recursive: bool = False,
+    verbose: bool = False,
+) -> List[Any]:
+    """Collect DVC stages using DVC's internal index.
+    
+    This uses the same mechanism as `dvc fetch` and `dvc pull` to discover
+    stages. It handles:
+    - .dvc files (from `dvc add` or `dvc import`)
+    - Pipeline stages (from dvc.yaml/dvc.lock)
+    - Targets by file path, stage name, or output path
+    
+    Args:
+        targets: Optional list of targets. If None, collects all stages.
+                 Can be .dvc file paths, stage names, or output paths.
+        recursive: If True, recursively find stages in directories.
+        verbose: If True, print debug information.
+        
+    Returns:
+        List of Stage objects. Each stage has:
+        - addressing: Stage name (e.g., 'data.dvc' or 'transform')
+        - is_import: True if this is a `dvc import` stage
+        - outs: List of Output objects with hash_info, def_path, fs_path
+        - deps: List of dependencies (for imports, includes def_repo)
+        
+    Raises:
+        StageFileDoesNotExistError: If a target doesn't exist
+        SCMError: If not in a git repository
+        
+    Example:
+        # Get all stages
+        stages = collect_stages()
+        
+        # Get specific targets (mixed formats work)
+        stages = collect_stages(['data.dvc', 'transform', 'output.txt'])
+        
+        # Get stages in a directory
+        stages = collect_stages(['imported'], recursive=True)
+    """
+    from dvc.repo import Repo
+    from dvc.stage.exceptions import StageFileDoesNotExistError
+    
+    repo = Repo()
+    
+    try:
+        view = repo.index.targets_view(targets=targets, recursive=recursive)
+        stages = list(view.stages)
+        
+        if verbose:
+            print(f"Collected {len(stages)} stages")
+            for stage in stages:
+                print(f"  {stage.addressing} (import={stage.is_import})")
+                
+        return stages
+        
+    except StageFileDoesNotExistError:
+        raise
+    finally:
+        repo.close()
+
+
+def find_dvc_files_fallback(
+    targets: Optional[List[str]] = None,
+    verbose: bool = False,
+) -> List[Path]:
+    """Fallback function to find .dvc files when DVC Repo is unavailable.
+    
+    Used when not in a proper git/DVC repository (e.g., unit tests).
+    
+    Args:
+        targets: Optional list of target paths. If None, finds all .dvc files.
+        verbose: If True, print debug information.
+        
+    Returns:
+        List of Path objects to .dvc files.
+    """
+    if targets:
+        result = []
+        for target in targets:
+            target_path = Path(target)
+            if target_path.suffix == '.dvc' and target_path.exists():
+                result.append(target_path)
+            elif Path(str(target) + '.dvc').exists():
+                result.append(Path(str(target) + '.dvc'))
+        return result
+    
+    # Find all .dvc files
+    cwd = Path.cwd()
+    candidates = [
+        f for f in cwd.rglob('*.dvc') 
+        if f.is_file() and '.dt' not in f.parts and f.name != '.dvc'
+        and not str(f).startswith('.dvc/')
+    ]
+    
+    # Filter out ignored files if possible
+    result = []
+    for f in candidates:
+        try:
+            if is_ignored(f):
+                if verbose:
+                    print(f"  Skipping ignored file: {f}")
+            else:
+                result.append(f)
+        except Exception:
+            # If we can't check ignore status, include the file
+            result.append(f)
+    
+    return sorted(result)
+
+
+def get_stage_info(stage: Any) -> Dict[str, Any]:
+    """Extract useful information from a DVC Stage object.
+    
+    Args:
+        stage: A DVC Stage object from collect_stages()
+        
+    Returns:
+        Dictionary with stage information:
+        - name: Stage addressing (name)
+        - is_import: Whether this is a dvc import
+        - is_pipeline: Whether this is from dvc.yaml
+        - outs: List of output dicts with path, md5, is_dir
+        - import_info: For imports, contains url, rev, path
+    """
+    from dvc.stage import PipelineStage
+    
+    info = {
+        'name': stage.addressing,
+        'is_import': stage.is_import,
+        'is_pipeline': isinstance(stage, PipelineStage),
+        'outs': [],
+        'import_info': None,
+    }
+    
+    # Extract output information
+    for out in stage.outs:
+        out_info = {
+            'path': out.def_path,
+            'fs_path': str(out.fs_path) if hasattr(out, 'fs_path') else None,
+            'md5': out.hash_info.value if out.hash_info else None,
+            'is_dir': out.hash_info.isdir if out.hash_info else False,
+        }
+        info['outs'].append(out_info)
+    
+    # Extract import information if applicable
+    if stage.is_import and hasattr(stage, 'deps') and stage.deps:
+        for dep in stage.deps:
+            if hasattr(dep, 'def_repo') and dep.def_repo:
+                info['import_info'] = {
+                    'url': dep.def_repo.get('url'),
+                    'rev': dep.def_repo.get('rev_lock') or dep.def_repo.get('rev'),
+                    'path': dep.def_path,
+                }
+                break
+    
+    return info
 
 
 # =============================================================================
@@ -360,6 +642,50 @@ def check_git() -> None:
         DependencyError: If git is not found
     """
     check_command('git')
+
+
+def is_ignored(path: Path) -> bool:
+    """Check if a path is ignored by git or dvc.
+    
+    Args:
+        path: Path to check.
+        
+    Returns:
+        True if the path is ignored, False otherwise.
+    """
+    import fnmatch
+    import subprocess
+    
+    # Check git ignore
+    try:
+        result = subprocess.run(
+            ['git', 'check-ignore', '-q', str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return True
+    except (OSError, FileNotFoundError):
+        pass
+    
+    # Check dvc ignore (.dvcignore)
+    # DVC doesn't have a dedicated command, so check common patterns
+    dvcignore = Path('.dvcignore')
+    if dvcignore.exists():
+        try:
+            patterns = dvcignore.read_text().splitlines()
+            path_str = str(path)
+            for pattern in patterns:
+                pattern = pattern.strip()
+                if not pattern or pattern.startswith('#'):
+                    continue
+                # Simple glob matching
+                if fnmatch.fnmatch(path_str, pattern) or fnmatch.fnmatch(path_str, f'*/{pattern}'):
+                    return True
+        except OSError:
+            pass
+    
+    return False
 
 
 def update_gitignore(pattern: str, gitignore_path: Optional[Path] = None) -> bool:
@@ -636,3 +962,101 @@ def get_commit_info(commit: str) -> Dict[str, str]:
         'message': '',
         'author': '',
     }
+
+
+# =============================================================================
+# DVC file manipulation utilities
+# =============================================================================
+
+def is_autostage_enabled() -> bool:
+    """Check if DVC core.autostage is enabled.
+    
+    Returns:
+        True if autostage is enabled, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            ['dvc', 'config', 'core.autostage'],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and result.stdout.strip().lower() == 'true'
+    except (OSError, FileNotFoundError):
+        return False
+
+
+def git_stage_file(path: Path, verbose: bool = False) -> None:
+    """Stage a file with git add.
+    
+    Args:
+        path: Path to file to stage.
+        verbose: Print progress messages.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'add', str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            if verbose:
+                print(f"  Staged {path.name} (core.autostage enabled)")
+        elif verbose:
+            print(f"  Warning: Could not stage {path.name}: {result.stderr.strip()}")
+    except (OSError, FileNotFoundError) as e:
+        if verbose:
+            print(f"  Warning: Could not stage {path.name}: {e}")
+
+
+def update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool = False) -> bool:
+    """Update the MD5 hash in a .dvc file.
+    
+    For import files, the hash is in outs with a .dir suffix (e.g., "abc123.dir").
+    
+    Args:
+        dvc_path: Path to the .dvc file.
+        old_hash: The old hash to replace (without .dir suffix).
+        new_hash: The new hash to use.
+        verbose: Print progress messages.
+        
+    Returns:
+        True if the file was modified, False otherwise.
+    """
+    import yaml
+    
+    try:
+        content = dvc_path.read_text()
+        data = yaml.safe_load(content)
+        
+        # Update the outs section - check for both exact hash and hash.dir format
+        modified = False
+        for out in data.get('outs', []):
+            out_md5 = out.get('md5', '')
+            # Handle both "hash" and "hash.dir" formats
+            if out_md5 == old_hash:
+                out['md5'] = new_hash
+                modified = True
+            elif out_md5 == f"{old_hash}.dir":
+                out['md5'] = f"{new_hash}.dir"
+                modified = True
+        
+        if modified:
+            # Write back with same formatting
+            with open(dvc_path, 'w') as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            if verbose:
+                print(f"  Updated .dvc file hash: {old_hash[:12]}... -> {new_hash[:12]}...")
+            
+            # Stage file if autostage is enabled
+            if is_autostage_enabled():
+                git_stage_file(dvc_path, verbose)
+            
+            return True
+        elif verbose:
+            print(f"  Warning: Could not find hash {old_hash[:12]}... in .dvc file to update")
+        return False
+            
+    except Exception as e:
+        if verbose:
+            print(f"  Warning: Could not update .dvc file: {e}")
+        return False

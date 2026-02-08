@@ -272,9 +272,10 @@ def list_remotes_from_repo(
         return _run_dvc_remote_list(local_repo)
     
     # Remote repo - clone it first
+    # Use refresh=False to avoid network operations when clone already exists
     from . import tmp as tmp_mod
     
-    repo_path = tmp_mod.clone_repo(repo_spec, owner=owner, refresh=True, verbose=False)
+    repo_path = tmp_mod.clone_repo(repo_spec, owner=owner, refresh=False, verbose=False)
     return _run_dvc_remote_list(repo_path)
 
 
@@ -331,6 +332,7 @@ def get_local_hosts() -> List[str]:
         List of hostnames considered local.
     """
     import socket
+    import signal
     
     hosts = []
     
@@ -338,12 +340,23 @@ def get_local_hosts() -> List[str]:
     hostname = socket.gethostname()
     hosts.append(hostname)
     
-    # Try to get FQDN
+    # Try to get FQDN with timeout (can hang on nodes without DNS)
+    def _timeout_handler(signum, frame):
+        raise TimeoutError("FQDN lookup timed out")
+    
     try:
-        fqdn = socket.getfqdn()
-        if fqdn and fqdn != hostname:
-            hosts.append(fqdn)
-    except Exception:
+        # Set a 2-second timeout for FQDN lookup
+        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(2)
+        try:
+            fqdn = socket.getfqdn()
+            if fqdn and fqdn != hostname:
+                hosts.append(fqdn)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    except (TimeoutError, Exception):
+        # FQDN lookup failed or timed out - continue without it
         pass
     
     # Configured SSH host (used for remote URLs)
@@ -354,12 +367,31 @@ def get_local_hosts() -> List[str]:
     return hosts
 
 
+def _get_domain(hostname: str) -> Optional[str]:
+    """Extract the domain from a hostname.
+    
+    Args:
+        hostname: A hostname like 'gadi-dm-0001.nci.org.au'
+        
+    Returns:
+        The domain suffix (e.g., 'nci.org.au') or None if no domain.
+    """
+    parts = hostname.split('.')
+    if len(parts) >= 3:
+        # Return last 2-3 parts as domain (e.g., 'nci.org.au')
+        return '.'.join(parts[-3:]) if len(parts) >= 3 else '.'.join(parts[-2:])
+    elif len(parts) == 2:
+        return '.'.join(parts)
+    return None
+
+
 def is_local_host(host: str) -> bool:
     """Check if a hostname should be considered 'local'.
     
     A host is considered local if:
-    - It matches the current hostname
-    - It matches any configured local hosts (core.local_hosts)
+    - It matches the current hostname exactly
+    - It shares the same domain suffix (e.g., both end with '.nci.org.au')
+    - It matches the configured ssh.host
     
     Args:
         host: Hostname to check
@@ -376,11 +408,20 @@ def is_local_host(host: str) -> bool:
     if host in local_hosts:
         return True
     
-    # Check for partial match (e.g., 'gadi-dm' matches 'gadi-dm.nci.org.au')
+    # Check for same short hostname (e.g., 'gadi-dm' matches 'gadi-dm.nci.org.au')
+    host_short = host.split('.')[0]
     for local in local_hosts:
-        if host.startswith(local.split('.')[0]) or local.startswith(host.split('.')[0]):
-            # Same short hostname
-            if host.split('.')[0] == local.split('.')[0]:
+        if host_short == local.split('.')[0]:
+            return True
+    
+    # Check for same domain suffix
+    # If remote is 'gadi-dm.nci.org.au' and we're on 'gadi-dm-0001.nci.org.au',
+    # both share the domain 'nci.org.au' so consider it local
+    host_domain = _get_domain(host)
+    if host_domain:
+        for local in local_hosts:
+            local_domain = _get_domain(local)
+            if local_domain and host_domain == local_domain:
                 return True
     
     return False
@@ -445,6 +486,40 @@ def find_local_remote(
                 return (name, local_path)
     
     return None
+
+
+def check_remote_access(
+    remotes: List[Tuple[str, str, bool]],
+) -> Tuple[Optional[Tuple[str, str]], Optional[str]]:
+    """Check remote access and return detailed error if not accessible.
+    
+    Similar to find_local_remote but provides detailed error messages
+    when remotes look like they should be local but aren't accessible.
+    
+    Args:
+        remotes: List of (name, url, is_default) tuples
+        
+    Returns:
+        Tuple of:
+        - (remote_name, local_path) if found and accessible, None otherwise
+        - Error message if remote looks local but not accessible, None otherwise
+    """
+    local_but_inaccessible = []
+    
+    for name, url, is_default in remotes:
+        local_path = extract_local_path(url)
+        if local_path:
+            if Path(local_path).exists():
+                return ((name, local_path), None)
+            else:
+                local_but_inaccessible.append((name, local_path, url))
+    
+    if local_but_inaccessible:
+        # Remote looks local but path doesn't exist
+        name, path, url = local_but_inaccessible[0]
+        return (None, f"Remote '{name}' path not accessible: {path} (from {url})")
+    
+    return (None, None)
 
 
 def find_local_remote_from_repo(
