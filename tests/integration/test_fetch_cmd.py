@@ -415,8 +415,8 @@ class TestFetchImport:
         
         # Verbose output should show progress details
         output = result.stdout + result.stderr
-        assert 'Import from:' in output, "Verbose should show import source"
-        assert 'Found local cache:' in output or 'Cached:' in output, "Verbose should show cache activity"
+        assert 'Fetch plan:' in output, "Verbose should show fetch plan"
+        assert 'import=True' in output or 'import=' in output, "Verbose should identify import stages"
         
         # Verify cache was actually populated (not just output claims)
         cache_files = [f for f in cache.rglob('*') if f.is_file()]

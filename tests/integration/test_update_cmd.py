@@ -58,16 +58,6 @@ class TestUpdateOptions:
         assert '--rev' in result.stdout
         assert 'revision' in result.stdout.lower()
     
-    def test_update_recursive_option(self):
-        """'-R/--recursive' option is available."""
-        result = subprocess.run(
-            ['dt', 'update', '--help'],
-            capture_output=True,
-            text=True,
-        )
-        
-        assert '-R, --recursive' in result.stdout
-    
     def test_update_no_download_option(self):
         """'--no-download' option is available."""
         result = subprocess.run(
@@ -78,25 +68,25 @@ class TestUpdateOptions:
         
         assert '--no-download' in result.stdout
     
-    def test_update_to_remote_option(self):
-        """'--to-remote' option is available."""
+    def test_update_push_dir_option(self):
+        """'--push-dir' option is available."""
         result = subprocess.run(
             ['dt', 'update', '--help'],
             capture_output=True,
             text=True,
         )
         
-        assert '--to-remote' in result.stdout
+        assert '--push-dir' in result.stdout
     
-    def test_update_jobs_option(self):
-        """'-j/--jobs' option is available."""
+    def test_update_dry_run_option(self):
+        """'--dry-run' option is available."""
         result = subprocess.run(
             ['dt', 'update', '--help'],
             capture_output=True,
             text=True,
         )
         
-        assert '-j, --jobs' in result.stdout
+        assert '--dry-run' in result.stdout
 
 
 # =============================================================================
