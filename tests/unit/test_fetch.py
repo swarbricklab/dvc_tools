@@ -1089,7 +1089,7 @@ class TestFetchWithUrlImport:
             
             mock_fetch_url.return_value = (True, "Fetched from s3://bucket/data.csv")
             
-            results = fetch.fetch(targets=['data.dvc'])
+            results = fetch.fetch(targets=['data.dvc'], network=True)
         
         assert len(results) == 1
         assert mock_fetch_url.called

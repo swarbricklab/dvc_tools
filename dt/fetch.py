@@ -782,8 +782,8 @@ def fetch_from_plan(
         )
         results.extend(recovery_results)
     
-    # Summary
-    if verbose:
+    # Summary - always show if there were failures, or if verbose
+    if total_failed > 0 or verbose:
         print(f"\nFetch complete: {total_fetched} fetched, {total_failed} failed")
     
     return results

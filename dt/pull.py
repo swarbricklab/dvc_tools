@@ -184,7 +184,7 @@ def pull(
             verbose=verbose,
             update=update,
             network=network,
-            show_progress=not verbose,
+            show_progress=True,
             dry=dry,
         )
     except FetchError as e:
