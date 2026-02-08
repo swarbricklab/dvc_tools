@@ -374,7 +374,8 @@ def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
     hash_paths = []
     for out in stage.outs:
         if out.use_cache and out.hash_info and out.hash_info.value:
-            path = str(out.path) if hasattr(out, 'path') else None
+            # DVC uses fspath for the filesystem path
+            path = str(out.fspath) if hasattr(out, 'fspath') else None
             hash_paths.append((out.hash_info.value, path))
     return hash_paths
 
