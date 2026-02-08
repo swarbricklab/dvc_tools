@@ -227,22 +227,25 @@ class SourceGroup:
     source_path: Path
     source_name: str  # Display name (e.g., remote name or repo short name)
     hashes: set = field(default_factory=set)
-    # Track which stage each .dir hash came from (for error reporting)
-    dir_hash_stages: Dict[str, str] = field(default_factory=dict)
+    # Track which stage each hash came from (for error reporting)
+    hash_stages: Dict[str, str] = field(default_factory=dict)
     
     def add_hash(self, h: str, stage_name: str = None) -> None:
         """Add a hash to fetch from this source."""
         self.hashes.add(h)
-        if h.endswith('.dir') and stage_name:
-            self.dir_hash_stages[h] = stage_name
+        if stage_name:
+            self.hash_stages[h] = stage_name
     
-    def add_hashes(self, hashes: set) -> None:
+    def add_hashes(self, hashes: set, stage_name: str = None) -> None:
         """Add multiple hashes to fetch from this source."""
         self.hashes.update(hashes)
+        if stage_name:
+            for h in hashes:
+                self.hash_stages[h] = stage_name
     
     def get_stage_for_hash(self, h: str) -> Optional[str]:
-        """Get the stage name that a .dir hash came from."""
-        return self.dir_hash_stages.get(h)
+        """Get the stage name that a hash came from."""
+        return self.hash_stages.get(h)
 
 
 @dataclass 
@@ -394,7 +397,7 @@ def build_fetch_plan(
                         # Expand directory hashes
                         if h.endswith('.dir') and source_db:
                             child_hashes = _expand_dir_hash(h, source_db)
-                            group.add_hashes(child_hashes)
+                            group.add_hashes(child_hashes, stage_name=stage_name)
         else:
             # No local remote available
             plan.no_source.extend(categorization.regular_stages)
@@ -414,7 +417,7 @@ def build_fetch_plan(
                     # Expand directory hashes
                     if h.endswith('.dir') and source_db:
                         child_hashes = _expand_dir_hash(h, source_db)
-                        group.add_hashes(child_hashes)
+                        group.add_hashes(child_hashes, stage_name=stage_name)
         else:
             # No local cache for this repo
             plan.no_source.extend(import_group.stages)
@@ -662,7 +665,11 @@ def fetch_from_plan(
             if other_failures:
                 print(f"  Failed files ({len(other_failures)}):")
                 for h, reason in other_failures:
-                    print(f"    {h}: {reason}")
+                    stage_name = group.get_stage_for_hash(h)
+                    if stage_name:
+                        print(f"    {h} ({stage_name}): {reason}")
+                    else:
+                        print(f"    {h}: {reason}")
             
             if dir_failures:
                 # Track for potential recovery (only for import .dvc files, not pipeline stages)
