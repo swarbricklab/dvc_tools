@@ -1287,66 +1287,39 @@ def mv(src, dst, verbose):
         raise click.ClickException(str(e))
 
 
-@cli.command(context_settings=dict(
-    ignore_unknown_options=True,
-    allow_extra_args=True,
-))
-@click.option('--workers', '-w', type=int, default=None,
-              help='Number of parallel workers for distributed pull via qxub.')
-@click.option('--worker', type=int, default=None,
-              help='Worker ID (internal, used by submitted jobs).')
-@click.option('--manifest', type=click.Path(exists=True), default=None,
-              help='Manifest directory (internal, used by submitted jobs).')
-@click.option('--remote', '-r', default=None,
-              help='Pull from specific remote.')
+@cli.command()
+@click.argument('targets', nargs=-1)
 @click.option('--force', '-f', is_flag=True,
               help='Delete .dir manifests before pulling to force re-fetch. Useful after dt cache validate --fix.')
-@click.option('--no-wait', is_flag=True,
-              help='Submit jobs and exit without waiting for completion.')
 @click.option('--dry', '--dry-run', is_flag=True,
               help='Show what would be pulled without actually pulling.')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
+@click.option('--network/--no-network', default=True,
+              help='Enable/disable network access for fetching. Default: enabled.')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-@click.pass_context
-def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, update, no_index_sync):
-    """Pull DVC-tracked files, handling imports automatically.
+def pull(targets, force, dry, verbose, update, network, no_index_sync):
+    """Pull DVC-tracked files (fetch + checkout).
     
-    For targets tracked by import .dvc files (those with deps.repo),
-    uses dt fetch to populate the cache from the source repository.
-    For other targets, uses regular dvc pull.
+    This is the dt equivalent of `dvc pull`. It fetches data to the cache
+    and checks out to the workspace in one step.
     
-    Without --workers: pulls using regular dvc pull.
-    With --workers N: distributes pull across N compute nodes via qxub.
+    For imports and local-remote scenarios, uses dt fetch for efficient
+    local cache symlinks. For data requiring network access, uses dvc fetch.
     
-    The parallel mode partitions files by hash prefix, ensuring no conflicts
-    between workers. Each worker calls DVC's internal transfer directly.
-    
-    \b
-    Target resolution:
-      - data.dvc        → check if data.dvc is an import
-      - data/           → resolve to data.dvc if it exists
-      - data/file.txt   → resolve to parent .dvc file if any
-    
-    All other options are passed through to `dvc pull`.
-    Run `dvc pull --help` for additional options.
+    By default, network access is enabled. Use --no-network to only fetch
+    data available locally (from local remotes or import sources).
     
     \b
     Examples:
-        dt pull                            # Pull all tracked files
-        dt pull data/                      # Pull specific target
-        dt pull --dry                      # Show what would be pulled
-        dt pull --dry -v                   # List all files to pull
-        dt pull -v                         # Show detailed progress
-        dt pull --jobs 4                   # Parallel pull (passed to dvc)
-        dt pull --workers 16               # Distributed via 16 qxub jobs
-        dt pull -w 8 -r myremote data.dvc  # Pull target from remote using 8 jobs
-        dt pull -w 16 --no-wait            # Submit jobs and exit
-        dt pull --force data/              # Force re-fetch (after cache validate --fix)
-        dt pull --update                   # Rebuild .dir files, update .dvc if needed
+        dt pull                    # Pull all tracked files
+        dt pull data/              # Pull specific target
+        dt pull --dry              # Show what would be pulled
+        dt pull -v                 # Show detailed progress
+        dt pull --force data/      # Force re-fetch (after cache validate --fix)
+        dt pull --update           # Rebuild .dir files, update .dvc if needed
+        dt pull --no-network       # Only pull data available locally
     """
-    from pathlib import Path
-    
     try:
         # Sync index from mirror before pull (if configured)
         if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
@@ -1356,181 +1329,29 @@ def pull(ctx, workers, worker, manifest, remote, force, no_wait, dry, verbose, u
                 if verbose:
                     click.echo(f"Warning: index sync failed: {e}")
         
-        # Worker mode: called by submitted jobs (no import handling needed)
-        if worker is not None and manifest is not None:
-            manifest_path = Path(manifest)
-            pulled, failed = pull_mod.worker_pull(
-                manifest_dir=manifest_path,
-                worker_id=worker,
-                verbose=verbose,
-            )
-            if verbose:
-                click.echo(f"Pulled: {pulled}, Failed: {failed}")
-            if failed > 0:
-                raise SystemExit(1)
-            return
+        # Convert tuple to list or None
+        target_list = list(targets) if targets else None
         
-        # Extract targets and dvc_args from ctx.args
-        targets = [arg for arg in ctx.args if not arg.startswith('-')]
-        dvc_args = [arg for arg in ctx.args if arg.startswith('-')]
+        # Call the simplified pull function
+        success, fetched, failed = pull_mod.pull(
+            targets=target_list,
+            verbose=verbose,
+            force=force,
+            update=update,
+            network=network,
+            dry=dry,
+        )
         
-        # Use targets=None to mean "all stages"
-        if not targets:
-            targets = None
+        if not success:
+            raise SystemExit(1)
         
-        # Standard pull mode: delegate to pull_mod.pull() which uses DVC stages
-        # This handles imports, regular files, and pipeline stages
-        if not dry and workers is None:
-            success = pull_mod.pull(
-                targets=targets,
-                verbose=verbose,
-                dvc_args=dvc_args,
-                force=force,
-                update=update,
-            )
-            
-            if not success:
-                raise SystemExit(1)
-            
-            # Sync index to mirror after pull (if configured)
-            if not no_index_sync and index_mod.is_auto_sync_enabled():
-                try:
-                    index_mod.push(quiet=not verbose, verbose=verbose)
-                except Exception as e:
-                    if verbose:
-                        click.echo(f"Warning: index sync failed: {e}")
-            return
-        
-        # --- Dry run or parallel mode: need file-based discovery for manifests ---
-        # These modes need to know which files would be pulled and their sizes
-        
-        # Discover targets if not specified
-        if targets is None:
-            if verbose:
-                click.echo("Discovering .dvc files...")
-            all_dvc_files = pull_mod.find_all_dvc_files()
-            targets = [str(f) for f in all_dvc_files]
-            if verbose:
-                click.echo(f"  Found {len(targets)} .dvc files")
-        
-        if not targets:
-            click.echo("No .dvc files found")
-            return
-        
-        # Force mode: delete .dir manifests before pulling
-        if force and not dry:
-            if verbose:
-                click.echo("Force mode: deleting .dir manifests from cache...")
+        # Sync index to mirror after pull (if configured)
+        if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
             try:
-                deleted = pull_mod.delete_dir_manifests(targets=targets, verbose=verbose)
-                if deleted:
-                    click.echo(f"  Deleted {len(deleted)} .dir manifest(s)")
-                elif verbose:
-                    click.echo("  No .dir manifests found for targets")
+                index_mod.push(quiet=not verbose, verbose=verbose)
             except Exception as e:
-                click.echo(f"Warning: failed to delete .dir manifests: {e}")
-        
-        # Separate import targets from regular targets
-        if verbose:
-            click.echo("Resolving targets...")
-        import_targets, regular_targets = pull_mod.separate_targets(targets, verbose)
-        
-        # --- Step 2: Handle imports first ---
-        if import_targets:
-            if dry:
-                # Dry run: just report imports
-                click.echo(f"Imports to fetch ({len(import_targets)}):")
-                for target in import_targets:
-                    dvc_file = pull_mod.resolve_to_dvc_file(target)
-                    click.echo(f"  {target} → dt fetch {dvc_file}")
-            else:
-                # Actually checkout imports
                 if verbose:
-                    click.echo(f"\nHandling {len(import_targets)} import target(s)...")
-                
-                for target in import_targets:
-                    dvc_file = pull_mod.resolve_to_dvc_file(target)
-                    if dvc_file:
-                        if verbose:
-                            click.echo(f"  dt fetch {dvc_file}")
-                        fetch_mod.fetch(
-                            targets=[str(dvc_file)],
-                            verbose=verbose,
-                            update=update,
-                            show_progress=not verbose,
-                        )
-                        # Checkout after fetch
-                        subprocess.run(
-                            ['dvc', 'checkout', str(dvc_file)],
-                            capture_output=not verbose,
-                            text=True,
-                        )
-        
-        # --- Step 3: Handle regular targets (dry-run, parallel, or standard) ---
-        if not regular_targets:
-            if verbose:
-                click.echo("\nNo regular targets to pull")
-            return
-        
-        if dry:
-            # Dry run mode for regular targets
-            if verbose and import_targets:
-                click.echo()  # Blank line after imports
-            
-            manifest_data = pull_mod.build_pull_manifest(
-                targets=regular_targets,
-                remote=remote,
-                verbose=False,
-            )
-            files = manifest_data.get('files', [])
-            paths = manifest_data.get('paths', {})
-            
-            if not files:
-                click.echo("No regular files to pull.")
-                return
-            
-            # Calculate total size if possible
-            total_size = pull_mod.get_remote_files_size(files, remote=remote)
-            
-            if verbose:
-                click.echo(f"Regular files to pull ({len(files)} files, {utils.format_size(total_size)}):")
-                for file_hash in sorted(files):
-                    path = paths.get(file_hash)
-                    if path:
-                        click.echo(f"  {path}  ({file_hash})")
-                    else:
-                        click.echo(f"  {file_hash}")
-            else:
-                click.echo(f"Would pull {len(files)} regular file(s), {utils.format_size(total_size)}")
-                if workers:
-                    partitions = pull_mod.partition_manifest(manifest_data, workers)
-                    click.echo(f"\nWith {workers} workers:")
-                    for worker_id, worker_files in partitions.items():
-                        if worker_files:
-                            click.echo(f"  Worker {worker_id}: {len(worker_files)} file(s)")
-            return
-        
-        if workers is not None:
-            # Parallel mode for regular targets only
-            if verbose:
-                click.echo(f"\nPulling {len(regular_targets)} regular target(s) with {workers} workers...")
-            
-            job_ids, manifest_dir = pull_mod.parallel_pull(
-                targets=regular_targets,
-                remote=remote,
-                num_workers=workers,
-                qxub_args=None,
-                wait=not no_wait,
-                verbose=verbose,
-            )
-            
-            if no_wait and job_ids:
-                click.echo(f"Submitted {len(job_ids)} job(s):")
-                for job_id in job_ids:
-                    click.echo(f"  {job_id}")
-                click.echo(f"\nManifest: {manifest_dir}")
-                click.echo("Monitor with: qxub monitor --summary " + " ".join(job_ids))
-            return
+                    click.echo(f"Warning: index sync failed: {e}")
             
     except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
