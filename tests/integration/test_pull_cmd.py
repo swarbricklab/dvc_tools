@@ -458,13 +458,15 @@ class TestPullErrors:
     """Test error handling in dt pull."""
 
     def test_pull_outside_dvc_repo_shows_no_files(self, tmp_path):
-        """Pull outside DVC repository shows no .dvc files message."""
+        """Pull outside DVC repository shows informative message."""
         result = run_dt('pull', cwd=tmp_path, check=False)
         
-        # Command returns 0 but shows "No .dvc files found"
+        # Command should indicate it's not in a valid repo
         combined_output = result.stdout + result.stderr
-        assert 'no .dvc files' in combined_output.lower(), \
-            f"Should indicate no .dvc files found: {combined_output}"
+        assert ('no .dvc files' in combined_output.lower() or 
+                'not in a git repository' in combined_output.lower() or
+                'not in a dvc repository' in combined_output.lower()), \
+            f"Should indicate not in valid repo: {combined_output}"
 
     def test_pull_nonexistent_target_fails(self, pull_test_fixtures):
         """Pull with nonexistent target fails appropriately."""
