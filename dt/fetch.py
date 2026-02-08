@@ -665,27 +665,42 @@ def fetch_from_plan(
                     print(f"    {h}: {reason}")
             
             if dir_failures:
-                # Track for potential recovery
+                # Track for potential recovery (only for import .dvc files, not pipeline stages)
+                recoverable_dirs = []
+                non_recoverable_dirs = []
                 for h, reason in dir_failures:
                     stage_name = group.get_stage_for_hash(h)
-                    if stage_name:
+                    # Only repo imports (ending in .dvc) can be recovered via dt update
+                    if stage_name and stage_name.endswith('.dvc'):
                         recoverable_dir_failures.append((h, stage_name))
+                        recoverable_dirs.append((h, reason, stage_name))
+                    else:
+                        non_recoverable_dirs.append((h, reason, stage_name))
                 
-                # Only report as failures if --update is not set
-                if not update:
-                    print(f"  Failed .dir manifests ({len(dir_failures)}):")
-                    for h, reason in dir_failures:
-                        stage_name = group.get_stage_for_hash(h)
+                # Always report non-recoverable .dir failures (pipeline stages)
+                if non_recoverable_dirs:
+                    print(f"  Failed .dir manifests ({len(non_recoverable_dirs)}):")
+                    for h, reason, stage_name in non_recoverable_dirs:
                         if stage_name:
                             print(f"    {h} ({stage_name}): {reason}")
                         else:
                             print(f"    {h}: {reason}")
+                
+                # Report recoverable .dir failures only if --update is not set
+                if recoverable_dirs and not update:
+                    print(f"  Failed .dir manifests ({len(recoverable_dirs)}):")
+                    for h, reason, stage_name in recoverable_dirs:
+                        print(f"    {h} ({stage_name}): {reason}")
                     print(f"  Hint: .dir files may need rebuilding. Try: dt fetch --update")
         
         # Count .dir failures separately if --update will handle them
         effective_failed = failed
         if update and dir_failures:
-            effective_failed = len(other_failures)
+            # Only subtract recoverable .dir failures, keep non-recoverable ones
+            recoverable_count = sum(1 for h, _ in dir_failures 
+                                   if group.get_stage_for_hash(h) and 
+                                   group.get_stage_for_hash(h).endswith('.dvc'))
+            effective_failed = failed - recoverable_count
         
         if effective_failed > 0:
             results.append((group.source_name, False, f"Fetched {fetched}, failed {effective_failed}"))
