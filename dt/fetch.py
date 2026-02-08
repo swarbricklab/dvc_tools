@@ -376,7 +376,7 @@ def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
     # Get repo root to make paths relative
     repo_root = None
     if hasattr(stage, 'repo') and stage.repo:
-        repo_root = Path(stage.repo.root)
+        repo_root = Path(stage.repo.root_dir)
     
     for out in stage.outs:
         if out.use_cache and out.hash_info and out.hash_info.value:
