@@ -255,3 +255,50 @@ def populate_cache_file(
     if link_type == 'failed':
         return None
     return success
+
+
+def create_v2_compat_link(
+    md5: str,
+    cache_root: Path,
+    verbose: bool = False,
+    cache_type: Optional[CacheType] = None,
+) -> Tuple[bool, LinkType]:
+    """Create a v2-compatible link from v2 location pointing to v3 location.
+    
+    This allows `dvc checkout` to find files for v2 .dvc files after
+    we've fetched them to the v3 location.
+    
+    Args:
+        md5: The MD5 hash (with optional .dir suffix).
+        cache_root: Path to the cache root directory.
+        verbose: Print progress messages.
+        cache_type: Link type to use (default: reflink → hardlink → symlink → copy).
+        
+    Returns:
+        Tuple of (success, link_type).
+    """
+    v3_path = get_cache_file_path(md5, cache_root, use_v3_layout=True)
+    v2_path = get_cache_file_path(md5, cache_root, use_v3_layout=False)
+    
+    if v2_path.exists():
+        return False, 'skipped'
+    
+    if not v3_path.exists():
+        if verbose:
+            print(f"  ERROR: v3 file not found: {v3_path}")
+        return False, 'failed'
+    
+    label = f"v2 compat: {md5[:12]}..."
+    return link_file(v3_path, v2_path, verbose=verbose, label=label, cache_type=cache_type)
+
+
+def is_v2_hash_name(hash_name: str) -> bool:
+    """Check if a hash name indicates v2/legacy format.
+    
+    Args:
+        hash_name: The hash algorithm name (e.g., 'md5', 'md5-dos2unix').
+        
+    Returns:
+        True if v2/legacy format, False if v3.
+    """
+    return hash_name in ('md5-dos2unix', 'params')

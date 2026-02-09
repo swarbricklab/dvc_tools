@@ -277,6 +277,8 @@ class FetchPlan:
     url_imports: List[Any] = field(default_factory=list)
     no_source: List[Any] = field(default_factory=list)  # Stages with no local source
     no_source_errors: Dict[str, str] = field(default_factory=dict)  # Stage addressing -> error message
+    v2_hashes: set = field(default_factory=set)  # Hashes from v2 .dvc files (need compat links)
+    v2_stages: set = field(default_factory=set)  # Stage names with v2 format
     
     def add_source(self, source_path: Path, source_name: str) -> SourceGroup:
         """Get or create a source group."""
@@ -379,17 +381,21 @@ def _expand_dir_hash(
     return child_files
 
 
-def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
+def _collect_hashes_from_stage(stage: Any) -> Tuple[List[Tuple[str, str]], bool]:
     """Extract all hashes from a stage's outputs with their paths.
     
     Args:
         stage: DVC Stage object.
         
     Returns:
-        List of (hash, path) tuples (may include .dir hashes).
-        Paths are relative to the repo root.
+        Tuple of:
+        - List of (hash, path) tuples (may include .dir hashes).
+          Paths are relative to the repo root.
+        - Boolean indicating if stage uses v2/legacy format (md5-dos2unix).
     """
     hash_paths = []
+    is_v2 = False
+    
     # Get repo root to make paths relative
     repo_root = None
     if hasattr(stage, 'repo') and stage.repo:
@@ -397,6 +403,10 @@ def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
     
     for out in stage.outs:
         if out.use_cache and out.hash_info and out.hash_info.value:
+            # Check for v2/legacy hash format
+            if out.hash_info.name in ('md5-dos2unix', 'params'):
+                is_v2 = True
+            
             # DVC uses fspath for the filesystem path
             path = None
             if hasattr(out, 'fspath') and out.fspath:
@@ -410,7 +420,7 @@ def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
                 else:
                     path = str(abs_path)
             hash_paths.append((out.hash_info.value, path))
-    return hash_paths
+    return hash_paths, is_v2
 
 
 def build_fetch_plan(
@@ -456,14 +466,21 @@ def build_fetch_plan(
         )
         
         for stage in all_stages:
-            stage_hash_paths = _collect_hashes_from_stage(stage)
+            stage_hash_paths, is_v2 = _collect_hashes_from_stage(stage)
             stage_name = stage.addressing
+            if is_v2:
+                plan.v2_stages.add(stage_name)
             for h, path in stage_hash_paths:
                 group.add_hash(h, stage_name=stage_name, path=path)
+                if is_v2:
+                    plan.v2_hashes.add(h)
                 # Expand directory hashes
                 if h.endswith('.dir') and source_db:
                     child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                     group.add_hashes_with_paths(child_files, stage_name=stage_name)
+                    if is_v2:
+                        for child_hash, _ in child_files:
+                            plan.v2_hashes.add(child_hash)
         
         # URL imports are still handled separately
         plan.url_imports = categorization.url_imports
@@ -490,21 +507,28 @@ def build_fetch_plan(
                 source_db = _create_source_cache_db(source_path)
                 
                 for stage in categorization.regular_stages:
-                    stage_hash_paths = _collect_hashes_from_stage(stage)
+                    stage_hash_paths, is_v2 = _collect_hashes_from_stage(stage)
                     stage_name = stage.addressing
+                    if is_v2:
+                        plan.v2_stages.add(stage_name)
                     for h, path in stage_hash_paths:
                         group.add_hash(h, stage_name=stage_name, path=path)
+                        if is_v2:
+                            plan.v2_hashes.add(h)
                         # Expand directory hashes
                         if h.endswith('.dir') and source_db:
                             child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                             group.add_hashes_with_paths(child_files, stage_name=stage_name)
+                            if is_v2:
+                                for child_hash, _ in child_files:
+                                    plan.v2_hashes.add(child_hash)
         else:
             # No local remote available - track with error message if available
             for stage in categorization.regular_stages:
                 plan.no_source.append(stage)
                 if categorization.local_remote_error:
                     plan.no_source_errors[stage.addressing] = categorization.local_remote_error
-    
+
     # Handle repo imports - grouped by source repository
     for url, import_group in categorization.repo_imports.items():
         if import_group.has_local_cache and import_group.local_cache:
@@ -513,26 +537,35 @@ def build_fetch_plan(
             source_db = _create_source_cache_db(source_path)
             
             for stage in import_group.stages:
-                stage_hash_paths = _collect_hashes_from_stage(stage)
+                stage_hash_paths, is_v2 = _collect_hashes_from_stage(stage)
                 stage_name = stage.addressing
+                if is_v2:
+                    plan.v2_stages.add(stage_name)
                 for h, path in stage_hash_paths:
                     group.add_hash(h, stage_name=stage_name, path=path)
+                    if is_v2:
+                        plan.v2_hashes.add(h)
                     # Expand directory hashes
                     if h.endswith('.dir') and source_db:
                         child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                         group.add_hashes_with_paths(child_files, stage_name=stage_name)
+                        if is_v2:
+                            for child_hash, _ in child_files:
+                                plan.v2_hashes.add(child_hash)
         else:
             # No local cache for this repo - track with error message if available
             for stage in import_group.stages:
                 plan.no_source.append(stage)
                 if import_group.local_cache_error:
                     plan.no_source_errors[stage.addressing] = import_group.local_cache_error
-    
+
     # URL imports are handled separately
     plan.url_imports = categorization.url_imports
     
     if verbose:
         print(f"\nFetch plan: {plan.total_hashes} hashes from {len(plan.sources)} sources")
+        if plan.v2_hashes:
+            print(f"  v2 format files: {len(plan.v2_hashes)} (will create compat links)")
         for line in plan.summary_lines():
             print(f"  {line}")
     
@@ -933,6 +966,54 @@ def fetch_from_plan(
             destination=destination,
         )
         results.extend(recovery_results)
+    
+    # Create v2 compatibility links for files from v2 .dvc files
+    v2_compat_created = 0
+    if plan.v2_hashes and total_fetched > 0:
+        # Determine cache root
+        cache_root = Path(destination) if destination else None
+        if cache_root is None:
+            try:
+                from dvc.repo import Repo
+                repo = Repo()
+                # Get the cache base (parent of files/md5)
+                cache_root = Path(repo.cache.local.path).parent.parent
+            except Exception:
+                pass
+        
+        if cache_root:
+            v2_hashes_to_link = plan.v2_hashes
+            if verbose or show_progress:
+                print(f"\nCreating v2 compatibility links for {len(v2_hashes_to_link)} files...")
+            
+            if show_progress:
+                with click.progressbar(
+                    sorted(v2_hashes_to_link),
+                    label="v2 compat links",
+                    show_pos=True,
+                    show_percent=True,
+                ) as bar:
+                    for h in bar:
+                        success, _ = cache_ops.create_v2_compat_link(
+                            h, cache_root, verbose=False, cache_type=cache_type
+                        )
+                        if success:
+                            v2_compat_created += 1
+            else:
+                for h in sorted(v2_hashes_to_link):
+                    success, _ = cache_ops.create_v2_compat_link(
+                        h, cache_root, verbose=verbose, cache_type=cache_type
+                    )
+                    if success:
+                        v2_compat_created += 1
+            
+            if verbose:
+                print(f"  Created {v2_compat_created} v2 compatibility links")
+    
+    # Report v2 files and suggest upgrade
+    if plan.v2_stages:
+        print(f"\nNote: {len(plan.v2_stages)} .dvc files use v2 format (md5-dos2unix).")
+        print("  Consider upgrading to v3: dt update --upgrade <targets>")
     
     # Summary - always show if there were failures, or if verbose
     if total_failed > 0 or verbose:
