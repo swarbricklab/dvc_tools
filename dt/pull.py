@@ -223,6 +223,8 @@ def pull(
         print("\n=== Checkout phase ===")
     
     cmd = ['dvc', 'checkout']
+    if force:
+        cmd.append('--force')
     if targets:
         cmd.extend(targets)
     

@@ -408,6 +408,7 @@ def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
 def build_fetch_plan(
     categorization: StageCategorization,
     verbose: bool = False,
+    explicit_source: Optional[Path] = None,
 ) -> FetchPlan:
     """Build a fetch plan from categorized stages.
     
@@ -417,10 +418,52 @@ def build_fetch_plan(
     Args:
         categorization: Result from categorize_stages().
         verbose: Print progress information.
+        explicit_source: Explicit source cache path. If provided, all stages
+            use this as the source instead of auto-discovered sources.
         
     Returns:
         FetchPlan with hashes grouped by source.
     """
+    plan = FetchPlan()
+    
+    # If explicit source is provided, use it for all stages
+    if explicit_source:
+        source_path = explicit_source
+        source_name = f"explicit ({source_path.name})"
+        group = plan.add_source(source_path, source_name)
+        source_db = _create_source_cache_db(source_path)
+        
+        if verbose:
+            print(f"Using explicit source cache: {source_path}")
+        
+        # Add all stages (regular, repo imports, etc.) to the same source
+        all_stages = (
+            categorization.regular_stages +
+            [stage for import_group in categorization.repo_imports.values() 
+             for stage in import_group.stages]
+        )
+        
+        for stage in all_stages:
+            stage_hash_paths = _collect_hashes_from_stage(stage)
+            stage_name = stage.addressing
+            for h, path in stage_hash_paths:
+                group.add_hash(h, stage_name=stage_name, path=path)
+                # Expand directory hashes
+                if h.endswith('.dir') and source_db:
+                    child_files = _expand_dir_hash(h, source_db, base_path=path)
+                    group.add_hashes_with_paths(child_files, stage_name=stage_name)
+        
+        # URL imports are still handled separately
+        plan.url_imports = categorization.url_imports
+        
+        if verbose:
+            print(f"\nFetch plan: {plan.total_hashes} hashes from explicit source")
+            for line in plan.summary_lines():
+                print(f"  {line}")
+        
+        return plan
+    
+    # Standard auto-discovery mode
     plan = FetchPlan()
     
     # Handle regular stages - all from the primary local remote
@@ -558,6 +601,8 @@ def fetch_from_plan(
     show_progress: bool = True,
     network: bool = False,
     update: bool = False,
+    destination: Optional[Path] = None,
+    cache_type: Optional[str] = None,
 ) -> List[Tuple[str, bool, str]]:
     """Execute a fetch plan, linking hashes from sources to primary cache.
     
@@ -567,6 +612,9 @@ def fetch_from_plan(
         show_progress: Show progress bar.
         network: Fall back to dvc fetch for stages without local source.
         update: If True, attempt to recover from .dir failures by running dt update.
+        destination: Explicit destination cache path. If None, uses primary cache.
+        cache_type: Link type for cache population (reflink, hardlink, symlink, copy).
+            If None, tries all in order until one succeeds.
         
     Returns:
         List of (source_name, success, message) tuples.
@@ -620,25 +668,49 @@ def fetch_from_plan(
             print("No hashes to fetch")
         return results
     
-    # Now we need the DVC cache for fetching from sources
-    from dvc.repo import Repo
-    
-    repo = Repo()
-    cache = repo.cache.local
-    if cache is None:
-        raise FetchError("DVC cache not configured.")
-    
-    # Get cache base path (strip files/md5 suffix if present)
-    cache_base = str(cache.path)
-    if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
-        cache_base = str(Path(cache.path).parent.parent)
+    # Determine destination cache
+    if destination:
+        # Use explicit destination cache
+        cache_base = str(destination)
+        if verbose:
+            print(f"Using explicit destination cache: {cache_base}")
+        
+        # For explicit destination, create a simple DB to check existing hashes
+        dest_db = _create_source_cache_db(destination)
+    else:
+        # Use DVC's primary cache
+        from dvc.repo import Repo
+        
+        repo = Repo()
+        cache = repo.cache.local
+        if cache is None:
+            raise FetchError("DVC cache not configured.")
+        
+        # Get cache base path (strip files/md5 suffix if present)
+        cache_base = str(cache.path)
+        if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
+            cache_base = str(Path(cache.path).parent.parent)
+        
+        dest_db = cache
     
     # Collect all hashes and check what's already cached
     all_hashes = set()
     for group in plan.sources.values():
         all_hashes.update(group.hashes)
     
-    existing = set(cache.oids_exist(all_hashes))
+    # Check existing hashes in destination
+    if hasattr(dest_db, 'oids_exist'):
+        # DVC cache object
+        existing = set(dest_db.oids_exist(all_hashes))
+    elif dest_db is not None:
+        # LocalHashFileDB - check manually
+        existing = set()
+        for h in all_hashes:
+            if cache_ops.find_source_file(h, Path(cache_base)) is not None:
+                existing.add(h)
+    else:
+        # No existing destination - assume empty
+        existing = set()
     total_missing = len(all_hashes) - len(existing)
     
     if verbose:
@@ -689,6 +761,7 @@ def fetch_from_plan(
                         dest_cache=cache_base,
                         verbose=False,
                         use_v3_layout=True,
+                        cache_type=cache_type,
                     )
                     if result is True:
                         fetched += 1
@@ -710,6 +783,7 @@ def fetch_from_plan(
                     dest_cache=cache_base,
                     verbose=False,
                     use_v3_layout=True,
+                    cache_type=cache_type,
                 )
                 if result is True:
                     fetched += 1
@@ -825,6 +899,9 @@ def fetch(
     imports: bool = False,
     urls: bool = False,
     regular: bool = False,
+    source: Optional[str] = None,
+    destination: Optional[str] = None,
+    cache_type: Optional[str] = None,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -854,6 +931,10 @@ def fetch(
         imports: If True, only fetch repo imports. Can combine with urls/regular.
         urls: If True, only fetch URL imports. Can combine with imports/regular.
         regular: If True, only fetch regular stages. Can combine with imports/urls.
+        source: Explicit source cache path (overrides auto-discovery).
+        destination: Explicit destination cache path (overrides primary cache).
+        cache_type: Link type for cache population (reflink, hardlink, symlink, copy).
+            If None, tries all in order until one succeeds.
         
     Returns:
         List of (target, success, message) tuples.
@@ -915,13 +996,19 @@ def fetch(
         return []
     
     # Build and execute fetch plan (new simplified model)
-    plan = build_fetch_plan(categorization, verbose=verbose)
+    plan = build_fetch_plan(
+        categorization,
+        verbose=verbose,
+        explicit_source=Path(source) if source else None,
+    )
     return fetch_from_plan(
         plan=plan,
         verbose=verbose,
         show_progress=show_progress,
         network=network,
         update=update,
+        destination=Path(destination) if destination else None,
+        cache_type=cache_type,
     )
 
 
