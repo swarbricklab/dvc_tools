@@ -531,6 +531,7 @@ def _recover_dir_failures(
     failures: List[Tuple[str, str]],
     verbose: bool = False,
     show_progress: bool = True,
+    destination: Optional[Path] = None,
 ) -> List[Tuple[str, bool, str]]:
     """Attempt to recover from .dir failures by running dt update.
     
@@ -541,6 +542,7 @@ def _recover_dir_failures(
         failures: List of (hash, stage_name) tuples for failed .dir hashes.
         verbose: Print detailed progress.
         show_progress: Show progress bar for re-fetch.
+        destination: Explicit destination cache path. If None, uses primary cache.
         
     Returns:
         List of (target, success, message) tuples for recovery attempts.
@@ -580,6 +582,7 @@ def _recover_dir_failures(
                 push_dir=False,  # Don't push during recovery
                 no_download=False,  # Let update call fetch after rebuilding
                 dry_run=False,
+                cache=str(destination) if destination else None,
             )
             
             # Check if update succeeded
@@ -879,6 +882,7 @@ def fetch_from_plan(
             failures=recoverable_dir_failures,
             verbose=verbose,
             show_progress=show_progress,
+            destination=destination,
         )
         results.extend(recovery_results)
     

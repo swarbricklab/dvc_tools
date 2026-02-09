@@ -416,6 +416,7 @@ def update(
     push_dir: bool = False,
     no_download: bool = False,
     dry_run: bool = False,
+    cache: Optional[str] = None,
 ) -> List[Tuple[str, bool, str]]:
     """Update import .dvc files by rebuilding .dir manifests.
     
@@ -435,6 +436,7 @@ def update(
         push_dir: Push .dir file to source remote after creating.
         no_download: Skip dt fetch after rebuilding .dir.
         dry_run: Show what would be done without making changes.
+        cache: Explicit cache path. If None, uses primary cache.
         
     Returns:
         List of (target, success, message) tuples.
@@ -576,15 +578,18 @@ def update(
         # Build .dir manifest
         manifest_content = _build_dir_manifest(entries)
         
-        # Get cache path
-        cache_dir = utils.get_cache_dir()
-        if not cache_dir:
-            results.append((str(target_path), False, "DVC cache not configured"))
-            continue
-        
-        cache_base = str(cache_dir)
-        if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
-            cache_base = str(Path(cache_base).parent.parent)
+        # Get cache path - use explicit or primary
+        if cache:
+            cache_base = cache
+        else:
+            cache_dir = utils.get_cache_dir()
+            if not cache_dir:
+                results.append((str(target_path), False, "DVC cache not configured"))
+                continue
+            
+            cache_base = str(cache_dir)
+            if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
+                cache_base = str(Path(cache_base).parent.parent)
         
         # Write to cache
         dir_hash, dir_file = _write_dir_to_cache(manifest_content, cache_base, verbose)
@@ -613,7 +618,7 @@ def update(
         print(f"\nFetching data for {len(updated_targets)} updated import(s)...")
         from . import fetch as fetch_mod
         try:
-            fetch_mod.fetch(targets=updated_targets, verbose=verbose)
+            fetch_mod.fetch(targets=updated_targets, verbose=verbose, destination=cache)
         except Exception as e:
             print(f"  Warning: fetch failed: {e}")
             print(f"  Run 'dt fetch {' '.join(updated_targets)}' manually")
