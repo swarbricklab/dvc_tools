@@ -413,7 +413,6 @@ def update(
     targets: Optional[List[str]] = None,
     rev: Optional[str] = None,
     verbose: bool = False,
-    push_dir: bool = False,
     no_download: bool = False,
     dry_run: bool = False,
     cache: Optional[str] = None,
@@ -433,10 +432,12 @@ def update(
         targets: .dvc files to update. If None, updates all import files.
         rev: Git revision to update to. None = smart auto-detection.
         verbose: Show detailed progress.
-        push_dir: Push .dir file to source remote after creating.
         no_download: Skip dt fetch after rebuilding .dir.
         dry_run: Show what would be done without making changes.
         cache: Explicit cache path. If None, uses primary cache.
+        
+    Note:
+        Rebuilt .dir files are always pushed to the source remote.
         
     Returns:
         List of (target, success, message) tuples.
@@ -598,17 +599,16 @@ def update(
         new_rev = target_rev if target_rev != info.locked_rev else None
         _update_dvc_file(target_path, dir_hash, new_rev, verbose)
         
-        # Push to source remote if requested
-        if push_dir:
-            from . import remote as remote_mod
-            try:
-                local_remote = remote_mod.find_local_remote_from_repo(info.repo_url)
-                if local_remote:
-                    remote_path = Path(local_remote[1])
-                    _push_dir_to_remote(dir_file, remote_path, dir_hash, verbose)
-            except Exception as e:
-                if verbose:
-                    print(f"  Warning: Could not push to source remote: {e}")
+        # Always push to source remote so fetch can find it
+        from . import remote as remote_mod
+        try:
+            local_remote = remote_mod.find_local_remote_from_repo(info.repo_url)
+            if local_remote:
+                remote_path = Path(local_remote[1])
+                _push_dir_to_remote(dir_file, remote_path, dir_hash, verbose)
+        except Exception as e:
+            if verbose:
+                print(f"  Warning: Could not push to source remote: {e}")
         
         updated_targets.append(str(target_path))
         results.append((str(target_path), True, f"Built .dir ({len(entries)} files)"))

@@ -68,16 +68,6 @@ class TestUpdateOptions:
         
         assert '--no-download' in result.stdout
     
-    def test_update_push_dir_option(self):
-        """'--push-dir' option is available."""
-        result = subprocess.run(
-            ['dt', 'update', '--help'],
-            capture_output=True,
-            text=True,
-        )
-        
-        assert '--push-dir' in result.stdout
-    
     def test_update_dry_run_option(self):
         """'--dry-run' option is available."""
         result = subprocess.run(

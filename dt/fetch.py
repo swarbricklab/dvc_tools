@@ -579,7 +579,6 @@ def _recover_dir_failures(
                 targets=[stage_name],
                 rev=rev_lock,  # Use locked rev, not HEAD
                 verbose=verbose,
-                push_dir=False,  # Don't push during recovery
                 no_download=False,  # Let update call fetch after rebuilding
                 dry_run=False,
                 cache=str(destination) if destination else None,
