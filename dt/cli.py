@@ -1050,6 +1050,7 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('--update', is_flag=True, help='Recover from .dir failures by rebuilding manifests with dt update')
 @click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
 @click.option('--dry', is_flag=True, help='Show stage categorization without fetching (for troubleshooting)')
+@click.option('--force', is_flag=True, help='Force re-fetch even if .dir exists in cache (ensures all child files are fetched)')
 @click.option('--imports', is_flag=True, help='Only fetch repo imports (from dvc import)')
 @click.option('--urls', is_flag=True, help='Only fetch URL imports (from dvc import-url)')
 @click.option('--regular', is_flag=True, help='Only fetch regular stages (non-imports)')
@@ -1058,7 +1059,7 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('--cache-type', type=click.Choice(['reflink', 'hardlink', 'symlink', 'copy']),
               help='Link type for cache population. If not specified, tries reflink → hardlink → symlink → copy.')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, urls, regular, source, destination, cache_type):
+def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imports, urls, regular, source, destination, cache_type):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1100,6 +1101,7 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, u
         dt fetch data/external.dvc         # Fetch specific targets
         dt fetch -v                        # Show detailed progress
         dt fetch --update                  # Rebuild .dir files, update .dvc if needed
+        dt fetch --force                   # Force re-fetch even if .dir exists (ensures children are fetched)
         dt fetch --network                 # Fall back to dvc fetch if local remote unavailable
         dt fetch --dry                     # Show what would be fetched without actually fetching
         dt fetch --dry -v                  # Show detailed categorization
@@ -1127,6 +1129,7 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, u
             update=update,
             network=network,
             dry=dry,
+            force=force,
             imports=imports,
             urls=urls,
             regular=regular,

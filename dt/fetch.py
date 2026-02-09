@@ -334,6 +334,7 @@ def _expand_dir_hash(
     dir_hash: str,
     source_db,
     base_path: str = None,
+    fallback_db=None,
 ) -> List[Tuple[str, str]]:
     """Expand a .dir hash to get all child file hashes with their paths.
     
@@ -343,6 +344,7 @@ def _expand_dir_hash(
         dir_hash: The directory hash (with .dir suffix).
         source_db: LocalHashFileDB to read the .dir file from.
         base_path: Base path to prepend to child paths.
+        fallback_db: Optional fallback DB to try if source_db doesn't have the .dir.
         
     Returns:
         List of (hash, path) tuples for child files.
@@ -352,21 +354,27 @@ def _expand_dir_hash(
     
     child_files = []
     
-    try:
-        hi = HashInfo("md5", dir_hash)
-        tree = Tree.load(source_db, hi)
-        for key, (meta, hash_info) in tree.iteritems():
-            # key is a tuple of path components, e.g., ('subdir', 'file.txt')
-            rel_path = '/'.join(key) if key else ''
-            if base_path:
-                full_path = f"{base_path}/{rel_path}" if rel_path else base_path
-            else:
-                full_path = rel_path
-            child_files.append((hash_info.value, full_path))
-    except Exception:
-        # If we can't load the tree, we'll just fetch the .dir hash
-        # and handle expansion later
-        pass
+    # Try source_db first
+    for db in [source_db, fallback_db]:
+        if db is None:
+            continue
+        try:
+            hi = HashInfo("md5", dir_hash)
+            tree = Tree.load(db, hi)
+            for key, (meta, hash_info) in tree.iteritems():
+                # key is a tuple of path components, e.g., ('subdir', 'file.txt')
+                rel_path = '/'.join(key) if key else ''
+                if base_path:
+                    full_path = f"{base_path}/{rel_path}" if rel_path else base_path
+                else:
+                    full_path = rel_path
+                child_files.append((hash_info.value, full_path))
+            # Successfully loaded from this db, return early
+            if child_files:
+                return child_files
+        except Exception:
+            # Try next database
+            continue
     
     return child_files
 
@@ -409,6 +417,7 @@ def build_fetch_plan(
     categorization: StageCategorization,
     verbose: bool = False,
     explicit_source: Optional[Path] = None,
+    destination_db=None,
 ) -> FetchPlan:
     """Build a fetch plan from categorized stages.
     
@@ -420,6 +429,9 @@ def build_fetch_plan(
         verbose: Print progress information.
         explicit_source: Explicit source cache path. If provided, all stages
             use this as the source instead of auto-discovered sources.
+        destination_db: Optional destination cache DB for fallback .dir expansion.
+            If a .dir file isn't in source but is in destination, we can still
+            expand it to get child hashes.
         
     Returns:
         FetchPlan with hashes grouped by source.
@@ -450,7 +462,7 @@ def build_fetch_plan(
                 group.add_hash(h, stage_name=stage_name, path=path)
                 # Expand directory hashes
                 if h.endswith('.dir') and source_db:
-                    child_files = _expand_dir_hash(h, source_db, base_path=path)
+                    child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                     group.add_hashes_with_paths(child_files, stage_name=stage_name)
         
         # URL imports are still handled separately
@@ -484,7 +496,7 @@ def build_fetch_plan(
                         group.add_hash(h, stage_name=stage_name, path=path)
                         # Expand directory hashes
                         if h.endswith('.dir') and source_db:
-                            child_files = _expand_dir_hash(h, source_db, base_path=path)
+                            child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                             group.add_hashes_with_paths(child_files, stage_name=stage_name)
         else:
             # No local remote available - track with error message if available
@@ -507,7 +519,7 @@ def build_fetch_plan(
                     group.add_hash(h, stage_name=stage_name, path=path)
                     # Expand directory hashes
                     if h.endswith('.dir') and source_db:
-                        child_files = _expand_dir_hash(h, source_db, base_path=path)
+                        child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                         group.add_hashes_with_paths(child_files, stage_name=stage_name)
         else:
             # No local cache for this repo - track with error message if available
@@ -603,6 +615,7 @@ def fetch_from_plan(
     show_progress: bool = True,
     network: bool = False,
     update: bool = False,
+    force: bool = False,
     destination: Optional[Path] = None,
     cache_type: Optional[str] = None,
 ) -> List[Tuple[str, bool, str]]:
@@ -614,6 +627,8 @@ def fetch_from_plan(
         show_progress: Show progress bar.
         network: Fall back to dvc fetch for stages without local source.
         update: If True, attempt to recover from .dir failures by running dt update.
+        force: If True, don't skip .dir files that are already cached. This ensures
+            all child files are fetched even if the .dir manifest exists in cache.
         destination: Explicit destination cache path. If None, uses primary cache.
         cache_type: Link type for cache population (reflink, hardlink, symlink, copy).
             If None, tries all in order until one succeeds.
@@ -720,14 +735,26 @@ def fetch_from_plan(
         print(f"  Total hashes: {len(all_hashes)}")
         print(f"  Already cached: {len(existing)}")
         print(f"  Missing: {total_missing}")
+        if force:
+            print(f"  Force mode: will re-fetch all missing from source")
     
-    if total_missing == 0:
+    if total_missing == 0 and not force:
         results.append(("all", True, f"All {len(all_hashes)} hashes already cached"))
         return results
     
+    # In force mode, we'll try to fetch everything from source (existing check still
+    # applies, but we don't exit early). This handles cases where .dir files were
+    # expanded from destination cache but children haven't been fetched yet.
+    
     # Fetch from each source
     for source_path, group in plan.sources.items():
-        missing_from_source = group.hashes - existing
+        if force:
+            # In force mode, try to fetch all hashes (not just missing ones)
+            # populate_cache_file will skip if already exists, but we need to
+            # ensure all children of .dir files get processed
+            missing_from_source = group.hashes.copy()
+        else:
+            missing_from_source = group.hashes - existing
         if not missing_from_source:
             continue
         
@@ -899,6 +926,7 @@ def fetch(
     show_progress: bool = True,
     network: bool = False,
     dry: bool = False,
+    force: bool = False,
     imports: bool = False,
     urls: bool = False,
     regular: bool = False,
@@ -931,6 +959,7 @@ def fetch(
         show_progress: If True (and not verbose), show a progress bar.
         network: If True, fall back to `dvc fetch` when local remote not available.
         dry: If True, only collect and categorize stages without fetching.
+        force: If True, ignore cached .dir files and verify all child files are fetched.
         imports: If True, only fetch repo imports. Can combine with urls/regular.
         urls: If True, only fetch URL imports. Can combine with imports/regular.
         regular: If True, only fetch regular stages. Can combine with imports/urls.
@@ -998,11 +1027,22 @@ def fetch(
         categorization.print_summary(verbose=verbose)
         return []
     
+    # Determine destination DB for fallback .dir expansion
+    destination_db = None
+    if destination:
+        destination_db = _create_source_cache_db(Path(destination))
+    else:
+        # Use DVC's primary cache
+        from dvc.repo import Repo
+        repo = Repo()
+        destination_db = repo.cache.local
+    
     # Build and execute fetch plan (new simplified model)
     plan = build_fetch_plan(
         categorization,
         verbose=verbose,
         explicit_source=Path(source) if source else None,
+        destination_db=destination_db,
     )
     return fetch_from_plan(
         plan=plan,
@@ -1010,6 +1050,7 @@ def fetch(
         show_progress=show_progress,
         network=network,
         update=update,
+        force=force,
         destination=Path(destination) if destination else None,
         cache_type=cache_type,
     )
