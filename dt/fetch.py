@@ -839,12 +839,15 @@ def fetch_from_plan(
                         failed_hashes.append((h, "not found in source"))
                         continue
                     
+                    # Use v3 layout for v3 files, v2 layout for v2 files
+                    use_v3 = h not in plan.v2_hashes
+                    
                     result = cache_ops.populate_cache_file(
                         md5=h,
                         source_cache=source_path,
                         dest_cache=cache_base,
                         verbose=False,
-                        use_v3_layout=True,
+                        use_v3_layout=use_v3,
                         cache_type=cache_type,
                     )
                     if result is True:
@@ -861,12 +864,15 @@ def fetch_from_plan(
                     failed_hashes.append((h, "not found in source"))
                     continue
                 
+                # Use v3 layout for v3 files, v2 layout for v2 files
+                use_v3 = h not in plan.v2_hashes
+                
                 result = cache_ops.populate_cache_file(
                     md5=h,
                     source_cache=source_path,
                     dest_cache=cache_base,
                     verbose=False,
-                    use_v3_layout=True,
+                    use_v3_layout=use_v3,
                     cache_type=cache_type,
                 )
                 if result is True:
@@ -967,53 +973,9 @@ def fetch_from_plan(
         )
         results.extend(recovery_results)
     
-    # Create v2 compatibility links for files from v2 .dvc files
-    v2_compat_created = 0
-    if plan.v2_hashes and total_fetched > 0:
-        # Determine cache root
-        cache_root = Path(destination) if destination else None
-        if cache_root is None:
-            try:
-                from dvc.repo import Repo
-                repo = Repo()
-                # Get the cache base (parent of files/md5)
-                cache_root = Path(repo.cache.local.path).parent.parent
-            except Exception:
-                pass
-        
-        if cache_root:
-            v2_hashes_to_link = plan.v2_hashes
-            if verbose or show_progress:
-                print(f"\nCreating v2 compatibility links for {len(v2_hashes_to_link)} files...")
-            
-            if show_progress:
-                with click.progressbar(
-                    sorted(v2_hashes_to_link),
-                    label="v2 compat links",
-                    show_pos=True,
-                    show_percent=True,
-                ) as bar:
-                    for h in bar:
-                        success, _ = cache_ops.create_v2_compat_link(
-                            h, cache_root, verbose=False, cache_type=cache_type
-                        )
-                        if success:
-                            v2_compat_created += 1
-            else:
-                for h in sorted(v2_hashes_to_link):
-                    success, _ = cache_ops.create_v2_compat_link(
-                        h, cache_root, verbose=verbose, cache_type=cache_type
-                    )
-                    if success:
-                        v2_compat_created += 1
-            
-            if verbose:
-                print(f"  Created {v2_compat_created} v2 compatibility links")
-    
-    # Report v2 files and suggest upgrade
-    if plan.v2_stages:
-        print(f"\nNote: {len(plan.v2_stages)} .dvc files use v2 format (md5-dos2unix).")
-        print("  Consider upgrading to v3: dt update --upgrade <targets>")
+    # Report v2 files (placed in v2 location)
+    if plan.v2_hashes and verbose:
+        print(f"\nNote: {len(plan.v2_hashes)} files from v2 format .dvc files placed in legacy cache location.")
     
     # Summary - always show if there were failures, or if verbose
     if total_failed > 0 or verbose:
