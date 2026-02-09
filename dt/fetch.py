@@ -565,7 +565,7 @@ def build_fetch_plan(
     if verbose:
         print(f"\nFetch plan: {plan.total_hashes} hashes from {len(plan.sources)} sources")
         if plan.v2_hashes:
-            print(f"  v2 format files: {len(plan.v2_hashes)} (will create compat links)")
+            print(f"  v2 format files: {len(plan.v2_hashes)} (will use legacy cache location)")
         for line in plan.summary_lines():
             print(f"  {line}")
     
