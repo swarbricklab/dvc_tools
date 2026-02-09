@@ -748,75 +748,27 @@ def fetch_from_plan(
         
         dest_db = cache
     
-    # Collect all hashes and check what's already cached
+    # Collect all hashes to fetch
     all_hashes = set()
     for group in plan.sources.values():
         all_hashes.update(group.hashes)
     
-    # Check existing hashes in destination
     if verbose:
-        print(f"Checking cache for {len(all_hashes)} hashes...")
-    elif show_progress and len(all_hashes) > 100:
-        # Show brief status for large hash sets
-        click.echo(f"Checking {len(all_hashes)} hashes in cache...", nl=False)
+        print(f"\nTotal hashes to process: {len(all_hashes)}")
+        print("  (existing files will be skipped during fetch)")
     
-    if hasattr(dest_db, 'oids_exist'):
-        # DVC cache object - batch check
-        existing = set(dest_db.oids_exist(all_hashes))
-    elif dest_db is not None:
-        # LocalHashFileDB - check manually (can be slow for many hashes)
-        existing = set()
-        hash_list = list(all_hashes)
-        check_count = 0
-        for h in hash_list:
-            if cache_ops.find_source_file(h, Path(cache_base)) is not None:
-                existing.add(h)
-            check_count += 1
-            # Show progress every 500 hashes if verbose
-            if verbose and check_count % 500 == 0:
-                print(f"  Checked {check_count}/{len(hash_list)} hashes...")
-    else:
-        # No existing destination - assume empty
-        existing = set()
-    
-    # Clear the "checking" message if we showed one
-    if not verbose and show_progress and len(all_hashes) > 100:
-        click.echo(" done")
-    
-    total_missing = len(all_hashes) - len(existing)
-    
-    if verbose:
-        print(f"\nCache status:")
-        print(f"  Total hashes: {len(all_hashes)}")
-        print(f"  Already cached: {len(existing)}")
-        print(f"  Missing: {total_missing}")
-        if force:
-            print(f"  Force mode: will re-fetch all missing from source")
-    
-    if total_missing == 0 and not force:
-        results.append(("all", True, f"All {len(all_hashes)} hashes already cached"))
-        return results
-    
-    # In force mode, we'll try to fetch everything from source (existing check still
-    # applies, but we don't exit early). This handles cases where .dir files were
-    # expanded from destination cache but children haven't been fetched yet.
-    
-    # Fetch from each source
+    # Fetch from each source - let populate_cache_file handle existence checks
+    # This avoids a slow upfront check that can take hours on network filesystems
     for source_path, group in plan.sources.items():
-        if force:
-            # In force mode, try to fetch all hashes (not just missing ones)
-            # populate_cache_file will skip if already exists, but we need to
-            # ensure all children of .dir files get processed
-            missing_from_source = group.hashes.copy()
-        else:
-            missing_from_source = group.hashes - existing
-        if not missing_from_source:
+        # Always try all hashes - populate_cache_file skips if dest exists
+        hashes_to_try = group.hashes
+        if not hashes_to_try:
             continue
         
-        source_label = f"{group.source_name} ({len(missing_from_source)} files)"
+        source_label = f"{group.source_name} ({len(hashes_to_try)} files)"
         
         if verbose:
-            print(f"\nFetching from {group.source_name}: {len(missing_from_source)} files")
+            print(f"\nFetching from {group.source_name}: {len(hashes_to_try)} files")
             print(f"  Source: {source_path}")
         
         fetched = 0
@@ -826,7 +778,7 @@ def fetch_from_plan(
         # Always use progress bar when show_progress is True (even in verbose mode)
         if show_progress:
             with click.progressbar(
-                sorted(missing_from_source),
+                sorted(hashes_to_try),
                 label=source_label,
                 show_pos=True,
                 show_percent=True,
@@ -857,7 +809,7 @@ def fetch_from_plan(
                         failed_hashes.append((h, "link failed"))
         else:
             # No progress bar - just process silently
-            for h in sorted(missing_from_source):
+            for h in sorted(hashes_to_try):
                 source_file = cache_ops.find_source_file(h, Path(source_path))
                 if source_file is None:
                     failed += 1
