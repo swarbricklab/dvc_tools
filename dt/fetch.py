@@ -602,6 +602,7 @@ def fetch_from_plan(
     network: bool = False,
     update: bool = False,
     destination: Optional[Path] = None,
+    cache_type: Optional[str] = None,
 ) -> List[Tuple[str, bool, str]]:
     """Execute a fetch plan, linking hashes from sources to primary cache.
     
@@ -612,6 +613,8 @@ def fetch_from_plan(
         network: Fall back to dvc fetch for stages without local source.
         update: If True, attempt to recover from .dir failures by running dt update.
         destination: Explicit destination cache path. If None, uses primary cache.
+        cache_type: Link type for cache population (reflink, hardlink, symlink, copy).
+            If None, tries all in order until one succeeds.
         
     Returns:
         List of (source_name, success, message) tuples.
@@ -758,6 +761,7 @@ def fetch_from_plan(
                         dest_cache=cache_base,
                         verbose=False,
                         use_v3_layout=True,
+                        cache_type=cache_type,
                     )
                     if result is True:
                         fetched += 1
@@ -779,6 +783,7 @@ def fetch_from_plan(
                     dest_cache=cache_base,
                     verbose=False,
                     use_v3_layout=True,
+                    cache_type=cache_type,
                 )
                 if result is True:
                     fetched += 1
@@ -896,6 +901,7 @@ def fetch(
     regular: bool = False,
     source: Optional[str] = None,
     destination: Optional[str] = None,
+    cache_type: Optional[str] = None,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -927,6 +933,8 @@ def fetch(
         regular: If True, only fetch regular stages. Can combine with imports/urls.
         source: Explicit source cache path (overrides auto-discovery).
         destination: Explicit destination cache path (overrides primary cache).
+        cache_type: Link type for cache population (reflink, hardlink, symlink, copy).
+            If None, tries all in order until one succeeds.
         
     Returns:
         List of (target, success, message) tuples.
@@ -1000,6 +1008,7 @@ def fetch(
         network=network,
         update=update,
         destination=Path(destination) if destination else None,
+        cache_type=cache_type,
     )
 
 

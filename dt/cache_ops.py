@@ -11,6 +11,49 @@ from pathlib import Path
 from typing import Literal, Optional, Tuple
 
 LinkType = Literal['reflink', 'hardlink', 'symlink', 'copy', 'skipped', 'failed']
+CacheType = Literal['reflink', 'hardlink', 'symlink', 'copy']
+
+# Valid cache types (matches DVC's cache.type config)
+VALID_CACHE_TYPES = ('reflink', 'hardlink', 'symlink', 'copy')
+
+
+def _try_reflink(source: Path, dest: Path) -> bool:
+    """Try to create a reflink (copy-on-write)."""
+    try:
+        result = subprocess.run(
+            ['cp', '--reflink=only', str(source), str(dest)],
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except (OSError, FileNotFoundError):
+        return False
+
+
+def _try_hardlink(source: Path, dest: Path) -> bool:
+    """Try to create a hardlink."""
+    try:
+        os.link(source, dest)
+        return True
+    except OSError:
+        return False
+
+
+def _try_symlink(source: Path, dest: Path) -> bool:
+    """Try to create a symlink."""
+    try:
+        os.symlink(source, dest)
+        return True
+    except OSError:
+        return False
+
+
+def _try_copy(source: Path, dest: Path) -> bool:
+    """Try to copy the file."""
+    try:
+        shutil.copy2(source, dest)
+        return True
+    except OSError:
+        return False
 
 
 def link_file(
@@ -18,10 +61,13 @@ def link_file(
     dest: Path,
     verbose: bool = False,
     label: str = '',
+    cache_type: Optional[CacheType] = None,
 ) -> Tuple[bool, LinkType]:
     """Copy or link a file from source to destination.
     
-    Uses DVC's preferred order: reflink → hardlink → symlink → copy.
+    By default, uses DVC's preferred order: reflink → hardlink → symlink → copy.
+    If cache_type is specified, only that method is attempted.
+    
     Creates parent directories as needed. Skips if destination already exists.
     
     Args:
@@ -29,6 +75,8 @@ def link_file(
         dest: Destination file path.
         verbose: Print progress messages.
         label: Optional label for verbose output (e.g., hash or filename).
+        cache_type: If specified, only use this link type (reflink, hardlink,
+            symlink, or copy). Fails if the specified type doesn't work.
         
     Returns:
         Tuple of (success, link_type).
@@ -48,53 +96,52 @@ def link_file(
     
     display = label or source.name
     
-    # 1. Try reflink (copy-on-write) - best option: instant, zero space, safe to modify
-    try:
-        result = subprocess.run(
-            ['cp', '--reflink=only', str(source), str(dest)],
-            capture_output=True,
-        )
-        if result.returncode == 0:
+    # If specific cache_type requested, only try that one
+    if cache_type:
+        methods = {
+            'reflink': (_try_reflink, 'reflink'),
+            'hardlink': (_try_hardlink, 'hardlink'),
+            'symlink': (_try_symlink, 'symlink'),
+            'copy': (_try_copy, 'copy'),
+        }
+        
+        try_func, type_name = methods[cache_type]
+        if try_func(source, dest):
             if verbose:
-                print(f"  Cached (reflink): {display}")
-            return True, 'reflink'
-    except (OSError, FileNotFoundError):
-        pass  # cp not available or reflink not supported
+                print(f"  Cached ({type_name}): {display}")
+            return True, type_name
+        else:
+            if verbose:
+                print(f"  ERROR: {type_name} failed for {display}")
+            return False, 'failed'
+    
+    # Default: try all methods in order
+    # 1. Try reflink (copy-on-write) - best option: instant, zero space, safe to modify
+    if _try_reflink(source, dest):
+        if verbose:
+            print(f"  Cached (reflink): {display}")
+        return True, 'reflink'
     
     # 2. Try hardlink - same inode, no extra space, works within same filesystem
-    try:
-        os.link(source, dest)
+    if _try_hardlink(source, dest):
         if verbose:
             print(f"  Cached (hardlink): {display}")
         return True, 'hardlink'
-    except OSError as e:
-        # EXDEV (18): Cross-device link (different filesystems)
-        # EPERM (1): Operation not permitted (common on HPC with quota restrictions)
-        # EACCES (13): Permission denied
-        if e.errno not in (1, 13, 18):
-            if verbose:
-                print(f"  ERROR: Failed to hardlink {display}: {e}")
-            return False, 'failed'
     
     # 3. Try symlink - pointer to source, no extra space, works across filesystems
-    try:
-        os.symlink(source, dest)
+    if _try_symlink(source, dest):
         if verbose:
             print(f"  Cached (symlink): {display}")
         return True, 'symlink'
-    except OSError as e:
-        if verbose:
-            print(f"  Warning: symlink failed for {display}: {e}")
     
     # 4. Fall back to regular copy - slower but universally compatible
-    try:
-        shutil.copy2(source, dest)
+    if _try_copy(source, dest):
         if verbose:
             print(f"  Cached (copy): {display}")
         return True, 'copy'
-    except OSError as e:
-        if verbose:
-            print(f"  ERROR: Failed to copy {display}: {e}")
+    
+    if verbose:
+        print(f"  ERROR: All link methods failed for {display}")
     
     return False, 'failed'
 
@@ -169,6 +216,7 @@ def populate_cache_file(
     dest_cache: str,
     verbose: bool = False,
     use_v3_layout: bool = True,
+    cache_type: Optional[CacheType] = None,
 ) -> Optional[bool]:
     """Copy or link a single file from source cache to destination cache.
     
@@ -184,6 +232,8 @@ def populate_cache_file(
         dest_cache: Path to the destination cache base directory.
         verbose: Print progress messages.
         use_v3_layout: If True, use v3 layout for destination.
+        cache_type: If specified, only use this link type (reflink, hardlink,
+            symlink, or copy). Fails if the specified type doesn't work.
             
     Returns:
         True if file was added to cache.
@@ -200,7 +250,7 @@ def populate_cache_file(
         return False
     
     label = f"{md5[:12]}..."
-    success, link_type = link_file(source_path, dest_path, verbose=verbose, label=label)
+    success, link_type = link_file(source_path, dest_path, verbose=verbose, label=label, cache_type=cache_type)
     
     if link_type == 'failed':
         return None

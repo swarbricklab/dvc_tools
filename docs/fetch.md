@@ -43,6 +43,7 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | `--no-index-sync` | Skip automatic index mirror sync |
 | `--source PATH` | Explicit source cache path (overrides auto-discovery) |
 | `--destination PATH` | Explicit destination cache path (overrides primary cache) |
+| `--cache-type TYPE` | Link type: `reflink`, `hardlink`, `symlink`, or `copy` |
 
 ### Stage Type Filters
 
@@ -81,6 +82,28 @@ This is useful when:
 - The source cache is not configured as a DVC remote
 - You want to populate a different cache than the primary one
 - You're copying data between caches on shared filesystems
+
+### Cache Link Type
+
+The `--cache-type` option controls how files are linked from source to destination cache. By default, `dt fetch` tries methods in order until one succeeds: reflink → hardlink → symlink → copy.
+
+```bash
+# Only use symlinks (fail if symlink not possible)
+dt fetch --cache-type symlink
+
+# Force copy (useful when source may change)
+dt fetch --cache-type copy
+
+# Use hardlinks (same filesystem, no extra space)
+dt fetch --cache-type hardlink
+```
+
+| Type | Description |
+|------|-------------|
+| `reflink` | Copy-on-write (instant, zero space, safe to modify). Requires filesystem support (e.g., APFS, Btrfs, XFS). |
+| `hardlink` | Same inode, no extra space. Only works within the same filesystem. |
+| `symlink` | Pointer to source file. Works across filesystems but source must remain accessible. |
+| `copy` | Full copy. Slower but universally compatible. |
 
 ## Examples
 
