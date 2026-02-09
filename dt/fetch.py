@@ -686,11 +686,13 @@ def fetch_from_plan(
         return results
     
     # Determine destination cache
+    if verbose:
+        print("\nDetermining destination cache...")
     if destination:
         # Use explicit destination cache
         cache_base = str(destination)
         if verbose:
-            print(f"Using explicit destination cache: {cache_base}")
+            print(f"  Using explicit destination cache: {cache_base}")
         
         # For explicit destination, create a simple DB to check existing hashes
         dest_db = _create_source_cache_db(destination)
@@ -708,6 +710,9 @@ def fetch_from_plan(
         if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
             cache_base = str(Path(cache.path).parent.parent)
         
+        if verbose:
+            print(f"  Using primary cache: {cache_base}")
+        
         dest_db = cache
     
     # Collect all hashes and check what's already cached
@@ -716,18 +721,35 @@ def fetch_from_plan(
         all_hashes.update(group.hashes)
     
     # Check existing hashes in destination
+    if verbose:
+        print(f"Checking cache for {len(all_hashes)} hashes...")
+    elif show_progress and len(all_hashes) > 100:
+        # Show brief status for large hash sets
+        click.echo(f"Checking {len(all_hashes)} hashes in cache...", nl=False)
+    
     if hasattr(dest_db, 'oids_exist'):
-        # DVC cache object
+        # DVC cache object - batch check
         existing = set(dest_db.oids_exist(all_hashes))
     elif dest_db is not None:
-        # LocalHashFileDB - check manually
+        # LocalHashFileDB - check manually (can be slow for many hashes)
         existing = set()
-        for h in all_hashes:
+        hash_list = list(all_hashes)
+        check_count = 0
+        for h in hash_list:
             if cache_ops.find_source_file(h, Path(cache_base)) is not None:
                 existing.add(h)
+            check_count += 1
+            # Show progress every 500 hashes if verbose
+            if verbose and check_count % 500 == 0:
+                print(f"  Checked {check_count}/{len(hash_list)} hashes...")
     else:
         # No existing destination - assume empty
         existing = set()
+    
+    # Clear the "checking" message if we showed one
+    if not verbose and show_progress and len(all_hashes) > 100:
+        click.echo(" done")
+    
     total_missing = len(all_hashes) - len(existing)
     
     if verbose:
