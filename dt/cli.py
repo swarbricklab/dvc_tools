@@ -1053,8 +1053,12 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('--imports', is_flag=True, help='Only fetch repo imports (from dvc import)')
 @click.option('--urls', is_flag=True, help='Only fetch URL imports (from dvc import-url)')
 @click.option('--regular', is_flag=True, help='Only fetch regular stages (non-imports)')
+@click.option('--source', type=click.Path(exists=True), help='Explicit source cache path (overrides auto-discovery)')
+@click.option('--destination', type=click.Path(), help='Explicit destination cache path (overrides primary cache)')
+@click.option('--cache-type', type=click.Choice(['reflink', 'hardlink', 'symlink', 'copy']),
+              help='Link type for cache population. If not specified, tries reflink → hardlink → symlink → copy.')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, urls, regular):
+def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, urls, regular, source, destination, cache_type):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1081,6 +1085,16 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, u
         --regular    Only regular stages (non-imports)
     
     \b
+    Explicit cache paths:
+        --source       Use this cache as the source (overrides auto-discovery)
+        --destination  Write to this cache instead of the primary cache
+    
+    \b
+    Cache link type:
+        --cache-type   Only use this link method (reflink, hardlink, symlink, copy).
+                       If not specified, tries all in order until one succeeds.
+    
+    \b
     Examples:
         dt fetch                           # Fetch all .dvc files from local sources
         dt fetch data/external.dvc         # Fetch specific targets
@@ -1092,6 +1106,9 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, u
         dt fetch --imports                 # Only fetch repo imports
         dt fetch --urls --imports          # Only fetch imports (both types)
         dt fetch --regular                 # Only fetch regular stages
+        dt fetch --source /path/to/source  # Fetch from explicit source cache
+        dt fetch --destination /path/to/dest # Fetch into explicit destination cache
+        dt fetch --cache-type symlink      # Only use symlinks for cache population
     """
     from . import fetch as fetch_mod
     
@@ -1113,6 +1130,9 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, u
             imports=imports,
             urls=urls,
             regular=regular,
+            source=source,
+            destination=destination,
+            cache_type=cache_type,
         )
         
         # In dry mode, just exit (summary already printed)
