@@ -249,10 +249,12 @@ def pull(
         return True
     
     if not quiet:
-        print(f"Syncing index from mirror...")
         if verbose:
+            print(f"Syncing index from mirror...")
             print(f"  Mirror: {mirror_path}")
             print(f"  Local:  {local_index}")
+        else:
+            print(f"Syncing index...")
     
     # Create local index directory if needed
     local_index.mkdir(parents=True, exist_ok=True)
@@ -297,7 +299,7 @@ def pull(
                 print(f"Warning: rsync failed: {result.stderr}")
             return False
         
-        if not quiet and not dry:
+        if verbose and not quiet and not dry:
             print("  Index updated from mirror")
         
         return True
@@ -340,10 +342,12 @@ def push(
         return True
     
     if not quiet:
-        print(f"Syncing index to mirror...")
         if verbose:
+            print(f"Syncing index to mirror...")
             print(f"  Local:  {local_index}")
             print(f"  Mirror: {mirror_path}")
+        else:
+            print(f"Syncing index...")
     
     # Create mirror directory if needed
     mirror_path.mkdir(parents=True, exist_ok=True)
@@ -394,7 +398,7 @@ def push(
                 print(f"Warning: rsync failed: {result.stderr}")
             return False
         
-        if not quiet and not dry:
+        if verbose and not quiet and not dry:
             print("  Index pushed to mirror")
         
         return True

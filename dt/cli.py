@@ -1882,8 +1882,9 @@ def index():
 
 @index.command('pull')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
 @click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
-def index_pull(verbose, dry):
+def index_pull(verbose, quiet, dry):
     """Pull index from mirror to local.
     
     Syncs the shared index mirror to your local site cache index.
@@ -1893,10 +1894,11 @@ def index_pull(verbose, dry):
     Examples:
         dt index pull           # Pull latest index
         dt index pull -v        # Verbose output
+        dt index pull -q        # Quiet (no output)
         dt index pull --dry     # Preview what would sync
     """
     try:
-        success = index_mod.pull(verbose=verbose, dry=dry)
+        success = index_mod.pull(verbose=verbose, quiet=quiet, dry=dry)
         if not success:
             raise SystemExit(1)
     except index_mod.IndexError as e:
@@ -1905,8 +1907,9 @@ def index_pull(verbose, dry):
 
 @index.command('push')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
 @click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
-def index_push(verbose, dry):
+def index_push(verbose, quiet, dry):
     """Push index from local to mirror.
     
     Syncs your local site cache index to the shared mirror.
@@ -1916,10 +1919,11 @@ def index_push(verbose, dry):
     Examples:
         dt index push           # Push index to mirror
         dt index push -v        # Verbose output
+        dt index push -q        # Quiet (no output)
         dt index push --dry     # Preview what would sync
     """
     try:
-        success = index_mod.push(verbose=verbose, dry=dry)
+        success = index_mod.push(verbose=verbose, quiet=quiet, dry=dry)
         if not success:
             raise SystemExit(1)
     except index_mod.IndexError as e:
