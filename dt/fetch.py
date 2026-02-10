@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import click
 
+from . import cache_index
 from . import cache_ops
 from . import remote
 from . import utils
@@ -755,20 +756,44 @@ def fetch_from_plan(
     
     if verbose:
         print(f"\nTotal hashes to process: {len(all_hashes)}")
-        print("  (existing files will be skipped during fetch)")
     
-    # Fetch from each source - let populate_cache_file handle existence checks
-    # This avoids a slow upfront check that can take hours on network filesystems
+    # Open cache index for fast existence checks
+    idx = cache_index.CacheIndex(Path(cache_base))
+    skipped_by_index = 0
+    
+    if verbose:
+        try:
+            idx_len = len(idx)
+            print(f"  Cache index: {idx_len} entries ({idx._db_dir})")
+        except Exception:
+            print(f"  Cache index: new (will be created)")
+    
+    # Fetch from each source
     for source_path, group in plan.sources.items():
-        # Always try all hashes - populate_cache_file skips if dest exists
-        hashes_to_try = group.hashes
+        if force:
+            # --force: bypass index, try all hashes
+            hashes_to_try = group.hashes
+        else:
+            # Filter through index — skip hashes already known to be cached
+            hashes_to_try = set()
+            for h in group.hashes:
+                if h in idx:
+                    skipped_by_index += 1
+                else:
+                    hashes_to_try.add(h)
         if not hashes_to_try:
+            if verbose and not force:
+                skipped_here = len(group.hashes)
+                print(f"\n{group.source_name}: all {skipped_here} files already in index, skipping")
             continue
         
         source_label = f"{group.source_name} ({len(hashes_to_try)} files)"
         
         if verbose:
+            skipped_here = len(group.hashes) - len(hashes_to_try)
             print(f"\nFetching from {group.source_name}: {len(hashes_to_try)} files")
+            if skipped_here > 0:
+                print(f"  Skipped by index: {skipped_here}")
             print(f"  Source: {source_path}")
         
         fetched = 0
@@ -804,6 +829,9 @@ def fetch_from_plan(
                     )
                     if result is True:
                         fetched += 1
+                        idx.add(h)  # Record in index
+                    elif result is False:
+                        idx.add(h)  # Self-heal: already existed
                     elif result is None:
                         failed += 1
                         failed_hashes.append((h, "link failed"))
@@ -829,6 +857,9 @@ def fetch_from_plan(
                 )
                 if result is True:
                     fetched += 1
+                    idx.add(h)  # Record in index
+                elif result is False:
+                    idx.add(h)  # Self-heal: already existed
                 elif result is None:
                     failed += 1
                     failed_hashes.append((h, "link failed"))
@@ -931,7 +962,15 @@ def fetch_from_plan(
     
     # Summary - always show if there were failures, or if verbose
     if total_failed > 0 or verbose:
-        print(f"\nFetch complete: {total_fetched} fetched, {total_failed} failed")
+        if skipped_by_index > 0:
+            print(f"\nFetch complete: {total_fetched} fetched, {skipped_by_index} skipped (cached), {total_failed} failed")
+        else:
+            print(f"\nFetch complete: {total_fetched} fetched, {total_failed} failed")
+    elif skipped_by_index > 0 and total_fetched == 0:
+        print(f"All {skipped_by_index} files already cached (index)")
+    
+    # Close index
+    idx.close()
     
     return results
 

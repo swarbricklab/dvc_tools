@@ -20,6 +20,7 @@ from . import summary as summary_mod
 from . import du as du_mod
 from . import ls as ls_mod
 from . import index as index_mod
+from . import cache_index as cache_index_mod
 from . import update as update_mod
 from . import utils
 
@@ -1961,6 +1962,85 @@ def index_status(verbose):
         owner = info.get('mirror_lock_owner', 'unknown')
         age = info.get('mirror_lock_age', 0)
         click.echo(f"  Mirror locked: yes (by {owner}, {age:.0f}s ago)")
+
+
+@index.group('cache')
+def index_cache():
+    """Manage the local cache index.
+
+    The cache index is a lightweight SQLite database that tracks which OIDs
+    exist in the DVC cache.  This allows `dt fetch` to skip files that are
+    already cached without expensive per-file stat() calls on network
+    filesystems.
+
+    The index lives at <cache_root>/.dt/cache.db/ and is shared by all
+    repos that use the same cache.
+
+    \b
+    Commands:
+        dt index cache status   # Show index info
+        dt index cache rebuild  # Rebuild from filesystem scan
+    """
+    pass
+
+
+@index_cache.command('status')
+@click.option('-v', '--verbose', is_flag=True, help='Show additional details')
+def index_cache_status(verbose):
+    """Show cache index status.
+
+    Displays the index location, whether it exists, and how many OIDs
+    it contains.
+    """
+    idx = cache_index_mod.open_index(read_only=True)
+    if idx is None:
+        click.echo("Cache not configured or not in a DVC repo.")
+        raise SystemExit(1)
+
+    info = idx.info()
+    click.echo("Cache index:")
+    click.echo(f"  Path:        {info['path']}")
+    click.echo(f"  Cache root:  {info['cache_root']}")
+    click.echo(f"  Exists:      {'yes' if info['exists'] else 'no'}")
+    if info.get('entries') is not None:
+        click.echo(f"  Entries:     {info['entries']:,}")
+    if info.get('error'):
+        click.echo(f"  Error:       {info['error']}")
+    idx.close()
+
+
+@index_cache.command('rebuild')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
+@click.confirmation_option(
+    prompt='This will clear and rebuild the cache index from the filesystem. Continue?',
+)
+def index_cache_rebuild(verbose, quiet):
+    """Rebuild the cache index by scanning the filesystem.
+
+    Clears the existing index and walks the cache directory tree to
+    discover all OIDs.  Use this after manual cache modifications or
+    after running ``dvc gc``.
+
+    \b
+    Examples:
+        dt index cache rebuild         # Rebuild with confirmation
+        dt index cache rebuild -v      # Verbose output
+        dt index cache rebuild --yes   # Skip confirmation prompt
+    """
+    idx = cache_index_mod.open_index()
+    if idx is None:
+        click.echo("Cache not configured or not in a DVC repo.")
+        raise SystemExit(1)
+
+    if not quiet:
+        click.echo(f"Scanning cache: {idx._cache_root}")
+
+    n = idx.rebuild(verbose=verbose, show_progress=not quiet)
+
+    if not quiet:
+        click.echo(f"Index rebuilt: {n:,} entries")
+    idx.close()
 
 
 # =============================================================================
