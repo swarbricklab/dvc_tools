@@ -16,6 +16,7 @@ from . import data_status as data_status_mod
 from . import fetch as fetch_mod
 from . import tmp as tmp_mod
 from . import import_data as import_mod
+from . import migrate as migrate_mod
 from . import pull as pull_mod
 from . import offline as offline_mod
 from . import summary as summary_mod
@@ -2662,6 +2663,78 @@ def summary(output_dir, tree_only, dag_only):
             
     except summary_mod.SummaryError as e:
         raise click.ClickException(str(e))
+
+
+# =============================================================================
+# Migrate commands
+# =============================================================================
+
+@cli.command()
+@click.argument('targets', nargs=-1)
+@click.option('--dry', is_flag=True, help='Show what would change without modifying files')
+@click.option('-v', '--verbose', is_flag=True, help='Print detailed progress')
+@click.option('--cache-root', type=click.Path(exists=True), help='Override cache root directory')
+def migrate(targets, dry, verbose, cache_root):
+    """Migrate .dvc files from v2 to v3 format.
+
+    Updates .dvc files in place to use v3 format (explicit hash field and
+    plain md5 hashing instead of md5-dos2unix). This handles imports that
+    'dvc cache migrate --dvc-files' may trip over.
+
+    Without arguments, migrates all .dvc files in the project.
+    With arguments, migrates only the specified files or directories.
+
+    Run 'dvc cache migrate' first to relocate cache data to v3 layout.
+
+    \b
+    Examples:
+        dt migrate                    # Migrate all .dvc files
+        dt migrate --dry              # Preview changes
+        dt migrate data.csv.dvc       # Migrate a single file
+        dt migrate data/              # Migrate all .dvc files in data/
+        dt migrate imported.dvc -v    # Migrate an import with verbose output
+    """
+    from pathlib import Path
+
+    try:
+        result = migrate_mod.migrate_project(
+            targets=list(targets) if targets else None,
+            dry_run=dry,
+            verbose=verbose,
+            cache_root=Path(cache_root) if cache_root else None,
+        )
+    except migrate_mod.MigrateError as e:
+        raise click.ClickException(str(e))
+
+    total = result['total']
+    migrated = result['migrated']
+    skipped = result['skipped']
+    error_count = result['errors']
+
+    if total == 0:
+        click.echo('No .dvc files found.')
+        return
+
+    # Summary
+    action = 'Would migrate' if dry else 'Migrated'
+    parts = []
+    if migrated:
+        parts.append(f'{action} {migrated}')
+    if skipped:
+        parts.append(f'skipped {skipped} (already v3)')
+    if error_count:
+        parts.append(f'{error_count} error(s)')
+
+    click.echo(', '.join(parts) + f' of {total} .dvc file(s).')
+
+    # Report errors
+    if error_count:
+        for f in result['files']:
+            if f['status'] == 'error':
+                click.echo(f"  ERROR: {f['path']}: {f['error']}", err=True)
+        raise click.ClickException(
+            f'{error_count} file(s) could not be migrated'
+        )
 
 
 if __name__ == '__main__':
