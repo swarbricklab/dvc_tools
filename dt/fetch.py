@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import click
 
+from . import cache_index
 from . import cache_ops
 from . import remote
 from . import utils
@@ -277,6 +278,8 @@ class FetchPlan:
     url_imports: List[Any] = field(default_factory=list)
     no_source: List[Any] = field(default_factory=list)  # Stages with no local source
     no_source_errors: Dict[str, str] = field(default_factory=dict)  # Stage addressing -> error message
+    v2_hashes: set = field(default_factory=set)  # Hashes from v2 .dvc files (need compat links)
+    v2_stages: set = field(default_factory=set)  # Stage names with v2 format
     
     def add_source(self, source_path: Path, source_name: str) -> SourceGroup:
         """Get or create a source group."""
@@ -334,6 +337,7 @@ def _expand_dir_hash(
     dir_hash: str,
     source_db,
     base_path: str = None,
+    fallback_db=None,
 ) -> List[Tuple[str, str]]:
     """Expand a .dir hash to get all child file hashes with their paths.
     
@@ -343,6 +347,7 @@ def _expand_dir_hash(
         dir_hash: The directory hash (with .dir suffix).
         source_db: LocalHashFileDB to read the .dir file from.
         base_path: Base path to prepend to child paths.
+        fallback_db: Optional fallback DB to try if source_db doesn't have the .dir.
         
     Returns:
         List of (hash, path) tuples for child files.
@@ -352,36 +357,46 @@ def _expand_dir_hash(
     
     child_files = []
     
-    try:
-        hi = HashInfo("md5", dir_hash)
-        tree = Tree.load(source_db, hi)
-        for key, (meta, hash_info) in tree.iteritems():
-            # key is a tuple of path components, e.g., ('subdir', 'file.txt')
-            rel_path = '/'.join(key) if key else ''
-            if base_path:
-                full_path = f"{base_path}/{rel_path}" if rel_path else base_path
-            else:
-                full_path = rel_path
-            child_files.append((hash_info.value, full_path))
-    except Exception:
-        # If we can't load the tree, we'll just fetch the .dir hash
-        # and handle expansion later
-        pass
+    # Try source_db first
+    for db in [source_db, fallback_db]:
+        if db is None:
+            continue
+        try:
+            hi = HashInfo("md5", dir_hash)
+            tree = Tree.load(db, hi)
+            for key, (meta, hash_info) in tree.iteritems():
+                # key is a tuple of path components, e.g., ('subdir', 'file.txt')
+                rel_path = '/'.join(key) if key else ''
+                if base_path:
+                    full_path = f"{base_path}/{rel_path}" if rel_path else base_path
+                else:
+                    full_path = rel_path
+                child_files.append((hash_info.value, full_path))
+            # Successfully loaded from this db, return early
+            if child_files:
+                return child_files
+        except Exception:
+            # Try next database
+            continue
     
     return child_files
 
 
-def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
+def _collect_hashes_from_stage(stage: Any) -> Tuple[List[Tuple[str, str]], bool]:
     """Extract all hashes from a stage's outputs with their paths.
     
     Args:
         stage: DVC Stage object.
         
     Returns:
-        List of (hash, path) tuples (may include .dir hashes).
-        Paths are relative to the repo root.
+        Tuple of:
+        - List of (hash, path) tuples (may include .dir hashes).
+          Paths are relative to the repo root.
+        - Boolean indicating if stage uses v2/legacy format (md5-dos2unix).
     """
     hash_paths = []
+    is_v2 = False
+    
     # Get repo root to make paths relative
     repo_root = None
     if hasattr(stage, 'repo') and stage.repo:
@@ -389,6 +404,10 @@ def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
     
     for out in stage.outs:
         if out.use_cache and out.hash_info and out.hash_info.value:
+            # Check for v2/legacy hash format
+            if out.hash_info.name in ('md5-dos2unix', 'params'):
+                is_v2 = True
+            
             # DVC uses fspath for the filesystem path
             path = None
             if hasattr(out, 'fspath') and out.fspath:
@@ -402,13 +421,14 @@ def _collect_hashes_from_stage(stage: Any) -> List[Tuple[str, str]]:
                 else:
                     path = str(abs_path)
             hash_paths.append((out.hash_info.value, path))
-    return hash_paths
+    return hash_paths, is_v2
 
 
 def build_fetch_plan(
     categorization: StageCategorization,
     verbose: bool = False,
     explicit_source: Optional[Path] = None,
+    destination_db=None,
 ) -> FetchPlan:
     """Build a fetch plan from categorized stages.
     
@@ -420,6 +440,9 @@ def build_fetch_plan(
         verbose: Print progress information.
         explicit_source: Explicit source cache path. If provided, all stages
             use this as the source instead of auto-discovered sources.
+        destination_db: Optional destination cache DB for fallback .dir expansion.
+            If a .dir file isn't in source but is in destination, we can still
+            expand it to get child hashes.
         
     Returns:
         FetchPlan with hashes grouped by source.
@@ -444,14 +467,21 @@ def build_fetch_plan(
         )
         
         for stage in all_stages:
-            stage_hash_paths = _collect_hashes_from_stage(stage)
+            stage_hash_paths, is_v2 = _collect_hashes_from_stage(stage)
             stage_name = stage.addressing
+            if is_v2:
+                plan.v2_stages.add(stage_name)
             for h, path in stage_hash_paths:
                 group.add_hash(h, stage_name=stage_name, path=path)
+                if is_v2:
+                    plan.v2_hashes.add(h)
                 # Expand directory hashes
                 if h.endswith('.dir') and source_db:
-                    child_files = _expand_dir_hash(h, source_db, base_path=path)
+                    child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                     group.add_hashes_with_paths(child_files, stage_name=stage_name)
+                    if is_v2:
+                        for child_hash, _ in child_files:
+                            plan.v2_hashes.add(child_hash)
         
         # URL imports are still handled separately
         plan.url_imports = categorization.url_imports
@@ -478,21 +508,28 @@ def build_fetch_plan(
                 source_db = _create_source_cache_db(source_path)
                 
                 for stage in categorization.regular_stages:
-                    stage_hash_paths = _collect_hashes_from_stage(stage)
+                    stage_hash_paths, is_v2 = _collect_hashes_from_stage(stage)
                     stage_name = stage.addressing
+                    if is_v2:
+                        plan.v2_stages.add(stage_name)
                     for h, path in stage_hash_paths:
                         group.add_hash(h, stage_name=stage_name, path=path)
+                        if is_v2:
+                            plan.v2_hashes.add(h)
                         # Expand directory hashes
                         if h.endswith('.dir') and source_db:
-                            child_files = _expand_dir_hash(h, source_db, base_path=path)
+                            child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                             group.add_hashes_with_paths(child_files, stage_name=stage_name)
+                            if is_v2:
+                                for child_hash, _ in child_files:
+                                    plan.v2_hashes.add(child_hash)
         else:
             # No local remote available - track with error message if available
             for stage in categorization.regular_stages:
                 plan.no_source.append(stage)
                 if categorization.local_remote_error:
                     plan.no_source_errors[stage.addressing] = categorization.local_remote_error
-    
+
     # Handle repo imports - grouped by source repository
     for url, import_group in categorization.repo_imports.items():
         if import_group.has_local_cache and import_group.local_cache:
@@ -501,26 +538,35 @@ def build_fetch_plan(
             source_db = _create_source_cache_db(source_path)
             
             for stage in import_group.stages:
-                stage_hash_paths = _collect_hashes_from_stage(stage)
+                stage_hash_paths, is_v2 = _collect_hashes_from_stage(stage)
                 stage_name = stage.addressing
+                if is_v2:
+                    plan.v2_stages.add(stage_name)
                 for h, path in stage_hash_paths:
                     group.add_hash(h, stage_name=stage_name, path=path)
+                    if is_v2:
+                        plan.v2_hashes.add(h)
                     # Expand directory hashes
                     if h.endswith('.dir') and source_db:
-                        child_files = _expand_dir_hash(h, source_db, base_path=path)
+                        child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                         group.add_hashes_with_paths(child_files, stage_name=stage_name)
+                        if is_v2:
+                            for child_hash, _ in child_files:
+                                plan.v2_hashes.add(child_hash)
         else:
             # No local cache for this repo - track with error message if available
             for stage in import_group.stages:
                 plan.no_source.append(stage)
                 if import_group.local_cache_error:
                     plan.no_source_errors[stage.addressing] = import_group.local_cache_error
-    
+
     # URL imports are handled separately
     plan.url_imports = categorization.url_imports
     
     if verbose:
         print(f"\nFetch plan: {plan.total_hashes} hashes from {len(plan.sources)} sources")
+        if plan.v2_hashes:
+            print(f"  v2 format files: {len(plan.v2_hashes)} (will use legacy cache location)")
         for line in plan.summary_lines():
             print(f"  {line}")
     
@@ -531,6 +577,7 @@ def _recover_dir_failures(
     failures: List[Tuple[str, str]],
     verbose: bool = False,
     show_progress: bool = True,
+    destination: Optional[Path] = None,
 ) -> List[Tuple[str, bool, str]]:
     """Attempt to recover from .dir failures by running dt update.
     
@@ -541,6 +588,7 @@ def _recover_dir_failures(
         failures: List of (hash, stage_name) tuples for failed .dir hashes.
         verbose: Print detailed progress.
         show_progress: Show progress bar for re-fetch.
+        destination: Explicit destination cache path. If None, uses primary cache.
         
     Returns:
         List of (target, success, message) tuples for recovery attempts.
@@ -577,9 +625,9 @@ def _recover_dir_failures(
                 targets=[stage_name],
                 rev=rev_lock,  # Use locked rev, not HEAD
                 verbose=verbose,
-                push_dir=False,  # Don't push during recovery
                 no_download=False,  # Let update call fetch after rebuilding
                 dry_run=False,
+                cache=str(destination) if destination else None,
             )
             
             # Check if update succeeded
@@ -601,6 +649,7 @@ def fetch_from_plan(
     show_progress: bool = True,
     network: bool = False,
     update: bool = False,
+    force: bool = False,
     destination: Optional[Path] = None,
     cache_type: Optional[str] = None,
 ) -> List[Tuple[str, bool, str]]:
@@ -612,6 +661,8 @@ def fetch_from_plan(
         show_progress: Show progress bar.
         network: Fall back to dvc fetch for stages without local source.
         update: If True, attempt to recover from .dir failures by running dt update.
+        force: If True, don't skip .dir files that are already cached. This ensures
+            all child files are fetched even if the .dir manifest exists in cache.
         destination: Explicit destination cache path. If None, uses primary cache.
         cache_type: Link type for cache population (reflink, hardlink, symlink, copy).
             If None, tries all in order until one succeeds.
@@ -649,31 +700,14 @@ def fetch_from_plan(
                 else:
                     results.append((stage.addressing, False, "No local source (use --network)"))
     
-    # Handle URL imports (require network access)
-    if plan.url_imports:
-        if network:
-            if verbose:
-                print(f"\nProcessing {len(plan.url_imports)} URL imports...")
-            for stage in plan.url_imports:
-                result = _fetch_url_import_stage(stage, verbose=verbose)
-                results.append(result)
-        else:
-            # Skip URL imports when network=False
-            for stage in plan.url_imports:
-                results.append((stage.addressing, False, "URL import requires network (use --network)"))
-    
-    # Early return if no sources with hashes to fetch
-    if plan.total_hashes == 0:
-        if verbose and not results:
-            print("No hashes to fetch")
-        return results
-    
-    # Determine destination cache
+    # Determine destination cache early (needed for index lookups)
+    if verbose:
+        print("\nDetermining destination cache...")
     if destination:
         # Use explicit destination cache
         cache_base = str(destination)
         if verbose:
-            print(f"Using explicit destination cache: {cache_base}")
+            print(f"  Using explicit destination cache: {cache_base}")
         
         # For explicit destination, create a simple DB to check existing hashes
         dest_db = _create_source_cache_db(destination)
@@ -691,48 +725,93 @@ def fetch_from_plan(
         if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
             cache_base = str(Path(cache.path).parent.parent)
         
+        if verbose:
+            print(f"  Using primary cache: {cache_base}")
+        
         dest_db = cache
     
-    # Collect all hashes and check what's already cached
+    # Open cache index for fast existence checks
+    idx = cache_index.CacheIndex(Path(cache_base))
+    skipped_by_index = 0
+    
+    if verbose:
+        try:
+            idx_len = len(idx)
+            print(f"  Cache index: {idx_len} entries ({idx._db_dir})")
+        except Exception:
+            print("  Cache index: new (will be created)")
+    
+    # Handle URL imports (require network access)
+    if plan.url_imports:
+        if network:
+            if verbose:
+                print(f"\nProcessing {len(plan.url_imports)} URL imports...")
+            for stage in plan.url_imports:
+                # Check index: skip if all output hashes are already cached
+                if not force and _stage_hashes_in_index(stage, idx):
+                    skipped_by_index += 1
+                    if verbose:
+                        click.echo(f"{stage.addressing}: ✓ (index)")
+                    results.append((stage.addressing, True, "Already in cache (index)"))
+                    continue
+                result = _fetch_url_import_stage(stage, verbose=verbose)
+                results.append(result)
+                # Record hashes in index on success
+                if result[1]:  # success
+                    _record_stage_hashes(stage, idx)
+        else:
+            # Skip URL imports when network=False
+            for stage in plan.url_imports:
+                # Even without network, check index so we don't report false "needs network"
+                if not force and _stage_hashes_in_index(stage, idx):
+                    skipped_by_index += 1
+                    if verbose:
+                        click.echo(f"{stage.addressing}: ✓ (index)")
+                    results.append((stage.addressing, True, "Already in cache (index)"))
+                    continue
+                results.append((stage.addressing, False, "URL import requires network (use --network)"))
+    
+    # Early return if no sources with hashes to fetch
+    if plan.total_hashes == 0:
+        if verbose and not results:
+            print("No hashes to fetch")
+        idx.close()
+        return results
+    
+    # Collect all hashes to fetch
     all_hashes = set()
     for group in plan.sources.values():
         all_hashes.update(group.hashes)
     
-    # Check existing hashes in destination
-    if hasattr(dest_db, 'oids_exist'):
-        # DVC cache object
-        existing = set(dest_db.oids_exist(all_hashes))
-    elif dest_db is not None:
-        # LocalHashFileDB - check manually
-        existing = set()
-        for h in all_hashes:
-            if cache_ops.find_source_file(h, Path(cache_base)) is not None:
-                existing.add(h)
-    else:
-        # No existing destination - assume empty
-        existing = set()
-    total_missing = len(all_hashes) - len(existing)
-    
     if verbose:
-        print(f"\nCache status:")
-        print(f"  Total hashes: {len(all_hashes)}")
-        print(f"  Already cached: {len(existing)}")
-        print(f"  Missing: {total_missing}")
-    
-    if total_missing == 0:
-        results.append(("all", True, f"All {len(all_hashes)} hashes already cached"))
-        return results
+        print(f"\nTotal hashes to process: {len(all_hashes)}")
     
     # Fetch from each source
     for source_path, group in plan.sources.items():
-        missing_from_source = group.hashes - existing
-        if not missing_from_source:
+        if force:
+            # --force: bypass index, try all hashes
+            hashes_to_try = group.hashes
+        else:
+            # Filter through index — skip hashes already known to be cached
+            hashes_to_try = set()
+            for h in group.hashes:
+                if h in idx:
+                    skipped_by_index += 1
+                else:
+                    hashes_to_try.add(h)
+        if not hashes_to_try:
+            if verbose and not force:
+                skipped_here = len(group.hashes)
+                print(f"\n{group.source_name}: all {skipped_here} files already in index, skipping")
             continue
         
-        source_label = f"{group.source_name} ({len(missing_from_source)} files)"
+        source_label = f"{group.source_name} ({len(hashes_to_try)} files)"
         
         if verbose:
-            print(f"\nFetching from {group.source_name}: {len(missing_from_source)} files")
+            skipped_here = len(group.hashes) - len(hashes_to_try)
+            print(f"\nFetching from {group.source_name}: {len(hashes_to_try)} files")
+            if skipped_here > 0:
+                print(f"  Skipped by index: {skipped_here}")
             print(f"  Source: {source_path}")
         
         fetched = 0
@@ -742,7 +821,7 @@ def fetch_from_plan(
         # Always use progress bar when show_progress is True (even in verbose mode)
         if show_progress:
             with click.progressbar(
-                sorted(missing_from_source),
+                sorted(hashes_to_try),
                 label=source_label,
                 show_pos=True,
                 show_percent=True,
@@ -755,38 +834,50 @@ def fetch_from_plan(
                         failed_hashes.append((h, "not found in source"))
                         continue
                     
+                    # Use v3 layout for v3 files, v2 layout for v2 files
+                    use_v3 = h not in plan.v2_hashes
+                    
                     result = cache_ops.populate_cache_file(
                         md5=h,
                         source_cache=source_path,
                         dest_cache=cache_base,
                         verbose=False,
-                        use_v3_layout=True,
+                        use_v3_layout=use_v3,
                         cache_type=cache_type,
                     )
                     if result is True:
                         fetched += 1
+                        idx.add(h)  # Record in index
+                    elif result is False:
+                        idx.add(h)  # Self-heal: already existed
                     elif result is None:
                         failed += 1
                         failed_hashes.append((h, "link failed"))
         else:
             # No progress bar - just process silently
-            for h in sorted(missing_from_source):
+            for h in sorted(hashes_to_try):
                 source_file = cache_ops.find_source_file(h, Path(source_path))
                 if source_file is None:
                     failed += 1
                     failed_hashes.append((h, "not found in source"))
                     continue
                 
+                # Use v3 layout for v3 files, v2 layout for v2 files
+                use_v3 = h not in plan.v2_hashes
+                
                 result = cache_ops.populate_cache_file(
                     md5=h,
                     source_cache=source_path,
                     dest_cache=cache_base,
                     verbose=False,
-                    use_v3_layout=True,
+                    use_v3_layout=use_v3,
                     cache_type=cache_type,
                 )
                 if result is True:
                     fetched += 1
+                    idx.add(h)  # Record in index
+                elif result is False:
+                    idx.add(h)  # Self-heal: already existed
                 elif result is None:
                     failed += 1
                     failed_hashes.append((h, "link failed"))
@@ -879,12 +970,25 @@ def fetch_from_plan(
             failures=recoverable_dir_failures,
             verbose=verbose,
             show_progress=show_progress,
+            destination=destination,
         )
         results.extend(recovery_results)
     
+    # Report v2 files (placed in v2 location)
+    if plan.v2_hashes and verbose:
+        print(f"\nNote: {len(plan.v2_hashes)} files from v2 format .dvc files placed in legacy cache location.")
+    
     # Summary - always show if there were failures, or if verbose
     if total_failed > 0 or verbose:
-        print(f"\nFetch complete: {total_fetched} fetched, {total_failed} failed")
+        if skipped_by_index > 0:
+            print(f"\nFetch complete: {total_fetched} fetched, {skipped_by_index} skipped (cached), {total_failed} failed")
+        else:
+            print(f"\nFetch complete: {total_fetched} fetched, {total_failed} failed")
+    elif skipped_by_index > 0 and total_fetched == 0:
+        print(f"All {skipped_by_index} files already cached (index)")
+    
+    # Close index
+    idx.close()
     
     return results
 
@@ -896,6 +1000,7 @@ def fetch(
     show_progress: bool = True,
     network: bool = False,
     dry: bool = False,
+    force: bool = False,
     imports: bool = False,
     urls: bool = False,
     regular: bool = False,
@@ -928,6 +1033,7 @@ def fetch(
         show_progress: If True (and not verbose), show a progress bar.
         network: If True, fall back to `dvc fetch` when local remote not available.
         dry: If True, only collect and categorize stages without fetching.
+        force: If True, ignore cached .dir files and verify all child files are fetched.
         imports: If True, only fetch repo imports. Can combine with urls/regular.
         urls: If True, only fetch URL imports. Can combine with imports/regular.
         regular: If True, only fetch regular stages. Can combine with imports/urls.
@@ -995,11 +1101,22 @@ def fetch(
         categorization.print_summary(verbose=verbose)
         return []
     
+    # Determine destination DB for fallback .dir expansion
+    destination_db = None
+    if destination:
+        destination_db = _create_source_cache_db(Path(destination))
+    else:
+        # Use DVC's primary cache
+        from dvc.repo import Repo
+        repo = Repo()
+        destination_db = repo.cache.local
+    
     # Build and execute fetch plan (new simplified model)
     plan = build_fetch_plan(
         categorization,
         verbose=verbose,
         explicit_source=Path(source) if source else None,
+        destination_db=destination_db,
     )
     return fetch_from_plan(
         plan=plan,
@@ -1007,9 +1124,32 @@ def fetch(
         show_progress=show_progress,
         network=network,
         update=update,
+        force=force,
         destination=Path(destination) if destination else None,
         cache_type=cache_type,
     )
+
+
+def _stage_hashes_in_index(stage: Any, idx) -> bool:
+    """Check if all output hashes for a stage are in the cache index.
+
+    Returns True only if every cacheable output with a hash is present.
+    Returns False if the stage has no hashes (nothing to check).
+    """
+    found_any = False
+    for out in stage.outs:
+        if out.use_cache and out.hash_info and out.hash_info.value:
+            found_any = True
+            if out.hash_info.value not in idx:
+                return False
+    return found_any
+
+
+def _record_stage_hashes(stage: Any, idx) -> None:
+    """Record all output hashes for a stage in the cache index."""
+    for out in stage.outs:
+        if out.use_cache and out.hash_info and out.hash_info.value:
+            idx.add(out.hash_info.value)
 
 
 def _fetch_url_import_stage(

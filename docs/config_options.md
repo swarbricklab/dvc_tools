@@ -24,7 +24,6 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `qxub.walltime` | Maximum runtime for parallel jobs | `10:00:00` |
 | `qxub.mem` | Memory allocation for parallel jobs | `4GB` |
 | `summary.output_dir` | Output directory for [summary files](summary.md) | `docs` |
-| `update.push_dir` | Push rebuilt .dir files to remote after `dt update` | `true` |
 
 ## Option Details
 
@@ -214,24 +213,6 @@ dt config set summary.output_dir project_docs
 ```
 
 The `--out` flag on `dt summary` overrides this setting.
-
-## update Options
-
-### `update.push_dir`
-
-**Default:** `false`
-
-When set to `true`, automatically pushes rebuilt `.dir` manifest files to the remote after running `dt update`. This helps ensure other users don't encounter the same missing `.dir` failures.
-
-```bash
-# Always push rebuilt .dir files
-dt config set update.push_dir true
-
-# Or use the flag on individual commands
-dt update --push-dir data/external.dvc
-```
-
-See [dt update](update.md) for more information on rebuilding `.dir` manifests.
 
 ## See also
 
