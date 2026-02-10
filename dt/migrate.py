@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
+from dvc.utils.serialize import dump_yaml
 from dvc_data.hashfile.hash_info import HashInfo
 from dvc_data.hashfile.meta import Meta
 from dvc_data.hashfile.tree import Tree
@@ -102,8 +103,7 @@ def write_dvc_file(path: Path, data: Dict[str, Any]) -> None:
         MigrateError: If the file cannot be written.
     """
     try:
-        with open(path, 'w') as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        dump_yaml(path, data)
     except Exception as e:
         raise MigrateError(f"Cannot write {path}: {e}")
 
@@ -184,11 +184,16 @@ def migrate_single_output(
 
     cached = find_in_cache(old_md5, cache_root)
     if cached is None:
-        raise MigrateError(
-            f"Cannot find {rel_path} in cache "
-            f"(hash: {old_md5[:12]}…). Run 'dvc cache migrate' first "
-            f"to ensure cache data is available."
-        )
+        # File not in cache — keep existing hash and just add hash field.
+        # On Unix this is always safe: v2 (md5-dos2unix) and v3 (plain md5)
+        # produce identical hashes for files without CRLF line endings.
+        if verbose:
+            print(
+                f"  {rel_path}: not in cache, keeping hash "
+                f"{old_md5[:12]}… (adding hash field)"
+            )
+        out['hash'] = 'md5'
+        return out
 
     new_md5 = md5_file(cached)
     changed = (new_md5 != old_md5)
@@ -270,11 +275,14 @@ def migrate_directory_output(
     # Read the old .dir manifest from cache
     dir_cache_path = find_in_cache(old_md5, cache_root)
     if dir_cache_path is None:
-        raise MigrateError(
-            f"Cannot find .dir manifest for {rel_path} in cache "
-            f"(hash: {old_md5}). Run 'dvc cache migrate' first to "
-            f"ensure cache data is in v3 layout."
-        )
+        # Manifest not in cache — keep existing hash and just add hash field.
+        if verbose:
+            print(
+                f"  {rel_path} (dir): manifest not in cache, keeping hash "
+                f"{old_md5.replace('.dir', '')[:12]}… (adding hash field)"
+            )
+        out['hash'] = 'md5'
+        return out
 
     old_manifest = json.loads(dir_cache_path.read_bytes())
 

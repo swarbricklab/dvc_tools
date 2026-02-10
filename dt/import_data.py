@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 import yaml
+from dvc.utils.serialize import dump_yaml
 
 from . import cache_ops
 from . import remote as remote_mod
@@ -659,8 +660,7 @@ def create_dvc_file(
     
     dest_path.mkdir(parents=True, exist_ok=True)
     
-    with open(dvc_path, 'w') as f:
-        yaml.dump(content, f, default_flow_style=False, sort_keys=False)
+    dump_yaml(dvc_path, content)
     
     return dvc_path
 

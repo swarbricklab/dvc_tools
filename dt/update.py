@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import yaml
+from dvc.utils.serialize import dump_yaml
 
 from . import tmp as tmp_mod
 from . import utils
@@ -329,8 +330,7 @@ def _update_dvc_file(
         
         if modified:
             data = utils.recompute_dvc_md5(data)
-            with open(dvc_path, 'w') as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            dump_yaml(dvc_path, data)
             
             # Auto-stage if core.autostage is enabled
             if utils.is_autostage_enabled():

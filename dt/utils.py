@@ -1065,9 +1065,9 @@ def update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool 
                 modified = True
         
         if modified:
-            # Write back with same formatting
-            with open(dvc_path, 'w') as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            # Write back with DVC-compatible formatting
+            from dvc.utils.serialize import dump_yaml
+            dump_yaml(dvc_path, data)
             if verbose:
                 print(f"  Updated .dvc file hash: {old_hash[:12]}... -> {new_hash[:12]}...")
             

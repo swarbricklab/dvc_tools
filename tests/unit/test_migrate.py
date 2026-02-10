@@ -248,14 +248,17 @@ class TestMigrateSingleOutput:
         assert result['md5'] == md5
         assert result['hash'] == 'md5'
 
-    def test_error_when_not_in_cache(self, tmp_path):
-        """Raises MigrateError when file not in cache."""
+    def test_keeps_hash_when_not_in_cache(self, tmp_path):
+        """When file not in cache, keeps existing hash and adds hash field."""
         cache_root = tmp_path / 'empty_cache'
         cache_root.mkdir()
 
-        out = {'md5': 'deadbeef' * 4, 'size': 100, 'path': 'gone.txt'}
-        with pytest.raises(MigrateError, match='Cannot find'):
-            migrate.migrate_single_output(out, cache_root)
+        old_md5 = 'deadbeef' * 4
+        out = {'md5': old_md5, 'size': 100, 'path': 'gone.txt'}
+        result = migrate.migrate_single_output(out, cache_root)
+
+        assert result['md5'] == old_md5
+        assert result['hash'] == 'md5'
 
     def test_ensures_v3_cache_on_hash_change(self, tmp_path):
         """When hash changes, new hash is written to v3 cache."""
@@ -313,14 +316,17 @@ class TestMigrateDirectoryOutput:
         assert result['hash'] == 'md5'
         assert result['md5'].endswith('.dir')
 
-    def test_error_manifest_not_found(self, tmp_path):
-        """Raises MigrateError when .dir manifest not in cache."""
+    def test_keeps_hash_when_manifest_not_found(self, tmp_path):
+        """When .dir manifest not in cache, keeps existing hash and adds hash field."""
         cache_root = tmp_path / 'cache'
         cache_root.mkdir()
 
-        out = {'md5': 'deadbeef' * 4 + '.dir', 'path': 'mydir'}
-        with pytest.raises(MigrateError, match='Cannot find .dir manifest'):
-            migrate.migrate_directory_output(out, cache_root)
+        old_md5 = 'deadbeef' * 4 + '.dir'
+        out = {'md5': old_md5, 'path': 'mydir'}
+        result = migrate.migrate_directory_output(out, cache_root)
+
+        assert result['md5'] == old_md5
+        assert result['hash'] == 'md5'
 
     def test_error_child_not_in_cache(self, tmp_path):
         """Raises MigrateError when a child file is missing from cache."""
@@ -564,8 +570,8 @@ class TestMigrateProject:
         assert result['total'] == 2
         assert result['migrated'] == 2
 
-    def test_handles_errors_gracefully(self, tmp_path, monkeypatch):
-        """Errors in one file don't stop processing of others."""
+    def test_migrates_without_cache(self, tmp_path, monkeypatch):
+        """Files not in cache are migrated by keeping existing hash."""
         monkeypatch.chdir(tmp_path)
         cache_root = tmp_path / 'cache'
 
@@ -581,8 +587,8 @@ class TestMigrateProject:
         result = migrate.migrate_project(cache_root=cache_root)
 
         assert result['total'] == 2
-        assert result['migrated'] == 1
-        assert result['errors'] == 1
+        assert result['migrated'] == 2
+        assert result['errors'] == 0
 
 
 # =============================================================================
