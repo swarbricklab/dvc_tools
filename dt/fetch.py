@@ -700,26 +700,7 @@ def fetch_from_plan(
                 else:
                     results.append((stage.addressing, False, "No local source (use --network)"))
     
-    # Handle URL imports (require network access)
-    if plan.url_imports:
-        if network:
-            if verbose:
-                print(f"\nProcessing {len(plan.url_imports)} URL imports...")
-            for stage in plan.url_imports:
-                result = _fetch_url_import_stage(stage, verbose=verbose)
-                results.append(result)
-        else:
-            # Skip URL imports when network=False
-            for stage in plan.url_imports:
-                results.append((stage.addressing, False, "URL import requires network (use --network)"))
-    
-    # Early return if no sources with hashes to fetch
-    if plan.total_hashes == 0:
-        if verbose and not results:
-            print("No hashes to fetch")
-        return results
-    
-    # Determine destination cache
+    # Determine destination cache early (needed for index lookups)
     if verbose:
         print("\nDetermining destination cache...")
     if destination:
@@ -749,14 +730,6 @@ def fetch_from_plan(
         
         dest_db = cache
     
-    # Collect all hashes to fetch
-    all_hashes = set()
-    for group in plan.sources.values():
-        all_hashes.update(group.hashes)
-    
-    if verbose:
-        print(f"\nTotal hashes to process: {len(all_hashes)}")
-    
     # Open cache index for fast existence checks
     idx = cache_index.CacheIndex(Path(cache_base))
     skipped_by_index = 0
@@ -766,7 +739,52 @@ def fetch_from_plan(
             idx_len = len(idx)
             print(f"  Cache index: {idx_len} entries ({idx._db_dir})")
         except Exception:
-            print(f"  Cache index: new (will be created)")
+            print("  Cache index: new (will be created)")
+    
+    # Handle URL imports (require network access)
+    if plan.url_imports:
+        if network:
+            if verbose:
+                print(f"\nProcessing {len(plan.url_imports)} URL imports...")
+            for stage in plan.url_imports:
+                # Check index: skip if all output hashes are already cached
+                if not force and _stage_hashes_in_index(stage, idx):
+                    skipped_by_index += 1
+                    if verbose:
+                        click.echo(f"{stage.addressing}: ✓ (index)")
+                    results.append((stage.addressing, True, "Already in cache (index)"))
+                    continue
+                result = _fetch_url_import_stage(stage, verbose=verbose)
+                results.append(result)
+                # Record hashes in index on success
+                if result[1]:  # success
+                    _record_stage_hashes(stage, idx)
+        else:
+            # Skip URL imports when network=False
+            for stage in plan.url_imports:
+                # Even without network, check index so we don't report false "needs network"
+                if not force and _stage_hashes_in_index(stage, idx):
+                    skipped_by_index += 1
+                    if verbose:
+                        click.echo(f"{stage.addressing}: ✓ (index)")
+                    results.append((stage.addressing, True, "Already in cache (index)"))
+                    continue
+                results.append((stage.addressing, False, "URL import requires network (use --network)"))
+    
+    # Early return if no sources with hashes to fetch
+    if plan.total_hashes == 0:
+        if verbose and not results:
+            print("No hashes to fetch")
+        idx.close()
+        return results
+    
+    # Collect all hashes to fetch
+    all_hashes = set()
+    for group in plan.sources.values():
+        all_hashes.update(group.hashes)
+    
+    if verbose:
+        print(f"\nTotal hashes to process: {len(all_hashes)}")
     
     # Fetch from each source
     for source_path, group in plan.sources.items():
@@ -1110,6 +1128,28 @@ def fetch(
         destination=Path(destination) if destination else None,
         cache_type=cache_type,
     )
+
+
+def _stage_hashes_in_index(stage: Any, idx) -> bool:
+    """Check if all output hashes for a stage are in the cache index.
+
+    Returns True only if every cacheable output with a hash is present.
+    Returns False if the stage has no hashes (nothing to check).
+    """
+    found_any = False
+    for out in stage.outs:
+        if out.use_cache and out.hash_info and out.hash_info.value:
+            found_any = True
+            if out.hash_info.value not in idx:
+                return False
+    return found_any
+
+
+def _record_stage_hashes(stage: Any, idx) -> None:
+    """Record all output hashes for a stage in the cache index."""
+    for out in stage.outs:
+        if out.use_cache and out.hash_info and out.hash_info.value:
+            idx.add(out.hash_info.value)
 
 
 def _fetch_url_import_stage(
