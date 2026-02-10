@@ -83,8 +83,10 @@ def link_file(
         success is True if file was linked/copied, False if skipped or failed.
         link_type indicates how the file was handled.
     """
-    if dest.exists():
-        return False, 'skipped'
+    # Skip explicit dest.exists() check - it's slow on network filesystems.
+    # Instead, just try the operation and catch FileExistsError.
+    # This is faster on Lustre/NFS because the filesystem checks existence
+    # as part of the link syscall anyway.
     
     if not source.exists():
         if verbose:
@@ -111,6 +113,9 @@ def link_file(
                 print(f"  Cached ({type_name}): {display}")
             return True, type_name
         else:
+            # Check if failure was because dest already exists
+            if dest.exists():
+                return False, 'skipped'
             if verbose:
                 print(f"  ERROR: {type_name} failed for {display}")
             return False, 'failed'
@@ -139,6 +144,12 @@ def link_file(
         if verbose:
             print(f"  Cached (copy): {display}")
         return True, 'copy'
+    
+    # All methods failed. Check if it's because dest already exists.
+    # This check happens only once per file (after failure) rather than
+    # once per file upfront, which is much faster when most files are new.
+    if dest.exists():
+        return False, 'skipped'
     
     if verbose:
         print(f"  ERROR: All link methods failed for {display}")
@@ -246,12 +257,28 @@ def populate_cache_file(
     
     dest_path = get_cache_file_path(md5, Path(dest_cache), use_v3_layout)
     
-    if dest_path.exists():
-        return False
+    # Note: We don't check dest_path.exists() here - it's slow on network
+    # filesystems. link_file() handles existing files efficiently by catching
+    # the failure and checking existence only when needed.
     
     label = f"{md5[:12]}..."
     success, link_type = link_file(source_path, dest_path, verbose=verbose, label=label, cache_type=cache_type)
     
+    if link_type == 'skipped':
+        return False  # Already existed
     if link_type == 'failed':
         return None
     return success
+
+
+def is_v2_hash_name(hash_name: str) -> bool:
+    """Check if a hash name indicates v2/legacy format.
+    
+    Args:
+        hash_name: The hash algorithm name (e.g., 'md5', 'md5-dos2unix').
+        
+    Returns:
+        True if v2/legacy format, False if v3.
+    """
+    return hash_name in ('md5-dos2unix', 'params')
+

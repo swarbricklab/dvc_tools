@@ -20,6 +20,7 @@ from . import summary as summary_mod
 from . import du as du_mod
 from . import ls as ls_mod
 from . import index as index_mod
+from . import cache_index as cache_index_mod
 from . import update as update_mod
 from . import utils
 
@@ -1050,6 +1051,7 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('--update', is_flag=True, help='Recover from .dir failures by rebuilding manifests with dt update')
 @click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
 @click.option('--dry', is_flag=True, help='Show stage categorization without fetching (for troubleshooting)')
+@click.option('--force', is_flag=True, help='Force re-fetch even if .dir exists in cache (ensures all child files are fetched)')
 @click.option('--imports', is_flag=True, help='Only fetch repo imports (from dvc import)')
 @click.option('--urls', is_flag=True, help='Only fetch URL imports (from dvc import-url)')
 @click.option('--regular', is_flag=True, help='Only fetch regular stages (non-imports)')
@@ -1058,7 +1060,7 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('--cache-type', type=click.Choice(['reflink', 'hardlink', 'symlink', 'copy']),
               help='Link type for cache population. If not specified, tries reflink → hardlink → symlink → copy.')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, urls, regular, source, destination, cache_type):
+def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imports, urls, regular, source, destination, cache_type):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1100,6 +1102,7 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, u
         dt fetch data/external.dvc         # Fetch specific targets
         dt fetch -v                        # Show detailed progress
         dt fetch --update                  # Rebuild .dir files, update .dvc if needed
+        dt fetch --force                   # Force re-fetch even if .dir exists (ensures children are fetched)
         dt fetch --network                 # Fall back to dvc fetch if local remote unavailable
         dt fetch --dry                     # Show what would be fetched without actually fetching
         dt fetch --dry -v                  # Show detailed categorization
@@ -1127,6 +1130,7 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, imports, u
             update=update,
             network=network,
             dry=dry,
+            force=force,
             imports=imports,
             urls=urls,
             regular=regular,
@@ -1516,12 +1520,11 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
 @cli.command()
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('--rev', default=None, help='Git revision to update to. If not specified, checks for changes and auto-upgrades to HEAD if safe.')
-@click.option('--push-dir/--no-push-dir', default=None, help='Push rebuilt .dir file to source remote. Default from update.push_dir config.')
 @click.option('--no-download', is_flag=True, help='Rebuild .dir only, do not run dt fetch')
 @click.option('--dry-run', is_flag=True, help='Show what would be done without making changes')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-def update(targets, rev, push_dir, no_download, dry_run, verbose, no_index_sync):
+def update(targets, rev, no_download, dry_run, verbose, no_index_sync):
     """Update imported data by rebuilding .dir manifests.
     
     Rebuilds .dir files for repo imports where the directory manifest
@@ -1548,17 +1551,10 @@ def update(targets, rev, push_dir, no_download, dry_run, verbose, no_index_sync)
         dt update data/external.dvc  # Update specific file
         dt update --rev HEAD         # Force update to latest
         dt update --no-download      # Rebuild .dir only
-        dt update --push-dir         # Push .dir to source remote
         dt update --dry-run          # Show what would be done
     
-    \b
-    Configuration:
-        dt config set update.push_dir true   # Always push .dir by default
+    Note: Rebuilt .dir files are always pushed to the source remote.
     """
-    # Determine push_dir from config if not explicitly set
-    if push_dir is None:
-        push_dir = cfg.get_value('update.push_dir', False)
-    
     try:
         # Sync index from mirror before update (if configured)
         if not no_index_sync and index_mod.is_auto_sync_enabled():
@@ -1572,7 +1568,6 @@ def update(targets, rev, push_dir, no_download, dry_run, verbose, no_index_sync)
             targets=list(targets) if targets else None,
             rev=rev,
             verbose=verbose,
-            push_dir=push_dir,
             no_download=no_download,
             dry_run=dry_run,
         )
@@ -1882,8 +1877,9 @@ def index():
 
 @index.command('pull')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
 @click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
-def index_pull(verbose, dry):
+def index_pull(verbose, quiet, dry):
     """Pull index from mirror to local.
     
     Syncs the shared index mirror to your local site cache index.
@@ -1893,10 +1889,11 @@ def index_pull(verbose, dry):
     Examples:
         dt index pull           # Pull latest index
         dt index pull -v        # Verbose output
+        dt index pull -q        # Quiet (no output)
         dt index pull --dry     # Preview what would sync
     """
     try:
-        success = index_mod.pull(verbose=verbose, dry=dry)
+        success = index_mod.pull(verbose=verbose, quiet=quiet, dry=dry)
         if not success:
             raise SystemExit(1)
     except index_mod.IndexError as e:
@@ -1905,8 +1902,9 @@ def index_pull(verbose, dry):
 
 @index.command('push')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
 @click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
-def index_push(verbose, dry):
+def index_push(verbose, quiet, dry):
     """Push index from local to mirror.
     
     Syncs your local site cache index to the shared mirror.
@@ -1916,10 +1914,11 @@ def index_push(verbose, dry):
     Examples:
         dt index push           # Push index to mirror
         dt index push -v        # Verbose output
+        dt index push -q        # Quiet (no output)
         dt index push --dry     # Preview what would sync
     """
     try:
-        success = index_mod.push(verbose=verbose, dry=dry)
+        success = index_mod.push(verbose=verbose, quiet=quiet, dry=dry)
         if not success:
             raise SystemExit(1)
     except index_mod.IndexError as e:
@@ -1963,6 +1962,85 @@ def index_status(verbose):
         owner = info.get('mirror_lock_owner', 'unknown')
         age = info.get('mirror_lock_age', 0)
         click.echo(f"  Mirror locked: yes (by {owner}, {age:.0f}s ago)")
+
+
+@index.group('cache')
+def index_cache():
+    """Manage the local cache index.
+
+    The cache index is a lightweight SQLite database that tracks which OIDs
+    exist in the DVC cache.  This allows `dt fetch` to skip files that are
+    already cached without expensive per-file stat() calls on network
+    filesystems.
+
+    The index lives at <cache_root>/.dt/cache.db/ and is shared by all
+    repos that use the same cache.
+
+    \b
+    Commands:
+        dt index cache status   # Show index info
+        dt index cache rebuild  # Rebuild from filesystem scan
+    """
+    pass
+
+
+@index_cache.command('status')
+@click.option('-v', '--verbose', is_flag=True, help='Show additional details')
+def index_cache_status(verbose):
+    """Show cache index status.
+
+    Displays the index location, whether it exists, and how many OIDs
+    it contains.
+    """
+    idx = cache_index_mod.open_index(read_only=True)
+    if idx is None:
+        click.echo("Cache not configured or not in a DVC repo.")
+        raise SystemExit(1)
+
+    info = idx.info()
+    click.echo("Cache index:")
+    click.echo(f"  Path:        {info['path']}")
+    click.echo(f"  Cache root:  {info['cache_root']}")
+    click.echo(f"  Exists:      {'yes' if info['exists'] else 'no'}")
+    if info.get('entries') is not None:
+        click.echo(f"  Entries:     {info['entries']:,}")
+    if info.get('error'):
+        click.echo(f"  Error:       {info['error']}")
+    idx.close()
+
+
+@index_cache.command('rebuild')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
+@click.confirmation_option(
+    prompt='This will clear and rebuild the cache index from the filesystem. Continue?',
+)
+def index_cache_rebuild(verbose, quiet):
+    """Rebuild the cache index by scanning the filesystem.
+
+    Clears the existing index and walks the cache directory tree to
+    discover all OIDs.  Use this after manual cache modifications or
+    after running ``dvc gc``.
+
+    \b
+    Examples:
+        dt index cache rebuild         # Rebuild with confirmation
+        dt index cache rebuild -v      # Verbose output
+        dt index cache rebuild --yes   # Skip confirmation prompt
+    """
+    idx = cache_index_mod.open_index()
+    if idx is None:
+        click.echo("Cache not configured or not in a DVC repo.")
+        raise SystemExit(1)
+
+    if not quiet:
+        click.echo(f"Scanning cache: {idx._cache_root}")
+
+    n = idx.rebuild(verbose=verbose, show_progress=not quiet)
+
+    if not quiet:
+        click.echo(f"Index rebuilt: {n:,} entries")
+    idx.close()
 
 
 # =============================================================================

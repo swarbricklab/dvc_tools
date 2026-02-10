@@ -35,7 +35,8 @@ Sync the shared index mirror to your local site cache index.
 
 ```bash
 dt index pull           # Pull latest index
-dt index pull -v        # Verbose output
+dt index pull -v        # Verbose output (show paths and details)
+dt index pull -q        # Quiet (no output)
 dt index pull --dry     # Preview what would sync
 ```
 
@@ -45,7 +46,8 @@ Sync your local site cache index to the shared mirror.
 
 ```bash
 dt index push           # Push index to mirror
-dt index push -v        # Verbose output
+dt index push -v        # Verbose output (show paths and details)
+dt index push -q        # Quiet (no output)
 dt index push --dry     # Preview what would sync
 ```
 

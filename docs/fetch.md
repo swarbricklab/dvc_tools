@@ -35,6 +35,7 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 |--------|-------------|
 | `-v, --verbose` | Show detailed progress messages |
 | `--update` | Recover from .dir failures by rebuilding manifests with `dt update` |
+| `--force` | Force re-fetch even if .dir exists in cache (ensures all child files are fetched) |
 | `--network` | Fall back to `dvc fetch` (network) if local remote not available |
 | `--dry` | Show stage categorization without fetching (for troubleshooting) |
 | `--imports` | Only fetch repo imports (from `dvc import`) |
@@ -83,6 +84,23 @@ This is useful when:
 - You want to populate a different cache than the primary one
 - You're copying data between caches on shared filesystems
 
+### Force Mode
+
+The `--force` option ensures all child files of directory imports are fetched, even if the `.dir` manifest file already exists in the destination cache.
+
+```bash
+# Force re-fetch to ensure all child files are present
+dt fetch --force
+
+# Combine with verbose to see what's being fetched
+dt fetch --force -v
+```
+
+This is useful when:
+- The `.dir` manifest was rebuilt (e.g., by `dt update`) but child files weren't fetched
+- You suspect some files are missing despite the cache reporting "all cached"
+- Checkout fails even though fetch reported success
+
 ### Cache Link Type
 
 The `--cache-type` option controls how files are linked from source to destination cache. By default, `dt fetch` tries methods in order until one succeeds: reflink → hardlink → symlink → copy.
@@ -119,6 +137,9 @@ dt fetch -v
 
 # Fall back to network fetch if local remote not available
 dt fetch --network
+
+# Force re-fetch to ensure all child files of directories are fetched
+dt fetch --force
 
 # Fetch with verbose output and network fallback
 dt fetch -v --network data/

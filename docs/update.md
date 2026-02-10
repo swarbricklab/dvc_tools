@@ -17,6 +17,8 @@ dt update [OPTIONS] [TARGETS]...
 
 This is particularly useful for recovering from `.dir` fetch failures, which can occur when data was pushed with older DVC versions or when `dvc update --no-download` was used without re-pushing.
 
+Rebuilt `.dir` files are automatically pushed to the source remote so others don't encounter the same missing manifest issues.
+
 ## Smart Revision Detection
 
 When `--rev` is not specified, `dt update` intelligently determines the best revision to use:
@@ -38,7 +40,6 @@ This means running `dt update` without `--rev` will **not** accidentally update 
 | Option | Description |
 |--------|-------------|
 | `--rev TEXT` | Git revision (commit, branch, tag) to update to. |
-| `--push-dir / --no-push-dir` | Push the rebuilt .dir file to the remote (default: configurable) |
 | `--no-download` | Rebuild .dir file only, do not download data. |
 | `--dry-run` | Show what would be updated without making changes. |
 | `-v, --verbose` | Show detailed progress. |
@@ -86,31 +87,10 @@ Rebuild the `.dir` manifest without downloading the actual files:
 dt update --no-download data/external.dvc
 ```
 
-### Push rebuilt .dir to remote
-
-After rebuilding, push the `.dir` file so others don't have the same problem:
-
-```bash
-dt update --push-dir data/external.dvc
-```
-
 ### Update with verbose output
 
 ```bash
 dt update -v data/external.dvc
-```
-
-## Configuration
-
-| Option | Description |
-|--------|-------------|
-| `update.push_dir` | Default behavior for `--push-dir` flag. Set to `true` to always push rebuilt .dir files. |
-
-Example:
-
-```bash
-# Set default to always push rebuilt .dir files
-dt config update.push_dir true
 ```
 
 ## Workflow
@@ -166,7 +146,7 @@ This updates the .dvc file to point to the new revision and rebuilds the `.dir` 
 5. **Rebuild .dir**: For directories, rebuilds the `.dir` manifest file by scanning the directory contents
 6. **Cache data**: Adds the data (and `.dir` file) to the local cache
 7. **Update .dvc file**: Updates the .dvc file with the new hashes
-8. **Push .dir** (optional): If `--push-dir` is set, pushes the `.dir` file to the remote
+8. **Push .dir**: Pushes the `.dir` file to the source remote so others don't have this issue
 9. **Sync index**: If index mirror is configured, syncs after update
 
 ## Import detection
