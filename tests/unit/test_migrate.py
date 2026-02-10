@@ -646,3 +646,64 @@ class TestAnalyseDvcFile:
         assert result['is_v3'] is False
         assert result['can_migrate'] is False
         assert 'not found in cache' in result['reason']
+
+
+# =============================================================================
+# Find v2 files
+# =============================================================================
+
+class TestFindV2Files:
+    def test_finds_v2_files(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _make_v2_dvc(tmp_path, 'a.txt', b'aaa')
+        _make_v2_dvc(tmp_path, 'b.txt', b'bbb')
+        _make_v3_dvc(tmp_path, 'c.txt', b'ccc')
+
+        result = migrate.find_v2_files()
+
+        assert len(result) == 2
+        paths = [f['path'] for f in result]
+        assert any('a.txt.dvc' in p for p in paths)
+        assert any('b.txt.dvc' in p for p in paths)
+
+    def test_returns_empty_when_all_v3(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _make_v3_dvc(tmp_path, 'a.txt', b'aaa')
+        _make_v3_dvc(tmp_path, 'b.txt', b'bbb')
+
+        result = migrate.find_v2_files()
+        assert result == []
+
+    def test_marks_imports(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        dvc_data = {
+            'deps': [{'path': 'data.csv', 'repo': {'url': 'https://example.com'}}],
+            'outs': [{'md5': 'abc123', 'size': 10, 'path': 'data.csv'}],
+        }
+        (tmp_path / 'data.csv.dvc').write_text(yaml.dump(dvc_data, sort_keys=False))
+
+        result = migrate.find_v2_files()
+
+        assert len(result) == 1
+        assert result[0]['is_import'] is True
+
+    def test_with_targets(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _make_v2_dvc(tmp_path, 'a.txt', b'aaa')
+        _make_v2_dvc(tmp_path, 'b.txt', b'bbb')
+
+        result = migrate.find_v2_files(targets=['a.txt.dvc'])
+
+        assert len(result) == 1
+        assert 'a.txt.dvc' in result[0]['path']
+
+    def test_skips_unparseable_files(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _make_v2_dvc(tmp_path, 'good.txt', b'good')
+        (tmp_path / 'bad.txt.dvc').write_text('{{invalid yaml')
+
+        result = migrate.find_v2_files()
+
+        assert len(result) == 1
+        assert 'good.txt.dvc' in result[0]['path']

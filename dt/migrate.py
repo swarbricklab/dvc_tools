@@ -587,6 +587,54 @@ def migrate_project(
 
 
 # =============================================================================
+# Find v2 files
+# =============================================================================
+
+def find_v2_files(
+    targets: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Find all v2 .dvc files in the workspace.
+
+    Scans for ``.dvc`` files that lack the v3 ``hash: md5`` field.
+
+    Args:
+        targets: Optional list of file paths or directories to scan.
+            Without targets, scans the entire project.
+
+    Returns:
+        List of dicts, one per v2 file, with keys:
+            - ``path``: Relative path to the ``.dvc`` file
+            - ``is_import``: Whether the file is a repo import
+            - ``outputs``: Number of output entries
+    """
+    dvc_files = _collect_dvc_files(targets)
+    v2_files: List[Dict[str, Any]] = []
+
+    for dvc_path in dvc_files:
+        try:
+            data = parse_dvc_file(dvc_path)
+        except MigrateError:
+            continue
+
+        if is_v3(data):
+            continue
+
+        # Make path relative to cwd for readability
+        try:
+            rel = dvc_path.relative_to(Path.cwd())
+        except ValueError:
+            rel = dvc_path
+
+        v2_files.append({
+            'path': str(rel),
+            'is_import': is_import(data),
+            'outputs': len(data.get('outs', [])),
+        })
+
+    return v2_files
+
+
+# =============================================================================
 # Internal helpers
 # =============================================================================
 

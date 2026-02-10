@@ -2674,7 +2674,8 @@ def summary(output_dir, tree_only, dag_only):
 @click.option('--dry', is_flag=True, help='Show what would change without modifying files')
 @click.option('-v', '--verbose', is_flag=True, help='Print detailed progress')
 @click.option('--cache-root', type=click.Path(exists=True), help='Override cache root directory')
-def migrate(targets, dry, verbose, cache_root):
+@click.option('--find-v2', is_flag=True, help='List v2 .dvc files without migrating')
+def migrate(targets, dry, verbose, cache_root, find_v2):
     """Migrate .dvc files from v2 to v3 format.
 
     Updates .dvc files in place to use v3 format (explicit hash field and
@@ -2690,11 +2691,31 @@ def migrate(targets, dry, verbose, cache_root):
     Examples:
         dt migrate                    # Migrate all .dvc files
         dt migrate --dry              # Preview changes
+        dt migrate --find-v2          # List v2 files only
         dt migrate data.csv.dvc       # Migrate a single file
         dt migrate data/              # Migrate all .dvc files in data/
         dt migrate imported.dvc -v    # Migrate an import with verbose output
     """
     from pathlib import Path
+
+    if find_v2:
+        try:
+            v2_files = migrate_mod.find_v2_files(
+                targets=list(targets) if targets else None,
+            )
+        except migrate_mod.MigrateError as e:
+            raise click.ClickException(str(e))
+
+        if not v2_files:
+            click.echo('No v2 .dvc files found.')
+            return
+
+        for f in v2_files:
+            suffix = ' (import)' if f['is_import'] else ''
+            click.echo(f"{f['path']}{suffix}")
+
+        click.echo(f'\n{len(v2_files)} v2 .dvc file(s) found.')
+        return
 
     try:
         result = migrate_mod.migrate_project(
