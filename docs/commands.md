@@ -25,6 +25,7 @@
 | [`dt worktree`](#dt-worktree) | Manage git worktrees with DVC cache configured |
 | [`dt config`](#dt-config) | View and modify configuration settings |
 | [`dt du`](#dt-du) | Report disk usage for DVC-tracked files |
+| [`dt auth`](#dt-auth) | Verify and diagnose access to storage backends |
 | [`dt doctor`](#dt-doctor) | Diagnose common setup issues |
 
 ---
@@ -273,6 +274,21 @@ dt du [targets...] [-h] [-d N] [-s] [--inodes] [-c] [--cached|--expected]
 | `--cached/--expected` | Show cached sizes (default) or expected sizes from metadata |
 
 Output is sorted by size ascending (largest last). [Full documentation →](du.md)
+
+---
+
+## dt auth
+
+Verify and diagnose access to all storage backends used by a DVC project.
+
+| Subcommand | Description |
+|------------|-------------|
+| `dt auth list` | Discover every storage endpoint the project uses |
+| `dt auth check` | Test access to each endpoint |
+| `dt auth request` | Generate an access-request template from failures |
+| `dt auth grant` | Grant a user access to a resource (admin) |
+
+Discovers endpoints from DVC remotes, `.dvc` import files, dt config, and git remotes. Supports filesystem, SSH, S3-compatible (including CloudFlare R2), GCS, and git endpoints. [Full documentation →](auth.md)
 
 ---
 
