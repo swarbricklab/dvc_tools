@@ -138,16 +138,37 @@ def classify_url(url: str) -> str:
 # =============================================================================
 
 def _discover_dt_config() -> List[Endpoint]:
-    """Endpoints from dt configuration (cache.root, remote.root)."""
+    """Endpoints from dt config and DVC cache configuration.
+
+    Discovers the DVC cache directory via ``utils.get_cache_dir()``
+    (which reads ``Repo().cache.local.path``, the same value reported
+    by ``dvc cache dir``).  Falls back to ``cache.root`` from dt
+    config only if the DVC cache cannot be determined.
+
+    Also discovers ``remote.root`` from dt config.
+    """
     endpoints: List[Endpoint] = []
 
-    cache_root = cfg.get_value('cache.root')
-    if cache_root:
+    # Cache directory — prefer DVC's own cache path
+    cache_dir = utils.get_cache_dir()
+    if cache_dir:
+        # get_cache_dir() returns the files/md5 subdirectory; report
+        # the cache root (its grandparent) for permission checking.
+        cache_root = cache_dir.parent.parent
         endpoints.append(Endpoint(
             type='filesystem',
-            url=cache_root,
-            source='cache.root',
+            url=str(cache_root),
+            source='DVC cache (dvc cache dir)',
         ))
+    else:
+        # Fallback: dt config cache.root (may not be set)
+        cache_root_cfg = cfg.get_value('cache.root')
+        if cache_root_cfg:
+            endpoints.append(Endpoint(
+                type='filesystem',
+                url=cache_root_cfg,
+                source='cache.root (dt config)',
+            ))
 
     remote_root = cfg.get_value('remote.root')
     if remote_root:

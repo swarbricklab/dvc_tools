@@ -146,18 +146,31 @@ class TestEndpoint:
 class TestDiscoverDtConfig:
     """Tests for _discover_dt_config."""
 
-    @patch('dt.auth.cfg.get_value')
-    def test_cache_root_only(self, mock_get):
-        mock_get.side_effect = lambda k: '/cache' if k == 'cache.root' else None
+    @patch('dt.auth.cfg.get_value', return_value=None)
+    @patch('dt.auth.utils.get_cache_dir')
+    def test_dvc_cache_dir(self, mock_cache, _):
+        """DVC cache directory is discovered via utils.get_cache_dir()."""
+        mock_cache.return_value = Path('/data/cache/files/md5')
         eps = _discover_dt_config()
         assert len(eps) == 1
         assert eps[0].type == 'filesystem'
+        assert eps[0].url == '/data/cache'  # grandparent of files/md5
+        assert 'DVC cache' in eps[0].source
+
+    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.utils.get_cache_dir', return_value=None)
+    def test_fallback_to_dt_config_cache_root(self, _, mock_get):
+        """Falls back to dt config cache.root when DVC cache unavailable."""
+        mock_get.side_effect = lambda k: '/cache' if k == 'cache.root' else None
+        eps = _discover_dt_config()
+        assert len(eps) == 1
         assert eps[0].url == '/cache'
-        assert eps[0].source == 'cache.root'
+        assert 'dt config' in eps[0].source
 
     @patch('dt.auth.utils.get_project_name', return_value='myproj')
     @patch('dt.auth.cfg.get_value')
-    def test_remote_root_appends_project_name(self, mock_get, _):
+    @patch('dt.auth.utils.get_cache_dir', return_value=None)
+    def test_remote_root_appends_project_name(self, _, mock_get, __):
         mock_get.side_effect = lambda k: '/remote' if k == 'remote.root' else None
         eps = _discover_dt_config()
         assert len(eps) == 1
@@ -166,22 +179,31 @@ class TestDiscoverDtConfig:
 
     @patch('dt.auth.utils.get_project_name', return_value='proj')
     @patch('dt.auth.cfg.get_value')
-    def test_both_cache_and_remote(self, mock_get, _):
-        def side_effect(k):
-            return {
-                'cache.root': '/cache',
-                'remote.root': '/remote',
-            }.get(k)
-        mock_get.side_effect = side_effect
+    @patch('dt.auth.utils.get_cache_dir')
+    def test_both_cache_and_remote(self, mock_cache, mock_get, _):
+        mock_cache.return_value = Path('/data/cache/files/md5')
+        mock_get.side_effect = lambda k: '/remote' if k == 'remote.root' else None
         eps = _discover_dt_config()
         assert len(eps) == 2
-        assert eps[0].url == '/cache'
+        assert eps[0].url == '/data/cache'
         assert eps[1].url == '/remote/proj'
 
     @patch('dt.auth.cfg.get_value', return_value=None)
-    def test_nothing_configured(self, _):
+    @patch('dt.auth.utils.get_cache_dir', return_value=None)
+    def test_nothing_configured(self, *_):
         eps = _discover_dt_config()
         assert eps == []
+
+    @patch('dt.auth.cfg.get_value', return_value=None)
+    @patch('dt.auth.utils.get_cache_dir')
+    def test_dvc_cache_preempts_dt_config(self, mock_cache, _):
+        """When DVC cache dir is available, dt config cache.root is ignored."""
+        mock_cache.return_value = Path('/dvc/cache/files/md5')
+        eps = _discover_dt_config()
+        # Should only have the DVC cache, not the dt config one
+        cache_eps = [e for e in eps if 'cache' in e.source.lower()]
+        assert len(cache_eps) == 1
+        assert cache_eps[0].url == '/dvc/cache'
 
 
 # =============================================================================
