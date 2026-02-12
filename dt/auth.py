@@ -244,7 +244,7 @@ def _discover_import_sources(
     search_root = repo_path or Path.cwd()
 
     # Collect unique import URLs from .dvc files
-    import_urls: Dict[str, str] = {}  # url -> first dvc file that uses it
+    import_urls: Dict[str, List[str]] = {}  # url -> list of dvc files
     for dvc_file in sorted(search_root.rglob('*.dvc')):
         # Skip .dvc directory itself and .dt/tmp clones
         rel = str(dvc_file.relative_to(search_root))
@@ -268,15 +268,20 @@ def _discover_import_sources(
             repo = dep.get('repo') if isinstance(dep, dict) else None
             if repo and isinstance(repo, dict):
                 url = repo.get('url')
-                if url and url not in import_urls:
-                    import_urls[url] = rel
+                if url:
+                    import_urls.setdefault(url, []).append(rel)
 
     # Build endpoints for each unique import source
-    for url, first_file in import_urls.items():
+    for url, dvc_files in import_urls.items():
+        if len(dvc_files) == 1:
+            source_label = f"import source ({dvc_files[0]})"
+        else:
+            source_label = f"import source ({len(dvc_files)} files)"
+
         ep = Endpoint(
             type=classify_url(url),
             url=url,
-            source=f"import source ({first_file})",
+            source=source_label,
         )
 
         # Try to discover DVC remotes of the source repo via tmp clone

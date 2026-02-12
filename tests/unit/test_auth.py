@@ -335,6 +335,7 @@ class TestDiscoverImportSources:
             eps = _discover_import_sources(repo_path=tmp_path)
 
         assert len(eps) == 1
+        assert '2 files' in eps[0].source
 
     def test_discovers_source_repo_remotes(self, tmp_path):
         """Discovers DVC remotes of the import source repo as children."""
