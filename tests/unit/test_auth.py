@@ -18,10 +18,15 @@ from dt.auth import (
     STATUS_SKIP,
     AccessRequest,
     CheckResult,
+    Identity,
     classify_url,
     discover_endpoints,
     check_endpoints,
     generate_request,
+    get_identities,
+    detect_identities,
+    compare_identities,
+    save_detected_identities,
     format_endpoints,
     format_endpoints_json,
     format_check_results,
@@ -29,10 +34,17 @@ from dt.auth import (
     format_request_text,
     format_request_markdown,
     format_request_json,
+    format_identities,
+    format_identities_json,
+    format_whoami_comparison,
     send_request,
     send_request_slack,
     send_request_email,
     _format_slack_blocks,
+    _detect_github_user,
+    _detect_github_teams,
+    _detect_gcp_email,
+    _detect_aws_identity,
     _discover_dt_config,
     _discover_dvc_remotes,
     _discover_git_remotes,
@@ -1665,3 +1677,306 @@ class TestSendRequest:
         mock_cfg.side_effect = KeyError('not found')
         with pytest.raises(AuthError, match='No delivery method configured'):
             send_request(self._make_req(), method=None)
+
+
+# =============================================================================
+# Identity dataclass tests
+# =============================================================================
+
+class TestIdentity:
+    """Tests for the Identity dataclass."""
+
+    def test_to_dict(self):
+        i = Identity(system='GitHub user', value='alice', source='config')
+        d = i.to_dict()
+        assert d == {'system': 'GitHub user', 'value': 'alice', 'source': 'config'}
+
+    def test_default_source(self):
+        i = Identity(system='test', value='val')
+        assert i.source == 'config'
+
+
+# =============================================================================
+# get_identities tests
+# =============================================================================
+
+class TestGetIdentities:
+    """Tests for get_identities (config-based)."""
+
+    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.getpass.getuser', return_value='alice')
+    def test_always_includes_nci_username(self, mock_user, mock_cfg):
+        mock_cfg.side_effect = KeyError('not set')
+        ids = get_identities()
+        assert len(ids) == 1
+        assert ids[0].system == 'NCI username'
+        assert ids[0].value == 'alice'
+        assert ids[0].source == 'detected'
+
+    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.getpass.getuser', return_value='alice')
+    def test_reads_config_values(self, mock_user, mock_cfg):
+        def cfg_side(k):
+            return {
+                'auth.github_user': 'alice-gh',
+                'auth.github_teams': 'data-team, ops',
+            }.get(k)
+        mock_cfg.side_effect = lambda k: cfg_side(k) or (_ for _ in ()).throw(KeyError)
+        # Fix: need a proper side effect
+        def cfg_effect(k):
+            val = {'auth.github_user': 'alice-gh', 'auth.github_teams': 'data-team, ops'}.get(k)
+            if val is None:
+                raise KeyError(k)
+            return val
+        mock_cfg.side_effect = cfg_effect
+        ids = get_identities()
+        systems = {i.system: i.value for i in ids}
+        assert systems['NCI username'] == 'alice'
+        assert systems['GitHub user'] == 'alice-gh'
+        assert systems['GitHub teams'] == 'data-team, ops'
+
+    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.getpass.getuser', return_value='bob')
+    def test_skips_empty_values(self, mock_user, mock_cfg):
+        def cfg_effect(k):
+            if k == 'auth.github_user':
+                return ''
+            raise KeyError(k)
+        mock_cfg.side_effect = cfg_effect
+        ids = get_identities()
+        # Empty string should be skipped
+        assert len(ids) == 1
+        assert ids[0].system == 'NCI username'
+
+
+# =============================================================================
+# detect_* function tests
+# =============================================================================
+
+class TestDetectGithubUser:
+    """Tests for _detect_github_user."""
+
+    @patch('dt.auth.subprocess.run')
+    def test_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout='alice-gh\n')
+        assert _detect_github_user() == 'alice-gh'
+
+    @patch('dt.auth.subprocess.run')
+    def test_failure_returns_none(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout='')
+        assert _detect_github_user() is None
+
+    @patch('dt.auth.subprocess.run', side_effect=FileNotFoundError)
+    def test_gh_not_installed(self, mock_run):
+        assert _detect_github_user() is None
+
+    @patch('dt.auth.subprocess.run', side_effect=subprocess.TimeoutExpired('gh', 15))
+    def test_timeout(self, mock_run):
+        assert _detect_github_user() is None
+
+
+class TestDetectGithubTeams:
+    """Tests for _detect_github_teams."""
+
+    @patch('dt.auth.subprocess.run')
+    def test_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout='data-team\nops\n')
+        assert _detect_github_teams() == 'data-team, ops'
+
+    @patch('dt.auth.subprocess.run')
+    def test_no_teams(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout='')
+        assert _detect_github_teams() is None
+
+
+class TestDetectGcpEmail:
+    """Tests for _detect_gcp_email."""
+
+    @patch('dt.auth.subprocess.run')
+    def test_success(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout='alice@proj.iam.gserviceaccount.com\n',
+        )
+        assert _detect_gcp_email() == 'alice@proj.iam.gserviceaccount.com'
+
+    @patch('dt.auth.subprocess.run', side_effect=FileNotFoundError)
+    def test_gcloud_not_installed(self, mock_run):
+        assert _detect_gcp_email() is None
+
+
+class TestDetectAwsIdentity:
+    """Tests for _detect_aws_identity."""
+
+    @patch('dt.auth.subprocess.run')
+    def test_success(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout='arn:aws:iam::123:user/alice\n',
+        )
+        assert _detect_aws_identity() == 'arn:aws:iam::123:user/alice'
+
+    @patch('dt.auth.subprocess.run', side_effect=FileNotFoundError)
+    def test_aws_not_installed(self, mock_run):
+        assert _detect_aws_identity() is None
+
+
+# =============================================================================
+# detect_identities tests
+# =============================================================================
+
+class TestDetectIdentities:
+    """Tests for detect_identities."""
+
+    @patch('dt.auth._DETECT_FNS', {
+        'auth.github_user': lambda: 'alice-gh',
+        'auth.github_teams': lambda: None,
+        'auth.gcp_email': lambda: 'a@gcp.com',
+        'auth.aws_identity': lambda: None,
+    })
+    @patch('dt.auth.getpass.getuser', return_value='alice')
+    def test_collects_detected(self, mock_user):
+        ids = detect_identities()
+        systems = {i.system for i in ids}
+        assert 'NCI username' in systems
+        assert 'GitHub user' in systems
+        assert 'GCP email' in systems
+        # GitHub teams and AWS were None, should be absent
+        assert 'GitHub teams' not in systems
+        assert 'AWS identity' not in systems
+
+    @patch('dt.auth._DETECT_FNS', {
+        'auth.github_user': lambda: None,
+        'auth.github_teams': lambda: None,
+        'auth.gcp_email': lambda: None,
+        'auth.aws_identity': lambda: None,
+    })
+    @patch('dt.auth.getpass.getuser', return_value='bob')
+    def test_no_tools_returns_only_nci(self, mock_user):
+        ids = detect_identities()
+        assert len(ids) == 1
+        assert ids[0].system == 'NCI username'
+
+
+# =============================================================================
+# compare_identities tests
+# =============================================================================
+
+class TestCompareIdentities:
+    """Tests for compare_identities."""
+
+    def test_match(self):
+        stored = [Identity('GitHub user', 'alice', 'config')]
+        detected = [Identity('GitHub user', 'alice', 'detected via gh api')]
+        results = compare_identities(stored, detected)
+        assert len(results) == 1
+        assert results[0][2] == 'match'
+
+    def test_mismatch(self):
+        stored = [Identity('GitHub teams', 'a, b', 'config')]
+        detected = [Identity('GitHub teams', 'a, b, c', 'detected via gh api')]
+        results = compare_identities(stored, detected)
+        assert len(results) == 1
+        best, other, note = results[0]
+        assert note == 'mismatch'
+        assert best.value == 'a, b, c'  # detected is best
+        assert other.value == 'a, b'
+
+    def test_config_only(self):
+        stored = [Identity('GCP email', 'a@gcp.com', 'config')]
+        detected = []
+        results = compare_identities(stored, detected)
+        assert results[0][2] == 'config only'
+
+    def test_detected_only(self):
+        stored = []
+        detected = [Identity('GCP email', 'a@gcp.com', 'detected via gcloud')]
+        results = compare_identities(stored, detected)
+        assert results[0][2] == 'detected only'
+
+    def test_nci_always_matches(self):
+        stored = [Identity('NCI username', 'alice', 'detected')]
+        detected = [Identity('NCI username', 'alice', 'detected')]
+        results = compare_identities(stored, detected)
+        assert results[0][2] == 'match'
+
+
+# =============================================================================
+# format_identities tests
+# =============================================================================
+
+class TestFormatIdentities:
+    """Tests for format_identities and format_identities_json."""
+
+    def test_text_output(self):
+        ids = [
+            Identity('NCI username', 'alice', 'detected'),
+            Identity('GitHub user', 'alice-gh', 'config'),
+        ]
+        output = format_identities(ids)
+        assert 'alice' in output
+        assert 'alice-gh' in output
+
+    def test_empty(self):
+        output = format_identities([])
+        assert 'No identities found' in output
+
+    def test_json_output(self):
+        ids = [Identity('NCI username', 'alice', 'detected')]
+        data = json.loads(format_identities_json(ids))
+        assert len(data) == 1
+        assert data[0]['system'] == 'NCI username'
+        assert data[0]['value'] == 'alice'
+
+    def test_comparison_output(self):
+        comparisons = [
+            (Identity('NCI username', 'alice', 'detected'), None, 'match'),
+            (Identity('GCP email', 'a@gcp.com', 'detected via gcloud'), None, 'detected only'),
+        ]
+        output = format_whoami_comparison(comparisons)
+        assert 'alice' in output
+        assert 'a@gcp.com' in output
+
+
+# =============================================================================
+# save_detected_identities tests
+# =============================================================================
+
+class TestSaveDetectedIdentities:
+    """Tests for save_detected_identities."""
+
+    @patch('dt.auth.cfg.set_value')
+    @patch('dt.auth.cfg.get_value', side_effect=KeyError)
+    def test_saves_new_values(self, mock_get, mock_set):
+        detected = [
+            Identity('NCI username', 'alice', 'detected'),  # should skip
+            Identity('GitHub user', 'alice-gh', 'detected via gh api'),
+            Identity('GCP email', 'a@gcp.com', 'detected via gcloud'),
+        ]
+        count = save_detected_identities(detected)
+        assert count == 2
+        assert mock_set.call_count == 2
+        # Check the calls — scope is passed as keyword arg
+        calls = mock_set.call_args_list
+        assert calls[0] == (('auth.github_user', 'alice-gh'), {'scope': 'user'})
+        assert calls[1] == (('auth.gcp_email', 'a@gcp.com'), {'scope': 'user'})
+
+    @patch('dt.auth.cfg.set_value')
+    @patch('dt.auth.cfg.get_value')
+    def test_skips_matching_values(self, mock_get, mock_set):
+        mock_get.return_value = 'alice-gh'
+        detected = [
+            Identity('GitHub user', 'alice-gh', 'detected via gh api'),
+        ]
+        count = save_detected_identities(detected)
+        assert count == 0
+        mock_set.assert_not_called()
+
+    @patch('dt.auth.cfg.set_value')
+    @patch('dt.auth.cfg.get_value')
+    def test_updates_changed_values(self, mock_get, mock_set):
+        mock_get.return_value = 'old-name'
+        detected = [
+            Identity('GitHub user', 'new-name', 'detected via gh api'),
+        ]
+        count = save_detected_identities(detected)
+        assert count == 1
+        mock_set.assert_called_once_with('auth.github_user', 'new-name', scope='user')

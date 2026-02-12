@@ -13,6 +13,7 @@ A DVC project may depend on several storage backends simultaneously — a shared
 | Subcommand | Description |
 |------------|-------------|
 | [`dt auth list`](#dt-auth-list) | Discover every storage endpoint the project uses |
+| [`dt auth whoami`](#dt-auth-whoami) | Show current user identities across systems |
 | [`dt auth check`](#dt-auth-check) | Test access to each endpoint |
 | [`dt auth request`](#dt-auth-request) | Generate an access-request template from failures |
 | [`dt auth grant`](#dt-auth-grant) | Grant a user access to a resource (admin) |
@@ -100,6 +101,63 @@ dt auth list --json
 ```
 
 Returns a JSON array of endpoint objects, each with `type`, `url`, `source` (where it was discovered), and optional `local_path` (for SSH remotes on the local host).
+
+---
+
+## dt auth whoami
+
+Show current user identities across all relevant systems.
+
+### Usage
+
+```bash
+dt auth whoami [--detect] [--save] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--detect` | Probe external tools (`gh`, `gcloud`, `aws`) to auto-detect active accounts |
+| `--save` | Detect + save results to user config (implies `--detect`) |
+| `--json` | Output as JSON |
+
+Without flags, displays the local username and any identities stored in dt config.
+
+### Examples
+
+```
+$ dt auth whoami
+  NCI username:   alice           (detected)
+  GitHub user:    alice-smith     (config)
+  GitHub teams:   data-team, ops  (config)
+```
+
+```
+$ dt auth whoami --detect
+Detecting identities...
+  ✓ NCI username:   alice                          (detected)             matches config
+  ✓ GitHub user:    alice-smith                     (detected via gh api)  matches config
+  ✗ GitHub teams:   data-team, ops, new-team        (detected via gh api)
+      config has: data-team, ops
+  ● GCP email:      alice@proj.iam.gserviceaccount.com  (detected via gcloud)  not in config
+```
+
+```
+$ dt auth whoami --save
+Detecting identities...
+  ...
+✓ Saved 2 identity value(s) to user config.
+```
+
+### Configuration
+
+```bash
+# Store identities manually
+dt config set --user auth.github_user alice-smith
+dt config set --user auth.github_teams 'data-team, ops'
+dt config set --user auth.gcp_email alice@proj.iam.gserviceaccount.com
+```
+
+See [Configuration Options](config_options.md#auth-options) for all identity keys.
 
 ---
 
@@ -335,9 +393,10 @@ The `--dry` flag shows what commands would be run without executing them.
 This command is being built incrementally:
 
 1. **`dt auth list`** — pure discovery, no side effects
-2. **`dt auth check`** — read-only access tests
-3. **`dt auth request`** — template generation from check results
-4. **`dt auth grant`** — admin actions, built last
+2. **`dt auth whoami`** — identity management and detection
+3. **`dt auth check`** — read-only access tests
+4. **`dt auth request`** — template generation from check results
+5. **`dt auth grant`** — admin actions, built last
 
 ---
 

@@ -713,6 +713,57 @@ def auth_list(types, as_json, verbose):
         raise click.ClickException(str(e))
 
 
+@auth.command('whoami')
+@click.option('--detect', is_flag=True,
+              help='Probe external tools (gh, gcloud, aws) to auto-detect identities.')
+@click.option('--save', is_flag=True,
+              help='Save detected identities to user config (implies --detect).')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+def auth_whoami(detect, save, as_json):
+    """Show current user identities across systems.
+
+    Without flags, displays the local username and any identities stored
+    in dt config.
+
+    \b
+      dt auth whoami              # show stored identities
+      dt auth whoami --detect     # probe gh, gcloud, aws for active accounts
+      dt auth whoami --save       # detect + save to user config
+    """
+    if save:
+        detect = True
+
+    if detect:
+        click.echo(click.style('Detecting identities...', dim=True))
+        detected = auth_mod.detect_identities()
+        stored = auth_mod.get_identities()
+
+        if as_json:
+            click.echo(auth_mod.format_identities_json(detected))
+        else:
+            comparisons = auth_mod.compare_identities(stored, detected)
+            click.echo(auth_mod.format_whoami_comparison(comparisons))
+
+        if save:
+            count = auth_mod.save_detected_identities(detected)
+            if count:
+                click.echo(click.style(
+                    f'✓ Saved {count} identity value(s) to user config.',
+                    fg='green',
+                ))
+            else:
+                click.echo(click.style(
+                    'Nothing new to save — config is up to date.',
+                    dim=True,
+                ))
+    else:
+        identities = auth_mod.get_identities()
+        if as_json:
+            click.echo(auth_mod.format_identities_json(identities))
+        else:
+            click.echo(auth_mod.format_identities(identities))
+
+
 @auth.command('check')
 @click.option('--type', 'types', multiple=True,
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
