@@ -966,6 +966,94 @@ _CHECKERS = {
 }
 
 
+def _check_dvc_remote(ep: Endpoint, remote_name: str,
+                      verbose: bool = False) -> Optional[CheckResult]:
+    """Check a DVC remote via DVC's own storage API.
+
+    Uses ``Repo().cloud.get_remote_odb(name)`` to obtain a
+    remote object-database, then ``odb.fs.exists(odb.path)`` to
+    verify the remote is reachable using whatever credentials DVC
+    has configured (service-account JSON, endpoint URLs, SSH keys,
+    environment variables, etc.).
+
+    This is authoritative: if DVC can reach the remote, access is
+    confirmed regardless of whether external CLIs (``aws``, ``gcloud``,
+    etc.) are installed or configured.
+
+    Returns a :class:`CheckResult` on success or failure, or ``None``
+    if the DVC Repo cannot be opened (caller should fall back to
+    per-type checkers).
+    """
+    return _check_dvc_remote_impl(ep, remote_name, verbose=verbose)
+
+
+def _check_dvc_remote_impl(ep: Endpoint, remote_name: str,
+                           verbose: bool = False,
+                           _repo_factory=None) -> Optional[CheckResult]:
+    """Implementation of :func:`_check_dvc_remote`.
+
+    Accepts an optional *_repo_factory* for testing.  In production
+    this defaults to ``dvc.repo.Repo``.
+    """
+    if _repo_factory is None:
+        try:
+            from dvc.repo import Repo as DvcRepo
+        except ImportError:
+            return None
+        _repo_factory = DvcRepo
+
+    try:
+        repo = _repo_factory()
+    except Exception:
+        return None
+
+    try:
+        odb = repo.cloud.get_remote_odb(remote_name)
+    except Exception as exc:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary=f'DVC cannot initialise remote: {exc}',
+            hints=[f'Check DVC remote config: dvc remote list'],
+        )
+
+    try:
+        reachable = odb.fs.exists(odb.path)
+    except Exception as exc:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary=f'remote not reachable: {exc}',
+            hints=[f'Check credentials for {ep.url}'],
+        )
+
+    if not reachable:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='remote path does not exist',
+            hints=[f'Check remote URL: dvc remote modify {remote_name} url <url>'],
+        )
+
+    # Remote is reachable — optionally list contents to confirm read access
+    detail_lines: List[str] = []
+    try:
+        items = odb.fs.ls(odb.path)
+        n_items = len(items)
+        summary = f'accessible via DVC ({n_items} entries)'
+        if verbose:
+            for item in items[:20]:
+                name = item.rsplit('/', 1)[-1] if isinstance(item, str) else str(item)
+                detail_lines.append(name)
+            if n_items > 20:
+                detail_lines.append(f'... and {n_items - 20} more')
+    except Exception:
+        summary = 'reachable via DVC'
+
+    return CheckResult(
+        endpoint=ep, status=STATUS_PASS,
+        summary=summary,
+        details=detail_lines,
+    )
+
+
 # ---------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------
@@ -978,6 +1066,13 @@ def check_endpoints(
     """Run access checks on every endpoint.
 
     If *endpoints* is ``None``, calls :func:`discover_endpoints` first.
+
+    For DVC remotes (endpoints whose source matches ``"DVC remote '...'"``),
+    the check is performed via DVC's own storage API first
+    (:func:`_check_dvc_remote`).  This uses whatever credentials DVC has
+    configured (service-account JSON, endpoint URLs, SSH keys, etc.) and
+    is authoritative.  Per-type CLI checkers are used as a fallback for
+    non-DVC endpoints or if the DVC API is unavailable.
 
     Children of each endpoint are checked recursively (e.g. DVC remotes
     of an import source).
@@ -995,29 +1090,43 @@ def check_endpoints(
 
     results: List[CheckResult] = []
     for ep in endpoints:
-        checker = _CHECKERS.get(ep.type)
-        if checker:
-            # filesystem and ssh checkers accept verbose
-            if ep.type in ('filesystem', 'ssh'):
-                results.append(checker(ep, verbose=verbose))
-            else:
-                results.append(checker(ep))
-        else:
-            results.append(CheckResult(
-                endpoint=ep, status=STATUS_SKIP,
-                summary=f'no checker for type {ep.type!r}',
-            ))
+        result = _try_check(ep, verbose=verbose)
+        results.append(result)
 
         # Check children too
         for child in ep.children:
-            child_checker = _CHECKERS.get(child.type)
-            if child_checker:
-                if child.type in ('filesystem', 'ssh'):
-                    results.append(child_checker(child, verbose=verbose))
-                else:
-                    results.append(child_checker(child))
+            results.append(_try_check(child, verbose=verbose))
 
     return results
+
+
+def _try_check(ep: Endpoint, verbose: bool = False) -> CheckResult:
+    """Check a single endpoint, preferring DVC-native access where possible.
+
+    For endpoints sourced from a DVC remote (source matches
+    ``"DVC remote '...'"``), tries :func:`_check_dvc_remote` first.
+    Falls back to per-type CLI checkers.
+    """
+    remote_name = _extract_remote_name(ep.source)
+
+    # For DVC remotes in the current project (not children of import
+    # sources), try the DVC-native check first.
+    if remote_name and ' of ' not in ep.source:
+        dvc_result = _check_dvc_remote(ep, remote_name, verbose=verbose)
+        if dvc_result is not None:
+            return dvc_result
+
+    # Fall back to per-type checker
+    checker = _CHECKERS.get(ep.type)
+    if checker:
+        if ep.type in ('filesystem', 'ssh'):
+            return checker(ep, verbose=verbose)
+        return checker(ep)
+
+    return CheckResult(
+        endpoint=ep, status=STATUS_SKIP,
+        summary=f'no checker for type {ep.type!r}',
+    )
 
 
 # ---------------------------------------------------------------------

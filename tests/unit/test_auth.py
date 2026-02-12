@@ -39,6 +39,9 @@ from dt.auth import (
     _check_http,
     _check_s3,
     _check_gs,
+    _check_dvc_remote,
+    _check_dvc_remote_impl,
+    _try_check,
     _extract_remote_name,
     _short_repo_name,
     _apply_type_filter,
@@ -980,6 +983,139 @@ class TestExtractRemoteName:
 # =============================================================================
 # check_endpoints orchestrator tests
 # =============================================================================
+
+class TestCheckDvcRemote:
+    """Tests for _check_dvc_remote_impl."""
+
+    def test_pass_when_reachable(self):
+        ep = Endpoint(type='s3', url='s3://bucket/prefix',
+                      source="DVC remote 'cloud'")
+        mock_odb = MagicMock()
+        mock_odb.fs.exists.return_value = True
+        mock_odb.fs.ls.return_value = ['/bucket/prefix/aa', '/bucket/prefix/bb']
+        mock_odb.path = '/bucket/prefix/files/md5'
+
+        mock_repo = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = mock_odb
+
+        result = _check_dvc_remote_impl(ep, 'cloud',
+                                        _repo_factory=lambda: mock_repo)
+        assert result is not None
+        assert result.status == STATUS_PASS
+        assert 'via DVC' in result.summary
+        assert '2 entries' in result.summary
+
+    def test_fail_when_not_reachable(self):
+        ep = Endpoint(type='gs', url='gs://bucket',
+                      source="DVC remote 'gcs'")
+        mock_odb = MagicMock()
+        mock_odb.fs.exists.return_value = False
+        mock_odb.path = '/bucket/files/md5'
+
+        mock_repo = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = mock_odb
+
+        result = _check_dvc_remote_impl(ep, 'gcs',
+                                        _repo_factory=lambda: mock_repo)
+        assert result.status == STATUS_FAIL
+        assert 'does not exist' in result.summary
+
+    def test_fail_when_access_error(self):
+        ep = Endpoint(type='s3', url='s3://bucket',
+                      source="DVC remote 'r2'")
+        mock_odb = MagicMock()
+        mock_odb.fs.exists.side_effect = Exception('access denied')
+        mock_odb.path = '/bucket/files/md5'
+
+        mock_repo = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = mock_odb
+
+        result = _check_dvc_remote_impl(ep, 'r2',
+                                        _repo_factory=lambda: mock_repo)
+        assert result.status == STATUS_FAIL
+        assert 'not reachable' in result.summary
+
+    def test_fail_when_remote_init_error(self):
+        ep = Endpoint(type='gs', url='gs://bucket',
+                      source="DVC remote 'gcs'")
+        mock_repo = MagicMock()
+        mock_repo.cloud.get_remote_odb.side_effect = Exception('bad config')
+
+        result = _check_dvc_remote_impl(ep, 'gcs',
+                                        _repo_factory=lambda: mock_repo)
+        assert result.status == STATUS_FAIL
+        assert 'cannot initialise' in result.summary
+
+    def test_returns_none_when_repo_fails(self):
+        ep = Endpoint(type='s3', url='s3://b', source="DVC remote 'x'")
+
+        def bad_factory():
+            raise Exception('no repo')
+
+        result = _check_dvc_remote_impl(ep, 'x', _repo_factory=bad_factory)
+        assert result is None
+
+    def test_verbose_lists_entries(self):
+        ep = Endpoint(type='s3', url='s3://bucket/prefix',
+                      source="DVC remote 'cloud'")
+        mock_odb = MagicMock()
+        mock_odb.fs.exists.return_value = True
+        mock_odb.fs.ls.return_value = ['/prefix/aa', '/prefix/bb', '/prefix/cc']
+        mock_odb.path = '/prefix/files/md5'
+
+        mock_repo = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = mock_odb
+
+        result = _check_dvc_remote_impl(ep, 'cloud', verbose=True,
+                                        _repo_factory=lambda: mock_repo)
+        assert result.status == STATUS_PASS
+        assert len(result.details) == 3
+        assert 'aa' in result.details[0]
+
+
+class TestTryCheck:
+    """Tests for _try_check — DVC-native vs per-type fallback."""
+
+    def test_dvc_remote_uses_native_check(self):
+        """DVC remotes are checked via _check_dvc_remote."""
+        ep = Endpoint(type='s3', url='s3://bucket',
+                      source="DVC remote 'cloud'")
+        dvc_result = CheckResult(
+            endpoint=ep, status=STATUS_PASS, summary='via DVC'
+        )
+        with patch('dt.auth._check_dvc_remote', return_value=dvc_result) as mock_dvc:
+            result = _try_check(ep)
+        mock_dvc.assert_called_once_with(ep, 'cloud', verbose=False)
+        assert result.summary == 'via DVC'
+
+    def test_non_dvc_endpoint_uses_type_checker(self, tmp_path):
+        """Non-DVC endpoints use per-type checkers."""
+        d = tmp_path / 'data'
+        d.mkdir()
+        ep = Endpoint(type='filesystem', url=str(d), source='cache.root')
+        result = _try_check(ep)
+        assert result.status == STATUS_PASS
+
+    def test_dvc_native_fallback_to_type_checker(self):
+        """Falls back to per-type checker when DVC is unavailable."""
+        ep = Endpoint(type='git', url='git@g:o/r.git',
+                      source="DVC remote 'origin'")
+        with patch('dt.auth._check_dvc_remote', return_value=None), \
+             patch('subprocess.run', return_value=MagicMock(returncode=0)):
+            result = _try_check(ep)
+        assert result.status == STATUS_PASS
+
+    def test_import_source_child_skips_dvc_native(self):
+        """Children from import sources (source contains ' of ') skip
+        DVC-native check since they need a different repo context."""
+        ep = Endpoint(type='ssh', url='ssh://host/path',
+                      source="DVC remote 'nci' of data-repo")
+        with patch('dt.auth._check_dvc_remote') as mock_dvc, \
+             patch('subprocess.run', return_value=MagicMock(returncode=1)):
+            mock_dvc.return_value = None  # should not matter
+            result = _try_check(ep)
+        mock_dvc.assert_not_called()
+
 
 class TestCheckEndpoints:
     """Tests for check_endpoints."""
