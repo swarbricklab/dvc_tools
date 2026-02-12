@@ -5,6 +5,7 @@ complete picture of every storage endpoint the current project depends on.
 """
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -476,6 +477,590 @@ def format_endpoints_json(endpoints: List[Endpoint]) -> str:
     """Format endpoints as a JSON string."""
     return json.dumps(
         [ep.to_dict() for ep in endpoints],
+        indent=2,
+    )
+
+
+# =============================================================================
+# Access checking
+# =============================================================================
+
+#: Result status constants
+STATUS_PASS = 'pass'
+STATUS_FAIL = 'fail'
+STATUS_WARN = 'warn'
+STATUS_SKIP = 'skip'
+
+
+@dataclass
+class CheckResult:
+    """Outcome of a single access check.
+
+    Attributes:
+        endpoint: The endpoint that was checked.
+        status: One of ``'pass'``, ``'fail'``, ``'warn'``, ``'skip'``.
+        summary: Short human-readable result line (e.g. ``"read/write"``).
+        details: Optional list of verbose detail lines.
+        hints: Suggested remediation steps for failures.
+    """
+
+    endpoint: Endpoint
+    status: str  # pass | fail | warn | skip
+    summary: str
+    details: List[str] = field(default_factory=list)
+    hints: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        d = {
+            'endpoint': self.endpoint.to_dict(),
+            'status': self.status,
+            'summary': self.summary,
+        }
+        if self.details:
+            d['details'] = self.details
+        if self.hints:
+            d['hints'] = self.hints
+        return d
+
+
+# ---------------------------------------------------------------------
+# Per-type checkers
+# ---------------------------------------------------------------------
+
+def _check_filesystem(ep: Endpoint, verbose: bool = False) -> CheckResult:
+    """Check a filesystem endpoint for read/write access.
+
+    Walks immediate subdirectories and reports per-subdir status.
+    """
+    path = Path(ep.url)
+
+    if not path.exists():
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='path does not exist',
+            hints=[f'Create the directory or mount the filesystem: {ep.url}'],
+        )
+
+    if not path.is_dir():
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='not a directory',
+        )
+
+    # Check root readability/writability
+    readable = os.access(path, os.R_OK)
+    writable = os.access(path, os.W_OK)
+
+    if not readable:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='not readable',
+            hints=[f'Check permissions: ls -la {ep.url}'],
+        )
+
+    # Walk immediate subdirectories
+    try:
+        subdirs = sorted([d for d in path.iterdir() if d.is_dir()])
+    except PermissionError:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='cannot list directory contents',
+            hints=[f'Check permissions: ls -la {ep.url}'],
+        )
+
+    if not subdirs:
+        # Empty dir or flat — just report root status
+        status = STATUS_PASS if writable else STATUS_FAIL
+        summary = 'read/write' if writable else 'read-only'
+        result = CheckResult(endpoint=ep, status=status, summary=summary)
+        if not writable:
+            result.hints.append(f'Check permissions: ls -la {ep.url}')
+        return result
+
+    ok_count = 0
+    fail_count = 0
+    detail_lines: List[str] = []
+    failed_dirs: List[Path] = []
+
+    for d in subdirs:
+        d_read = os.access(d, os.R_OK)
+        d_write = os.access(d, os.W_OK)
+        if d_read and d_write:
+            ok_count += 1
+            if verbose:
+                detail_lines.append(f'{d.name}  r/w')
+        else:
+            fail_count += 1
+            failed_dirs.append(d)
+            perms = []
+            if not d_read:
+                perms.append('not readable')
+            if not d_write:
+                perms.append('not writable')
+            detail_lines.append(f'{d.name}  {", ".join(perms)}')
+
+    total = ok_count + fail_count
+    if fail_count == 0:
+        status = STATUS_PASS if writable else STATUS_FAIL
+        summary = f'read/write ({total}/{total} subdirs OK)'
+        details = detail_lines if verbose else []
+    else:
+        status = STATUS_FAIL
+        summary = f'{fail_count} of {total} subdirectories not accessible'
+        details = detail_lines  # always show failures
+        hints = []
+        for d in failed_dirs[:3]:  # limit hints
+            hints.append(
+                f'Fix permissions: chmod -R g+rw {d}'
+            )
+        return CheckResult(
+            endpoint=ep, status=status, summary=summary,
+            details=details, hints=hints,
+        )
+
+    result = CheckResult(endpoint=ep, status=status, summary=summary, details=details)
+    if not writable:
+        result.hints.append(f'Root directory is read-only: {ep.url}')
+    return result
+
+
+def _check_ssh(ep: Endpoint, verbose: bool = False) -> CheckResult:
+    """Check an SSH endpoint.
+
+    If the host is local, delegates to :func:`_check_filesystem` via
+    ``local_path``.  Otherwise tests the SSH connection directly.
+    """
+    if ep.local_path:
+        # Host is local — check the filesystem path directly
+        fs_ep = Endpoint(
+            type='filesystem', url=ep.local_path, source=ep.source,
+        )
+        result = _check_filesystem(fs_ep, verbose=verbose)
+        result.endpoint = ep  # restore original endpoint
+        result.summary = f'checked as local path — {result.summary}'
+        return result
+
+    # Remote SSH — test connection
+    # Extract host from ssh://[user@]host/path
+    url = ep.url.strip()
+    if url.startswith('ssh://'):
+        netloc = url[6:].split('/')[0]
+        host = netloc.split('@')[-1]
+    elif '@' in url and ':' in url:
+        # SCP-style user@host:/path
+        host = url.split('@')[1].split(':')[0]
+    else:
+        host = url
+
+    try:
+        result_proc = subprocess.run(
+            ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+             host],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        # SSH -T exits 0 on success, but some servers return 1 even when
+        # connection works (e.g. GitHub).  A connection failure is typically
+        # exit code 255.
+        if result_proc.returncode != 255:
+            return CheckResult(
+                endpoint=ep, status=STATUS_PASS,
+                summary='connection OK',
+            )
+        else:
+            return CheckResult(
+                endpoint=ep, status=STATUS_FAIL,
+                summary='connection failed',
+                hints=[
+                    'Check your SSH agent has keys loaded: ssh-add -l',
+                    'Ensure you connected with agent forwarding: ssh -A <host>',
+                ],
+            )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='connection timed out',
+            hints=[
+                'Check your SSH agent has keys loaded: ssh-add -l',
+                f'Test manually: ssh -T {host}',
+            ],
+        )
+    except FileNotFoundError:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='ssh command not found',
+            hints=['Install OpenSSH or ensure ssh is in your PATH'],
+        )
+
+
+def _get_dvc_remote_config(remote_name: str, key: str) -> Optional[str]:
+    """Read a single DVC remote config value.
+
+    Runs ``dvc config remote.<name>.<key>`` and returns the value,
+    or ``None`` if not set.
+    """
+    try:
+        result = subprocess.run(
+            ['dvc', 'config', f'remote.{remote_name}.{key}'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return None
+
+
+def _extract_remote_name(source: str) -> Optional[str]:
+    """Extract the DVC remote name from an endpoint's source string.
+
+    The source string is like ``"DVC remote 'nci' (default)"`` — this
+    returns ``"nci"``.
+    """
+    import re
+    m = re.search(r"DVC remote '([^']+)'", source)
+    return m.group(1) if m else None
+
+
+def _check_s3(ep: Endpoint) -> CheckResult:
+    """Check an S3-compatible endpoint (AWS, R2, MinIO, …).
+
+    Uses ``aws`` CLI with ``--endpoint-url`` if configured in DVC.
+    """
+    import shutil
+
+    if not shutil.which('aws'):
+        return CheckResult(
+            endpoint=ep, status=STATUS_SKIP,
+            summary='aws CLI not installed',
+            hints=['Install the AWS CLI: pip install awscli'],
+        )
+
+    # Try to get endpoint URL from DVC remote config
+    endpoint_url = None
+    remote_name = _extract_remote_name(ep.source)
+    if remote_name:
+        endpoint_url = _get_dvc_remote_config(remote_name, 'endpointurl')
+
+    extra_args: List[str] = []
+    if endpoint_url:
+        extra_args = ['--endpoint-url', endpoint_url]
+
+    # 1. Check credentials
+    try:
+        cred_result = subprocess.run(
+            ['aws', 'sts', 'get-caller-identity'] + extra_args,
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='credentials check timed out',
+        )
+
+    if cred_result.returncode != 0:
+        hint = 'Configure AWS credentials in ~/.aws/credentials or environment variables'
+        if endpoint_url:
+            hint += f' for endpoint {endpoint_url}'
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='credentials not configured',
+            hints=[hint],
+        )
+
+    # 2. Check bucket access
+    bucket_prefix = ep.url  # s3://bucket/prefix
+    try:
+        ls_result = subprocess.run(
+            ['aws', 's3', 'ls', bucket_prefix] + extra_args,
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return CheckResult(
+            endpoint=ep, status=STATUS_WARN,
+            summary='credentials OK, bucket check timed out',
+        )
+
+    if ls_result.returncode != 0:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='credentials OK, bucket not accessible',
+            hints=[f'Check bucket exists and your credentials have access: {bucket_prefix}'],
+        )
+
+    return CheckResult(
+        endpoint=ep, status=STATUS_PASS,
+        summary='credentials OK, bucket accessible',
+    )
+
+
+def _check_gs(ep: Endpoint) -> CheckResult:
+    """Check a GCS endpoint.
+
+    Reports warnings rather than errors during the service-account
+    to IAM transition.
+    """
+    import shutil
+
+    if not shutil.which('gcloud'):
+        return CheckResult(
+            endpoint=ep, status=STATUS_SKIP,
+            summary='gcloud CLI not installed',
+            hints=['Install the Google Cloud SDK: https://cloud.google.com/sdk/docs/install'],
+        )
+
+    # Check if any account is authenticated
+    try:
+        auth_result = subprocess.run(
+            ['gcloud', 'auth', 'list', '--format=value(account)',
+             '--filter=status:ACTIVE'],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return CheckResult(
+            endpoint=ep, status=STATUS_WARN,
+            summary='gcloud auth check timed out',
+        )
+
+    if auth_result.returncode != 0 or not auth_result.stdout.strip():
+        return CheckResult(
+            endpoint=ep, status=STATUS_WARN,
+            summary='no gcloud auth configured',
+            hints=['Run: gcloud auth login'],
+        )
+
+    # Check bucket access
+    if not shutil.which('gsutil'):
+        return CheckResult(
+            endpoint=ep, status=STATUS_WARN,
+            summary=f'authenticated as {auth_result.stdout.strip()}, gsutil not available',
+        )
+
+    try:
+        ls_result = subprocess.run(
+            ['gsutil', 'ls', ep.url],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return CheckResult(
+            endpoint=ep, status=STATUS_WARN,
+            summary='authenticated, bucket check timed out',
+        )
+
+    if ls_result.returncode != 0:
+        return CheckResult(
+            endpoint=ep, status=STATUS_WARN,
+            summary='authenticated, bucket not accessible',
+            hints=[f'Check bucket permissions: {ep.url}'],
+        )
+
+    return CheckResult(
+        endpoint=ep, status=STATUS_PASS,
+        summary='authenticated, bucket accessible',
+    )
+
+
+def _check_git(ep: Endpoint) -> CheckResult:
+    """Check a git endpoint via ``git ls-remote``."""
+    try:
+        result = subprocess.run(
+            ['git', 'ls-remote', '--exit-code', ep.url],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return CheckResult(
+                endpoint=ep, status=STATUS_PASS,
+                summary='reachable',
+            )
+        else:
+            hints = []
+            if 'git@' in ep.url or ep.url.startswith('ssh://'):
+                hints = [
+                    'Check your SSH agent has keys loaded: ssh-add -l',
+                    'Ensure you connected with agent forwarding: ssh -A <host>',
+                ]
+            return CheckResult(
+                endpoint=ep, status=STATUS_FAIL,
+                summary='not reachable',
+                hints=hints,
+            )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='connection timed out',
+            hints=[f'Test manually: git ls-remote {ep.url}'],
+        )
+    except FileNotFoundError:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='git command not found',
+        )
+
+
+def _check_http(ep: Endpoint) -> CheckResult:
+    """Check an HTTP(S) endpoint via ``curl``."""
+    import shutil
+
+    if not shutil.which('curl'):
+        return CheckResult(
+            endpoint=ep, status=STATUS_SKIP,
+            summary='curl not installed',
+        )
+
+    try:
+        result = subprocess.run(
+            ['curl', '-sf', '--head', '--max-time', '10', ep.url],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return CheckResult(
+                endpoint=ep, status=STATUS_PASS,
+                summary='reachable',
+            )
+        else:
+            return CheckResult(
+                endpoint=ep, status=STATUS_FAIL,
+                summary='not reachable',
+                hints=[f'Test manually: curl -sf --head {ep.url}'],
+            )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='connection timed out',
+        )
+
+
+# The dispatcher used by check_endpoints
+_CHECKERS = {
+    'filesystem': _check_filesystem,
+    'ssh': _check_ssh,
+    's3': _check_s3,
+    'gs': _check_gs,
+    'git': _check_git,
+    'http': _check_http,
+}
+
+
+# ---------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------
+
+def check_endpoints(
+    endpoints: Optional[List[Endpoint]] = None,
+    type_filter: Optional[Set[str]] = None,
+    verbose: bool = False,
+) -> List[CheckResult]:
+    """Run access checks on every endpoint.
+
+    If *endpoints* is ``None``, calls :func:`discover_endpoints` first.
+
+    Children of each endpoint are checked recursively (e.g. DVC remotes
+    of an import source).
+
+    Args:
+        endpoints: Pre-discovered endpoints, or None to discover now.
+        type_filter: Passed through to :func:`discover_endpoints`.
+        verbose: Show verbose per-subdirectory filesystem detail.
+
+    Returns:
+        List of :class:`CheckResult` objects.
+    """
+    if endpoints is None:
+        endpoints = discover_endpoints(type_filter=type_filter, verbose=verbose)
+
+    results: List[CheckResult] = []
+    for ep in endpoints:
+        checker = _CHECKERS.get(ep.type)
+        if checker:
+            # filesystem and ssh checkers accept verbose
+            if ep.type in ('filesystem', 'ssh'):
+                results.append(checker(ep, verbose=verbose))
+            else:
+                results.append(checker(ep))
+        else:
+            results.append(CheckResult(
+                endpoint=ep, status=STATUS_SKIP,
+                summary=f'no checker for type {ep.type!r}',
+            ))
+
+        # Check children too
+        for child in ep.children:
+            child_checker = _CHECKERS.get(child.type)
+            if child_checker:
+                if child.type in ('filesystem', 'ssh'):
+                    results.append(child_checker(child, verbose=verbose))
+                else:
+                    results.append(child_checker(child))
+
+    return results
+
+
+# ---------------------------------------------------------------------
+# Check output formatting
+# ---------------------------------------------------------------------
+
+def format_check_results(results: List[CheckResult]) -> str:
+    """Format check results for human-readable terminal output."""
+    import click
+
+    _status_icon = {
+        STATUS_PASS: click.style('✓', fg='green', bold=True),
+        STATUS_FAIL: click.style('✗', fg='red', bold=True),
+        STATUS_WARN: click.style('⚠', fg='yellow', bold=True),
+        STATUS_SKIP: click.style('–', dim=True),
+    }
+
+    _status_colour = {
+        STATUS_PASS: 'green',
+        STATUS_FAIL: 'red',
+        STATUS_WARN: 'yellow',
+        STATUS_SKIP: 'white',
+    }
+
+    lines: List[str] = []
+
+    for r in results:
+        icon = _status_icon.get(r.status, '?')
+        colour = _status_colour.get(r.status, 'white')
+        url_str = click.style(r.endpoint.url, fg=colour)
+        summary_str = click.style(r.summary, dim=(r.status == STATUS_SKIP))
+        lines.append(f'  {icon} {url_str}')
+        lines.append(f'    {summary_str}')
+
+        for detail in r.details:
+            lines.append(click.style(f'      {detail}', dim=True))
+
+        for hint in r.hints:
+            hint_str = click.style(f'    Hint: {hint}', fg='yellow')
+            lines.append(hint_str)
+
+    # Summary line
+    counts = {STATUS_PASS: 0, STATUS_FAIL: 0, STATUS_WARN: 0, STATUS_SKIP: 0}
+    for r in results:
+        counts[r.status] = counts.get(r.status, 0) + 1
+
+    parts: List[str] = []
+    if counts[STATUS_PASS]:
+        parts.append(click.style(f'{counts[STATUS_PASS]} passed', fg='green'))
+    if counts[STATUS_FAIL]:
+        parts.append(click.style(f'{counts[STATUS_FAIL]} failed', fg='red'))
+    if counts[STATUS_WARN]:
+        parts.append(click.style(f'{counts[STATUS_WARN]} warning(s)', fg='yellow'))
+    if counts[STATUS_SKIP]:
+        parts.append(click.style(f'{counts[STATUS_SKIP]} skipped', dim=True))
+
+    lines.append('')
+    lines.append(', '.join(parts) + '.')
+    lines.append('')
+
+    return '\n'.join(lines)
+
+
+def format_check_results_json(results: List[CheckResult]) -> str:
+    """Format check results as a JSON string."""
+    return json.dumps(
+        [r.to_dict() for r in results],
         indent=2,
     )
 

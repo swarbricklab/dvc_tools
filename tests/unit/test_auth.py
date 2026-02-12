@@ -4,6 +4,7 @@ Tests endpoint discovery and classification for ``dt auth list``.
 """
 
 import json
+import subprocess
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
@@ -11,14 +12,29 @@ from unittest.mock import MagicMock, patch, mock_open
 from dt.auth import (
     Endpoint,
     ENDPOINT_TYPES,
+    STATUS_PASS,
+    STATUS_FAIL,
+    STATUS_WARN,
+    STATUS_SKIP,
+    CheckResult,
     classify_url,
     discover_endpoints,
+    check_endpoints,
     format_endpoints,
     format_endpoints_json,
+    format_check_results,
+    format_check_results_json,
     _discover_dt_config,
     _discover_dvc_remotes,
     _discover_git_remotes,
     _discover_import_sources,
+    _check_filesystem,
+    _check_ssh,
+    _check_git,
+    _check_http,
+    _check_s3,
+    _check_gs,
+    _extract_remote_name,
     _short_repo_name,
     _apply_type_filter,
     _merge_children,
@@ -674,3 +690,351 @@ class TestEndpointTypes:
 
     def test_is_frozen(self):
         assert isinstance(ENDPOINT_TYPES, frozenset)
+
+
+# =============================================================================
+# CheckResult tests
+# =============================================================================
+
+class TestCheckResult:
+    """Tests for the CheckResult dataclass."""
+
+    def test_to_dict_minimal(self):
+        ep = Endpoint(type='ssh', url='ssh://h/p', source='remote')
+        r = CheckResult(endpoint=ep, status=STATUS_PASS, summary='OK')
+        d = r.to_dict()
+        assert d['status'] == 'pass'
+        assert d['summary'] == 'OK'
+        assert 'endpoint' in d
+        assert 'details' not in d
+        assert 'hints' not in d
+
+    def test_to_dict_with_details_and_hints(self):
+        ep = Endpoint(type='filesystem', url='/x', source='a')
+        r = CheckResult(
+            endpoint=ep, status=STATUS_FAIL, summary='bad',
+            details=['line1'], hints=['fix it'],
+        )
+        d = r.to_dict()
+        assert d['details'] == ['line1']
+        assert d['hints'] == ['fix it']
+
+
+# =============================================================================
+# _check_filesystem tests
+# =============================================================================
+
+class TestCheckFilesystem:
+    """Tests for _check_filesystem."""
+
+    def test_pass_empty_dir(self, tmp_path):
+        ep = Endpoint(type='filesystem', url=str(tmp_path), source='test')
+        r = _check_filesystem(ep)
+        assert r.status == STATUS_PASS
+        assert 'read/write' in r.summary
+
+    def test_pass_with_subdirs(self, tmp_path):
+        (tmp_path / 'aa').mkdir()
+        (tmp_path / 'bb').mkdir()
+        ep = Endpoint(type='filesystem', url=str(tmp_path), source='test')
+        r = _check_filesystem(ep)
+        assert r.status == STATUS_PASS
+        assert '2/2 subdirs OK' in r.summary
+
+    def test_nonexistent_path(self):
+        ep = Endpoint(type='filesystem', url='/nonexistent/path/xyz', source='test')
+        r = _check_filesystem(ep)
+        assert r.status == STATUS_FAIL
+        assert 'does not exist' in r.summary
+
+    def test_verbose_lists_subdirs(self, tmp_path):
+        (tmp_path / 'aa').mkdir()
+        ep = Endpoint(type='filesystem', url=str(tmp_path), source='test')
+        r = _check_filesystem(ep, verbose=True)
+        assert r.status == STATUS_PASS
+        assert any('aa' in d for d in r.details)
+
+    def test_not_a_directory(self, tmp_path):
+        f = tmp_path / 'file.txt'
+        f.write_text('hello')
+        ep = Endpoint(type='filesystem', url=str(f), source='test')
+        r = _check_filesystem(ep)
+        assert r.status == STATUS_FAIL
+        assert 'not a directory' in r.summary
+
+
+# =============================================================================
+# _check_ssh tests
+# =============================================================================
+
+class TestCheckSsh:
+    """Tests for _check_ssh."""
+
+    def test_local_path_delegates_to_filesystem(self, tmp_path):
+        """SSH endpoint with local_path checks the filesystem instead."""
+        ep = Endpoint(
+            type='ssh', url='ssh://host/path', source='remote',
+            local_path=str(tmp_path),
+        )
+        r = _check_ssh(ep)
+        assert r.status == STATUS_PASS
+        assert 'checked as local path' in r.summary
+        # Endpoint should still be the original SSH endpoint
+        assert r.endpoint.type == 'ssh'
+
+    @patch('subprocess.run')
+    def test_remote_ssh_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/data', source='r')
+        r = _check_ssh(ep)
+        assert r.status == STATUS_PASS
+        assert 'connection OK' in r.summary
+
+    @patch('subprocess.run')
+    def test_remote_ssh_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=255)
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/data', source='r')
+        r = _check_ssh(ep)
+        assert r.status == STATUS_FAIL
+        assert r.hints  # should suggest ssh-add
+
+    @patch('subprocess.run', side_effect=subprocess.TimeoutExpired('ssh', 10))
+    def test_remote_ssh_timeout(self, _):
+        ep = Endpoint(type='ssh', url='ssh://host/data', source='r')
+        r = _check_ssh(ep)
+        assert r.status == STATUS_FAIL
+        assert 'timed out' in r.summary
+
+
+# =============================================================================
+# _check_git tests
+# =============================================================================
+
+class TestCheckGit:
+    """Tests for _check_git."""
+
+    @patch('subprocess.run')
+    def test_reachable(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        ep = Endpoint(type='git', url='git@github.com:o/r.git', source='origin')
+        r = _check_git(ep)
+        assert r.status == STATUS_PASS
+        assert 'reachable' in r.summary
+
+    @patch('subprocess.run')
+    def test_not_reachable_ssh(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=128)
+        ep = Endpoint(type='git', url='git@github.com:o/r.git', source='origin')
+        r = _check_git(ep)
+        assert r.status == STATUS_FAIL
+        assert r.hints  # SSH-based URL should suggest ssh-add
+
+    @patch('subprocess.run')
+    def test_not_reachable_https(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=128)
+        ep = Endpoint(type='git', url='https://github.com/o/r.git', source='o')
+        r = _check_git(ep)
+        assert r.status == STATUS_FAIL
+        assert not r.hints  # HTTPS — no SSH hint
+
+    @patch('subprocess.run', side_effect=subprocess.TimeoutExpired('git', 15))
+    def test_timeout(self, _):
+        ep = Endpoint(type='git', url='git@github.com:o/r.git', source='o')
+        r = _check_git(ep)
+        assert r.status == STATUS_FAIL
+        assert 'timed out' in r.summary
+
+
+# =============================================================================
+# _check_http tests
+# =============================================================================
+
+class TestCheckHttp:
+    """Tests for _check_http."""
+
+    @patch('shutil.which', return_value='/usr/bin/curl')
+    @patch('subprocess.run')
+    def test_reachable(self, mock_run, _):
+        mock_run.return_value = MagicMock(returncode=0)
+        ep = Endpoint(type='http', url='https://example.com/data', source='r')
+        r = _check_http(ep)
+        assert r.status == STATUS_PASS
+
+    @patch('shutil.which', return_value='/usr/bin/curl')
+    @patch('subprocess.run')
+    def test_not_reachable(self, mock_run, _):
+        mock_run.return_value = MagicMock(returncode=22)
+        ep = Endpoint(type='http', url='https://example.com/data', source='r')
+        r = _check_http(ep)
+        assert r.status == STATUS_FAIL
+
+    @patch('shutil.which', return_value=None)
+    def test_curl_not_installed(self, _):
+        ep = Endpoint(type='http', url='https://example.com/data', source='r')
+        r = _check_http(ep)
+        assert r.status == STATUS_SKIP
+
+
+# =============================================================================
+# _check_s3 tests
+# =============================================================================
+
+class TestCheckS3:
+    """Tests for _check_s3."""
+
+    @patch('shutil.which', return_value=None)
+    def test_aws_not_installed(self, _):
+        ep = Endpoint(type='s3', url='s3://bucket', source='cloud')
+        r = _check_s3(ep)
+        assert r.status == STATUS_SKIP
+
+    @patch('shutil.which', return_value='/usr/bin/aws')
+    @patch('subprocess.run')
+    def test_credentials_fail(self, mock_run, _):
+        mock_run.return_value = MagicMock(returncode=1)
+        ep = Endpoint(type='s3', url='s3://bucket', source='cloud')
+        r = _check_s3(ep)
+        assert r.status == STATUS_FAIL
+        assert 'credentials not configured' in r.summary
+
+    @patch('shutil.which', return_value='/usr/bin/aws')
+    @patch('subprocess.run')
+    def test_full_pass(self, mock_run, _):
+        mock_run.return_value = MagicMock(returncode=0)
+        ep = Endpoint(type='s3', url='s3://bucket/prefix', source='cloud')
+        r = _check_s3(ep)
+        assert r.status == STATUS_PASS
+        assert 'bucket accessible' in r.summary
+
+
+# =============================================================================
+# _check_gs tests
+# =============================================================================
+
+class TestCheckGs:
+    """Tests for _check_gs."""
+
+    @patch('shutil.which', return_value=None)
+    def test_gcloud_not_installed(self, _):
+        ep = Endpoint(type='gs', url='gs://bucket', source='cloud')
+        r = _check_gs(ep)
+        assert r.status == STATUS_SKIP
+
+    @patch('shutil.which', return_value='/usr/bin/gcloud')
+    @patch('subprocess.run')
+    def test_no_auth(self, mock_run, _):
+        mock_run.return_value = MagicMock(returncode=0, stdout='')
+        ep = Endpoint(type='gs', url='gs://bucket', source='cloud')
+        r = _check_gs(ep)
+        assert r.status == STATUS_WARN  # soft failure
+        assert 'no gcloud auth' in r.summary
+
+
+# =============================================================================
+# _extract_remote_name tests
+# =============================================================================
+
+class TestExtractRemoteName:
+    """Tests for _extract_remote_name."""
+
+    def test_default_remote(self):
+        assert _extract_remote_name("DVC remote 'nci' (default)") == 'nci'
+
+    def test_non_default(self):
+        assert _extract_remote_name("DVC remote 'cloud'") == 'cloud'
+
+    def test_no_match(self):
+        assert _extract_remote_name('cache.root') is None
+
+    def test_child_remote(self):
+        assert _extract_remote_name("DVC remote 'gadi' of chromium (default)") == 'gadi'
+
+
+# =============================================================================
+# check_endpoints orchestrator tests
+# =============================================================================
+
+class TestCheckEndpoints:
+    """Tests for check_endpoints."""
+
+    def test_checks_all_endpoints(self, tmp_path):
+        """Checks each endpoint and returns results."""
+        d = tmp_path / 'cache'
+        d.mkdir()
+        eps = [
+            Endpoint(type='filesystem', url=str(d), source='cache'),
+        ]
+        results = check_endpoints(endpoints=eps)
+        assert len(results) == 1
+        assert results[0].status == STATUS_PASS
+
+    @patch('subprocess.run')
+    def test_checks_children(self, mock_run):
+        """Children of endpoints are checked too."""
+        mock_run.return_value = MagicMock(returncode=0)
+        child = Endpoint(type='git', url='git@g:o/r.git', source='child')
+        parent = Endpoint(
+            type='git', url='git@g:o/parent.git', source='origin',
+            children=[child],
+        )
+        results = check_endpoints(endpoints=[parent])
+        assert len(results) == 2  # parent + child
+
+    def test_discovers_if_not_provided(self):
+        """When endpoints=None, calls discover_endpoints."""
+        with patch('dt.auth.discover_endpoints', return_value=[]) as mock_disc:
+            results = check_endpoints(endpoints=None)
+        mock_disc.assert_called_once()
+        assert results == []
+
+
+# =============================================================================
+# format_check_results tests
+# =============================================================================
+
+class TestFormatCheckResults:
+    """Tests for format_check_results."""
+
+    def test_shows_pass_icon(self):
+        ep = Endpoint(type='filesystem', url='/cache', source='test')
+        r = CheckResult(endpoint=ep, status=STATUS_PASS, summary='OK')
+        output = format_check_results([r])
+        assert '✓' in output
+        assert '1 passed' in output
+
+    def test_shows_fail_icon_and_hints(self):
+        ep = Endpoint(type='ssh', url='ssh://h/p', source='test')
+        r = CheckResult(
+            endpoint=ep, status=STATUS_FAIL, summary='bad',
+            hints=['do this'],
+        )
+        output = format_check_results([r])
+        assert '✗' in output
+        assert 'Hint:' in output
+        assert '1 failed' in output
+
+    def test_shows_warn_icon(self):
+        ep = Endpoint(type='gs', url='gs://b', source='test')
+        r = CheckResult(endpoint=ep, status=STATUS_WARN, summary='warn')
+        output = format_check_results([r])
+        assert '⚠' in output
+        assert 'warning' in output
+
+    def test_json_format(self):
+        ep = Endpoint(type='filesystem', url='/x', source='test')
+        r = CheckResult(endpoint=ep, status=STATUS_PASS, summary='OK')
+        output = format_check_results_json([r])
+        data = json.loads(output)
+        assert len(data) == 1
+        assert data[0]['status'] == 'pass'
+
+    def test_summary_line_counts(self):
+        ep1 = Endpoint(type='filesystem', url='/a', source='a')
+        ep2 = Endpoint(type='ssh', url='ssh://h/p', source='b')
+        results = [
+            CheckResult(endpoint=ep1, status=STATUS_PASS, summary='OK'),
+            CheckResult(endpoint=ep2, status=STATUS_FAIL, summary='bad'),
+        ]
+        output = format_check_results(results)
+        assert '1 passed' in output
+        assert '1 failed' in output

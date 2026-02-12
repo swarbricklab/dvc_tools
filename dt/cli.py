@@ -713,6 +713,37 @@ def auth_list(types, as_json, verbose):
         raise click.ClickException(str(e))
 
 
+@auth.command('check')
+@click.option('--type', 'types', multiple=True,
+              type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
+              help='Only check specific endpoint type(s). Repeat for multiple.')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True,
+              help='Show per-subdirectory detail for filesystem checks')
+def auth_check(types, as_json, verbose):
+    """Test access to each discovered endpoint.
+
+    Discovers all endpoints (like ``dt auth list``) then runs a
+    connectivity / permission check for each one.
+    """
+    try:
+        type_filter = set(types) if types else None
+        results = auth_mod.check_endpoints(
+            type_filter=type_filter,
+            verbose=verbose,
+        )
+        if as_json:
+            click.echo(auth_mod.format_check_results_json(results))
+        else:
+            click.echo(auth_mod.format_check_results(results))
+
+        # Exit non-zero if any checks failed
+        if any(r.status == auth_mod.STATUS_FAIL for r in results):
+            raise SystemExit(1)
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
 @cli.command()
 @click.argument('targets', nargs=-1)
 @click.option('-h', '--human-readable', 'human', is_flag=True,
