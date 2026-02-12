@@ -9,6 +9,7 @@ from . import init as init_mod
 from . import cache as cache_mod
 from . import remote as remote_mod
 from . import doctor as doctor_mod
+from . import auth as auth_mod
 from . import push as push_mod
 from . import add as add_mod
 from . import fetch as fetch_mod
@@ -533,27 +534,36 @@ def remote_init(project_name, name, remote_root, remote_path):
 @remote.command('list')
 @click.argument('repository', required=False)
 @click.option('--owner', help='Override the GitHub owner for short names')
-def remote_list(repository, owner):
+@click.option('--all', 'show_all', is_flag=True,
+              help='Show remotes from all config scopes, including local overrides')
+def remote_list(repository, owner, show_all):
     """List DVC remotes for a repository.
     
     Without arguments, lists remotes for the current repository.
     With a repository argument, lists remotes for that remote repository.
     
+    By default shows only remotes defined in the shared project config
+    (.dvc/config), excluding local overrides (.dvc/config.local).
+    Use --all to include every config scope.
+    
     \b
     Examples:
-        dt remote list                    # List remotes for current repo
+        dt remote list                    # Project-scope remotes
+        dt remote list --all              # Include local overrides
         dt remote list otherproject       # List remotes for another repo
         dt remote list myorg/otherproject # List with explicit owner
     """
+    project_only = not show_all
     if repository:
         # List remotes from a remote repository
         try:
-            remotes = remote_mod.list_remotes_from_repo(repository, owner=owner)
+            remotes = remote_mod.list_remotes_from_repo(
+                repository, owner=owner, project_only=project_only)
         except Exception as e:
             raise click.ClickException(str(e))
     else:
         # List remotes for current repository
-        remotes = remote_mod.list_remotes()
+        remotes = remote_mod.list_remotes(project_only=project_only)
     
     if not remotes:
         click.echo("No remotes configured.")
@@ -660,6 +670,379 @@ def doctor(verbose):
         click.echo("--- DVC Doctor ---")
         dvc_output = doctor_mod.run_dvc_doctor()
         click.echo(dvc_output)
+
+
+# =============================================================================
+# dt auth
+# =============================================================================
+
+@cli.group()
+def auth():
+    """Verify and diagnose access to storage backends.
+    
+    Discovers every storage endpoint the current project relies on
+    (filesystem, SSH, S3/R2, GCS, git) and can test access to each.
+    """
+    pass
+
+
+@auth.command('list')
+@click.option('--type', 'types', multiple=True,
+              type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
+              help='Filter to specific endpoint type(s). Repeat for multiple.')
+@click.option('--repo', 'repo_url', default=None,
+              help='Discover endpoints for a remote repo (URL or short name).')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True, help='Show discovery progress')
+def auth_list(types, repo_url, as_json, verbose):
+    """Discover every storage endpoint the project uses.
+    
+    Scans DVC remotes, dt config (cache.root, remote.root), git remotes,
+    and import .dvc files to find all endpoints. For imports, also discovers
+    DVC remotes of the source repository via tmp clones.
+
+    Use --repo to discover endpoints for a repo you haven't cloned:
+
+    \b
+      dt auth list --repo git@github.com:org/data-repo.git
+    """
+    try:
+        type_filter = set(types) if types else None
+        if repo_url:
+            endpoints = auth_mod.discover_endpoints_from_repo(
+                repo_url, type_filter=type_filter, verbose=verbose,
+            )
+        else:
+            endpoints = auth_mod.discover_endpoints(
+                type_filter=type_filter,
+                verbose=verbose,
+            )
+        if as_json:
+            click.echo(auth_mod.format_endpoints_json(endpoints))
+        else:
+            click.echo(auth_mod.format_endpoints(endpoints))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+@auth.command('whoami')
+@click.option('--detect', is_flag=True,
+              help='Probe external tools (gh, gcloud, aws) to auto-detect identities.')
+@click.option('--save', is_flag=True,
+              help='Save detected identities to user config (implies --detect).')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+def auth_whoami(detect, save, as_json):
+    """Show current user identities across systems.
+
+    Without flags, displays the local username and any identities stored
+    in dt config.
+
+    \b
+      dt auth whoami              # show stored identities
+      dt auth whoami --detect     # probe gh, gcloud, aws for active accounts
+      dt auth whoami --save       # detect + save to user config
+    """
+    if save:
+        detect = True
+
+    if detect:
+        click.echo(click.style('Detecting identities...', dim=True))
+        detected = auth_mod.detect_identities()
+        stored = auth_mod.get_identities()
+
+        if as_json:
+            click.echo(auth_mod.format_identities_json(detected))
+        else:
+            comparisons = auth_mod.compare_identities(stored, detected)
+            click.echo(auth_mod.format_whoami_comparison(comparisons))
+
+            # If there are new or mismatched detections, suggest --save
+            if not save:
+                saveable = [
+                    note for _, _, note in comparisons
+                    if note in ('detected only', 'mismatch')
+                ]
+                if saveable:
+                    click.echo(click.style(
+                        'Run `dt auth whoami --save` to save detected '
+                        'values to user config.',
+                        dim=True,
+                    ))
+
+        if save:
+            count = auth_mod.save_detected_identities(detected)
+            if count:
+                click.echo(click.style(
+                    f'✓ Saved {count} identity value(s) to user config.',
+                    fg='green',
+                ))
+            else:
+                click.echo(click.style(
+                    'Nothing new to save — config is up to date.',
+                    dim=True,
+                ))
+    else:
+        identities = auth_mod.get_identities()
+        if as_json:
+            click.echo(auth_mod.format_identities_json(identities))
+        else:
+            click.echo(auth_mod.format_identities(identities))
+
+
+@auth.command('check')
+@click.option('--type', 'types', multiple=True,
+              type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
+              help='Only check specific endpoint type(s). Repeat for multiple.')
+@click.option('--repo', 'repo_url', default=None,
+              help='Check endpoints for a remote repo (URL or short name).')
+@click.option('--user', 'check_user', default=None,
+              help="Check access from another user's perspective (filesystem + GitHub).")
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True,
+              help='Show per-subdirectory detail for filesystem checks')
+def auth_check(types, repo_url, check_user, as_json, verbose):
+    """Test access to each discovered endpoint.
+
+    Discovers all endpoints (like ``dt auth list``) then runs a
+    connectivity / permission check for each one.
+
+    Use --user to check access from another user's perspective:
+
+    \b
+      dt auth check --user alice        # check all endpoints for alice
+      dt auth check --user alice --type filesystem  # filesystem only
+
+    Use --repo to check endpoints for a repo you haven't cloned:
+
+    \b
+      dt auth check --repo git@github.com:org/data-repo.git
+    """
+    try:
+        type_filter = set(types) if types else None
+        if check_user:
+            click.echo(click.style(
+                f'Checking access for user: {check_user}', dim=True,
+            ))
+        if repo_url:
+            endpoints = auth_mod.discover_endpoints_from_repo(
+                repo_url, type_filter=type_filter, verbose=verbose,
+            )
+        else:
+            endpoints = None
+        results = auth_mod.check_endpoints(
+            endpoints=endpoints,
+            type_filter=type_filter if not repo_url else None,
+            verbose=verbose,
+            user=check_user,
+        )
+        if as_json:
+            click.echo(auth_mod.format_check_results_json(results))
+        else:
+            click.echo(auth_mod.format_check_results(results))
+
+        # Exit non-zero if any checks failed
+        if any(r.status == auth_mod.STATUS_FAIL for r in results):
+            raise SystemExit(1)
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+@auth.command('request')
+@click.option('--type', 'types', multiple=True,
+              type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
+              help='Only include failures for specific endpoint type(s).')
+@click.option('--repo', 'repo_url', default=None,
+              help='Generate request for a remote repo (URL or short name).')
+@click.option('--format', 'fmt', default='text',
+              type=click.Choice(['text', 'markdown', 'json'], case_sensitive=False),
+              help='Output format (default: text).')
+@click.option('--send', 'send_via', default=None, is_flag=False,
+              flag_value='auto',
+              type=click.Choice(['slack', 'email'], case_sensitive=False),
+              help='Send the request (slack, email, or omit value to auto-detect).')
+@click.option('-v', '--verbose', is_flag=True,
+              help='Show verbose check detail')
+def auth_request(types, repo_url, fmt, verbose, send_via):
+    """Generate an access-request template from check failures.
+
+    Runs ``dt auth check`` internally, collects failures, and produces
+    a template that can be sent to an administrator or pasted into a
+    support ticket.
+
+    Use --send to deliver the request directly:
+
+    \b
+      dt auth request --send          # auto-detect (Slack > email)
+      dt auth request --send slack    # send to Slack webhook
+      dt auth request --send email    # send via mail command
+
+    Use --repo for a repo you haven't cloned:
+
+    \b
+      dt auth request --repo git@github.com:org/data-repo.git
+    """
+    try:
+        type_filter = set(types) if types else None
+        if repo_url:
+            endpoints = auth_mod.discover_endpoints_from_repo(
+                repo_url, type_filter=type_filter, verbose=verbose,
+            )
+            req = auth_mod.generate_request(
+                type_filter=None, verbose=verbose,
+                endpoints=endpoints,
+            )
+        else:
+            req = auth_mod.generate_request(
+                type_filter=type_filter,
+                verbose=verbose,
+            )
+
+        if fmt == 'json':
+            click.echo(auth_mod.format_request_json(req))
+        elif fmt == 'markdown':
+            click.echo(auth_mod.format_request_markdown(req))
+        else:
+            click.echo(auth_mod.format_request_text(req))
+
+        # Send if requested
+        if send_via is not None:
+            if not req.items:
+                click.echo('Nothing to send — all endpoints are accessible.')
+            else:
+                method = None if send_via == 'auto' else send_via
+                msg = auth_mod.send_request(req, method=method)
+                click.echo(click.style(f'\n✓ {msg}', fg='green'))
+
+        # Exit non-zero if there are items to request
+        if req.items:
+            raise SystemExit(1)
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+# -- dt auth teams ----------------------------------------------------------
+
+@auth.group('teams')
+def auth_teams():
+    """Manage GitHub team access for repositories."""
+    pass
+
+
+@auth_teams.command('repo')
+@click.argument('repo_url')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+def auth_teams_repo(repo_url, as_json):
+    """List GitHub teams with access to a repository.
+
+    REPO_URL is a GitHub repository URL (SSH or HTTPS) or a short name.
+
+    \b
+      dt auth teams repo git@github.com:org/data-repo.git
+      dt auth teams repo neochemo
+    """
+    try:
+        teams = auth_mod.list_repo_teams(repo_url)
+        if as_json:
+            click.echo(auth_mod.format_teams_json(teams))
+        else:
+            click.echo(auth_mod.format_teams(
+                teams, header=f'Teams with access to {repo_url}',
+            ))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+@auth_teams.command('user')
+@click.argument('username')
+@click.option('--org', required=True,
+              help='GitHub organisation to search.')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+def auth_teams_user(username, org, as_json):
+    """List GitHub teams that a user belongs to.
+
+    \b
+      dt auth teams user alice --org myorg
+    """
+    try:
+        teams = auth_mod.list_user_teams(username, org=org)
+        if as_json:
+            click.echo(auth_mod.format_teams_json(teams))
+        else:
+            click.echo(auth_mod.format_teams(
+                teams, header=f"Teams for '{username}' in {org}",
+            ))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+@auth_teams.command('add-to-repo')
+@click.argument('team_slug')
+@click.argument('repo_url')
+@click.option('--permission', default='push',
+              type=click.Choice(['pull', 'push', 'admin', 'maintain', 'triage'],
+                                case_sensitive=False),
+              help='Permission level (default: push).')
+@click.option('--dry', is_flag=True,
+              help='Show what would be done without making changes.')
+def auth_teams_add_to_repo(team_slug, repo_url, permission, dry):
+    """Add a GitHub team to a repository.
+
+    \b
+      dt auth teams add-to-repo data-team git@github.com:org/repo.git
+      dt auth teams add-to-repo data-team neochemo
+      dt auth teams add-to-repo data-team neochemo --permission pull
+      dt auth teams add-to-repo data-team neochemo --dry
+    """
+    try:
+        repo_url = auth_mod.resolve_repo_url(repo_url)
+        parsed = auth_mod._parse_github_owner_repo(repo_url)
+        if parsed is None:
+            raise click.ClickException(f'Not a GitHub URL: {repo_url}')
+        owner, repo = parsed
+        if dry:
+            click.echo(
+                f"Would grant '{permission}' access for team '{team_slug}' "
+                f"to {owner}/{repo}"
+            )
+            click.echo(
+                f"  gh api orgs/{owner}/teams/{team_slug}/repos/{owner}/{repo} "
+                f"-X PUT -f permission={permission}"
+            )
+        else:
+            msg = auth_mod.add_team_to_repo(repo_url, team_slug, permission)
+            click.echo(click.style(f'✓ {msg}', fg='green'))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+@auth_teams.command('add-user')
+@click.argument('username')
+@click.argument('team_slug')
+@click.option('--org', required=True,
+              help='GitHub organisation.')
+@click.option('--dry', is_flag=True,
+              help='Show what would be done without making changes.')
+def auth_teams_add_user(username, team_slug, org, dry):
+    """Add a user to a GitHub team.
+
+    \b
+      dt auth teams add-user alice data-team --org myorg
+      dt auth teams add-user alice data-team --org myorg --dry
+    """
+    try:
+        if dry:
+            click.echo(
+                f"Would add '{username}' to team '{org}/{team_slug}'"
+            )
+            click.echo(
+                f"  gh api orgs/{org}/teams/{team_slug}/memberships/{username} "
+                f"-X PUT"
+            )
+        else:
+            msg = auth_mod.add_user_to_team(org, team_slug, username)
+            click.echo(click.style(f'✓ {msg}', fg='green'))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
 
 
 @cli.command()
