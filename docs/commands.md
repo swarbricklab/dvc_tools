@@ -284,9 +284,11 @@ Verify and diagnose access to all storage backends used by a DVC project.
 | Subcommand | Description |
 |------------|-------------|
 | `dt auth list` | Discover every storage endpoint the project uses |
+| `dt auth whoami` | Show current user identities across systems |
 | `dt auth check` | Test access to each endpoint |
 | `dt auth request` | Generate an access-request template from failures |
-| `dt auth grant` | Grant a user access to a resource (admin) |
+| `dt auth teams` | Manage GitHub team access for repositories |
+| `dt auth grant` | Grant a user access to a resource *(planned)* |
 
 Discovers endpoints from DVC remotes, `.dvc` import files, dt config, and git remotes. Supports filesystem, SSH, S3-compatible (including CloudFlare R2), GCS, and git endpoints. [Full documentation →](auth.md)
 

@@ -17,7 +17,7 @@ A DVC project may depend on several storage backends simultaneously — a shared
 | [`dt auth check`](#dt-auth-check) | Test access to each endpoint |
 | [`dt auth request`](#dt-auth-request) | Generate an access-request template from failures |
 | [`dt auth teams`](#dt-auth-teams) | Manage GitHub team access for repositories |
-| [`dt auth grant`](#dt-auth-grant) | Grant a user access to a resource (admin) |
+| [`dt auth grant`](#dt-auth-grant) | Grant a user access to a resource *(planned)* |
 
 ---
 
@@ -473,36 +473,20 @@ dt auth teams add-user alice data-team --org myorg
 
 ## dt auth grant
 
-Grant a user access to a resource. Built gradually — initial support for POSIX filesystem permissions.
+> **Status**: Not yet implemented.
 
-### Usage
-
-```bash
-dt auth grant <user> <resource> [--level read|write] [--dry]
-```
+Planned command to grant a user access to a resource.
 
 ### Planned capabilities
 
-| Resource type | Mechanism | Status |
-|---------------|-----------|--------|
-| Filesystem | `setfacl` / group management | First to build |
-| GitHub repo | `gh api` collaborator invite | Planned |
+| Resource type | Mechanism | Notes |
+|---------------|-----------|-------|
+| Filesystem | `setfacl` / group management | Deferred — the admin typically does not own the cache files and lacks sudo. Use `dt auth check --user` + ownership info to identify who to ask. |
+| GitHub repo | `gh api` collaborator invite or `dt auth teams add-to-repo` | Team-based access is available now via `dt auth teams`. |
 | S3/R2 bucket | Policy suggestion (manual) | Planned |
 | GCS bucket | IAM binding suggestion (manual) | Planned |
 
-### Example
-
-```bash
-# Grant write access to a cache directory
-dt auth grant jsmith /g/data/a56/dvc_cache --level write --dry
-
-# Would run:
-#   setfacl -R -m u:jsmith:rwx /g/data/a56/dvc_cache
-```
-
-The `--dry` flag shows what commands would be run without executing them.
-
-> **Note**: `dt auth grant` requires appropriate admin permissions. It is designed to be extended over time as new resource types are encountered.
+For now, use `dt auth teams` to manage GitHub-level access and `dt auth check` with ownership info to identify the right person to grant filesystem access.
 
 ---
 
@@ -515,7 +499,7 @@ This command is being built incrementally:
 3. **`dt auth check`** — read-only access tests ✅
 4. **`dt auth request`** — template generation from check results ✅
 5. **`dt auth teams`** — GitHub team management ✅
-6. **`dt auth grant`** — admin actions (filesystem deferred, GitHub via teams)
+6. **`dt auth grant`** — admin actions (not yet implemented; use `dt auth teams` for GitHub access)
 
 ---
 
