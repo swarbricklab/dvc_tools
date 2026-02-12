@@ -168,7 +168,7 @@ Test whether the current user can actually access each discovered endpoint.
 ### Usage
 
 ```bash
-dt auth check [--type TYPE] [--verbose]
+dt auth check [--type TYPE] [--verbose] [--user USERNAME]
 ```
 
 ### Options
@@ -177,6 +177,7 @@ dt auth check [--type TYPE] [--verbose]
 |--------|-------------|
 | `--type TYPE` | Only check specific endpoint type(s): `filesystem`, `ssh`, `s3`, `gs`, `http`, `git` |
 | `--verbose` | Show per-subdirectory detail for filesystem checks |
+| `--user USERNAME` | Check access from another user's perspective (admin use) |
 
 ```bash
 # Only check filesystem access (cache and remote directories)
@@ -278,6 +279,42 @@ When an SSH access check fails, `dt auth check` will **not** look for local SSH 
     Hint: ensure you connected with agent forwarding: ssh -A <host>
 ```
 
+### Checking access for another user (`--user`)
+
+Admins can check whether a specific user has access to project
+endpoints **without needing sudo**. The `--user` flag simulates
+permission checks from that user's perspective:
+
+```bash
+# Check if user 'ab1234' can access all endpoints
+dt auth check --user ab1234
+
+# Only check filesystem access for that user
+dt auth check --user ab1234 --type filesystem
+```
+
+#### How it works
+
+| Endpoint type | Method |
+|---------------|--------|
+| **filesystem** | Resolves the user's uid/gid/supplementary groups via `pwd` and `grp`, then checks file mode bits from `os.stat()` plus POSIX ACLs via `getfacl` |
+| **git** (GitHub) | Queries `gh api repos/{owner}/{repo}/collaborators/{user}/permission` to get the user's permission level |
+| **ssh** (local path) | Same as filesystem — checks the local path |
+| s3, gs, http, ssh (remote) | Skipped — cannot determine another user's credentials |
+
+Example output:
+
+```
+$ dt auth check --user ab1234
+Checking access for user: ab1234
+
+  ✓ /g/data/a56/dvc_cache                       read/write for ab1234
+  ✗ /g/data/a56/dvc_remote/my-project           not readable by ab1234
+    Hint: Grant access: setfacl -R -m u:ab1234:rwx /g/data/a56/dvc_remote/my-project
+  ✓ git@github.com:org/data-repo.git             write access for ab1234
+  – s3://my-r2-bucket/dvc                        cannot check s3 access for another user
+```
+
 ---
 
 ## dt auth request
@@ -298,6 +335,8 @@ dt auth request [--type TYPE] [--format text|markdown|json] [--send [slack|email
 | `--send` | Send the request. Omit the value to auto-detect (Slack → email), or specify `slack` or `email` explicitly. |
 
 Runs `dt auth check` internally (respecting `--type` filters), collects failures, and produces a template that can be sent to an administrator or pasted into a support ticket.
+
+The request automatically includes the user's **identities** (NCI username, GitHub user, GitHub teams, GCP email, AWS identity) so admins know which accounts to grant access to. Identities are gathered from config and auto-detection (same as `dt auth whoami`).
 
 With `--send`, the request is delivered directly:
 
@@ -334,6 +373,11 @@ The following resources are not accessible:
      Status: credentials not configured
      Required: read access (at minimum)
      Suggested fix: configure aws credentials for the R2 endpoint
+
+Identities:
+  NCI username: jsmith
+  GitHub user: jsmith-gh
+  GitHub teams: org/data-team
 
 Platform: gadi-dm.nci.org.au
 dt version: 0.2.0

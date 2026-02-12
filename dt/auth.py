@@ -958,6 +958,299 @@ def _check_http(ep: Endpoint) -> CheckResult:
         )
 
 
+# ---------------------------------------------------------------------
+# Per-user checkers (for --user flag)
+# ---------------------------------------------------------------------
+
+def _get_user_info(username: str) -> Optional[Tuple[int, int, List[int]]]:
+    """Get uid, primary gid, and supplementary gids for *username*.
+
+    Returns ``None`` if the user does not exist on this system.
+    """
+    import grp
+    import pwd
+    try:
+        pw = pwd.getpwnam(username)
+    except KeyError:
+        return None
+
+    uid = pw.pw_uid
+    gid = pw.pw_gid
+    groups = [g.gr_gid for g in grp.getgrall() if username in g.gr_mem]
+    if gid not in groups:
+        groups.append(gid)
+    return uid, gid, groups
+
+
+def _stat_check_user(
+    path: Path,
+    uid: int,
+    gids: List[int],
+    need_write: bool = True,
+) -> Tuple[bool, bool]:
+    """Simulate permission check for a given uid/gids.
+
+    Returns ``(readable, writable)`` booleans.  Uses the file's
+    mode bits and owner/group from :func:`os.stat`, plus ACLs via
+    ``getfacl`` if available.
+    """
+    try:
+        st = path.stat()
+    except (PermissionError, FileNotFoundError):
+        return False, False
+
+    mode = st.st_mode
+    file_uid = st.st_uid
+    file_gid = st.st_gid
+
+    if uid == file_uid:
+        readable = bool(mode & 0o400)
+        writable = bool(mode & 0o200)
+    elif file_gid in gids:
+        readable = bool(mode & 0o040)
+        writable = bool(mode & 0o020)
+    else:
+        readable = bool(mode & 0o004)
+        writable = bool(mode & 0o002)
+
+    # Try ACLs as a supplementary check (may grant extra access)
+    if not (readable and writable):
+        acl_r, acl_w = _check_acl_for_user(path, uid, gids)
+        readable = readable or acl_r
+        writable = writable or acl_w
+
+    return readable, writable
+
+
+def _check_acl_for_user(
+    path: Path,
+    uid: int,
+    gids: List[int],
+) -> Tuple[bool, bool]:
+    """Check POSIX ACLs for a user via ``getfacl``.
+
+    Returns ``(readable, writable)`` — both False if getfacl is
+    unavailable or errors out.
+    """
+    import grp
+    import pwd
+
+    try:
+        username = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return False, False
+
+    try:
+        result = subprocess.run(
+            ['getfacl', '-p', str(path)],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return False, False
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False, False
+
+    readable = False
+    writable = False
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        # user:<name>:rwx
+        if line.startswith(f'user:{username}:'):
+            perms = line.split(':')[2]
+            if 'r' in perms:
+                readable = True
+            if 'w' in perms:
+                writable = True
+        # group:<name>:rwx — check all groups
+        elif line.startswith('group:'):
+            parts = line.split(':')
+            if len(parts) >= 3:
+                gname = parts[1]
+                try:
+                    gr = grp.getgrnam(gname)
+                    if gr.gr_gid in gids:
+                        perms = parts[2]
+                        if 'r' in perms:
+                            readable = True
+                        if 'w' in perms:
+                            writable = True
+                except KeyError:
+                    pass
+
+    return readable, writable
+
+
+def _check_filesystem_for_user(
+    ep: Endpoint,
+    username: str,
+    verbose: bool = False,
+) -> CheckResult:
+    """Check filesystem access from *username*'s perspective.
+
+    Simulates permission checks using ``stat()`` + ``getfacl``
+    without needing ``sudo``.
+    """
+    user_info = _get_user_info(username)
+    if user_info is None:
+        return CheckResult(
+            endpoint=ep, status=STATUS_SKIP,
+            summary=f"user '{username}' not found on this system",
+        )
+
+    uid, _, gids = user_info
+    path = Path(ep.url)
+
+    if not path.exists():
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary='path does not exist',
+        )
+
+    readable, writable = _stat_check_user(path, uid, gids)
+
+    if not readable:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary=f'not readable by {username}',
+            hints=[f'Grant access: setfacl -R -m u:{username}:rwx {ep.url}'],
+        )
+
+    if not writable:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary=f'read-only for {username}',
+            hints=[f'Grant write: setfacl -R -m u:{username}:rwx {ep.url}'],
+        )
+
+    # Check subdirectories
+    try:
+        subdirs = sorted([d for d in path.iterdir() if d.is_dir()])
+    except PermissionError:
+        return CheckResult(
+            endpoint=ep, status=STATUS_PASS,
+            summary=f'root accessible by {username} (cannot enumerate subdirs)',
+        )
+
+    if not subdirs:
+        return CheckResult(
+            endpoint=ep, status=STATUS_PASS,
+            summary=f'read/write for {username}',
+        )
+
+    fail_count = 0
+    detail_lines: List[str] = []
+    failed_dirs: List[Path] = []
+
+    for d in subdirs:
+        d_r, d_w = _stat_check_user(d, uid, gids)
+        if d_r and d_w:
+            if verbose:
+                detail_lines.append(f'{d.name}  r/w')
+        else:
+            fail_count += 1
+            failed_dirs.append(d)
+            perms = []
+            if not d_r:
+                perms.append('not readable')
+            if not d_w:
+                perms.append('not writable')
+            detail_lines.append(f'{d.name}  {", ".join(perms)}')
+
+    total = len(subdirs)
+    if fail_count == 0:
+        return CheckResult(
+            endpoint=ep, status=STATUS_PASS,
+            summary=f'read/write for {username} ({total}/{total} subdirs OK)',
+            details=detail_lines if verbose else [],
+        )
+
+    hints = [f'setfacl -R -m u:{username}:rwx {d}' for d in failed_dirs[:3]]
+    return CheckResult(
+        endpoint=ep, status=STATUS_FAIL,
+        summary=f'{fail_count} of {total} subdirs not accessible by {username}',
+        details=detail_lines,
+        hints=hints,
+    )
+
+
+def _check_github_for_user(
+    ep: Endpoint,
+    username: str,
+) -> CheckResult:
+    """Check GitHub repository access for a specific user.
+
+    Uses ``gh api`` to check:
+    1. Whether the user is a collaborator on the repo.
+    2. Their permission level.
+
+    Requires the caller to have admin/maintain access to the repo
+    (or org membership).
+    """
+    # Extract owner/repo from git URL
+    url = ep.url
+    repo_path = None
+    for prefix in ('git@github.com:', 'https://github.com/'):
+        if url.startswith(prefix):
+            repo_path = url[len(prefix):]
+            break
+
+    if not repo_path:
+        return CheckResult(
+            endpoint=ep, status=STATUS_SKIP,
+            summary='not a GitHub URL, cannot check per-user access',
+        )
+
+    repo_path = repo_path.rstrip('/').removesuffix('.git')
+
+    try:
+        result = subprocess.run(
+            ['gh', 'api', f'repos/{repo_path}/collaborators/{username}/permission',
+             '-q', '.permission'],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            perm = result.stdout.strip()
+            if perm in ('admin', 'maintain', 'write', 'read'):
+                return CheckResult(
+                    endpoint=ep, status=STATUS_PASS,
+                    summary=f'{username} has {perm} access',
+                )
+            else:
+                return CheckResult(
+                    endpoint=ep, status=STATUS_FAIL,
+                    summary=f'{username} has {perm} access (insufficient)',
+                    hints=[f'Invite {username} to {repo_path} or add to a team with access'],
+                )
+        elif result.returncode != 0:
+            stderr = result.stderr.strip()
+            if '404' in stderr or 'Not Found' in stderr:
+                return CheckResult(
+                    endpoint=ep, status=STATUS_FAIL,
+                    summary=f'{username} is not a collaborator',
+                    hints=[f'Invite {username} to {repo_path} or add to a team with access'],
+                )
+            return CheckResult(
+                endpoint=ep, status=STATUS_SKIP,
+                summary=f'cannot check: {stderr[:80]}',
+            )
+    except FileNotFoundError:
+        return CheckResult(
+            endpoint=ep, status=STATUS_SKIP,
+            summary='gh CLI not available',
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            endpoint=ep, status=STATUS_SKIP,
+            summary='gh API timed out',
+        )
+
+    return CheckResult(
+        endpoint=ep, status=STATUS_SKIP,
+        summary='could not determine access',
+    )
+
+
 # The dispatcher used by check_endpoints
 _CHECKERS = {
     'filesystem': _check_filesystem,
@@ -1065,6 +1358,7 @@ def check_endpoints(
     endpoints: Optional[List[Endpoint]] = None,
     type_filter: Optional[Set[str]] = None,
     verbose: bool = False,
+    user: Optional[str] = None,
 ) -> List[CheckResult]:
     """Run access checks on every endpoint.
 
@@ -1084,6 +1378,8 @@ def check_endpoints(
         endpoints: Pre-discovered endpoints, or None to discover now.
         type_filter: Passed through to :func:`discover_endpoints`.
         verbose: Show verbose per-subdirectory filesystem detail.
+        user: If set, check access from this user's perspective
+            (filesystem via stat/ACL, git via GitHub API).
 
     Returns:
         List of :class:`CheckResult` objects.
@@ -1093,23 +1389,46 @@ def check_endpoints(
 
     results: List[CheckResult] = []
     for ep in endpoints:
-        result = _try_check(ep, verbose=verbose)
+        result = _try_check(ep, verbose=verbose, user=user)
         results.append(result)
 
         # Check children too
         for child in ep.children:
-            results.append(_try_check(child, verbose=verbose))
+            results.append(_try_check(child, verbose=verbose, user=user))
 
     return results
 
 
-def _try_check(ep: Endpoint, verbose: bool = False) -> CheckResult:
+def _try_check(ep: Endpoint, verbose: bool = False,
+               user: Optional[str] = None) -> CheckResult:
     """Check a single endpoint, preferring DVC-native access where possible.
 
     For endpoints sourced from a DVC remote (source matches
     ``"DVC remote '...'"``), tries :func:`_check_dvc_remote` first.
     Falls back to per-type CLI checkers.
+
+    If *user* is set, uses per-user checkers for filesystem and git
+    endpoints (simulating access from another user's perspective).
     """
+    # --user mode: use per-user checkers where available
+    if user:
+        if ep.type == 'filesystem':
+            return _check_filesystem_for_user(ep, user, verbose=verbose)
+        if ep.type == 'git':
+            return _check_github_for_user(ep, user)
+        if ep.type == 'ssh' and ep.local_path:
+            # SSH with local path — check the local filesystem
+            local_ep = Endpoint(
+                type='filesystem', url=ep.local_path,
+                source=ep.source, local_path=ep.local_path,
+            )
+            return _check_filesystem_for_user(local_ep, user, verbose=verbose)
+        # For s3/gs/http/ssh-remote: can't check per-user
+        return CheckResult(
+            endpoint=ep, status=STATUS_SKIP,
+            summary=f'cannot check {ep.type} access for another user',
+        )
+
     remote_name = _extract_remote_name(ep.source)
 
     # For DVC remotes in the current project (not children of import
@@ -1215,6 +1534,7 @@ class AccessRequest:
         platform_name: Hostname / platform identifier.
         dt_version: Installed dt version string.
         request_date: Date the request was generated.
+        identities: User identities across systems.
         items: Failed/warned :class:`CheckResult` objects that need
             attention.
     """
@@ -1224,6 +1544,7 @@ class AccessRequest:
     platform_name: str
     dt_version: str
     request_date: str
+    identities: List['Identity'] = field(default_factory=list)
     items: List[CheckResult] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -1233,6 +1554,7 @@ class AccessRequest:
             'platform': self.platform_name,
             'dt_version': self.dt_version,
             'date': self.request_date,
+            'identities': [i.to_dict() for i in self.identities],
             'items': [r.to_dict() for r in self.items],
         }
 
@@ -1280,6 +1602,7 @@ def generate_request(
         platform_name=platform.node(),
         dt_version=_get_dt_version(),
         request_date=date.today().isoformat(),
+        identities=get_identities(),
         items=items,
     )
 
@@ -1322,6 +1645,13 @@ def format_request_text(req: AccessRequest) -> str:
     lines.append(f'Platform: {req.platform_name}')
     lines.append(f'dt version: {req.dt_version}')
     lines.append(f'Date: {req.request_date}')
+
+    if req.identities:
+        lines.append('')
+        lines.append('Identities:')
+        for ident in req.identities:
+            lines.append(f'  {ident.system}: {ident.value}')
+
     lines.append('')
 
     return '\n'.join(lines)
@@ -1338,6 +1668,13 @@ def format_request_markdown(req: AccessRequest) -> str:
     lines.append(f'**dt version:** {req.dt_version}  ')
     lines.append(f'**Date:** {req.request_date}')
     lines.append('')
+
+    if req.identities:
+        lines.append('**Identities:**')
+        lines.append('')
+        for ident in req.identities:
+            lines.append(f'- **{ident.system}:** {ident.value}')
+        lines.append('')
 
     if not req.items:
         lines.append('All endpoints are accessible — no request needed.')
@@ -1407,8 +1744,21 @@ def _format_slack_blocks(req: AccessRequest) -> dict:
                 {'type': 'mrkdwn', 'text': f'*Date:* {req.request_date}'},
             ],
         },
-        {'type': 'divider'},
     ]
+
+    # Add identities (skip NCI username — already shown as User)
+    id_lines = [f'*{i.system}:* {i.value}'
+                for i in req.identities if i.system != 'NCI username']
+    if id_lines:
+        blocks.append({
+            'type': 'section',
+            'text': {
+                'type': 'mrkdwn',
+                'text': '\n'.join(id_lines),
+            },
+        })
+
+    blocks.append({'type': 'divider'})
 
     if not req.items:
         blocks.append({

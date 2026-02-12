@@ -768,20 +768,33 @@ def auth_whoami(detect, save, as_json):
 @click.option('--type', 'types', multiple=True,
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
               help='Only check specific endpoint type(s). Repeat for multiple.')
+@click.option('--user', 'check_user', default=None,
+              help="Check access from another user's perspective (filesystem + GitHub).")
 @click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show per-subdirectory detail for filesystem checks')
-def auth_check(types, as_json, verbose):
+def auth_check(types, check_user, as_json, verbose):
     """Test access to each discovered endpoint.
 
     Discovers all endpoints (like ``dt auth list``) then runs a
     connectivity / permission check for each one.
+
+    Use --user to check access from another user's perspective:
+
+    \b
+      dt auth check --user alice        # check all endpoints for alice
+      dt auth check --user alice --type filesystem  # filesystem only
     """
     try:
         type_filter = set(types) if types else None
+        if check_user:
+            click.echo(click.style(
+                f'Checking access for user: {check_user}', dim=True,
+            ))
         results = auth_mod.check_endpoints(
             type_filter=type_filter,
             verbose=verbose,
+            user=check_user,
         )
         if as_json:
             click.echo(auth_mod.format_check_results_json(results))

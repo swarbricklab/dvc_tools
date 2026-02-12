@@ -45,6 +45,10 @@ from dt.auth import (
     _detect_github_teams,
     _detect_gcp_email,
     _detect_aws_identity,
+    _get_user_info,
+    _stat_check_user,
+    _check_filesystem_for_user,
+    _check_github_for_user,
     _discover_dt_config,
     _discover_dvc_remotes,
     _discover_git_remotes,
@@ -1980,3 +1984,342 @@ class TestSaveDetectedIdentities:
         count = save_detected_identities(detected)
         assert count == 1
         mock_set.assert_called_once_with('auth.github_user', 'new-name', scope='user')
+
+
+# =============================================================================
+# AccessRequest identities tests
+# =============================================================================
+
+class TestAccessRequestIdentities:
+    """Tests for identities flowing through AccessRequest."""
+
+    def test_to_dict_includes_identities(self):
+        req = AccessRequest(
+            user='alice', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+            identities=[Identity('GitHub user', 'alice-gh', 'config')],
+        )
+        d = req.to_dict()
+        assert 'identities' in d
+        assert len(d['identities']) == 1
+        assert d['identities'][0]['value'] == 'alice-gh'
+
+    def test_to_dict_empty_identities(self):
+        req = AccessRequest(
+            user='alice', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+        )
+        d = req.to_dict()
+        assert d['identities'] == []
+
+    def test_text_format_includes_identities(self):
+        ep = Endpoint(type='filesystem', url='/data', source='test')
+        item = CheckResult(endpoint=ep, status=STATUS_FAIL, summary='bad')
+        req = AccessRequest(
+            user='alice', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+            identities=[
+                Identity('NCI username', 'alice', 'detected'),
+                Identity('GitHub user', 'alice-gh', 'config'),
+            ],
+            items=[item],
+        )
+        output = format_request_text(req)
+        assert 'Identities:' in output
+        assert 'GitHub user: alice-gh' in output
+
+    def test_text_format_no_identities_section_when_empty(self):
+        ep = Endpoint(type='filesystem', url='/data', source='test')
+        item = CheckResult(endpoint=ep, status=STATUS_FAIL, summary='bad')
+        req = AccessRequest(
+            user='alice', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+            items=[item],
+        )
+        output = format_request_text(req)
+        assert 'Identities:' not in output
+
+    def test_markdown_format_includes_identities(self):
+        ep = Endpoint(type='filesystem', url='/data', source='test')
+        item = CheckResult(endpoint=ep, status=STATUS_FAIL, summary='bad')
+        req = AccessRequest(
+            user='alice', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+            identities=[Identity('GitHub teams', 'data-team, ops', 'config')],
+            items=[item],
+        )
+        output = format_request_markdown(req)
+        assert '**GitHub teams:**' in output
+        assert 'data-team, ops' in output
+
+    def test_json_format_includes_identities(self):
+        req = AccessRequest(
+            user='alice', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+            identities=[Identity('GCP email', 'a@gcp.com', 'config')],
+        )
+        data = json.loads(format_request_json(req))
+        assert len(data['identities']) == 1
+        assert data['identities'][0]['system'] == 'GCP email'
+
+    def test_slack_blocks_include_identities(self):
+        req = AccessRequest(
+            user='alice', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+            identities=[
+                Identity('NCI username', 'alice', 'detected'),
+                Identity('GitHub user', 'alice-gh', 'config'),
+                Identity('GitHub teams', 'data-team', 'config'),
+            ],
+        )
+        payload = _format_slack_blocks(req)
+        text = json.dumps(payload)
+        # NCI username should be skipped (shown as User already)
+        assert 'GitHub user' in text
+        assert 'alice-gh' in text
+        assert 'data-team' in text
+
+    def test_slack_blocks_no_extra_section_without_identities(self):
+        req = AccessRequest(
+            user='alice', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+            identities=[Identity('NCI username', 'alice', 'detected')],
+        )
+        payload = _format_slack_blocks(req)
+        # Only NCI username, which is skipped — no identity section block
+        # Should have: header, metadata section, divider, all-clear
+        block_types = [b['type'] for b in payload['blocks']]
+        assert block_types.count('section') == 2  # metadata + all-clear
+
+
+# =============================================================================
+# generate_request with identities tests
+# =============================================================================
+
+class TestGenerateRequestIdentities:
+    """Test that generate_request populates identities."""
+
+    @patch('dt.auth.check_endpoints', return_value=[])
+    @patch('dt.auth.get_identities', return_value=[
+        Identity('NCI username', 'alice', 'detected'),
+        Identity('GitHub user', 'alice-gh', 'config'),
+    ])
+    @patch('dt.auth.date')
+    @patch('dt.auth.platform.node', return_value='gadi')
+    @patch('dt.auth.utils.get_project_name', return_value='proj')
+    @patch('dt.auth.getpass.getuser', return_value='alice')
+    @patch('dt.auth._get_dt_version', return_value='0.3.0')
+    def test_identities_populated(self, *mocks):
+        req = generate_request()
+        assert len(req.identities) == 2
+        assert req.identities[1].value == 'alice-gh'
+
+
+# =============================================================================
+# Per-user filesystem check tests
+# =============================================================================
+
+class TestGetUserInfo:
+    """Tests for _get_user_info."""
+
+    def test_returns_uid_gid_groups(self):
+        import grp as grp_mod
+        import pwd as pwd_mod
+
+        pw = MagicMock()
+        pw.pw_uid = 1001
+        pw.pw_gid = 100
+
+        g1 = MagicMock()
+        g1.gr_gid = 100
+        g1.gr_mem = ['alice']
+        g2 = MagicMock()
+        g2.gr_gid = 200
+        g2.gr_mem = ['alice', 'bob']
+        g3 = MagicMock()
+        g3.gr_gid = 300
+        g3.gr_mem = ['bob']
+
+        with patch.object(pwd_mod, 'getpwnam', return_value=pw), \
+             patch.object(grp_mod, 'getgrall', return_value=[g1, g2, g3]):
+            result = _get_user_info('alice')
+        assert result is not None
+        uid, gid, groups = result
+        assert uid == 1001
+        assert gid == 100
+        assert 100 in groups
+        assert 200 in groups
+        assert 300 not in groups
+
+    def test_unknown_user_returns_none(self):
+        import pwd as pwd_mod
+        with patch.object(pwd_mod, 'getpwnam', side_effect=KeyError):
+            assert _get_user_info('nonexistent') is None
+
+
+class TestStatCheckUser:
+    """Tests for _stat_check_user."""
+
+    def test_owner_match(self, tmp_path):
+        f = tmp_path / 'test'
+        f.mkdir()
+        f.chmod(0o700)
+        st = f.stat()
+        # Current user owns this
+        r, w = _stat_check_user(f, st.st_uid, [st.st_gid])
+        assert r is True
+        assert w is True
+
+    def test_no_access(self, tmp_path):
+        f = tmp_path / 'test'
+        f.mkdir()
+        f.chmod(0o700)
+        st = f.stat()
+        # Different uid, different group
+        r, w = _stat_check_user(f, st.st_uid + 9999, [99999])
+        assert r is False
+        assert w is False
+
+    def test_nonexistent_path(self, tmp_path):
+        p = tmp_path / 'nope'
+        r, w = _stat_check_user(p, 1000, [1000])
+        assert r is False
+        assert w is False
+
+
+class TestCheckFilesystemForUser:
+    """Tests for _check_filesystem_for_user."""
+
+    @patch('dt.auth._get_user_info', return_value=None)
+    def test_unknown_user_skips(self, mock_info):
+        ep = Endpoint(type='filesystem', url='/data', source='test')
+        r = _check_filesystem_for_user(ep, 'nobody')
+        assert r.status == STATUS_SKIP
+        assert 'not found' in r.summary
+
+    @patch('dt.auth._stat_check_user', return_value=(True, True))
+    @patch('dt.auth._get_user_info', return_value=(1001, 100, [100]))
+    def test_accessible_dir(self, mock_info, mock_stat, tmp_path):
+        d = tmp_path / 'cache'
+        d.mkdir()
+        ep = Endpoint(type='filesystem', url=str(d), source='test')
+        r = _check_filesystem_for_user(ep, 'alice')
+        assert r.status == STATUS_PASS
+
+    @patch('dt.auth._stat_check_user', return_value=(False, False))
+    @patch('dt.auth._get_user_info', return_value=(1001, 100, [100]))
+    def test_not_readable(self, mock_info, mock_stat, tmp_path):
+        d = tmp_path / 'cache'
+        d.mkdir()
+        ep = Endpoint(type='filesystem', url=str(d), source='test')
+        r = _check_filesystem_for_user(ep, 'alice')
+        assert r.status == STATUS_FAIL
+        assert 'not readable' in r.summary
+
+    def test_nonexistent_path(self):
+        with patch('dt.auth._get_user_info', return_value=(1001, 100, [100])):
+            ep = Endpoint(type='filesystem', url='/nonexistent/path', source='test')
+            r = _check_filesystem_for_user(ep, 'alice')
+            assert r.status == STATUS_FAIL
+            assert 'does not exist' in r.summary
+
+
+# =============================================================================
+# Per-user GitHub check tests
+# =============================================================================
+
+class TestCheckGithubForUser:
+    """Tests for _check_github_for_user."""
+
+    @patch('dt.auth.subprocess.run')
+    def test_has_write_access(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout='write\n')
+        ep = Endpoint(type='git', url='git@github.com:org/repo.git', source='test')
+        r = _check_github_for_user(ep, 'alice')
+        assert r.status == STATUS_PASS
+        assert 'write' in r.summary
+
+    @patch('dt.auth.subprocess.run')
+    def test_not_collaborator(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stderr='404 Not Found')
+        ep = Endpoint(type='git', url='git@github.com:org/repo.git', source='test')
+        r = _check_github_for_user(ep, 'alice')
+        assert r.status == STATUS_FAIL
+        assert 'not a collaborator' in r.summary
+
+    @patch('dt.auth.subprocess.run', side_effect=FileNotFoundError)
+    def test_gh_not_installed(self, mock_run):
+        ep = Endpoint(type='git', url='git@github.com:org/repo.git', source='test')
+        r = _check_github_for_user(ep, 'alice')
+        assert r.status == STATUS_SKIP
+
+    def test_non_github_url_skipped(self):
+        ep = Endpoint(type='git', url='git@gitlab.com:org/repo.git', source='test')
+        r = _check_github_for_user(ep, 'alice')
+        assert r.status == STATUS_SKIP
+
+    @patch('dt.auth.subprocess.run')
+    def test_https_url(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout='read\n')
+        ep = Endpoint(type='git', url='https://github.com/org/repo', source='test')
+        r = _check_github_for_user(ep, 'alice')
+        assert r.status == STATUS_PASS
+
+
+# =============================================================================
+# _try_check with --user tests
+# =============================================================================
+
+class TestTryCheckUser:
+    """Tests for _try_check with user parameter."""
+
+    @patch('dt.auth._check_filesystem_for_user')
+    def test_filesystem_routes_to_user_checker(self, mock_check):
+        mock_check.return_value = CheckResult(
+            endpoint=Endpoint(type='filesystem', url='/data', source='test'),
+            status=STATUS_PASS, summary='ok',
+        )
+        ep = Endpoint(type='filesystem', url='/data', source='test')
+        r = _try_check(ep, user='alice')
+        mock_check.assert_called_once_with(ep, 'alice', verbose=False)
+
+    @patch('dt.auth._check_github_for_user')
+    def test_git_routes_to_github_checker(self, mock_check):
+        mock_check.return_value = CheckResult(
+            endpoint=Endpoint(type='git', url='git@github.com:o/r.git', source='test'),
+            status=STATUS_PASS, summary='ok',
+        )
+        ep = Endpoint(type='git', url='git@github.com:o/r.git', source='test')
+        r = _try_check(ep, user='alice')
+        mock_check.assert_called_once_with(ep, 'alice')
+
+    def test_s3_skipped_for_user(self):
+        ep = Endpoint(type='s3', url='s3://bucket', source='test')
+        r = _try_check(ep, user='alice')
+        assert r.status == STATUS_SKIP
+        assert 'cannot check' in r.summary
+
+    @patch('dt.auth._check_filesystem_for_user')
+    def test_ssh_local_path_routes_to_filesystem(self, mock_check):
+        mock_check.return_value = CheckResult(
+            endpoint=Endpoint(type='filesystem', url='/local/path', source='test'),
+            status=STATUS_PASS, summary='ok',
+        )
+        ep = Endpoint(type='ssh', url='ssh://host/path', source='test',
+                      local_path='/local/path')
+        r = _try_check(ep, user='alice')
+        mock_check.assert_called_once()
+        # Should have created a filesystem endpoint with the local path
+        call_ep = mock_check.call_args[0][0]
+        assert call_ep.type == 'filesystem'
+        assert call_ep.url == '/local/path'
+
+    def test_no_user_uses_normal_path(self):
+        """Without user, _try_check should not route to per-user checkers."""
+        ep = Endpoint(type='filesystem', url='/data', source='test')
+        mock_checker = MagicMock(return_value=CheckResult(
+            endpoint=ep, status=STATUS_PASS, summary='ok',
+        ))
+        with patch('dt.auth._CHECKERS', {'filesystem': mock_checker}):
+            r = _try_check(ep, user=None)
+            mock_checker.assert_called_once()
