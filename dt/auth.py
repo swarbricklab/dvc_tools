@@ -402,15 +402,30 @@ def discover_endpoints(
 def format_endpoints(endpoints: List[Endpoint]) -> str:
     """Format endpoints for human-readable terminal output.
 
-    Groups by type, shows children indented with ``→`` prefix.
+    Groups by type with coloured headers.  Uses ``click.style`` for
+    ANSI colours so the output degrades gracefully when piped.
     """
+    import click
+
     project_name = utils.get_project_name()
-    lines: List[str] = [f"Endpoints for project '{project_name}':"]
+    lines: List[str] = [
+        click.style(f"\nEndpoints for '{project_name}'", bold=True),
+    ]
 
     # Group by type, preserving discovery order within each group
     groups: Dict[str, List[Endpoint]] = {}
     for ep in endpoints:
         groups.setdefault(ep.type, []).append(ep)
+
+    # Colour per type
+    _type_colour: Dict[str, str] = {
+        'filesystem': 'yellow',
+        'ssh': 'cyan',
+        's3': 'green',
+        'gs': 'green',
+        'http': 'magenta',
+        'git': 'blue',
+    }
 
     # Display in a stable order
     type_order = ['filesystem', 'ssh', 's3', 'gs', 'http', 'git']
@@ -419,23 +434,36 @@ def format_endpoints(endpoints: List[Endpoint]) -> str:
         if not eps:
             continue
 
+        colour = _type_colour.get(t, 'white')
         lines.append('')
-        lines.append(f'  {t}')
+        lines.append(click.style(f'  [{t}]', fg=colour, bold=True))
+
         for ep in eps:
-            source_tag = f'({ep.source})'
-            lines.append(f'    {ep.url:<50s} {source_tag}')
+            url_str = click.style(ep.url, fg=colour)
+            src_str = click.style(ep.source, dim=True)
+            lines.append(f'    {url_str}')
+            lines.append(f'      {src_str}')
+
             if ep.local_path:
-                lines.append(f'      → local equivalent: {ep.local_path} (host is local)')
+                local_str = click.style(ep.local_path, fg='yellow')
+                lines.append(f'      ↳ local path: {local_str}')
+
             for child in ep.children:
-                child_tag = f'({child.source})'
-                lines.append(f'      → remote: {child.url:<44s} {child_tag}')
+                child_colour = _type_colour.get(child.type, 'white')
+                arrow = click.style('├─', dim=True)
+                child_url = click.style(child.url, fg=child_colour)
+                child_src = click.style(child.source, dim=True)
+                lines.append(f'      {arrow} {child_url}')
+                lines.append(f'      │  {child_src}')
                 if child.local_path:
-                    lines.append(f'          → local equivalent: {child.local_path} (host is local)')
+                    local_str = click.style(child.local_path, fg='yellow')
+                    lines.append(f'      │  ↳ local path: {local_str}')
 
     if not any(groups.values()):
         lines.append('')
-        lines.append('  (no endpoints discovered)')
+        lines.append(click.style('  (no endpoints discovered)', dim=True))
 
+    lines.append('')  # trailing newline for breathing room
     return '\n'.join(lines)
 
 

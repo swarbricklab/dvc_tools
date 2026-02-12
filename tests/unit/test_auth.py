@@ -539,7 +539,7 @@ class TestFormat:
                      local_path='/path'),
         ]
         output = format_endpoints(eps)
-        assert 'local equivalent' in output
+        assert 'local path' in output
 
     @patch('dt.auth.utils.get_project_name', return_value='test-proj')
     def test_format_endpoints_shows_children(self, _):
@@ -547,7 +547,8 @@ class TestFormat:
         ep = Endpoint(type='git', url='git@github.com:o/r.git',
                       source='import', children=[child])
         output = format_endpoints([ep])
-        assert '→ remote:' in output
+        assert 'ssh://h/p' in output
+        assert 'child' in output
 
     @patch('dt.auth.utils.get_project_name', return_value='test-proj')
     def test_format_endpoints_empty(self, _):
