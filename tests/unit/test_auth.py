@@ -19,14 +19,20 @@ from dt.auth import (
     AccessRequest,
     CheckResult,
     Identity,
+    TeamInfo,
     classify_url,
     discover_endpoints,
+    discover_endpoints_from_repo,
     check_endpoints,
     generate_request,
     get_identities,
     detect_identities,
     compare_identities,
     save_detected_identities,
+    list_repo_teams,
+    list_user_teams,
+    add_team_to_repo,
+    add_user_to_team,
     format_endpoints,
     format_endpoints_json,
     format_check_results,
@@ -37,6 +43,8 @@ from dt.auth import (
     format_identities,
     format_identities_json,
     format_whoami_comparison,
+    format_teams,
+    format_teams_json,
     send_request,
     send_request_slack,
     send_request_email,
@@ -45,10 +53,12 @@ from dt.auth import (
     _detect_github_teams,
     _detect_gcp_email,
     _detect_aws_identity,
+    _get_owner_info,
     _get_user_info,
     _stat_check_user,
     _check_filesystem_for_user,
     _check_github_for_user,
+    _parse_github_owner_repo,
     _discover_dt_config,
     _discover_dvc_remotes,
     _discover_git_remotes,
@@ -1297,7 +1307,9 @@ class TestGenerateRequest:
     def test_passes_type_filter(self, mock_check):
         mock_check.return_value = []
         generate_request(type_filter={'s3'})
-        mock_check.assert_called_once_with(type_filter={'s3'}, verbose=False)
+        mock_check.assert_called_once_with(
+            endpoints=None, type_filter={'s3'}, verbose=False,
+        )
 
     @patch('dt.auth.check_endpoints')
     def test_metadata_populated(self, mock_check):
@@ -2323,3 +2335,214 @@ class TestTryCheckUser:
         with patch('dt.auth._CHECKERS', {'filesystem': mock_checker}):
             r = _try_check(ep, user=None)
             mock_checker.assert_called_once()
+
+
+# =============================================================================
+# Ownership info tests
+# =============================================================================
+
+class TestGetOwnerInfo:
+    """Tests for _get_owner_info."""
+
+    def test_returns_owner_group(self, tmp_path):
+        d = tmp_path / 'test'
+        d.mkdir()
+        owner, group = _get_owner_info(d)
+        # Should return strings, not integers
+        assert isinstance(owner, str)
+        assert isinstance(group, str)
+        assert owner != '?'
+
+    def test_nonexistent_path(self, tmp_path):
+        p = tmp_path / 'nope'
+        owner, group = _get_owner_info(p)
+        assert owner == '?'
+        assert group == '?'
+
+
+class TestFilesystemOwnershipInDetails:
+    """Tests that ownership info appears in _check_filesystem details."""
+
+    def test_failed_subdir_shows_ownership(self, tmp_path):
+        root = tmp_path / 'cache'
+        root.mkdir()
+        sub = root / 'bad'
+        sub.mkdir()
+        sub.chmod(0o000)  # no access
+
+        ep = Endpoint(type='filesystem', url=str(root), source='test')
+        try:
+            r = _check_filesystem(ep)
+            if r.status == STATUS_FAIL:
+                # At least one detail line should contain "owner:"
+                assert any('owner:' in d for d in r.details)
+                # Hints should contain setfacl, not chmod
+                assert any('setfacl' in h for h in r.hints)
+        finally:
+            sub.chmod(0o755)  # restore for cleanup
+
+
+# =============================================================================
+# _parse_github_owner_repo tests
+# =============================================================================
+
+class TestParseGithubOwnerRepo:
+    """Tests for _parse_github_owner_repo."""
+
+    def test_ssh_url(self):
+        assert _parse_github_owner_repo('git@github.com:org/repo.git') == ('org', 'repo')
+
+    def test_https_url(self):
+        assert _parse_github_owner_repo('https://github.com/org/repo') == ('org', 'repo')
+
+    def test_https_url_with_git_suffix(self):
+        assert _parse_github_owner_repo('https://github.com/org/repo.git') == ('org', 'repo')
+
+    def test_non_github_returns_none(self):
+        assert _parse_github_owner_repo('git@gitlab.com:org/repo.git') is None
+
+    def test_trailing_slash_stripped(self):
+        assert _parse_github_owner_repo('https://github.com/org/repo/') == ('org', 'repo')
+
+
+# =============================================================================
+# discover_endpoints_from_repo tests
+# =============================================================================
+
+class TestDiscoverFromRepo:
+    """Tests for discover_endpoints_from_repo."""
+
+    @patch('dt.auth.discover_endpoints', return_value=[
+        Endpoint(type='git', url='git@github.com:org/repo.git', source='test'),
+    ])
+    @patch('dt.auth.subprocess.run')
+    def test_clones_and_discovers(self, mock_run, mock_discover):
+        mock_run.return_value = MagicMock(returncode=0)
+        result = discover_endpoints_from_repo('git@github.com:org/repo.git')
+        assert len(result) == 1
+        # Should have called git clone
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        assert args[0] == 'git'
+        assert args[1] == 'clone'
+
+    @patch('dt.auth.subprocess.run')
+    def test_clone_failure_raises(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1, stderr='fatal: repo not found',
+        )
+        with pytest.raises(Exception, match='Failed to clone'):
+            discover_endpoints_from_repo('git@github.com:org/nope.git')
+
+
+# =============================================================================
+# GitHub team management tests
+# =============================================================================
+
+class TestListRepoTeams:
+    """Tests for list_repo_teams."""
+
+    @patch('dt.auth.subprocess.run')
+    def test_returns_teams(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='data-team\tData Team\tpush\nadmin-team\tAdmins\tadmin\n',
+        )
+        teams = list_repo_teams('git@github.com:org/repo.git')
+        assert len(teams) == 2
+        assert teams[0].slug == 'data-team'
+        assert teams[0].permission == 'push'
+        assert teams[1].slug == 'admin-team'
+
+    def test_non_github_url_raises(self):
+        with pytest.raises(Exception, match='Not a GitHub URL'):
+            list_repo_teams('git@gitlab.com:org/repo.git')
+
+    @patch('dt.auth.subprocess.run', side_effect=FileNotFoundError)
+    def test_gh_not_installed(self, mock_run):
+        with pytest.raises(Exception, match='gh CLI'):
+            list_repo_teams('git@github.com:org/repo.git')
+
+
+class TestListUserTeams:
+    """Tests for list_user_teams."""
+
+    def test_org_required(self):
+        with pytest.raises(Exception, match='organisation'):
+            list_user_teams('alice')
+
+    @patch('dt.auth.subprocess.run')
+    def test_returns_member_teams(self, mock_run):
+        # First call: list org teams
+        # Second call: check membership for team-a → active
+        # Third call: check membership for team-b → 404 (not member)
+        def side_effect(args, **kw):
+            if 'orgs/myorg/teams' in args[2] and 'memberships' not in args[2]:
+                return MagicMock(
+                    returncode=0,
+                    stdout='team-a\tTeam A\nteam-b\tTeam B\n',
+                )
+            elif 'team-a/memberships/alice' in args[2]:
+                return MagicMock(returncode=0, stdout='active\n')
+            elif 'team-b/memberships/alice' in args[2]:
+                return MagicMock(returncode=1, stderr='404')
+            return MagicMock(returncode=1, stderr='unknown')
+
+        mock_run.side_effect = side_effect
+        teams = list_user_teams('alice', org='myorg')
+        assert len(teams) == 1
+        assert teams[0].slug == 'team-a'
+
+
+class TestAddTeamToRepo:
+    """Tests for add_team_to_repo."""
+
+    @patch('dt.auth.subprocess.run')
+    def test_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        msg = add_team_to_repo('git@github.com:org/repo.git', 'data-team')
+        assert 'data-team' in msg
+        assert 'push' in msg
+
+    @patch('dt.auth.subprocess.run')
+    def test_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stderr='forbidden')
+        with pytest.raises(Exception, match='Failed to add'):
+            add_team_to_repo('git@github.com:org/repo.git', 'data-team')
+
+
+class TestAddUserToTeam:
+    """Tests for add_user_to_team."""
+
+    @patch('dt.auth.subprocess.run')
+    def test_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        msg = add_user_to_team('org', 'data-team', 'alice')
+        assert 'alice' in msg
+        assert 'data-team' in msg
+
+    @patch('dt.auth.subprocess.run')
+    def test_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stderr='not found')
+        with pytest.raises(Exception, match='Failed to add'):
+            add_user_to_team('org', 'data-team', 'alice')
+
+
+class TestFormatTeams:
+    """Tests for format_teams and format_teams_json."""
+
+    def test_empty(self):
+        assert 'No teams' in format_teams([])
+
+    def test_text_output(self):
+        teams = [TeamInfo(org='org', slug='data', name='Data', permission='push')]
+        output = format_teams(teams)
+        assert 'org/data' in output
+        assert 'Data' in output
+
+    def test_json_output(self):
+        teams = [TeamInfo(org='org', slug='data', name='Data', permission='push')]
+        data = json.loads(format_teams_json(teams))
+        assert len(data) == 1
+        assert data[0]['slug'] == 'data'
+        assert data[0]['permission'] == 'push'

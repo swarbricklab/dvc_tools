@@ -690,21 +690,33 @@ def auth():
 @click.option('--type', 'types', multiple=True,
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
               help='Filter to specific endpoint type(s). Repeat for multiple.')
+@click.option('--repo', 'repo_url', default=None,
+              help='Discover endpoints for a remote repo (cloned to a temp dir).')
 @click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
 @click.option('-v', '--verbose', is_flag=True, help='Show discovery progress')
-def auth_list(types, as_json, verbose):
+def auth_list(types, repo_url, as_json, verbose):
     """Discover every storage endpoint the project uses.
     
     Scans DVC remotes, dt config (cache.root, remote.root), git remotes,
     and import .dvc files to find all endpoints. For imports, also discovers
     DVC remotes of the source repository via tmp clones.
+
+    Use --repo to discover endpoints for a repo you haven't cloned:
+
+    \b
+      dt auth list --repo git@github.com:org/data-repo.git
     """
     try:
         type_filter = set(types) if types else None
-        endpoints = auth_mod.discover_endpoints(
-            type_filter=type_filter,
-            verbose=verbose,
-        )
+        if repo_url:
+            endpoints = auth_mod.discover_endpoints_from_repo(
+                repo_url, type_filter=type_filter, verbose=verbose,
+            )
+        else:
+            endpoints = auth_mod.discover_endpoints(
+                type_filter=type_filter,
+                verbose=verbose,
+            )
         if as_json:
             click.echo(auth_mod.format_endpoints_json(endpoints))
         else:
@@ -768,12 +780,14 @@ def auth_whoami(detect, save, as_json):
 @click.option('--type', 'types', multiple=True,
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
               help='Only check specific endpoint type(s). Repeat for multiple.')
+@click.option('--repo', 'repo_url', default=None,
+              help='Check endpoints for a remote repo (cloned to a temp dir).')
 @click.option('--user', 'check_user', default=None,
               help="Check access from another user's perspective (filesystem + GitHub).")
 @click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show per-subdirectory detail for filesystem checks')
-def auth_check(types, check_user, as_json, verbose):
+def auth_check(types, repo_url, check_user, as_json, verbose):
     """Test access to each discovered endpoint.
 
     Discovers all endpoints (like ``dt auth list``) then runs a
@@ -784,6 +798,11 @@ def auth_check(types, check_user, as_json, verbose):
     \b
       dt auth check --user alice        # check all endpoints for alice
       dt auth check --user alice --type filesystem  # filesystem only
+
+    Use --repo to check endpoints for a repo you haven't cloned:
+
+    \b
+      dt auth check --repo git@github.com:org/data-repo.git
     """
     try:
         type_filter = set(types) if types else None
@@ -791,8 +810,15 @@ def auth_check(types, check_user, as_json, verbose):
             click.echo(click.style(
                 f'Checking access for user: {check_user}', dim=True,
             ))
+        if repo_url:
+            endpoints = auth_mod.discover_endpoints_from_repo(
+                repo_url, type_filter=type_filter, verbose=verbose,
+            )
+        else:
+            endpoints = None
         results = auth_mod.check_endpoints(
-            type_filter=type_filter,
+            endpoints=endpoints,
+            type_filter=type_filter if not repo_url else None,
             verbose=verbose,
             user=check_user,
         )
@@ -812,6 +838,8 @@ def auth_check(types, check_user, as_json, verbose):
 @click.option('--type', 'types', multiple=True,
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
               help='Only include failures for specific endpoint type(s).')
+@click.option('--repo', 'repo_url', default=None,
+              help='Generate request for a remote repo (cloned to a temp dir).')
 @click.option('--format', 'fmt', default='text',
               type=click.Choice(['text', 'markdown', 'json'], case_sensitive=False),
               help='Output format (default: text).')
@@ -821,7 +849,7 @@ def auth_check(types, check_user, as_json, verbose):
               help='Send the request (slack, email, or omit value to auto-detect).')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show verbose check detail')
-def auth_request(types, fmt, verbose, send_via):
+def auth_request(types, repo_url, fmt, verbose, send_via):
     """Generate an access-request template from check failures.
 
     Runs ``dt auth check`` internally, collects failures, and produces
@@ -834,13 +862,27 @@ def auth_request(types, fmt, verbose, send_via):
       dt auth request --send          # auto-detect (Slack > email)
       dt auth request --send slack    # send to Slack webhook
       dt auth request --send email    # send via mail command
+
+    Use --repo for a repo you haven't cloned:
+
+    \b
+      dt auth request --repo git@github.com:org/data-repo.git
     """
     try:
         type_filter = set(types) if types else None
-        req = auth_mod.generate_request(
-            type_filter=type_filter,
-            verbose=verbose,
-        )
+        if repo_url:
+            endpoints = auth_mod.discover_endpoints_from_repo(
+                repo_url, type_filter=type_filter, verbose=verbose,
+            )
+            req = auth_mod.generate_request(
+                type_filter=None, verbose=verbose,
+                endpoints=endpoints,
+            )
+        else:
+            req = auth_mod.generate_request(
+                type_filter=type_filter,
+                verbose=verbose,
+            )
 
         if fmt == 'json':
             click.echo(auth_mod.format_request_json(req))
@@ -861,6 +903,128 @@ def auth_request(types, fmt, verbose, send_via):
         # Exit non-zero if there are items to request
         if req.items:
             raise SystemExit(1)
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+# -- dt auth teams ----------------------------------------------------------
+
+@auth.group('teams')
+def auth_teams():
+    """Manage GitHub team access for repositories."""
+    pass
+
+
+@auth_teams.command('repo')
+@click.argument('repo_url')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+def auth_teams_repo(repo_url, as_json):
+    """List GitHub teams with access to a repository.
+
+    REPO_URL is a GitHub repository URL (SSH or HTTPS).
+
+    \b
+      dt auth teams repo git@github.com:org/data-repo.git
+    """
+    try:
+        teams = auth_mod.list_repo_teams(repo_url)
+        if as_json:
+            click.echo(auth_mod.format_teams_json(teams))
+        else:
+            click.echo(auth_mod.format_teams(
+                teams, header=f'Teams with access to {repo_url}',
+            ))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+@auth_teams.command('user')
+@click.argument('username')
+@click.option('--org', required=True,
+              help='GitHub organisation to search.')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+def auth_teams_user(username, org, as_json):
+    """List GitHub teams that a user belongs to.
+
+    \b
+      dt auth teams user alice --org myorg
+    """
+    try:
+        teams = auth_mod.list_user_teams(username, org=org)
+        if as_json:
+            click.echo(auth_mod.format_teams_json(teams))
+        else:
+            click.echo(auth_mod.format_teams(
+                teams, header=f"Teams for '{username}' in {org}",
+            ))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+@auth_teams.command('add-to-repo')
+@click.argument('team_slug')
+@click.argument('repo_url')
+@click.option('--permission', default='push',
+              type=click.Choice(['pull', 'push', 'admin', 'maintain', 'triage'],
+                                case_sensitive=False),
+              help='Permission level (default: push).')
+@click.option('--dry', is_flag=True,
+              help='Show what would be done without making changes.')
+def auth_teams_add_to_repo(team_slug, repo_url, permission, dry):
+    """Add a GitHub team to a repository.
+
+    \b
+      dt auth teams add-to-repo data-team git@github.com:org/repo.git
+      dt auth teams add-to-repo data-team git@github.com:org/repo.git --permission pull
+      dt auth teams add-to-repo data-team git@github.com:org/repo.git --dry
+    """
+    try:
+        parsed = auth_mod._parse_github_owner_repo(repo_url)
+        if parsed is None:
+            raise click.ClickException(f'Not a GitHub URL: {repo_url}')
+        owner, repo = parsed
+        if dry:
+            click.echo(
+                f"Would grant '{permission}' access for team '{team_slug}' "
+                f"to {owner}/{repo}"
+            )
+            click.echo(
+                f"  gh api orgs/{owner}/teams/{team_slug}/repos/{owner}/{repo} "
+                f"-X PUT -f permission={permission}"
+            )
+        else:
+            msg = auth_mod.add_team_to_repo(repo_url, team_slug, permission)
+            click.echo(click.style(f'✓ {msg}', fg='green'))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+@auth_teams.command('add-user')
+@click.argument('username')
+@click.argument('team_slug')
+@click.option('--org', required=True,
+              help='GitHub organisation.')
+@click.option('--dry', is_flag=True,
+              help='Show what would be done without making changes.')
+def auth_teams_add_user(username, team_slug, org, dry):
+    """Add a user to a GitHub team.
+
+    \b
+      dt auth teams add-user alice data-team --org myorg
+      dt auth teams add-user alice data-team --org myorg --dry
+    """
+    try:
+        if dry:
+            click.echo(
+                f"Would add '{username}' to team '{org}/{team_slug}'"
+            )
+            click.echo(
+                f"  gh api orgs/{org}/teams/{team_slug}/memberships/{username} "
+                f"-X PUT"
+            )
+        else:
+            msg = auth_mod.add_user_to_team(org, team_slug, username)
+            click.echo(click.style(f'✓ {msg}', fg='green'))
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 

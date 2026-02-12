@@ -16,6 +16,7 @@ A DVC project may depend on several storage backends simultaneously — a shared
 | [`dt auth whoami`](#dt-auth-whoami) | Show current user identities across systems |
 | [`dt auth check`](#dt-auth-check) | Test access to each endpoint |
 | [`dt auth request`](#dt-auth-request) | Generate an access-request template from failures |
+| [`dt auth teams`](#dt-auth-teams) | Manage GitHub team access for repositories |
 | [`dt auth grant`](#dt-auth-grant) | Grant a user access to a resource (admin) |
 
 ---
@@ -27,7 +28,7 @@ Discover every storage endpoint the current project relies on.
 ### Usage
 
 ```bash
-dt auth list [--type TYPE] [--json]
+dt auth list [--type TYPE] [--repo URL] [--json]
 ```
 
 ### Options
@@ -35,6 +36,7 @@ dt auth list [--type TYPE] [--json]
 | Option | Description |
 |--------|-------------|
 | `--type TYPE` | Filter to a specific endpoint type: `filesystem`, `ssh`, `s3`, `gs`, `http`, `git` |
+| `--repo URL` | Discover endpoints for a remote repository (cloned to a temp dir) |
 | `--json` | Output as JSON array |
 
 The `--type` flag can be repeated to include multiple types:
@@ -45,6 +47,9 @@ dt auth list --type filesystem --type ssh
 
 # Only show cloud storage
 dt auth list --type s3 --type gs
+
+# Discover endpoints for a repo you haven't cloned
+dt auth list --repo git@github.com:org/data-repo.git
 ```
 
 ### Sources scanned
@@ -168,7 +173,7 @@ Test whether the current user can actually access each discovered endpoint.
 ### Usage
 
 ```bash
-dt auth check [--type TYPE] [--verbose] [--user USERNAME]
+dt auth check [--type TYPE] [--repo URL] [--verbose] [--user USERNAME] [--json]
 ```
 
 ### Options
@@ -176,8 +181,10 @@ dt auth check [--type TYPE] [--verbose] [--user USERNAME]
 | Option | Description |
 |--------|-------------|
 | `--type TYPE` | Only check specific endpoint type(s): `filesystem`, `ssh`, `s3`, `gs`, `http`, `git` |
+| `--repo URL` | Check endpoints for a remote repository (cloned to a temp dir) |
 | `--verbose` | Show per-subdirectory detail for filesystem checks |
 | `--user USERNAME` | Check access from another user's perspective (admin use) |
+| `--json` | Output as JSON |
 
 ```bash
 # Only check filesystem access (cache and remote directories)
@@ -188,6 +195,20 @@ dt auth check --type s3
 
 # Check everything except git repos
 dt auth check --type filesystem --type ssh --type s3 --type gs
+
+# Check endpoints for a repo you haven't cloned
+dt auth check --repo git@github.com:org/data-repo.git
+```
+
+### Ownership info for failed subdirectories
+
+When filesystem subdirectories fail the access check, `dt auth check` shows the **owner and group** of each failing directory. This tells you who to ask to run `setfacl` to grant access:
+
+```
+  ✗ /g/data/a56/dvc_cache
+      files  not writable  (owner: ab1234, group: a56)
+    Fix permissions: setfacl -R -m u:jsmith:rwx /g/data/a56/dvc_cache/files
+    Ask ab1234 to run the setfacl command(s) above
 ```
 
 ### Checks by endpoint type
@@ -397,6 +418,47 @@ $ dt auth request --send email
 
 ---
 
+## dt auth teams
+
+Manage GitHub team access for repositories. Wraps the `gh` CLI to provide quick commands for the most common team/repo access operations.
+
+### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `dt auth teams repo <URL>` | List teams with access to a repository |
+| `dt auth teams user <USERNAME> --org <ORG>` | List teams a user belongs to |
+| `dt auth teams add-to-repo <TEAM> <URL>` | Add a team to a repository |
+| `dt auth teams add-user <USER> <TEAM> --org <ORG>` | Add a user to a team |
+
+All subcommands support `--json` output where applicable.
+
+### Examples
+
+```bash
+# List teams with access to a repo
+dt auth teams repo git@github.com:org/data-repo.git
+
+# List teams that alice belongs to in the org
+dt auth teams user alice --org myorg
+
+# Grant a team push access to a repo
+dt auth teams add-to-repo data-team git@github.com:org/repo.git
+
+# Grant read-only access
+dt auth teams add-to-repo data-readers git@github.com:org/repo.git --permission pull
+
+# Preview without making changes
+dt auth teams add-to-repo data-team git@github.com:org/repo.git --dry
+
+# Add a user to a team
+dt auth teams add-user alice data-team --org myorg
+```
+
+> **Note**: These commands require the `gh` CLI to be authenticated with appropriate permissions (org admin or team maintainer for write operations).
+
+---
+
 ## dt auth grant
 
 Grant a user access to a resource. Built gradually — initial support for POSIX filesystem permissions.
@@ -436,11 +498,12 @@ The `--dry` flag shows what commands would be run without executing them.
 
 This command is being built incrementally:
 
-1. **`dt auth list`** — pure discovery, no side effects
-2. **`dt auth whoami`** — identity management and detection
-3. **`dt auth check`** — read-only access tests
-4. **`dt auth request`** — template generation from check results
-5. **`dt auth grant`** — admin actions, built last
+1. **`dt auth list`** — pure discovery, no side effects ✅
+2. **`dt auth whoami`** — identity management and detection ✅
+3. **`dt auth check`** — read-only access tests ✅
+4. **`dt auth request`** — template generation from check results ✅
+5. **`dt auth teams`** — GitHub team management ✅
+6. **`dt auth grant`** — admin actions (filesystem deferred, GitHub via teams)
 
 ---
 
