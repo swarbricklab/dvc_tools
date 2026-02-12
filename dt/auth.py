@@ -2193,31 +2193,62 @@ def send_request_email(
     req: AccessRequest,
     admin_email: str,
 ) -> None:
-    """Send an access request via the local ``mail`` command.
+    """Send an access request via the local mail system.
 
-    Pipes the text-format request to ``mail -s <subject> <admin_email>``.
-    This relies on a working MTA (e.g. ``sendmail``, ``postfix``) which
-    is standard on NCI HPC nodes.
+    Tries ``sendmail`` first (non-interactive, reliable for scripted use),
+    then falls back to ``mail -s``.  On NCI, ``sendmail`` is the standard
+    MTA interface and avoids the stdin-blocking issues that ``mail``/
+    ``mailx`` can have with piped input.
 
     Raises:
-        AuthError: If ``mail`` is not found or exits non-zero.
+        AuthError: If neither ``sendmail`` nor ``mail`` is found, or
+            the command exits non-zero.
     """
-    if not shutil.which('mail'):
-        raise AuthError(
-            "The 'mail' command is not available on this system.\n"
-            "Try 'dt auth request --send slack' or copy the output "
-            "manually."
-        )
+    import getpass
 
     subject = f'dt access request — {req.project} ({req.user})'
     body = format_request_text(req)
+    sender = getpass.getuser()
+
+    sendmail = shutil.which('sendmail')
+    if sendmail:
+        # Build a minimal RFC 2822 message so sendmail knows the
+        # recipient, subject, and From header without flags.
+        message = (
+            f'To: {admin_email}\n'
+            f'From: {sender}\n'
+            f'Subject: {subject}\n'
+            f'\n'
+            f'{body}'
+        )
+        result = subprocess.run(
+            [sendmail, '-t'],
+            input=message,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            raise AuthError(
+                f'sendmail failed (exit {result.returncode}): {stderr}'
+            )
+        return
+
+    # Fallback: mail command
+    if not shutil.which('mail'):
+        raise AuthError(
+            "Neither 'sendmail' nor 'mail' is available on this system.\n"
+            "Try 'dt auth request --send slack' or copy the output "
+            "manually."
+        )
 
     result = subprocess.run(
         ['mail', '-s', subject, admin_email],
         input=body,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
     )
 
     if result.returncode != 0:

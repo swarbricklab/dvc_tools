@@ -1586,8 +1586,23 @@ class TestSendRequestEmail:
         )
 
     @patch('dt.auth.subprocess.run')
-    @patch('dt.auth.shutil.which', return_value='/usr/bin/mail')
-    def test_success(self, mock_which, mock_run):
+    @patch('dt.auth.shutil.which', return_value='/usr/sbin/sendmail')
+    def test_sendmail_preferred(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stderr='')
+        send_request_email(self._make_req(), 'admin@example.com')
+
+        mock_run.assert_called_once()
+        args = mock_run.call_args
+        cmd = args[0][0]
+        assert cmd == ['/usr/sbin/sendmail', '-t']
+        body = args[1]['input']
+        assert 'To: admin@example.com' in body
+        assert 'Subject:' in body
+        assert 'proj' in body
+
+    @patch('dt.auth.subprocess.run')
+    @patch('dt.auth.shutil.which', side_effect=lambda cmd: '/usr/bin/mail' if cmd == 'mail' else None)
+    def test_fallback_to_mail(self, mock_which, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr='')
         send_request_email(self._make_req(), 'admin@example.com')
 
@@ -1596,18 +1611,24 @@ class TestSendRequestEmail:
         cmd = args[0][0]
         assert cmd[0] == 'mail'
         assert 'admin@example.com' in cmd
-        assert 'proj' in cmd[2]  # subject contains project name
-        assert args[1]['input']  # body is non-empty
 
     @patch('dt.auth.shutil.which', return_value=None)
-    def test_mail_not_found_raises(self, mock_which):
+    def test_neither_found_raises(self, mock_which):
         from dt.errors import AuthError
-        with pytest.raises(AuthError, match="'mail' command is not available"):
+        with pytest.raises(AuthError, match="'sendmail' nor 'mail'"):
             send_request_email(self._make_req(), 'admin@example.com')
 
     @patch('dt.auth.subprocess.run')
-    @patch('dt.auth.shutil.which', return_value='/usr/bin/mail')
-    def test_nonzero_exit_raises(self, mock_which, mock_run):
+    @patch('dt.auth.shutil.which', return_value='/usr/sbin/sendmail')
+    def test_sendmail_failure_raises(self, mock_which, mock_run):
+        from dt.errors import AuthError
+        mock_run.return_value = MagicMock(returncode=1, stderr='connection refused')
+        with pytest.raises(AuthError, match='sendmail failed'):
+            send_request_email(self._make_req(), 'admin@example.com')
+
+    @patch('dt.auth.subprocess.run')
+    @patch('dt.auth.shutil.which', side_effect=lambda cmd: '/usr/bin/mail' if cmd == 'mail' else None)
+    def test_mail_failure_raises(self, mock_which, mock_run):
         from dt.errors import AuthError
         mock_run.return_value = MagicMock(returncode=1, stderr='no such user')
         with pytest.raises(AuthError, match='mail command failed'):
