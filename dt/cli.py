@@ -756,6 +756,19 @@ def auth_whoami(detect, save, as_json):
             comparisons = auth_mod.compare_identities(stored, detected)
             click.echo(auth_mod.format_whoami_comparison(comparisons))
 
+            # If there are new or mismatched detections, suggest --save
+            if not save:
+                saveable = [
+                    note for _, _, note in comparisons
+                    if note in ('detected only', 'mismatch')
+                ]
+                if saveable:
+                    click.echo(click.style(
+                        'Run `dt auth whoami --save` to save detected '
+                        'values to user config.',
+                        dim=True,
+                    ))
+
         if save:
             count = auth_mod.save_detected_identities(detected)
             if count:
