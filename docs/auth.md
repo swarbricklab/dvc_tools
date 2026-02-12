@@ -26,7 +26,24 @@ Discover every storage endpoint the current project relies on.
 ### Usage
 
 ```bash
-dt auth list [--json]
+dt auth list [--type TYPE] [--json]
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--type TYPE` | Filter to a specific endpoint type: `filesystem`, `ssh`, `s3`, `gs`, `http`, `git` |
+| `--json` | Output as JSON array |
+
+The `--type` flag can be repeated to include multiple types:
+
+```bash
+# Only show filesystem and SSH endpoints
+dt auth list --type filesystem --type ssh
+
+# Only show cloud storage
+dt auth list --type s3 --type gs
 ```
 
 ### Sources scanned
@@ -93,7 +110,25 @@ Test whether the current user can actually access each discovered endpoint.
 ### Usage
 
 ```bash
-dt auth check [--verbose]
+dt auth check [--type TYPE] [--verbose]
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--type TYPE` | Only check specific endpoint type(s): `filesystem`, `ssh`, `s3`, `gs`, `http`, `git` |
+| `--verbose` | Show per-subdirectory detail for filesystem checks |
+
+```bash
+# Only check filesystem access (cache and remote directories)
+dt auth check --type filesystem
+
+# Only check S3/R2 credentials
+dt auth check --type s3
+
+# Check everything except git repos
+dt auth check --type filesystem --type ssh --type s3 --type gs
 ```
 
 ### Checks by endpoint type
@@ -194,10 +229,15 @@ Generate an access-request message from the results of `dt auth check`.
 ### Usage
 
 ```bash
-dt auth request [--format text|markdown|json]
+dt auth request [--type TYPE] [--format text|markdown|json]
 ```
 
-Runs `dt auth check` internally, collects failures, and produces a template that can be sent to an administrator or pasted into a support ticket.
+| Option | Description |
+|--------|-------------|
+| `--type TYPE` | Only include failures for specific endpoint type(s) |
+| `--format` | Output format: `text` (default), `markdown`, or `json` |
+
+Runs `dt auth check` internally (respecting `--type` filters), collects failures, and produces a template that can be sent to an administrator or pasted into a support ticket.
 
 ### Example
 
