@@ -224,22 +224,41 @@ When an SSH access check fails, `dt auth check` will **not** look for local SSH 
 
 ## dt auth request
 
-Generate an access-request message from the results of `dt auth check`.
+Generate an access-request message from the results of `dt auth check`,
+and optionally deliver it via Slack or email.
 
 ### Usage
 
 ```bash
-dt auth request [--type TYPE] [--format text|markdown|json]
+dt auth request [--type TYPE] [--format text|markdown|json] [--send [slack|email]]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--type TYPE` | Only include failures for specific endpoint type(s) |
 | `--format` | Output format: `text` (default), `markdown`, or `json` |
+| `--send` | Send the request. Omit the value to auto-detect (Slack → email), or specify `slack` or `email` explicitly. |
 
 Runs `dt auth check` internally (respecting `--type` filters), collects failures, and produces a template that can be sent to an administrator or pasted into a support ticket.
 
-### Example
+With `--send`, the request is delivered directly:
+
+- **Slack** — Posts to an incoming-webhook URL configured via `auth.slack_webhook`.
+- **Email** — Pipes the text-format request to the local `mail` command, addressed to `auth.admin_email`.
+
+Auto-detect (`--send` with no argument) tries Slack first, then email.
+
+### Configuration for --send
+
+```bash
+# Slack webhook (system scope recommended)
+dt config set --system auth.slack_webhook 'https://hooks.slack.com/services/T.../B.../xxx'
+
+# Admin email (system or user scope)
+dt config set --system auth.admin_email 'admin@example.com'
+```
+
+### Examples
 
 ```
 $ dt auth request
@@ -261,6 +280,17 @@ The following resources are not accessible:
 Platform: gadi-dm.nci.org.au
 dt version: 0.2.0
 Date: 2026-02-12
+```
+
+```bash
+# Send directly to Slack
+$ dt auth request --send slack
+
+# Auto-detect delivery method
+$ dt auth request --send
+
+# Send via email
+$ dt auth request --send email
 ```
 
 ---

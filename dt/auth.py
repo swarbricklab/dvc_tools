@@ -8,7 +8,10 @@ import getpass
 import json
 import os
 import platform
+import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -1375,6 +1378,192 @@ def format_request_markdown(req: AccessRequest) -> str:
 def format_request_json(req: AccessRequest) -> str:
     """Format an access request as JSON."""
     return json.dumps(req.to_dict(), indent=2)
+
+
+# =============================================================================
+# Sending access requests
+# =============================================================================
+
+def _format_slack_blocks(req: AccessRequest) -> dict:
+    """Build a Slack message payload from an *AccessRequest*.
+
+    Uses Slack's ``mrkdwn`` formatting via Block Kit so the message
+    renders nicely in channels and DMs.
+    """
+    blocks: List[dict] = [
+        {
+            'type': 'header',
+            'text': {
+                'type': 'plain_text',
+                'text': f'Access request — {req.project}',
+            },
+        },
+        {
+            'type': 'section',
+            'fields': [
+                {'type': 'mrkdwn', 'text': f'*User:* {req.user}'},
+                {'type': 'mrkdwn', 'text': f'*Platform:* {req.platform_name}'},
+                {'type': 'mrkdwn', 'text': f'*dt version:* {req.dt_version}'},
+                {'type': 'mrkdwn', 'text': f'*Date:* {req.request_date}'},
+            ],
+        },
+        {'type': 'divider'},
+    ]
+
+    if not req.items:
+        blocks.append({
+            'type': 'section',
+            'text': {
+                'type': 'mrkdwn',
+                'text': ':white_check_mark: All endpoints are accessible — no request needed.',
+            },
+        })
+    else:
+        for i, r in enumerate(req.items, 1):
+            ep = r.endpoint
+            icon = ':red_circle:' if r.status == STATUS_FAIL else ':large_yellow_circle:'
+            text = f'{icon} *{i}. {ep.type}* — `{ep.url}`\n_{r.summary}_'
+            if r.hints:
+                text += '\n' + '\n'.join(f'> :bulb: {h}' for h in r.hints)
+            blocks.append({
+                'type': 'section',
+                'text': {'type': 'mrkdwn', 'text': text},
+            })
+
+    return {'blocks': blocks}
+
+
+def send_request_slack(req: AccessRequest, webhook_url: str) -> None:
+    """Send an access request to a Slack incoming-webhook URL.
+
+    Uses :mod:`urllib.request` from stdlib — zero extra dependencies.
+
+    Raises:
+        AuthError: If the webhook POST fails.
+    """
+    payload = json.dumps(_format_slack_blocks(req)).encode()
+    http_req = urllib.request.Request(
+        webhook_url,
+        data=payload,
+        headers={'Content-Type': 'application/json'},
+    )
+
+    try:
+        with urllib.request.urlopen(http_req, timeout=30) as resp:
+            body = resp.read().decode()
+            if resp.status != 200 or body != 'ok':
+                raise AuthError(
+                    f'Slack webhook returned unexpected response: '
+                    f'{resp.status} {body}'
+                )
+    except urllib.error.URLError as exc:
+        raise AuthError(f'Failed to send Slack notification: {exc}') from exc
+
+
+def send_request_email(
+    req: AccessRequest,
+    admin_email: str,
+) -> None:
+    """Send an access request via the local ``mail`` command.
+
+    Pipes the text-format request to ``mail -s <subject> <admin_email>``.
+    This relies on a working MTA (e.g. ``sendmail``, ``postfix``) which
+    is standard on NCI HPC nodes.
+
+    Raises:
+        AuthError: If ``mail`` is not found or exits non-zero.
+    """
+    if not shutil.which('mail'):
+        raise AuthError(
+            "The 'mail' command is not available on this system.\n"
+            "Try 'dt auth request --send slack' or copy the output "
+            "manually."
+        )
+
+    subject = f'dt access request — {req.project} ({req.user})'
+    body = format_request_text(req)
+
+    result = subprocess.run(
+        ['mail', '-s', subject, admin_email],
+        input=body,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise AuthError(f'mail command failed (exit {result.returncode}): {stderr}')
+
+
+def send_request(
+    req: AccessRequest,
+    method: Optional[str] = None,
+) -> str:
+    """Send an access request using the configured delivery method.
+
+    Args:
+        req: The access request to send.
+        method: ``'slack'``, ``'email'``, or ``None`` for auto-detect.
+            Auto-detect tries Slack first, then email, based on which
+            config values are set.
+
+    Returns:
+        A human-friendly message describing where the request was sent.
+
+    Raises:
+        AuthError: If no delivery method is configured or sending fails.
+    """
+    slack_url = None
+    admin_email = None
+
+    try:
+        slack_url = cfg.get_value('auth.slack_webhook')
+    except Exception:
+        pass
+
+    try:
+        admin_email = cfg.get_value('auth.admin_email')
+    except Exception:
+        pass
+
+    if method == 'slack':
+        if not slack_url:
+            raise AuthError(
+                "Slack webhook not configured.\n"
+                "Set it with: dt config set --system auth.slack_webhook "
+                "'https://hooks.slack.com/services/...'"
+            )
+        send_request_slack(req, slack_url)
+        return 'Access request sent to Slack.'
+
+    if method == 'email':
+        if not admin_email:
+            raise AuthError(
+                "Admin email not configured.\n"
+                "Set it with: dt config set --system auth.admin_email "
+                "'admin@example.com'"
+            )
+        send_request_email(req, admin_email)
+        return f'Access request emailed to {admin_email}.'
+
+    # Auto-detect: prefer Slack, fall back to email
+    if slack_url:
+        send_request_slack(req, slack_url)
+        return 'Access request sent to Slack.'
+
+    if admin_email:
+        send_request_email(req, admin_email)
+        return f'Access request emailed to {admin_email}.'
+
+    raise AuthError(
+        "No delivery method configured.\n"
+        "Set one of:\n"
+        "  dt config set --system auth.slack_webhook "
+        "'https://hooks.slack.com/services/...'\n"
+        "  dt config set --system auth.admin_email 'admin@example.com'"
+    )
+
 
 def _short_repo_name(url: str) -> str:
     """Short display name from a repository URL."""

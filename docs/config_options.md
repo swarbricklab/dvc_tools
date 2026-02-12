@@ -23,6 +23,8 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `qxub.queue` | PBS queue for parallel jobs | `copyq` |
 | `qxub.walltime` | Maximum runtime for parallel jobs | `10:00:00` |
 | `qxub.mem` | Memory allocation for parallel jobs | `4GB` |
+| `auth.slack_webhook` | Slack incoming-webhook URL for [`dt auth request --send`](auth.md#dt-auth-request) | `https://hooks.slack.com/services/...` |
+| `auth.admin_email` | Admin email address for [`dt auth request --send email`](auth.md#dt-auth-request) | `admin@example.com` |
 | `summary.output_dir` | Output directory for [summary files](summary.md) | `docs` |
 
 ## Option Details
@@ -194,6 +196,28 @@ dt config set --user qxub.mem 4GB
 # Now parallel push/pull will use these settings
 dt push -w 16
 dt pull -w 16
+```
+
+## auth Options
+
+These options configure delivery methods for [`dt auth request --send`](auth.md#dt-auth-request).
+
+### `auth.slack_webhook`
+
+Slack incoming-webhook URL for posting access requests. Obtain one by creating an [Incoming Webhook](https://api.slack.com/messaging/webhooks) in your Slack workspace.
+
+Recommended at **system** scope so all users on the platform share the same channel.
+
+```bash
+dt config set --system auth.slack_webhook 'https://hooks.slack.com/services/T.../B.../xxx'
+```
+
+### `auth.admin_email`
+
+Email address of the administrator who handles access requests. Used by `dt auth request --send email`, which pipes the request text to the local `mail` command.
+
+```bash
+dt config set --system auth.admin_email 'data-admin@example.com'
 ```
 
 ## summary Options

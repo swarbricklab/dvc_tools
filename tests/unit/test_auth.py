@@ -29,6 +29,10 @@ from dt.auth import (
     format_request_text,
     format_request_markdown,
     format_request_json,
+    send_request,
+    send_request_slack,
+    send_request_email,
+    _format_slack_blocks,
     _discover_dt_config,
     _discover_dvc_remotes,
     _discover_git_remotes,
@@ -1420,3 +1424,244 @@ class TestFormatRequestJson:
         )
         data = json.loads(format_request_json(req))
         assert data['items'] == []
+
+
+# =============================================================================
+# Slack formatting tests
+# =============================================================================
+
+class TestFormatSlackBlocks:
+    """Tests for _format_slack_blocks."""
+
+    def _make_req(self, items=None):
+        return AccessRequest(
+            user='alice', project='my-proj', platform_name='gadi',
+            dt_version='0.3.0', request_date='2025-07-17',
+            items=items or [],
+        )
+
+    def test_no_items_shows_all_clear(self):
+        payload = _format_slack_blocks(self._make_req())
+        texts = json.dumps(payload)
+        assert 'All endpoints are accessible' in texts
+
+    def test_header_contains_project_name(self):
+        payload = _format_slack_blocks(self._make_req())
+        header = payload['blocks'][0]
+        assert header['type'] == 'header'
+        assert 'my-proj' in header['text']['text']
+
+    def test_metadata_fields(self):
+        payload = _format_slack_blocks(self._make_req())
+        section = payload['blocks'][1]
+        fields_text = ' '.join(f['text'] for f in section['fields'])
+        assert 'alice' in fields_text
+        assert 'gadi' in fields_text
+        assert '0.3.0' in fields_text
+
+    def test_fail_item_red_circle(self):
+        ep = Endpoint(type='filesystem', url='/data', source='test')
+        item = CheckResult(endpoint=ep, status=STATUS_FAIL, summary='not readable')
+        payload = _format_slack_blocks(self._make_req([item]))
+        text = json.dumps(payload)
+        assert ':red_circle:' in text
+        assert '/data' in text
+
+    def test_warn_item_yellow_circle(self):
+        ep = Endpoint(type='gs', url='gs://bucket', source='test')
+        item = CheckResult(endpoint=ep, status=STATUS_WARN, summary='warning')
+        payload = _format_slack_blocks(self._make_req([item]))
+        text = json.dumps(payload)
+        assert ':large_yellow_circle:' in text
+
+    def test_hints_included(self):
+        ep = Endpoint(type='ssh', url='ssh://host', source='test')
+        item = CheckResult(
+            endpoint=ep, status=STATUS_FAIL, summary='timeout',
+            hints=['check ssh-agent'],
+        )
+        payload = _format_slack_blocks(self._make_req([item]))
+        text = json.dumps(payload)
+        assert 'check ssh-agent' in text
+
+
+# =============================================================================
+# send_request_slack tests
+# =============================================================================
+
+class TestSendRequestSlack:
+    """Tests for send_request_slack."""
+
+    def _make_req(self):
+        return AccessRequest(
+            user='alice', project='proj', platform_name='h',
+            dt_version='v', request_date='d',
+        )
+
+    @patch('dt.auth.urllib.request.urlopen')
+    def test_success(self, mock_urlopen):
+        resp = MagicMock()
+        resp.status = 200
+        resp.read.return_value = b'ok'
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = resp
+
+        send_request_slack(self._make_req(), 'https://hooks.slack.com/test')
+        mock_urlopen.assert_called_once()
+        call_args = mock_urlopen.call_args
+        request_obj = call_args[0][0]
+        assert request_obj.full_url == 'https://hooks.slack.com/test'
+        assert request_obj.get_header('Content-type') == 'application/json'
+
+    @patch('dt.auth.urllib.request.urlopen')
+    def test_non_200_raises(self, mock_urlopen):
+        from dt.errors import AuthError
+        resp = MagicMock()
+        resp.status = 500
+        resp.read.return_value = b'server error'
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = resp
+
+        with pytest.raises(AuthError, match='unexpected response'):
+            send_request_slack(self._make_req(), 'https://hooks.slack.com/test')
+
+    @patch('dt.auth.urllib.request.urlopen')
+    def test_url_error_raises(self, mock_urlopen):
+        import urllib.error
+        from dt.errors import AuthError
+        mock_urlopen.side_effect = urllib.error.URLError('connection refused')
+
+        with pytest.raises(AuthError, match='Failed to send Slack'):
+            send_request_slack(self._make_req(), 'https://hooks.slack.com/bad')
+
+
+# =============================================================================
+# send_request_email tests
+# =============================================================================
+
+class TestSendRequestEmail:
+    """Tests for send_request_email."""
+
+    def _make_req(self):
+        return AccessRequest(
+            user='alice', project='proj', platform_name='h',
+            dt_version='v', request_date='d',
+            items=[
+                CheckResult(
+                    endpoint=Endpoint(type='filesystem', url='/data', source='t'),
+                    status=STATUS_FAIL, summary='not readable',
+                ),
+            ],
+        )
+
+    @patch('dt.auth.subprocess.run')
+    @patch('dt.auth.shutil.which', return_value='/usr/bin/mail')
+    def test_success(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stderr='')
+        send_request_email(self._make_req(), 'admin@example.com')
+
+        mock_run.assert_called_once()
+        args = mock_run.call_args
+        cmd = args[0][0]
+        assert cmd[0] == 'mail'
+        assert 'admin@example.com' in cmd
+        assert 'proj' in cmd[2]  # subject contains project name
+        assert args[1]['input']  # body is non-empty
+
+    @patch('dt.auth.shutil.which', return_value=None)
+    def test_mail_not_found_raises(self, mock_which):
+        from dt.errors import AuthError
+        with pytest.raises(AuthError, match="'mail' command is not available"):
+            send_request_email(self._make_req(), 'admin@example.com')
+
+    @patch('dt.auth.subprocess.run')
+    @patch('dt.auth.shutil.which', return_value='/usr/bin/mail')
+    def test_nonzero_exit_raises(self, mock_which, mock_run):
+        from dt.errors import AuthError
+        mock_run.return_value = MagicMock(returncode=1, stderr='no such user')
+        with pytest.raises(AuthError, match='mail command failed'):
+            send_request_email(self._make_req(), 'admin@example.com')
+
+
+# =============================================================================
+# send_request (auto-detect) tests
+# =============================================================================
+
+class TestSendRequest:
+    """Tests for send_request auto-detection."""
+
+    def _make_req(self):
+        ep = Endpoint(type='filesystem', url='/data', source='t')
+        item = CheckResult(endpoint=ep, status=STATUS_FAIL, summary='bad')
+        return AccessRequest(
+            user='alice', project='proj', platform_name='h',
+            dt_version='v', request_date='d', items=[item],
+        )
+
+    @patch('dt.auth.send_request_slack')
+    @patch('dt.auth.cfg.get_value')
+    def test_explicit_slack(self, mock_cfg, mock_send_slack):
+        mock_cfg.side_effect = lambda k: {
+            'auth.slack_webhook': 'https://hooks.slack.com/xxx',
+        }.get(k)
+        msg = send_request(self._make_req(), method='slack')
+        mock_send_slack.assert_called_once()
+        assert 'Slack' in msg
+
+    @patch('dt.auth.send_request_email')
+    @patch('dt.auth.cfg.get_value')
+    def test_explicit_email(self, mock_cfg, mock_send_email):
+        mock_cfg.side_effect = lambda k: {
+            'auth.admin_email': 'admin@test.com',
+        }.get(k)
+        msg = send_request(self._make_req(), method='email')
+        mock_send_email.assert_called_once()
+        assert 'admin@test.com' in msg
+
+    @patch('dt.auth.cfg.get_value')
+    def test_explicit_slack_no_config_raises(self, mock_cfg):
+        from dt.errors import AuthError
+        mock_cfg.side_effect = KeyError('not found')
+        with pytest.raises(AuthError, match='Slack webhook not configured'):
+            send_request(self._make_req(), method='slack')
+
+    @patch('dt.auth.cfg.get_value')
+    def test_explicit_email_no_config_raises(self, mock_cfg):
+        from dt.errors import AuthError
+        mock_cfg.side_effect = KeyError('not found')
+        with pytest.raises(AuthError, match='Admin email not configured'):
+            send_request(self._make_req(), method='email')
+
+    @patch('dt.auth.send_request_slack')
+    @patch('dt.auth.cfg.get_value')
+    def test_auto_prefers_slack(self, mock_cfg, mock_send_slack):
+        mock_cfg.side_effect = lambda k: {
+            'auth.slack_webhook': 'https://hooks.slack.com/xxx',
+            'auth.admin_email': 'admin@test.com',
+        }[k]
+        msg = send_request(self._make_req(), method=None)
+        mock_send_slack.assert_called_once()
+        assert 'Slack' in msg
+
+    @patch('dt.auth.send_request_email')
+    @patch('dt.auth.cfg.get_value')
+    def test_auto_falls_back_to_email(self, mock_cfg, mock_send_email):
+        def cfg_side(k):
+            if k == 'auth.slack_webhook':
+                raise KeyError('not found')
+            if k == 'auth.admin_email':
+                return 'admin@test.com'
+            raise KeyError
+        mock_cfg.side_effect = cfg_side
+        msg = send_request(self._make_req(), method=None)
+        mock_send_email.assert_called_once()
+        assert 'admin@test.com' in msg
+
+    @patch('dt.auth.cfg.get_value')
+    def test_auto_no_config_raises(self, mock_cfg):
+        from dt.errors import AuthError
+        mock_cfg.side_effect = KeyError('not found')
+        with pytest.raises(AuthError, match='No delivery method configured'):
+            send_request(self._make_req(), method=None)

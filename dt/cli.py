@@ -751,14 +751,25 @@ def auth_check(types, as_json, verbose):
 @click.option('--format', 'fmt', default='text',
               type=click.Choice(['text', 'markdown', 'json'], case_sensitive=False),
               help='Output format (default: text).')
+@click.option('--send', 'send_via', default=None, is_flag=False,
+              flag_value='auto',
+              type=click.Choice(['slack', 'email'], case_sensitive=False),
+              help='Send the request (slack, email, or omit value to auto-detect).')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show verbose check detail')
-def auth_request(types, fmt, verbose):
+def auth_request(types, fmt, verbose, send_via):
     """Generate an access-request template from check failures.
 
     Runs ``dt auth check`` internally, collects failures, and produces
     a template that can be sent to an administrator or pasted into a
     support ticket.
+
+    Use --send to deliver the request directly:
+
+    \b
+      dt auth request --send          # auto-detect (Slack > email)
+      dt auth request --send slack    # send to Slack webhook
+      dt auth request --send email    # send via mail command
     """
     try:
         type_filter = set(types) if types else None
@@ -773,6 +784,15 @@ def auth_request(types, fmt, verbose):
             click.echo(auth_mod.format_request_markdown(req))
         else:
             click.echo(auth_mod.format_request_text(req))
+
+        # Send if requested
+        if send_via is not None:
+            if not req.items:
+                click.echo('Nothing to send — all endpoints are accessible.')
+            else:
+                method = None if send_via == 'auto' else send_via
+                msg = auth_mod.send_request(req, method=method)
+                click.echo(click.style(f'\n✓ {msg}', fg='green'))
 
         # Exit non-zero if there are items to request
         if req.items:
