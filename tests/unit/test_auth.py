@@ -16,14 +16,19 @@ from dt.auth import (
     STATUS_FAIL,
     STATUS_WARN,
     STATUS_SKIP,
+    AccessRequest,
     CheckResult,
     classify_url,
     discover_endpoints,
     check_endpoints,
+    generate_request,
     format_endpoints,
     format_endpoints_json,
     format_check_results,
     format_check_results_json,
+    format_request_text,
+    format_request_markdown,
+    format_request_json,
     _discover_dt_config,
     _discover_dvc_remotes,
     _discover_git_remotes,
@@ -1038,3 +1043,222 @@ class TestFormatCheckResults:
         output = format_check_results(results)
         assert '1 passed' in output
         assert '1 failed' in output
+
+
+# =============================================================================
+# AccessRequest tests
+# =============================================================================
+
+class TestAccessRequest:
+
+    def test_to_dict(self):
+        ep = Endpoint(type='filesystem', url='/data', source='test')
+        item = CheckResult(endpoint=ep, status=STATUS_FAIL, summary='bad')
+        req = AccessRequest(
+            user='jsmith', project='proj', platform_name='gadi',
+            dt_version='0.1.0', request_date='2026-01-15', items=[item],
+        )
+        d = req.to_dict()
+        assert d['user'] == 'jsmith'
+        assert d['project'] == 'proj'
+        assert d['platform'] == 'gadi'
+        assert d['dt_version'] == '0.1.0'
+        assert d['date'] == '2026-01-15'
+        assert len(d['items']) == 1
+        assert d['items'][0]['status'] == 'fail'
+
+    def test_to_dict_empty_items(self):
+        req = AccessRequest(
+            user='u', project='p', platform_name='h',
+            dt_version='0.1.0', request_date='2026-01-01',
+        )
+        d = req.to_dict()
+        assert d['items'] == []
+
+
+class TestGenerateRequest:
+
+    @patch('dt.auth.check_endpoints')
+    def test_collects_failures(self, mock_check):
+        ep1 = Endpoint(type='filesystem', url='/ok', source='a')
+        ep2 = Endpoint(type='ssh', url='ssh://x/y', source='b')
+        ep3 = Endpoint(type='gs', url='gs://b', source='c')
+        mock_check.return_value = [
+            CheckResult(endpoint=ep1, status=STATUS_PASS, summary='OK'),
+            CheckResult(endpoint=ep2, status=STATUS_FAIL, summary='bad',
+                        hints=['fix it']),
+            CheckResult(endpoint=ep3, status=STATUS_WARN, summary='warn'),
+        ]
+        req = generate_request()
+        assert len(req.items) == 2  # fail + warn
+        assert req.items[0].endpoint.url == 'ssh://x/y'
+        assert req.items[1].endpoint.url == 'gs://b'
+
+    @patch('dt.auth.check_endpoints')
+    def test_excludes_warnings_when_disabled(self, mock_check):
+        ep1 = Endpoint(type='ssh', url='ssh://x/y', source='a')
+        ep2 = Endpoint(type='gs', url='gs://b', source='b')
+        mock_check.return_value = [
+            CheckResult(endpoint=ep1, status=STATUS_FAIL, summary='bad'),
+            CheckResult(endpoint=ep2, status=STATUS_WARN, summary='warn'),
+        ]
+        req = generate_request(include_warnings=False)
+        assert len(req.items) == 1
+        assert req.items[0].status == STATUS_FAIL
+
+    @patch('dt.auth.check_endpoints')
+    def test_all_pass_empty_items(self, mock_check):
+        ep = Endpoint(type='filesystem', url='/x', source='a')
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_PASS, summary='OK'),
+        ]
+        req = generate_request()
+        assert len(req.items) == 0
+
+    @patch('dt.auth.check_endpoints')
+    def test_passes_type_filter(self, mock_check):
+        mock_check.return_value = []
+        generate_request(type_filter={'s3'})
+        mock_check.assert_called_once_with(type_filter={'s3'}, verbose=False)
+
+    @patch('dt.auth.check_endpoints')
+    def test_metadata_populated(self, mock_check):
+        mock_check.return_value = []
+        req = generate_request()
+        assert req.user  # non-empty
+        assert req.project  # non-empty
+        assert req.platform_name  # non-empty
+        assert req.dt_version  # non-empty
+        assert req.request_date  # non-empty, ISO format
+
+
+class TestFormatRequestText:
+
+    def test_no_items(self):
+        req = AccessRequest(
+            user='jsmith', project='proj', platform_name='gadi',
+            dt_version='0.1.0', request_date='2026-01-15',
+        )
+        output = format_request_text(req)
+        assert 'jsmith' in output
+        assert 'proj' in output
+        assert 'no request needed' in output
+
+    def test_single_failure(self):
+        ep = Endpoint(type='filesystem', url='/scratch/data', source='cache.root')
+        item = CheckResult(
+            endpoint=ep, status=STATUS_FAIL, summary='not readable',
+            hints=['chmod -R g+rw /scratch/data'],
+        )
+        req = AccessRequest(
+            user='jsmith', project='proj', platform_name='gadi',
+            dt_version='0.1.0', request_date='2026-01-15', items=[item],
+        )
+        output = format_request_text(req)
+        assert 'jsmith' in output
+        assert 'Filesystem: /scratch/data' in output
+        assert 'not readable' in output
+        assert 'read/write access' in output
+        assert 'chmod' in output
+        assert 'Platform: gadi' in output
+        assert 'dt version: 0.1.0' in output
+        assert 'Date: 2026-01-15' in output
+
+    def test_multiple_types(self):
+        ep1 = Endpoint(type='s3', url='s3://bucket', source='remote')
+        ep2 = Endpoint(type='git', url='git@github.com:o/r.git', source='import')
+        req = AccessRequest(
+            user='u', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+            items=[
+                CheckResult(endpoint=ep1, status=STATUS_FAIL,
+                            summary='creds bad'),
+                CheckResult(endpoint=ep2, status=STATUS_FAIL,
+                            summary='not reachable'),
+            ],
+        )
+        output = format_request_text(req)
+        assert '1. S3: s3://bucket' in output
+        assert '2. Git: git@github.com:o/r.git' in output
+        assert 'read access' in output
+        assert 'connection access' in output
+
+    def test_warning_item(self):
+        ep = Endpoint(type='gs', url='gs://b', source='remote')
+        item = CheckResult(endpoint=ep, status=STATUS_WARN, summary='no auth')
+        req = AccessRequest(
+            user='u', project='p', platform_name='h',
+            dt_version='v', request_date='d', items=[item],
+        )
+        output = format_request_text(req)
+        assert 'Gs: gs://b' in output  # capitalised type
+        assert 'no auth' in output
+
+
+class TestFormatRequestMarkdown:
+
+    def test_no_items(self):
+        req = AccessRequest(
+            user='u', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+        )
+        output = format_request_markdown(req)
+        assert '# Access request' in output
+        assert 'no request needed' in output
+
+    def test_failure_with_hints(self):
+        ep = Endpoint(type='filesystem', url='/data', source='cache.root')
+        item = CheckResult(
+            endpoint=ep, status=STATUS_FAIL, summary='not readable',
+            hints=['chmod -R g+rw /data'],
+        )
+        req = AccessRequest(
+            user='jsmith', project='proj', platform_name='gadi',
+            dt_version='0.1.0', request_date='2026-01-15', items=[item],
+        )
+        output = format_request_markdown(req)
+        assert '# Access request — proj' in output
+        assert '**User:** jsmith' in output
+        assert '🔴' in output
+        assert '`/data`' in output
+        assert 'chmod' in output
+        assert '**Source:** cache.root' in output
+
+    def test_warning_gets_yellow_icon(self):
+        ep = Endpoint(type='gs', url='gs://b', source='remote')
+        item = CheckResult(endpoint=ep, status=STATUS_WARN, summary='warn')
+        req = AccessRequest(
+            user='u', project='p', platform_name='h',
+            dt_version='v', request_date='d', items=[item],
+        )
+        output = format_request_markdown(req)
+        assert '🟡' in output
+
+
+class TestFormatRequestJson:
+
+    def test_roundtrip(self):
+        ep = Endpoint(type='filesystem', url='/data', source='test')
+        item = CheckResult(
+            endpoint=ep, status=STATUS_FAIL, summary='bad',
+            hints=['fix it'],
+        )
+        req = AccessRequest(
+            user='u', project='p', platform_name='h',
+            dt_version='v', request_date='d', items=[item],
+        )
+        output = format_request_json(req)
+        data = json.loads(output)
+        assert data['user'] == 'u'
+        assert data['project'] == 'p'
+        assert len(data['items']) == 1
+        assert data['items'][0]['status'] == 'fail'
+        assert data['items'][0]['hints'] == ['fix it']
+
+    def test_empty_items(self):
+        req = AccessRequest(
+            user='u', project='p', platform_name='h',
+            dt_version='v', request_date='d',
+        )
+        data = json.loads(format_request_json(req))
+        assert data['items'] == []

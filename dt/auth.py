@@ -4,10 +4,13 @@ Scans DVC config, .dvc files, dt config, and git remotes to build a
 complete picture of every storage endpoint the current project depends on.
 """
 
+import getpass
 import json
 import os
+import platform
 import subprocess
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -1066,8 +1069,182 @@ def format_check_results_json(results: List[CheckResult]) -> str:
 
 
 # =============================================================================
-# Helpers
+# Access request generation
 # =============================================================================
+
+@dataclass
+class AccessRequest:
+    """An access-request template generated from check failures.
+
+    Attributes:
+        user: Username of the requester.
+        project: Project name.
+        platform_name: Hostname / platform identifier.
+        dt_version: Installed dt version string.
+        request_date: Date the request was generated.
+        items: Failed/warned :class:`CheckResult` objects that need
+            attention.
+    """
+
+    user: str
+    project: str
+    platform_name: str
+    dt_version: str
+    request_date: str
+    items: List[CheckResult] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            'user': self.user,
+            'project': self.project,
+            'platform': self.platform_name,
+            'dt_version': self.dt_version,
+            'date': self.request_date,
+            'items': [r.to_dict() for r in self.items],
+        }
+
+
+def _get_dt_version() -> str:
+    """Return the installed dt version string."""
+    try:
+        from importlib.metadata import version as pkg_version
+        return pkg_version('dvc-tools')
+    except Exception:
+        return 'unknown'
+
+
+def generate_request(
+    type_filter: Optional[Set[str]] = None,
+    verbose: bool = False,
+    include_warnings: bool = True,
+) -> AccessRequest:
+    """Run access checks and collect failures into an :class:`AccessRequest`.
+
+    Calls :func:`check_endpoints` internally, then filters to results
+    with status ``'fail'`` (and optionally ``'warn'``).
+
+    Args:
+        type_filter: Passed through to :func:`check_endpoints`.
+        verbose: Passed through to :func:`check_endpoints`.
+        include_warnings: Whether to include ``'warn'`` results as well
+            as ``'fail'`` results.  Defaults to ``True``.
+
+    Returns:
+        An :class:`AccessRequest` populated with metadata and the
+        failing / warning items.
+    """
+    results = check_endpoints(type_filter=type_filter, verbose=verbose)
+
+    target_statuses = {STATUS_FAIL}
+    if include_warnings:
+        target_statuses.add(STATUS_WARN)
+
+    items = [r for r in results if r.status in target_statuses]
+
+    return AccessRequest(
+        user=getpass.getuser(),
+        project=utils.get_project_name(),
+        platform_name=platform.node(),
+        dt_version=_get_dt_version(),
+        request_date=date.today().isoformat(),
+        items=items,
+    )
+
+
+def format_request_text(req: AccessRequest) -> str:
+    """Format an access request as plain text."""
+    lines: List[str] = []
+
+    lines.append(f"Access request for user '{req.user}' on project '{req.project}'")
+    lines.append('')
+
+    if not req.items:
+        lines.append('All endpoints are accessible — no request needed.')
+        lines.append('')
+        return '\n'.join(lines)
+
+    lines.append('The following resources are not accessible:')
+    lines.append('')
+
+    for i, r in enumerate(req.items, 1):
+        ep = r.endpoint
+        type_label = ep.type.capitalize()
+        lines.append(f'  {i}. {type_label}: {ep.url}')
+        lines.append(f'     Status: {r.summary}')
+
+        # Determine required access level
+        if ep.type == 'filesystem':
+            lines.append('     Required: read/write access')
+        elif ep.type in ('s3', 'gs'):
+            lines.append('     Required: read access (at minimum)')
+        elif ep.type in ('ssh', 'git'):
+            lines.append('     Required: connection access')
+        elif ep.type == 'http':
+            lines.append('     Required: HTTP reachability')
+
+        for hint in r.hints:
+            lines.append(f'     Suggested fix: {hint}')
+        lines.append('')
+
+    lines.append(f'Platform: {req.platform_name}')
+    lines.append(f'dt version: {req.dt_version}')
+    lines.append(f'Date: {req.request_date}')
+    lines.append('')
+
+    return '\n'.join(lines)
+
+
+def format_request_markdown(req: AccessRequest) -> str:
+    """Format an access request as Markdown (for tickets / emails)."""
+    lines: List[str] = []
+
+    lines.append(f"# Access request — {req.project}")
+    lines.append('')
+    lines.append(f'**User:** {req.user}  ')
+    lines.append(f'**Platform:** {req.platform_name}  ')
+    lines.append(f'**dt version:** {req.dt_version}  ')
+    lines.append(f'**Date:** {req.request_date}')
+    lines.append('')
+
+    if not req.items:
+        lines.append('All endpoints are accessible — no request needed.')
+        lines.append('')
+        return '\n'.join(lines)
+
+    lines.append('## Resources requiring access')
+    lines.append('')
+
+    for i, r in enumerate(req.items, 1):
+        ep = r.endpoint
+        status_icon = '🔴' if r.status == STATUS_FAIL else '🟡'
+        lines.append(f'### {i}. {ep.type} — `{ep.url}`')
+        lines.append('')
+        lines.append(f'- **Status:** {status_icon} {r.summary}')
+        lines.append(f'- **Source:** {ep.source}')
+
+        if ep.type == 'filesystem':
+            lines.append('- **Required:** read/write access')
+        elif ep.type in ('s3', 'gs'):
+            lines.append('- **Required:** read access (at minimum)')
+        elif ep.type in ('ssh', 'git'):
+            lines.append('- **Required:** connection access')
+        elif ep.type == 'http':
+            lines.append('- **Required:** HTTP reachability')
+
+        if r.hints:
+            lines.append('')
+            lines.append('**Suggested fix:**')
+            for hint in r.hints:
+                lines.append(f'- {hint}')
+
+        lines.append('')
+
+    return '\n'.join(lines)
+
+
+def format_request_json(req: AccessRequest) -> str:
+    """Format an access request as JSON."""
+    return json.dumps(req.to_dict(), indent=2)
 
 def _short_repo_name(url: str) -> str:
     """Short display name from a repository URL."""

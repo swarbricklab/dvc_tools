@@ -744,6 +744,43 @@ def auth_check(types, as_json, verbose):
         raise click.ClickException(str(e))
 
 
+@auth.command('request')
+@click.option('--type', 'types', multiple=True,
+              type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
+              help='Only include failures for specific endpoint type(s).')
+@click.option('--format', 'fmt', default='text',
+              type=click.Choice(['text', 'markdown', 'json'], case_sensitive=False),
+              help='Output format (default: text).')
+@click.option('-v', '--verbose', is_flag=True,
+              help='Show verbose check detail')
+def auth_request(types, fmt, verbose):
+    """Generate an access-request template from check failures.
+
+    Runs ``dt auth check`` internally, collects failures, and produces
+    a template that can be sent to an administrator or pasted into a
+    support ticket.
+    """
+    try:
+        type_filter = set(types) if types else None
+        req = auth_mod.generate_request(
+            type_filter=type_filter,
+            verbose=verbose,
+        )
+
+        if fmt == 'json':
+            click.echo(auth_mod.format_request_json(req))
+        elif fmt == 'markdown':
+            click.echo(auth_mod.format_request_markdown(req))
+        else:
+            click.echo(auth_mod.format_request_text(req))
+
+        # Exit non-zero if there are items to request
+        if req.items:
+            raise SystemExit(1)
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
 @cli.command()
 @click.argument('targets', nargs=-1)
 @click.option('-h', '--human-readable', 'human', is_flag=True,
