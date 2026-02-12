@@ -175,11 +175,16 @@ def init_remote(
     return remote_dir
 
 
-def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
+def _run_dvc_remote_list(
+    repo_path: Path,
+    project_only: bool = False,
+) -> List[Tuple[str, str, bool]]:
     """Run dvc remote list in a repository and parse output.
     
     Args:
         repo_path: Path to the repository
+        project_only: If True, only list remotes defined in project scope
+            (``.dvc/config``), excluding local overrides.
         
     Returns:
         List of (remote_name, url, is_default) tuples
@@ -188,8 +193,12 @@ def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
     env = os.environ.copy()
     env['COLUMNS'] = '1000'
     
+    cmd = ['dvc', 'remote', 'list']
+    if project_only:
+        cmd.append('--project')
+    
     result = subprocess.run(
-        ['dvc', 'remote', 'list'],
+        cmd,
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -199,9 +208,13 @@ def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
     if result.returncode != 0:
         return []
     
-    # Get default remote
+    # Get default remote (from same scope)
+    config_cmd = ['dvc', 'config', 'core.remote']
+    if project_only:
+        config_cmd.append('--project')
+    
     default_result = subprocess.run(
-        ['dvc', 'config', 'core.remote'],
+        config_cmd,
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -234,24 +247,30 @@ def _run_dvc_remote_list(repo_path: Path) -> List[Tuple[str, str, bool]]:
     return remotes
 
 
-def list_remotes(repo_path: Optional[Path] = None) -> List[Tuple[str, str, bool]]:
+def list_remotes(
+    repo_path: Optional[Path] = None,
+    project_only: bool = False,
+) -> List[Tuple[str, str, bool]]:
     """List remotes for a DVC repository.
     
     Uses `dvc remote list` to get remotes.
     
     Args:
         repo_path: Path to the repository (defaults to cwd)
+        project_only: If True, only list remotes defined in project scope
+            (``.dvc/config``), excluding local overrides.
         
     Returns:
         List of (remote_name, url, is_default) tuples
     """
     repo_path = repo_path or Path.cwd()
-    return _run_dvc_remote_list(repo_path)
+    return _run_dvc_remote_list(repo_path, project_only=project_only)
 
 
 def list_remotes_from_repo(
     repo_spec: str,
     owner: Optional[str] = None,
+    project_only: bool = False,
 ) -> List[Tuple[str, str, bool]]:
     """List remotes for a remote repository.
     
@@ -261,6 +280,7 @@ def list_remotes_from_repo(
     Args:
         repo_spec: Repository URL, local path, or short name
         owner: Optional owner for short names
+        project_only: If True, only list remotes defined in project scope.
         
     Returns:
         List of (remote_name, url, is_default) tuples
@@ -269,14 +289,14 @@ def list_remotes_from_repo(
     local_repo = Path(repo_spec)
     if local_repo.exists() and (local_repo / '.dvc').is_dir():
         # Local repo - run dvc remote list directly to get correct resolved paths
-        return _run_dvc_remote_list(local_repo)
+        return _run_dvc_remote_list(local_repo, project_only=project_only)
     
     # Remote repo - clone it first
     # Use refresh=False to avoid network operations when clone already exists
     from . import tmp as tmp_mod
     
     repo_path = tmp_mod.clone_repo(repo_spec, owner=owner, refresh=False, verbose=False)
-    return _run_dvc_remote_list(repo_path)
+    return _run_dvc_remote_list(repo_path, project_only=project_only)
 
 
 def parse_remote_url(url: str) -> Tuple[Optional[str], Optional[str]]:
