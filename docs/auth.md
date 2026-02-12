@@ -36,7 +36,7 @@ dt auth list [--type TYPE] [--repo URL] [--json]
 | Option | Description |
 |--------|-------------|
 | `--type TYPE` | Filter to a specific endpoint type: `filesystem`, `ssh`, `s3`, `gs`, `http`, `git` |
-| `--repo URL` | Discover endpoints for a remote repository (cloned to a temp dir) |
+| `--repo URL` | Discover endpoints for a remote repository (cloned to a temp dir). Accepts a full URL or a short name (resolved via the `owner` config key, same as `dt clone`). |
 | `--json` | Output as JSON array |
 
 The `--type` flag can be repeated to include multiple types:
@@ -50,6 +50,9 @@ dt auth list --type s3 --type gs
 
 # Discover endpoints for a repo you haven't cloned
 dt auth list --repo git@github.com:org/data-repo.git
+
+# Use a short name (requires: dt config set owner <github-org>)
+dt auth list --repo neochemo
 ```
 
 ### Sources scanned
@@ -181,7 +184,7 @@ dt auth check [--type TYPE] [--repo URL] [--verbose] [--user USERNAME] [--json]
 | Option | Description |
 |--------|-------------|
 | `--type TYPE` | Only check specific endpoint type(s): `filesystem`, `ssh`, `s3`, `gs`, `http`, `git` |
-| `--repo URL` | Check endpoints for a remote repository (cloned to a temp dir) |
+| `--repo URL` | Check endpoints for a remote repository (cloned to a temp dir). Accepts a full URL or a short name. |
 | `--verbose` | Show per-subdirectory detail for filesystem checks |
 | `--user USERNAME` | Check access from another user's perspective (admin use) |
 | `--json` | Output as JSON |
@@ -198,6 +201,9 @@ dt auth check --type filesystem --type ssh --type s3 --type gs
 
 # Check endpoints for a repo you haven't cloned
 dt auth check --repo git@github.com:org/data-repo.git
+
+# Use a short name
+dt auth check --repo neochemo
 ```
 
 ### Ownership info for failed subdirectories
@@ -346,12 +352,13 @@ and optionally deliver it via Slack or email.
 ### Usage
 
 ```bash
-dt auth request [--type TYPE] [--format text|markdown|json] [--send [slack|email]]
+dt auth request [--type TYPE] [--repo URL] [--format text|markdown|json] [--send [slack|email]]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--type TYPE` | Only include failures for specific endpoint type(s) |
+| `--repo URL` | Generate request for a remote repository. Accepts a full URL or short name. |
 | `--format` | Output format: `text` (default), `markdown`, or `json` |
 | `--send` | Send the request. Omit the value to auto-detect (Slack → email), or specify `slack` or `email` explicitly. |
 
@@ -433,17 +440,22 @@ Manage GitHub team access for repositories. Wraps the `gh` CLI to provide quick 
 
 All subcommands support `--json` output where applicable.
 
+Repository arguments accept a **full URL** or a **short name** (resolved via the `owner` config key, same as `dt clone`).
+
 ### Examples
 
 ```bash
 # List teams with access to a repo
 dt auth teams repo git@github.com:org/data-repo.git
 
+# Same, using a short name
+dt auth teams repo neochemo
+
 # List teams that alice belongs to in the org
 dt auth teams user alice --org myorg
 
-# Grant a team push access to a repo
-dt auth teams add-to-repo data-team git@github.com:org/repo.git
+# Grant a team push access to a repo (short name or full URL)
+dt auth teams add-to-repo data-team neochemo
 
 # Grant read-only access
 dt auth teams add-to-repo data-readers git@github.com:org/repo.git --permission pull

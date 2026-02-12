@@ -23,6 +23,7 @@ from dt.auth import (
     classify_url,
     discover_endpoints,
     discover_endpoints_from_repo,
+    resolve_repo_url,
     check_endpoints,
     generate_request,
     get_identities,
@@ -2546,3 +2547,64 @@ class TestFormatTeams:
         assert len(data) == 1
         assert data[0]['slug'] == 'data'
         assert data[0]['permission'] == 'push'
+
+
+# =============================================================================
+# resolve_repo_url tests
+# =============================================================================
+
+class TestResolveRepoUrl:
+    """Tests for resolve_repo_url short name support."""
+
+    def test_full_ssh_url_passthrough(self):
+        url = resolve_repo_url('git@github.com:org/repo.git')
+        assert url == 'git@github.com:org/repo.git'
+
+    def test_full_https_url_passthrough(self):
+        url = resolve_repo_url('https://github.com/org/repo')
+        assert url == 'https://github.com/org/repo'
+
+    @patch('dt.auth.tmp_mod.resolve_repository_url',
+           return_value='git@github.com:swarbricklab/neochemo.git')
+    def test_short_name_resolved(self, mock_resolve):
+        url = resolve_repo_url('neochemo')
+        assert url == 'git@github.com:swarbricklab/neochemo.git'
+        mock_resolve.assert_called_once_with('neochemo')
+
+    @patch('dt.auth.tmp_mod.resolve_repository_url',
+           side_effect=Exception("no owner configured"))
+    def test_short_name_no_owner_raises(self, mock_resolve):
+        with pytest.raises(Exception, match='no owner'):
+            resolve_repo_url('neochemo')
+
+
+class TestTeamsWithShortNames:
+    """Test that team functions resolve short names."""
+
+    @patch('dt.auth.subprocess.run')
+    @patch('dt.auth.resolve_repo_url',
+           return_value='git@github.com:org/repo.git')
+    def test_list_repo_teams_resolves(self, mock_resolve, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout='team\tTeam\tpush\n',
+        )
+        teams = list_repo_teams('repo')
+        mock_resolve.assert_called_once_with('repo')
+        assert len(teams) == 1
+
+    @patch('dt.auth.subprocess.run')
+    @patch('dt.auth.resolve_repo_url',
+           return_value='git@github.com:org/repo.git')
+    def test_add_team_resolves(self, mock_resolve, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        add_team_to_repo('repo', 'data-team')
+        mock_resolve.assert_called_once_with('repo')
+
+    @patch('dt.auth.discover_endpoints', return_value=[])
+    @patch('dt.auth.subprocess.run')
+    @patch('dt.auth.resolve_repo_url',
+           return_value='git@github.com:org/repo.git')
+    def test_discover_from_repo_resolves(self, mock_resolve, mock_run, mock_disc):
+        mock_run.return_value = MagicMock(returncode=0)
+        discover_endpoints_from_repo('repo')
+        mock_resolve.assert_called_once_with('repo')

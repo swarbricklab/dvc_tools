@@ -19,8 +19,30 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from . import config as cfg
 from . import remote as remote_mod
+from . import tmp as tmp_mod
 from . import utils
 from .errors import AuthError
+
+
+def resolve_repo_url(repo: str) -> str:
+    """Resolve a repository short name or URL to a full git URL.
+
+    Supports short names (e.g. ``neochemo``) when the ``owner`` config
+    key is set, as well as full SSH/HTTPS URLs.
+
+    Args:
+        repo: Repository URL or short name.
+
+    Returns:
+        Full git URL.
+
+    Raises:
+        AuthError: If the short name cannot be resolved.
+    """
+    try:
+        return tmp_mod.resolve_repository_url(repo)
+    except tmp_mod.TmpError as e:
+        raise AuthError(str(e))
 
 
 # =============================================================================
@@ -442,7 +464,7 @@ def discover_endpoints_from_repo(
     files, and git remotes — no data is fetched.
 
     Args:
-        repo_url: Git clone URL (https or SSH).
+        repo_url: Git clone URL, or short name (resolved via ``owner`` config).
         type_filter: Passed through to :func:`discover_endpoints`.
         verbose: Print progress information.
 
@@ -450,6 +472,8 @@ def discover_endpoints_from_repo(
         Deduplicated list of :class:`Endpoint` objects.
     """
     import tempfile
+
+    repo_url = resolve_repo_url(repo_url)
 
     tmpdir = tempfile.mkdtemp(prefix='dt-auth-')
     clone_path = Path(tmpdir) / 'repo'
@@ -1485,7 +1509,7 @@ def list_repo_teams(repo_url: str) -> List[TeamInfo]:
     """List GitHub teams that have access to a repository.
 
     Args:
-        repo_url: GitHub repository URL.
+        repo_url: GitHub repository URL or short name.
 
     Returns:
         List of :class:`TeamInfo` objects.
@@ -1493,6 +1517,7 @@ def list_repo_teams(repo_url: str) -> List[TeamInfo]:
     Raises:
         AuthError: If the URL is not a GitHub URL or ``gh`` fails.
     """
+    repo_url = resolve_repo_url(repo_url)
     parsed = _parse_github_owner_repo(repo_url)
     if parsed is None:
         raise AuthError(f'Not a GitHub URL: {repo_url}')
@@ -1597,7 +1622,7 @@ def add_team_to_repo(
     """Add a GitHub team to a repository.
 
     Args:
-        repo_url: GitHub repository URL.
+        repo_url: GitHub repository URL or short name.
         team_slug: Team slug (e.g. ``data-team``).
         permission: Permission level: ``pull``, ``push``, ``admin``,
             ``maintain``, or ``triage``.
@@ -1608,6 +1633,7 @@ def add_team_to_repo(
     Raises:
         AuthError: If the operation fails.
     """
+    repo_url = resolve_repo_url(repo_url)
     parsed = _parse_github_owner_repo(repo_url)
     if parsed is None:
         raise AuthError(f'Not a GitHub URL: {repo_url}')

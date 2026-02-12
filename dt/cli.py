@@ -691,7 +691,7 @@ def auth():
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
               help='Filter to specific endpoint type(s). Repeat for multiple.')
 @click.option('--repo', 'repo_url', default=None,
-              help='Discover endpoints for a remote repo (cloned to a temp dir).')
+              help='Discover endpoints for a remote repo (URL or short name).')
 @click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
 @click.option('-v', '--verbose', is_flag=True, help='Show discovery progress')
 def auth_list(types, repo_url, as_json, verbose):
@@ -781,7 +781,7 @@ def auth_whoami(detect, save, as_json):
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
               help='Only check specific endpoint type(s). Repeat for multiple.')
 @click.option('--repo', 'repo_url', default=None,
-              help='Check endpoints for a remote repo (cloned to a temp dir).')
+              help='Check endpoints for a remote repo (URL or short name).')
 @click.option('--user', 'check_user', default=None,
               help="Check access from another user's perspective (filesystem + GitHub).")
 @click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
@@ -839,7 +839,7 @@ def auth_check(types, repo_url, check_user, as_json, verbose):
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
               help='Only include failures for specific endpoint type(s).')
 @click.option('--repo', 'repo_url', default=None,
-              help='Generate request for a remote repo (cloned to a temp dir).')
+              help='Generate request for a remote repo (URL or short name).')
 @click.option('--format', 'fmt', default='text',
               type=click.Choice(['text', 'markdown', 'json'], case_sensitive=False),
               help='Output format (default: text).')
@@ -921,10 +921,11 @@ def auth_teams():
 def auth_teams_repo(repo_url, as_json):
     """List GitHub teams with access to a repository.
 
-    REPO_URL is a GitHub repository URL (SSH or HTTPS).
+    REPO_URL is a GitHub repository URL (SSH or HTTPS) or a short name.
 
     \b
       dt auth teams repo git@github.com:org/data-repo.git
+      dt auth teams repo neochemo
     """
     try:
         teams = auth_mod.list_repo_teams(repo_url)
@@ -975,10 +976,12 @@ def auth_teams_add_to_repo(team_slug, repo_url, permission, dry):
 
     \b
       dt auth teams add-to-repo data-team git@github.com:org/repo.git
-      dt auth teams add-to-repo data-team git@github.com:org/repo.git --permission pull
-      dt auth teams add-to-repo data-team git@github.com:org/repo.git --dry
+      dt auth teams add-to-repo data-team neochemo
+      dt auth teams add-to-repo data-team neochemo --permission pull
+      dt auth teams add-to-repo data-team neochemo --dry
     """
     try:
+        repo_url = auth_mod.resolve_repo_url(repo_url)
         parsed = auth_mod._parse_github_owner_repo(repo_url)
         if parsed is None:
             raise click.ClickException(f'Not a GitHub URL: {repo_url}')
