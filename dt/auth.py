@@ -160,10 +160,14 @@ def _discover_dt_config() -> List[Endpoint]:
 
 
 def _discover_dvc_remotes(repo_path: Optional[Path] = None) -> List[Endpoint]:
-    """Endpoints from ``dvc remote list``."""
+    """Endpoints from ``dvc remote list --project``.
+
+    Uses project scope only so that local overrides (e.g. a convenience
+    local-remote) are excluded.
+    """
     endpoints: List[Endpoint] = []
 
-    remotes = remote_mod.list_remotes(repo_path)
+    remotes = remote_mod.list_remotes(repo_path, project_only=True)
     for name, url, is_default in remotes:
         if not url:
             continue
@@ -277,7 +281,8 @@ def _discover_import_sources(
 
         # Try to discover DVC remotes of the source repo via tmp clone
         try:
-            source_remotes = remote_mod.list_remotes_from_repo(url)
+            source_remotes = remote_mod.list_remotes_from_repo(
+                        url, project_only=True)
             for rname, rurl, r_default in source_remotes:
                 if not rurl:
                     continue
@@ -329,22 +334,34 @@ def discover_endpoints(
     Returns:
         Deduplicated list of :class:`Endpoint` objects.
     """
-    if verbose:
-        print("Discovering endpoints...")
+    project_name = utils.get_project_name()
+    print(f"Scanning endpoints for project '{project_name}'...")
 
     all_eps: List[Endpoint] = []
 
     # 1. dt config (cache.root, remote.root)
-    all_eps.extend(_discover_dt_config())
+    dt_eps = _discover_dt_config()
+    all_eps.extend(dt_eps)
+    if verbose and dt_eps:
+        print(f"  dt config: {len(dt_eps)} endpoint(s)")
 
-    # 2. DVC remotes
-    all_eps.extend(_discover_dvc_remotes(repo_path))
+    # 2. DVC remotes (project scope only)
+    dvc_eps = _discover_dvc_remotes(repo_path)
+    all_eps.extend(dvc_eps)
+    if verbose and dvc_eps:
+        print(f"  DVC remotes (project scope): {len(dvc_eps)} endpoint(s)")
 
     # 3. Git remotes
-    all_eps.extend(_discover_git_remotes(repo_path))
+    git_eps = _discover_git_remotes(repo_path)
+    all_eps.extend(git_eps)
+    if verbose and git_eps:
+        print(f"  git remotes: {len(git_eps)} endpoint(s)")
 
     # 4. Import sources (+ their DVC remotes via tmp clone)
-    all_eps.extend(_discover_import_sources(repo_path, verbose=verbose))
+    import_eps = _discover_import_sources(repo_path, verbose=verbose)
+    all_eps.extend(import_eps)
+    if verbose and import_eps:
+        print(f"  import sources: {len(import_eps)} endpoint(s)")
 
     # Deduplicate by (type, url) keeping first occurrence
     seen: Set[Tuple[str, str]] = set()

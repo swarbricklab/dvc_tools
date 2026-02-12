@@ -171,6 +171,13 @@ class TestDiscoverDvcRemotes:
     """Tests for _discover_dvc_remotes."""
 
     @patch('dt.auth.remote_mod.list_remotes')
+    def test_uses_project_scope(self, mock_list):
+        """Ensures _discover_dvc_remotes passes project_only=True."""
+        mock_list.return_value = []
+        _discover_dvc_remotes()
+        mock_list.assert_called_once_with(None, project_only=True)
+
+    @patch('dt.auth.remote_mod.list_remotes')
     def test_ssh_remote_with_local_path(self, mock_list):
         mock_list.return_value = [
             ('origin', 'ssh://gadi.nci.org.au/g/data/remote', True),
@@ -281,6 +288,19 @@ class TestDiscoverGitRemotes:
 
 class TestDiscoverImportSources:
     """Tests for _discover_import_sources."""
+
+    def test_source_repo_uses_project_scope(self, tmp_path):
+        """Ensures source repo remote discovery passes project_only=True."""
+        import yaml
+        (tmp_path / 'imp.dvc').write_text(yaml.dump({
+            'deps': [{'path': 'f', 'repo': {'url': 'git@github.com:org/r.git'}}],
+            'outs': [{'md5': '111', 'path': 'imp'}],
+        }))
+        with patch('dt.auth.remote_mod.list_remotes_from_repo',
+                   return_value=[]) as mock_list:
+            _discover_import_sources(repo_path=tmp_path)
+        mock_list.assert_called_once_with(
+            'git@github.com:org/r.git', project_only=True)
 
     def test_finds_import_urls(self, tmp_path):
         """Finds unique import source URLs from .dvc files."""
@@ -394,6 +414,27 @@ class TestDiscoverImportSources:
 
 class TestDiscoverEndpoints:
     """Tests for the top-level discover_endpoints function."""
+
+    def test_prints_scanning_message(self, capsys):
+        """Always prints scanning message even without verbose."""
+        with patch('dt.auth._discover_import_sources', return_value=[]), \
+             patch('dt.auth._discover_git_remotes', return_value=[]), \
+             patch('dt.auth._discover_dvc_remotes', return_value=[]), \
+             patch('dt.auth._discover_dt_config', return_value=[]):
+            discover_endpoints()
+        captured = capsys.readouterr()
+        assert 'Scanning endpoints for project' in captured.out
+
+    def test_verbose_shows_step_counts(self, capsys):
+        """Verbose mode shows per-step endpoint counts."""
+        dvc_eps = [Endpoint(type='ssh', url='ssh://h/p', source='remote')]
+        with patch('dt.auth._discover_import_sources', return_value=[]), \
+             patch('dt.auth._discover_git_remotes', return_value=[]), \
+             patch('dt.auth._discover_dvc_remotes', return_value=dvc_eps), \
+             patch('dt.auth._discover_dt_config', return_value=[]):
+            discover_endpoints(verbose=True)
+        captured = capsys.readouterr()
+        assert 'DVC remotes (project scope): 1 endpoint(s)' in captured.out
 
     @patch('dt.auth._discover_import_sources', return_value=[])
     @patch('dt.auth._discover_git_remotes', return_value=[])

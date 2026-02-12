@@ -534,27 +534,35 @@ def remote_init(project_name, name, remote_root, remote_path):
 @remote.command('list')
 @click.argument('repository', required=False)
 @click.option('--owner', help='Override the GitHub owner for short names')
-def remote_list(repository, owner):
+@click.option('--project', 'project_only', is_flag=True,
+              help='Only show remotes defined in project scope (.dvc/config)')
+def remote_list(repository, owner, project_only):
     """List DVC remotes for a repository.
     
     Without arguments, lists remotes for the current repository.
     With a repository argument, lists remotes for that remote repository.
     
+    By default shows remotes from all config scopes. Use --project to
+    show only remotes defined in the shared project config (.dvc/config),
+    excluding local overrides.
+    
     \b
     Examples:
         dt remote list                    # List remotes for current repo
+        dt remote list --project          # Only project-scope remotes
         dt remote list otherproject       # List remotes for another repo
         dt remote list myorg/otherproject # List with explicit owner
     """
     if repository:
         # List remotes from a remote repository
         try:
-            remotes = remote_mod.list_remotes_from_repo(repository, owner=owner)
+            remotes = remote_mod.list_remotes_from_repo(
+                repository, owner=owner, project_only=project_only)
         except Exception as e:
             raise click.ClickException(str(e))
     else:
         # List remotes for current repository
-        remotes = remote_mod.list_remotes()
+        remotes = remote_mod.list_remotes(project_only=project_only)
     
     if not remotes:
         click.echo("No remotes configured.")
