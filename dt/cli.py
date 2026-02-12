@@ -9,6 +9,7 @@ from . import init as init_mod
 from . import cache as cache_mod
 from . import remote as remote_mod
 from . import doctor as doctor_mod
+from . import auth as auth_mod
 from . import push as push_mod
 from . import add as add_mod
 from . import fetch as fetch_mod
@@ -660,6 +661,47 @@ def doctor(verbose):
         click.echo("--- DVC Doctor ---")
         dvc_output = doctor_mod.run_dvc_doctor()
         click.echo(dvc_output)
+
+
+# =============================================================================
+# dt auth
+# =============================================================================
+
+@cli.group()
+def auth():
+    """Verify and diagnose access to storage backends.
+    
+    Discovers every storage endpoint the current project relies on
+    (filesystem, SSH, S3/R2, GCS, git) and can test access to each.
+    """
+    pass
+
+
+@auth.command('list')
+@click.option('--type', 'types', multiple=True,
+              type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
+              help='Filter to specific endpoint type(s). Repeat for multiple.')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True, help='Show discovery progress')
+def auth_list(types, as_json, verbose):
+    """Discover every storage endpoint the project uses.
+    
+    Scans DVC remotes, dt config (cache.root, remote.root), git remotes,
+    and import .dvc files to find all endpoints. For imports, also discovers
+    DVC remotes of the source repository via tmp clones.
+    """
+    try:
+        type_filter = set(types) if types else None
+        endpoints = auth_mod.discover_endpoints(
+            type_filter=type_filter,
+            verbose=verbose,
+        )
+        if as_json:
+            click.echo(auth_mod.format_endpoints_json(endpoints))
+        else:
+            click.echo(auth_mod.format_endpoints(endpoints))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
 
 
 @cli.command()
