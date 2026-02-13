@@ -150,6 +150,11 @@ class AddError(DTError):
     pass
 
 
+class DataStatusError(DTError):
+    """Error during data status operations."""
+    pass
+
+
 class AuthError(DTError):
     """Error during auth operations."""
     pass
