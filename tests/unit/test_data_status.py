@@ -128,3 +128,19 @@ class TestDataStatusViaQxub:
     def test_excessive_thread_count(self, mock_qxub, mock_cfg):
         with pytest.raises(DataStatusError, match='exceeds maximum'):
             data_status_via_qxub(threads=100)
+
+    @patch('dt.data_status.dvc_utils.submit_via_qxub', return_value=None)
+    @patch('dt.data_status.cfg.get_value', return_value='192')
+    @patch('dt.data_status.dvc_utils.check_qxub', return_value=True)
+    def test_no_index_sync_flag_in_worker_cmd(self, mock_qxub, mock_cfg, mock_submit):
+        data_status_via_qxub(no_index_sync=True)
+        call_kwargs = mock_submit.call_args[1]
+        assert '--no-index-sync' in call_kwargs['worker_cmd']
+
+    @patch('dt.data_status.dvc_utils.submit_via_qxub', return_value=None)
+    @patch('dt.data_status.cfg.get_value', return_value='192')
+    @patch('dt.data_status.dvc_utils.check_qxub', return_value=True)
+    def test_no_index_sync_flag_absent_by_default(self, mock_qxub, mock_cfg, mock_submit):
+        data_status_via_qxub()
+        call_kwargs = mock_submit.call_args[1]
+        assert '--no-index-sync' not in call_kwargs['worker_cmd']

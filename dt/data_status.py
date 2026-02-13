@@ -56,6 +56,7 @@ def data_status_via_qxub(
     dvc_args: Optional[List[str]] = None,
     verbose: bool = False,
     wait: bool = True,
+    no_index_sync: bool = False,
 ) -> Optional[str]:
     """Run ``dvc data status`` on a compute node via qxub.
 
@@ -67,6 +68,7 @@ def data_status_via_qxub(
         dvc_args: Additional arguments to pass to ``dvc data status``.
         verbose: Print detailed progress.
         wait: Wait for job to complete.
+        no_index_sync: Skip automatic index mirror sync on the worker.
 
     Returns:
         Job ID string when *wait* is ``False``, ``None`` otherwise.
@@ -91,6 +93,8 @@ def data_status_via_qxub(
 
     # Build worker command
     worker_cmd = ['dt', 'data', 'status', '--worker']
+    if no_index_sync:
+        worker_cmd.append('--no-index-sync')
     if threads is not None:
         worker_cmd.extend(['--threads', str(threads)])
     if verbose:

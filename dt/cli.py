@@ -1448,10 +1448,11 @@ def data():
               help='Submit job and exit without waiting for completion.')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show detailed progress.')
+@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--worker', is_flag=True, hidden=True,
               help='Internal: run dvc data status directly (used by compute node).')
 @click.pass_context
-def data_status(ctx, threads, no_wait, verbose, worker):
+def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
     """Show changes between the last git commit, DVC files and the workspace.
 
     Wraps ``dvc data status`` with parallel checksum computation and
@@ -1472,11 +1473,27 @@ def data_status(ctx, threads, no_wait, verbose, worker):
         dvc_args = list(ctx.args) if ctx.args else None
 
         if worker:
+            # Running on compute node — pull index, run status, push index
+            if not no_index_sync and index_mod.is_auto_sync_enabled():
+                try:
+                    index_mod.pull(quiet=not verbose, verbose=verbose)
+                except Exception as e:
+                    if verbose:
+                        click.echo(f"Warning: index pull failed: {e}")
+
             rc = data_status_mod.data_status(
                 threads=threads,
                 dvc_args=dvc_args,
                 verbose=verbose,
             )
+
+            if not no_index_sync and index_mod.is_auto_sync_enabled():
+                try:
+                    index_mod.push(quiet=not verbose, verbose=verbose)
+                except Exception as e:
+                    if verbose:
+                        click.echo(f"Warning: index push failed: {e}")
+
             if rc != 0:
                 raise SystemExit(rc)
         else:
@@ -1485,11 +1502,20 @@ def data_status(ctx, threads, no_wait, verbose, worker):
                 dvc_args=dvc_args,
                 verbose=verbose,
                 wait=not no_wait,
+                no_index_sync=no_index_sync,
             )
 
             if no_wait and job_id:
                 click.echo(f"Submitted job: {job_id}")
                 click.echo(f"Monitor with: qxub monitor {job_id}")
+            elif not no_wait:
+                # Job completed on compute node — push index from submitter too
+                if not no_index_sync and index_mod.is_auto_sync_enabled():
+                    try:
+                        index_mod.push(quiet=not verbose, verbose=verbose)
+                    except Exception as e:
+                        if verbose:
+                            click.echo(f"Warning: index sync failed: {e}")
 
     except data_status_mod.DataStatusError as e:
         raise click.ClickException(str(e))
