@@ -118,13 +118,54 @@ class TestEnsureGitignore:
         assert result is False
 
 
+class TestEnsureDvcignore:
+    """Tests for ensure_dvcignore function."""
+    
+    def test_adds_pattern(self, tmp_path, monkeypatch):
+        """Adds .dt/tmp/ to .dvcignore."""
+        monkeypatch.chdir(tmp_path)
+        
+        result = tmp.ensure_dvcignore()
+        
+        assert result is True
+        assert (tmp_path / '.dvcignore').exists()
+        content = (tmp_path / '.dvcignore').read_text()
+        assert '.dt/tmp/' in content
+    
+    def test_returns_false_for_existing_pattern(self, tmp_path, monkeypatch):
+        """Returns False if pattern already exists."""
+        monkeypatch.chdir(tmp_path)
+        
+        # Create .dvcignore with pattern already
+        (tmp_path / '.dvcignore').write_text('.dt/tmp/\n')
+        
+        result = tmp.ensure_dvcignore()
+        
+        assert result is False
+    
+    def test_appends_to_existing_content(self, tmp_path, monkeypatch):
+        """Appends pattern to existing .dvcignore content."""
+        monkeypatch.chdir(tmp_path)
+        
+        # Create .dvcignore with other content
+        (tmp_path / '.dvcignore').write_text('some/other/pattern\n')
+        
+        result = tmp.ensure_dvcignore()
+        
+        assert result is True
+        content = (tmp_path / '.dvcignore').read_text()
+        assert 'some/other/pattern' in content
+        assert '.dt/tmp/' in content
+
+
 class TestCloneRepo:
     """Tests for clone_repo function."""
     
-    def test_creates_sparse_clone(self, tmp_path, monkeypatch):
-        """Creates sparse clone with correct git commands."""
+    def test_creates_full_shallow_clone(self, tmp_path, monkeypatch):
+        """Creates full shallow clone with correct git commands."""
         monkeypatch.chdir(tmp_path)
         (tmp_path / '.gitignore').touch()
+        (tmp_path / '.dvcignore').touch()
         
         mock_result = MagicMock()
         mock_result.returncode = 0
@@ -144,11 +185,12 @@ class TestCloneRepo:
         
         assert result == tmp_path / '.dt' / 'tmp' / 'clones' / 'github.com' / 'swarbricklab' / 'dt-test-registry'
         
-        # Verify git clone was called with --no-checkout
+        # Verify git clone was called with --depth (shallow) but full checkout
         clone_cmd = calls[0]
         assert clone_cmd[0:2] == ['git', 'clone']
-        assert '--no-checkout' in clone_cmd
         assert '--depth' in clone_cmd
+        # No longer using sparse checkout
+        assert '--no-checkout' not in clone_cmd
     
     def test_refreshes_existing_clone(self, tmp_path, monkeypatch):
         """Refreshes existing clone when refresh=True."""
