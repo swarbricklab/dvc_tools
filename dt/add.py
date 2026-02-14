@@ -11,19 +11,19 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import config as cfg
+from . import dvc_utils
 from .errors import AddError
 
 
-# Default configuration
-# Node specs: 48 CPUs, 192 GB RAM, 4 threads per CPU = 192 max threads
-DEFAULT_MAX_THREADS = 192
-DEFAULT_MEM_PER_THREAD = 1  # GB (192 GB / 192 threads)
-THREADS_PER_CPU = 4  # How many checksum jobs per CPU
+# Default configuration — re-exported for backward compatibility
+DEFAULT_MAX_THREADS = dvc_utils.DEFAULT_MAX_THREADS
+DEFAULT_MEM_PER_THREAD = dvc_utils.DEFAULT_MEM_PER_THREAD
+THREADS_PER_CPU = dvc_utils.THREADS_PER_CPU
 
 
 def check_qxub() -> bool:
     """Check if qxub is available."""
-    return shutil.which('qxub') is not None
+    return dvc_utils.check_qxub()
 
 
 def count_files(path: str) -> int:
@@ -37,13 +37,7 @@ def count_files(path: str) -> int:
     Returns:
         Number of files.
     """
-    p = Path(path)
-    if p.is_file():
-        return 1
-    elif p.is_dir():
-        return sum(1 for f in p.rglob('*') if f.is_file())
-    else:
-        return 1  # Fallback for symlinks etc
+    return dvc_utils.count_files(path)
 
 
 def get_checksum_jobs() -> Optional[int]:
@@ -52,17 +46,7 @@ def get_checksum_jobs() -> Optional[int]:
     Returns:
         Current value or None if not set.
     """
-    try:
-        result = subprocess.run(
-            ['dvc', 'config', 'core.checksum_jobs'],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip())
-    except (subprocess.SubprocessError, ValueError):
-        pass
-    return None
+    return dvc_utils.get_checksum_jobs()
 
 
 def set_checksum_jobs(threads: int) -> None:
@@ -71,19 +55,12 @@ def set_checksum_jobs(threads: int) -> None:
     Args:
         threads: Number of threads for checksum computation.
     """
-    subprocess.run(
-        ['dvc', 'config', '--local', 'core.checksum_jobs', str(threads)],
-        check=True,
-        capture_output=True,
-    )
+    dvc_utils.set_checksum_jobs(threads)
 
 
 def unset_checksum_jobs() -> None:
     """Unset core.checksum_jobs at local scope."""
-    subprocess.run(
-        ['dvc', 'config', '--local', '--unset', 'core.checksum_jobs'],
-        capture_output=True,  # Don't fail if not set
-    )
+    dvc_utils.unset_checksum_jobs()
 
 
 def add(
@@ -122,32 +99,11 @@ def add(
         cmd.extend(dvc_args)
     cmd.extend(targets)
     
-    # Set checksum_jobs if threads specified
-    original_jobs = None
-    if threads is not None:
-        original_jobs = get_checksum_jobs()
-        if verbose:
-            print(f"Setting core.checksum_jobs={threads}")
-        set_checksum_jobs(threads)
-    
-    try:
+    with dvc_utils.with_checksum_jobs(threads, verbose=verbose):
         if verbose:
             print(f"Running: {' '.join(cmd)}")
-        
         result = subprocess.run(cmd)
         return result.returncode == 0
-        
-    finally:
-        # Restore original setting
-        if threads is not None:
-            if verbose:
-                print("Unsetting core.checksum_jobs")
-            unset_checksum_jobs()
-            # Restore original if there was one
-            if original_jobs is not None:
-                if verbose:
-                    print(f"Restoring core.checksum_jobs={original_jobs}")
-                set_checksum_jobs(original_jobs)
 
 
 def add_via_qxub(
@@ -181,84 +137,51 @@ def add_via_qxub(
     if not targets:
         raise AddError("No targets specified")
     
-    # Get configuration
-    max_threads = int(cfg.get_value('add.max_threads', str(DEFAULT_MAX_THREADS)))
-    mem_per_thread = int(cfg.get_value('add.mem_per_thread', str(DEFAULT_MEM_PER_THREAD)))
-    conda_env = cfg.get_value('qxub.env', 'dt')
-    queue = cfg.get_value('qxub.queue', 'normal')  # Use normal queue for compute
-    walltime = cfg.get_value('qxub.walltime', '10:00:00')
-    
-    # Default to max threads if not specified
-    if threads is None:
-        threads = max_threads
-    
-    # Validate thread count
-    if threads < 1:
-        raise AddError("Thread count must be at least 1")
-    if threads > max_threads:
-        raise AddError(f"Thread count {threads} exceeds maximum {max_threads}")
-    
     # Count total files across all targets
     total_files = sum(count_files(t) for t in targets)
-    
-    # Cap threads to file count
-    threads = min(threads, total_files)
-    
-    # Calculate CPUs: 1 CPU per THREADS_PER_CPU threads, minimum 1
-    cpus = max(1, math.ceil(threads / THREADS_PER_CPU))
-    
-    # Calculate memory based on threads
-    total_mem = threads * mem_per_thread
-    mem_str = f"{total_mem}GB"
+
+    # Validate thread count
+    max_threads = int(cfg.get_value('add.max_threads', str(DEFAULT_MAX_THREADS)))
+    if threads is not None:
+        if threads < 1:
+            raise AddError("Thread count must be at least 1")
+        if threads > max_threads:
+            raise AddError(f"Thread count {threads} exceeds maximum {max_threads}")
+
+    # Calculate resources
+    res = dvc_utils.calculate_resources(
+        threads, file_count=total_files, config_prefix='add',
+    )
     
     # Job name from first target
     target_name = Path(targets[0]).name[:20]
     if len(targets) > 1:
         target_name = f"{target_name}+{len(targets)-1}"
     
-    # Build qxub command
-    cmd = [
-        'qxub', 'exec',
-        '--env', conda_env,
-        '--queue', queue,
-        '--time', walltime,
-        '--mem', mem_str,
-        '--cpus', str(cpus),
-        '-N', f'dt-add-{target_name}',
-    ]
-    
-    # Use --terse only for no-wait mode
-    if not wait:
-        cmd.insert(2, '--terse')
-    
-    # Build dt add --worker command
-    cmd.extend(['--', 'dt', 'add', '--worker', '--threads', str(threads)])
+    # Build worker command
+    worker_cmd = ['dt', 'add', '--worker', '--threads', str(res['threads'])]
     if verbose:
-        cmd.append('--verbose')
+        worker_cmd.append('--verbose')
     if dvc_args:
-        cmd.extend(dvc_args)
-    cmd.extend(targets)
-    
+        worker_cmd.extend(dvc_args)
+    worker_cmd.extend(targets)
+
     if verbose:
         print(f"Submitting job for {len(targets)} target(s)")
-        print(f"  Files: {total_files}, Threads: {threads}, CPUs: {cpus}, Memory: {mem_str}")
-    
-    try:
-        # Stream output when waiting, capture when not waiting
-        result = subprocess.run(cmd, text=True, capture_output=not wait)
-        
-        if result.returncode != 0:
-            if not wait:
-                raise AddError(f"Failed to submit job: {result.stderr}")
-            else:
-                raise AddError("Job failed")
-        
-        # Return job ID if not waiting
-        if not wait:
-            job_id = result.stdout.strip().split('\n')[0]
-            return [job_id]
-        
-        return None
-        
-    except subprocess.SubprocessError as e:
-        raise AddError(f"Failed to run job: {e}")
+        print(f"  Files: {total_files}, Threads: {res['threads']}, "
+              f"CPUs: {res['cpus']}, Memory: {res['mem_str']}")
+
+    job_id = dvc_utils.submit_via_qxub(
+        job_name=f'dt-add-{target_name}',
+        worker_cmd=worker_cmd,
+        threads=threads,
+        file_count=total_files,
+        config_prefix='add',
+        verbose=False,  # Already printed above
+        wait=wait,
+        error_class=AddError,
+    )
+
+    if not wait and job_id:
+        return [job_id]
+    return None

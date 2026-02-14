@@ -12,6 +12,7 @@ from . import doctor as doctor_mod
 from . import auth as auth_mod
 from . import push as push_mod
 from . import add as add_mod
+from . import data_status as data_status_mod
 from . import fetch as fetch_mod
 from . import tmp as tmp_mod
 from . import import_data as import_mod
@@ -1421,6 +1422,102 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
                             click.echo(f"Warning: index sync failed: {e}")
                 
     except add_mod.AddError as e:
+        raise click.ClickException(str(e))
+
+
+# =============================================================================
+# dt data
+# =============================================================================
+
+@cli.group()
+def data():
+    """DVC data operations."""
+    pass
+
+
+@data.command(
+    'status',
+    context_settings=dict(
+        ignore_unknown_options=True,
+        allow_extra_args=True,
+    ),
+)
+@click.option('-t', '--threads', type=int, default=None,
+              help='Number of threads for checksum computation.')
+@click.option('--no-wait', is_flag=True,
+              help='Submit job and exit without waiting for completion.')
+@click.option('-v', '--verbose', is_flag=True,
+              help='Show detailed progress.')
+@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
+@click.option('--worker', is_flag=True, hidden=True,
+              help='Internal: run dvc data status directly (used by compute node).')
+@click.pass_context
+def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
+    """Show changes between the last git commit, DVC files and the workspace.
+
+    Wraps ``dvc data status`` with parallel checksum computation and
+    optional delegation to a compute node via qxub.
+
+    \b
+    Examples:
+        dt data status                        # Run via compute node
+        dt data status --granular             # File-level detail
+        dt data status -t 48                  # Use 48 threads
+        dt data status --no-wait              # Submit and exit
+
+    All other options are passed through to ``dvc data status``.
+    Run ``dvc data status --help`` for additional options.
+    """
+    try:
+        # Collect extra args (pass-through to dvc data status)
+        dvc_args = list(ctx.args) if ctx.args else None
+
+        if worker:
+            # Running on compute node — pull index, run status, push index
+            if not no_index_sync and index_mod.is_auto_sync_enabled():
+                try:
+                    index_mod.pull(quiet=not verbose, verbose=verbose)
+                except Exception as e:
+                    if verbose:
+                        click.echo(f"Warning: index pull failed: {e}")
+
+            rc = data_status_mod.data_status(
+                threads=threads,
+                dvc_args=dvc_args,
+                verbose=verbose,
+            )
+
+            if not no_index_sync and index_mod.is_auto_sync_enabled():
+                try:
+                    index_mod.push(quiet=not verbose, verbose=verbose)
+                except Exception as e:
+                    if verbose:
+                        click.echo(f"Warning: index push failed: {e}")
+
+            if rc != 0:
+                raise SystemExit(rc)
+        else:
+            job_id = data_status_mod.data_status_via_qxub(
+                threads=threads,
+                dvc_args=dvc_args,
+                verbose=verbose,
+                wait=not no_wait,
+                no_index_sync=no_index_sync,
+            )
+
+            if no_wait and job_id:
+                click.echo(f"Submitted job: {job_id}")
+                click.echo(f"Monitor with: qxub monitor {job_id}")
+            elif not no_wait:
+                # Job completed on compute node — push index from submitter too
+                if not no_index_sync and index_mod.is_auto_sync_enabled():
+                    try:
+                        index_mod.push(quiet=not verbose, verbose=verbose)
+                    except Exception as e:
+                        if verbose:
+                            click.echo(f"Warning: index sync failed: {e}")
+
+    except data_status_mod.DataStatusError as e:
         raise click.ClickException(str(e))
 
 

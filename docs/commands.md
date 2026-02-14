@@ -9,6 +9,7 @@
 | [`dt init`](#dt-init) | Initialize a new DVC project with external cache and remote |
 | [`dt clone`](#dt-clone) | Clone an existing DVC project and set up local configuration |
 | [`dt add`](#dt-add) | Add files to DVC tracking via compute node |
+| [`dt data status`](#dt-data-status) | Show DVC data status via compute node |
 | [`dt diff`](#dt-diff) | Show content differences between file versions |
 | [`dt fetch`](#dt-fetch) | Fetch import files into primary cache from local sources |
 | [`dt find`](#dt-find) | Find workspace path(s) for a given hash |
@@ -63,6 +64,18 @@ dt add [targets...] [-t <threads>] [--no-wait] [-v]
 ```
 
 Submits `dvc add` to a compute node via qxub with parallel checksum computation. Threads are capped to file count, and CPUs are allocated at 1 per 4 threads. [Full documentation →](add.md)
+
+---
+
+## dt data status
+
+Show changes between the last git commit, DVC files and the workspace.
+
+```bash
+dt data status [-t <threads>] [--no-wait] [-v] [-- DVC_OPTIONS...]
+```
+
+Wraps `dvc data status` with parallel checksum computation and optional compute-node delegation. Uses the same resource allocations as `dt add`. [Full documentation →](data_status.md)
 
 ---
 
