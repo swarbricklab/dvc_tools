@@ -17,10 +17,13 @@ from .errors import TmpError
 def get_tmp_dir() -> Path:
     """Get the .dt/tmp/clones directory path for the current repo.
     
+    The .dt directory is always at the project root (alongside .git/.dvc),
+    regardless of the current working directory.
+    
     Returns:
         Path to the .dt/tmp/clones directory.
     """
-    return Path.cwd() / ".dt" / "tmp" / "clones"
+    return utils.get_dt_dir() / "tmp" / "clones"
 
 
 def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:

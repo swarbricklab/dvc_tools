@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from . import config as cfg
+from . import utils
 from .errors import HPCError
 
 
@@ -205,13 +206,16 @@ def monitor_jobs(job_ids: List[str], verbose: bool = False) -> bool:
 def get_transfer_dir(operation: str) -> Path:
     """Get the .dt/tmp/{operation} directory for manifest storage.
     
+    The .dt directory is always at the project root (alongside .git/.dvc),
+    regardless of the current working directory.
+    
     Args:
         operation: Transfer operation name ('push' or 'pull')
         
     Returns:
         Path to the transfer directory (created if needed)
     """
-    transfer_dir = Path.cwd() / '.dt' / 'tmp' / operation
+    transfer_dir = utils.get_dt_dir() / 'tmp' / operation
     transfer_dir.mkdir(parents=True, exist_ok=True)
     return transfer_dir
 
