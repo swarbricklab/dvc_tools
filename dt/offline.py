@@ -25,22 +25,16 @@ from .errors import OfflineError
 def get_dt_root() -> Path:
     """Get the .dt directory root.
     
-    Searches upward from current directory to find the project root,
-    then returns the .dt directory within it.
-    
     Returns:
         Path to .dt directory.
         
     Raises:
         OfflineError: If not in a dt-initialized directory.
     """
-    # Find project root by looking for git or DVC repo
-    project_root = utils.find_project_root()
-    
-    dt_dir = project_root / '.dt'
+    dt_dir = utils.get_dt_dir(create=False)
     if not dt_dir.exists():
         raise OfflineError(
-            f"Not in a dt-initialized directory (checked {project_root})."
+            f"Not in a dt-initialized directory (checked {dt_dir.parent})."
             f" Run 'dt init' first."
         )
     return dt_dir
