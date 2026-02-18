@@ -825,6 +825,25 @@ def find_project_root(start: Optional[Path] = None) -> Path:
     return start or Path.cwd()
 
 
+def get_dt_dir(create: bool = True) -> Path:
+    """Get the .dt directory at the project root.
+    
+    The .dt directory is always located alongside .git and .dvc at the
+    project root, regardless of the current working directory.
+    
+    Args:
+        create: If True, create the directory if it doesn't exist.
+        
+    Returns:
+        Path to the .dt directory.
+    """
+    root = find_project_root()
+    dt_dir = root / '.dt'
+    if create:
+        dt_dir.mkdir(parents=True, exist_ok=True)
+    return dt_dir
+
+
 # =============================================================================
 # Git revision utilities
 # =============================================================================
