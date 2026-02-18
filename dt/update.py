@@ -622,6 +622,22 @@ def update(
         except Exception as e:
             print(f"  Warning: fetch failed: {e}")
             print(f"  Run 'dt fetch {' '.join(updated_targets)}' manually")
+        
+        # Checkout files to workspace
+        print(f"\nChecking out files to workspace...")
+        for target in updated_targets:
+            try:
+                result = subprocess.run(
+                    ['dvc', 'checkout', target],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    print(f"  Warning: checkout failed for {target}: {result.stderr.strip()}")
+                elif verbose:
+                    print(f"  Checked out: {target}")
+            except Exception as e:
+                print(f"  Warning: checkout failed for {target}: {e}")
     
     return results
 
