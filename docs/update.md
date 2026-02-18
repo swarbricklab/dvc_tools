@@ -117,15 +117,11 @@ dt fetch imported/dir.dvc
 
 When you want the latest version from upstream:
 
-1. **Update to new revision**:
-   ```bash
-   dt update --rev main data/shared.csv.dvc
-   ```
+```bash
+dt update --rev main data/shared.csv.dvc
+```
 
-2. **Fetch and checkout** the new data:
-   ```bash
-   dt pull data/shared.csv.dvc
-   ```
+This updates the .dvc file, fetches the data to cache, and checks out the files to your workspace—all in one command.
 
 ### Update without downloading
 
@@ -142,12 +138,13 @@ This updates the .dvc file to point to the new revision and rebuilds the `.dir` 
 1. **Find import files**: If no targets specified, finds all .dvc files with a `deps.repo` section (imports)
 2. **Determine revision**: Uses `--rev` if specified, otherwise uses the locked revision (`rev_lock`) from the .dvc file
 3. **Clone source repo**: Clones the source repository at the target revision (cached in `.dt/tmp/`)
-4. **Checkout data**: Checks out the data at the target revision to access the files
-5. **Rebuild .dir**: For directories, rebuilds the `.dir` manifest file by scanning the directory contents
-6. **Cache data**: Adds the data (and `.dir` file) to the local cache
-7. **Update .dvc file**: Updates the .dvc file with the new hashes
-8. **Push .dir**: Pushes the `.dir` file to the source remote so others don't have this issue
-9. **Sync index**: If index mirror is configured, syncs after update
+4. **Query source**: Gets the file listing and hashes from the source repository
+5. **Rebuild .dir**: For directories, rebuilds the `.dir` manifest file from the file listing
+6. **Update .dvc file**: Updates the .dvc file with the new hashes
+7. **Push .dir**: Pushes the `.dir` file to the source remote so others don't have this issue
+8. **Fetch data**: Downloads the data files to the local cache
+9. **Checkout**: Checks out files from cache to the workspace
+10. **Sync index**: If index mirror is configured, syncs after update
 
 ## Import detection
 
