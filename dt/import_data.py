@@ -630,6 +630,9 @@ def create_dvc_file(
     md5: str,
     size: int,
     nfiles: Optional[int] = None,
+    repo_url: Optional[str] = None,
+    repo_path: Optional[str] = None,
+    rev_lock: Optional[str] = None,
 ) -> Path:
     """Create a .dvc file.
     
@@ -639,10 +642,27 @@ def create_dvc_file(
         md5: MD5 hash (with .dir suffix for directories).
         size: Size in bytes.
         nfiles: Number of files (for directories).
+        repo_url: Source repository URL (for imports).
+        repo_path: Path within source repository (for imports).
+        rev_lock: Git revision/commit hash of source (for imports).
         
     Returns:
         Path to the created .dvc file.
     """
+    content = {}
+    
+    # Add deps section for imports (source tracking)
+    if repo_url and repo_path:
+        dep = {
+            'path': repo_path,
+            'repo': {
+                'url': repo_url,
+            },
+        }
+        if rev_lock:
+            dep['repo']['rev_lock'] = rev_lock
+        content['deps'] = [dep]
+    
     # Build the output entry
     out = {
         'md5': md5,
@@ -654,7 +674,7 @@ def create_dvc_file(
     if nfiles is not None:
         out['nfiles'] = nfiles
     
-    content = {'outs': [out]}
+    content['outs'] = [out]
     
     # Determine .dvc filename
     if name.endswith('/'):
@@ -719,6 +739,21 @@ def import_data(
     
     if verbose:
         print(f"Using clone at {clone_path}")
+    
+    # Get repository URL and commit hash for deps section
+    repo_url = tmp_mod.resolve_repository_url(repository, owner)
+    
+    # Get HEAD commit hash from clone
+    commit_result = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'],
+        cwd=clone_path,
+        capture_output=True,
+        text=True,
+    )
+    rev_lock = commit_result.stdout.strip() if commit_result.returncode == 0 else None
+    
+    if verbose and rev_lock:
+        print(f"Source revision: {rev_lock[:12]}...")
     
     # Step 2: Find a local cache from this repo
     if verbose:
@@ -785,6 +820,9 @@ def import_data(
             name=out_path.name,
             md5=root_hash,
             size=size,
+            repo_url=repo_url,
+            repo_path=path,
+            rev_lock=rev_lock,
         )
     else:
         # Directory import - need to create .dir file
@@ -829,6 +867,9 @@ def import_data(
             md5=dir_hash,
             size=total_size,
             nfiles=len(entries),
+            repo_url=repo_url,
+            repo_path=path,
+            rev_lock=rev_lock,
         )
     
     if verbose:
