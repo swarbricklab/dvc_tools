@@ -1963,8 +1963,9 @@ def tmp_clean(repository, owner, clean_all):
 @click.option('--no-download', is_flag=True, help='Create .dvc file without downloading data (like dvc import --no-download)')
 @click.option('--rev', default=None, help='Git revision to lock to (used with --no-download; defaults to tmp clone HEAD)')
 @click.option('--csv', 'csv_path', default=None, type=click.Path(exists=True), help='CSV file with paths to import (requires "path" column, optional "output" column)')
+@click.option('-f', '--force', is_flag=True, help='Overwrite existing output')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_download, rev, csv_path, verbose):
+def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_download, rev, csv_path, force, verbose):
     """Import DVC-tracked data from another repository.
     
     Creates a .dvc file pointing to data in REPOSITORY at PATH,
@@ -2057,6 +2058,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
             checkout=not no_checkout,
             verbose=verbose,
             refresh=not no_refresh,
+            force=force,
         )
         
         click.echo(f"Created {dvc_file}")

@@ -711,6 +711,7 @@ def import_data(
     checkout: bool = True,
     verbose: bool = False,
     refresh: bool = True,
+    force: bool = False,
 ) -> Tuple[Path, Optional[str]]:
     """Import DVC-tracked data from a remote repository.
     
@@ -722,6 +723,7 @@ def import_data(
         checkout: Whether to run checkout after import.
         verbose: Print progress messages.
         refresh: Whether to refresh temp clone (default True).
+        force: Overwrite existing output (default False).
         
     Returns:
         Tuple of (dvc_file_path, cache_path used).
@@ -736,6 +738,18 @@ def import_data(
     
     # Determine destination path
     out_path = resolve_out_path(out, path)
+    
+    # Check for existing output (matching dvc import behavior)
+    dvc_file_path = out_path.parent / f"{out_path.name}.dvc"
+    if not force:
+        if out_path.exists():
+            raise ImportError(
+                f"Output '{out_path}' already exists. Use --force to overwrite."
+            )
+        if dvc_file_path.exists():
+            raise ImportError(
+                f"Output '{dvc_file_path}' already exists. Use --force to overwrite."
+            )
     
     # Step 1: Ensure we have a sparse clone of the repo
     if verbose:

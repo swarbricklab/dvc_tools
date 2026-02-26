@@ -110,6 +110,38 @@ def ensure_gitignore() -> bool:
     return utils.update_gitignore(".dt/tmp/")
 
 
+def ensure_dvcignore() -> bool:
+    """Ensure .dt/tmp is in .dvcignore.
+    
+    Prevents DVC from scanning temp clones (which may contain their own
+    .dvc directories and tracked files).
+    
+    Returns:
+        True if .dvcignore was modified, False if already contains pattern.
+    """
+    dvcignore_path = Path.cwd() / ".dvcignore"
+    pattern = ".dt/tmp/"
+    pattern_normalized = pattern.rstrip('/')
+    
+    # Check if already present
+    if dvcignore_path.exists():
+        content = dvcignore_path.read_text()
+        for line in content.splitlines():
+            line_normalized = line.strip().rstrip('/')
+            if line_normalized == pattern_normalized:
+                return False
+    else:
+        content = ""
+    
+    # Append pattern
+    if content and not content.endswith('\n'):
+        content += '\n'
+    content += f"{pattern}\n"
+    
+    dvcignore_path.write_text(content)
+    return True
+
+
 def clone_repo(
     repo_spec: str,
     owner: Optional[str] = None,
@@ -118,7 +150,9 @@ def clone_repo(
 ) -> Path:
     """Clone or refresh a repository in .dt/tmp/clones/.
     
-    Creates a sparse clone with only .dvc/ directory checked out.
+    Creates a shallow clone with full checkout (not sparse) so that
+    dvc.yaml, dvc.lock, and all .dvc files are available for DVC
+    commands like `dvc list`.
     
     Args:
         repo_spec: Repository URL or short name
@@ -143,8 +177,9 @@ def clone_repo(
     tmp_dir = get_tmp_dir()
     repo_path = tmp_dir / repo_id
     
-    # Ensure .dt/tmp is gitignored
+    # Ensure .dt/tmp is gitignored and dvcignored
     ensure_gitignore()
+    ensure_dvcignore()
     
     if repo_path.exists():
         if refresh:
@@ -162,38 +197,15 @@ def clone_repo(
     if verbose:
         print(f"Cloning {url} to .dt/tmp/clones/{repo_id}...")
 
-    # Clone with no checkout
+    # Full shallow clone (depth 1 for speed, but full checkout for dvc.yaml etc)
     result = subprocess.run(
-        ['git', 'clone', '--no-checkout', '--depth', '1', '--single-branch', url, str(repo_path)],
+        ['git', 'clone', '--depth', '1', '--single-branch', url, str(repo_path)],
         capture_output=True,
         text=True,
     )
     
     if result.returncode != 0:
         raise TmpError(f"Failed to clone repository: {result.stderr}")
-    
-    # Set up sparse checkout for .dvc/ directory and all *.dvc files
-    # Use --no-cone mode to allow patterns (not just directories)
-    result = subprocess.run(
-        ['git', 'sparse-checkout', 'set', '--no-cone', '/.dvc/', '*.dvc'],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    )
-    
-    if result.returncode != 0:
-        raise TmpError(f"Failed to set sparse checkout: {result.stderr}")
-    
-    # Checkout the sparse content
-    result = subprocess.run(
-        ['git', 'checkout'],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    )
-    
-    if result.returncode != 0:
-        raise TmpError(f"Failed to checkout: {result.stderr}")
     
     if verbose:
         print(f"Cloned to .dt/tmp/clones/{repo_id}")
