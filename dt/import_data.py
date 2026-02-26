@@ -912,11 +912,13 @@ def import_data(
         print(f"Created {dvc_file}")
     
     # Step 6: Update .gitignore to exclude the data file/directory
-    # This matches DVC's behavior for dvc add and dvc import
+    # Place .gitignore adjacent to the output (matches DVC behaviour)
     gitignore_pattern = f"/{out_path.name}"
-    if utils.update_gitignore(gitignore_pattern):
+    gitignore_dir = out_path.parent.resolve()
+    gitignore_file = gitignore_dir / ".gitignore"
+    if utils.update_gitignore(gitignore_pattern, gitignore_path=gitignore_file):
         if verbose:
-            print(f"Added {gitignore_pattern} to .gitignore")
+            print(f"Added {gitignore_pattern} to {gitignore_file}")
     
     # Step 7: Populate primary cache and checkout if requested
     if checkout:
@@ -1132,11 +1134,13 @@ def import_no_download(
     if verbose:
         print(f"Created {dvc_file}")
 
-    # Update .gitignore
+    # Update .gitignore adjacent to the output
     gitignore_pattern = f"/{out_path.name}"
-    if utils.update_gitignore(gitignore_pattern):
+    gitignore_dir = out_path.parent.resolve()
+    gitignore_file = gitignore_dir / ".gitignore"
+    if utils.update_gitignore(gitignore_pattern, gitignore_path=gitignore_file):
         if verbose:
-            print(f"Added {gitignore_pattern} to .gitignore")
+            print(f"Added {gitignore_pattern} to {gitignore_file}")
 
     return dvc_file
 
