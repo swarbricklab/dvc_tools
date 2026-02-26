@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 
-import yaml
+from dvc.utils.serialize import dump_yaml
 
 from . import utils
 from .errors import MvError
@@ -114,8 +114,7 @@ def mv(
             new_dvc_data['deps'] = deps_data
             
             # Write back
-            with open(dst_dvc, 'w') as f:
-                yaml.dump(new_dvc_data, f, default_flow_style=False, sort_keys=False)
+            dump_yaml(dst_dvc, new_dvc_data)
             
             if verbose:
                 print(f"  Restored {len(deps_data)} dep(s)")

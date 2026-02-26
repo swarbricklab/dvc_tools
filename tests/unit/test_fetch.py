@@ -20,6 +20,7 @@ import pytest
 
 from dt import fetch
 from dt import import_data
+from dt import utils
 
 
 # =============================================================================
@@ -592,7 +593,7 @@ class TestBuildDirManifest:
             {'md5': 'bbbb', 'relpath': 'a.txt'},
         ]
         
-        content = import_data.build_dir_manifest(entries)
+        content = utils.build_dir_manifest(entries)
         expected = b'[{"md5": "bbbb", "relpath": "a.txt"}, {"md5": "aaaa", "relpath": "b.txt"}]'
         assert content == expected
     
@@ -605,7 +606,7 @@ class TestBuildDirManifest:
             {'md5': 'c2ad4b026e39ec2257321d20373b9f47', 'relpath': 'b.csv'},
         ]
         
-        content = import_data.build_dir_manifest(entries)
+        content = utils.build_dir_manifest(entries)
         actual_hash = hashlib.md5(content).hexdigest()
         
         # This is the actual hash from dt-test-registry's data/dir
@@ -648,7 +649,7 @@ class TestConstructDirFile:
             md5 = hashlib.md5(content).hexdigest()
             entries.append({'md5': md5, 'relpath': file.name})
         
-        manifest_content = import_data.build_dir_manifest(entries)
+        manifest_content = utils.build_dir_manifest(entries)
         expected_hash = hashlib.md5(manifest_content).hexdigest()
         
         # Now construct and verify it matches

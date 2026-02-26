@@ -105,6 +105,11 @@ class InitError(DTError):
     pass
 
 
+class MigrateError(DTError):
+    """Error during v2 → v3 migration operations."""
+    pass
+
+
 class MvError(DTError):
     """Error during move/rename operations."""
     pass

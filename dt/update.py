@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import yaml
+from dvc.utils.serialize import dump_yaml
 
 from . import tmp as tmp_mod
 from . import utils
@@ -246,28 +247,6 @@ def _get_file_listing(
     return entries
 
 
-def _build_dir_manifest(entries: List[Dict[str, str]]) -> bytes:
-    """Build a .dir manifest file content in exact DVC format.
-    
-    DVC uses a specific JSON format for .dir files that must be reproduced
-    exactly to match the expected hash.
-    
-    Args:
-        entries: List of dicts with 'md5' and 'relpath' keys.
-        
-    Returns:
-        Bytes content of the .dir file.
-    """
-    # Sort by relpath
-    sorted_entries = sorted(entries, key=lambda x: x['relpath'])
-    
-    # Build JSON with exact DVC format
-    parts = []
-    for entry in sorted_entries:
-        parts.append(f'{{"md5": "{entry["md5"]}", "relpath": "{entry["relpath"]}"}}')
-    
-    content = '[' + ', '.join(parts) + ']'
-    return content.encode('utf-8')
 
 
 def _write_dir_to_cache(
@@ -350,8 +329,8 @@ def _update_dvc_file(
                             print(f"  Updated rev_lock: {old_str} → {new_rev[:12]}...")
         
         if modified:
-            with open(dvc_path, 'w') as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            data = utils.recompute_dvc_md5(data)
+            dump_yaml(dvc_path, data)
             
             # Auto-stage if core.autostage is enabled
             if utils.is_autostage_enabled():
@@ -577,7 +556,7 @@ def update(
             continue
         
         # Build .dir manifest
-        manifest_content = _build_dir_manifest(entries)
+        manifest_content = utils.build_dir_manifest(entries)
         
         # Get cache path - use explicit or primary
         if cache:
