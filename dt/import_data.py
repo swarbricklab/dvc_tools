@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 import yaml
+from dvc.utils.serialize import dump_yaml
 
 from . import cache_ops
 from . import remote as remote_mod
@@ -106,35 +107,6 @@ def is_v3_dvc_file(dvc_data: Dict[str, Any]) -> bool:
     return 'hash' in out
 
 
-def build_dir_manifest(entries: List[Dict[str, str]]) -> bytes:
-    """Build a .dir manifest file content in exact DVC format.
-    
-    DVC uses a specific JSON format for .dir files that must be reproduced
-    exactly to match the expected hash. The format is:
-    - JSON array, no trailing newline
-    - Compact format with `: ` after colons and `, ` between entries
-    - Keys in order: md5, relpath
-    - Entries sorted by relpath
-    
-    Args:
-        entries: List of dicts with 'md5' and 'relpath' keys.
-        
-    Returns:
-        Bytes content of the .dir file.
-    """
-    # Sort by relpath
-    sorted_entries = sorted(entries, key=lambda x: x['relpath'])
-    
-    # Build JSON with exact DVC format
-    # DVC uses: [{"md5": "...", "relpath": "..."}, {"md5": "...", "relpath": "..."}]
-    parts = []
-    for entry in sorted_entries:
-        parts.append(f'{{"md5": "{entry["md5"]}", "relpath": "{entry["relpath"]}"}}')
-    
-    content = '[' + ', '.join(parts) + ']'
-    return content.encode('utf-8')
-
-
 def construct_dir_from_dvc_list(
     repo_url: str,
     path: str,
@@ -220,7 +192,7 @@ def construct_dir_from_dvc_list(
         print(f"  Found {len(entries)} files via 'dvc list'")
     
     # Build the manifest content
-    manifest_content = build_dir_manifest(entries)
+    manifest_content = utils.build_dir_manifest(entries)
     
     # Compute actual hash
     actual_hash = hashlib.md5(manifest_content).hexdigest()
@@ -436,7 +408,7 @@ def _construct_dir_file_fallback(
         return None
     
     # Build the manifest content
-    manifest_content = build_dir_manifest(entries)
+    manifest_content = utils.build_dir_manifest(entries)
     
     # Verify hash matches expected
     actual_hash = hashlib.md5(manifest_content).hexdigest()
@@ -575,17 +547,18 @@ def get_file_size_from_cache(cache_path: str, md5: str) -> Optional[int]:
 
 def compute_dir_hash(entries: List[Dict[str, str]]) -> str:
     """Compute the MD5 hash for a .dir file content.
-    
+
+    Uses :func:`utils.build_dir_manifest` (backed by ``Tree.as_bytes()``) to
+    produce the canonical byte representation, then hashes it.
+
     Args:
         entries: List of {'md5': ..., 'relpath': ...} dicts.
-        
+
     Returns:
         MD5 hash of the JSON content.
     """
-    # Sort by relpath for consistent ordering
-    sorted_entries = sorted(entries, key=lambda x: x['relpath'])
-    content = json.dumps(sorted_entries, separators=(',', ':'))
-    return hashlib.md5(content.encode()).hexdigest()
+    manifest = utils.build_dir_manifest(entries)
+    return hashlib.md5(manifest).hexdigest()
 
 
 def create_dir_file(
@@ -593,35 +566,36 @@ def create_dir_file(
     cache_path: str,
 ) -> Tuple[str, int]:
     """Create a .dir file in the cache.
-    
+
+    Uses :func:`utils.build_dir_manifest` (backed by ``Tree.as_bytes()``) to
+    produce canonical DVC-compatible ``.dir`` content.
+
     Args:
         entries: List of {'md5': ..., 'relpath': ...} dicts.
         cache_path: Path to the cache directory.
-        
+
     Returns:
         Tuple of (dir_hash, total_size).
-        
+
     Raises:
         ImportError: If creation fails.
     """
-    # Sort by relpath for consistent ordering
-    sorted_entries = sorted(entries, key=lambda x: x['relpath'])
-    content = json.dumps(sorted_entries, separators=(',', ':'))
-    
+    content = utils.build_dir_manifest(entries)
+
     # Compute hash
-    dir_hash = hashlib.md5(content.encode()).hexdigest()
-    
+    dir_hash = hashlib.md5(content).hexdigest()
+
     # Write to cache
     dir_path = Path(cache_path) / 'files' / 'md5' / dir_hash[:2]
     dir_path.mkdir(parents=True, exist_ok=True)
-    
+
     dir_file = dir_path / f"{dir_hash[2:]}.dir"
-    
+
     try:
-        dir_file.write_text(content)
+        dir_file.write_bytes(content)
     except Exception as e:
         raise ImportError(f"Failed to write .dir file: {e}")
-    
+
     return f"{dir_hash}.dir", len(content)
 
 
@@ -686,8 +660,7 @@ def create_dvc_file(
     
     dest_path.mkdir(parents=True, exist_ok=True)
     
-    with open(dvc_path, 'w') as f:
-        yaml.dump(content, f, default_flow_style=False, sort_keys=False)
+    dump_yaml(dvc_path, content)
     
     return dvc_path
 

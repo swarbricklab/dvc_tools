@@ -3,6 +3,7 @@
 Common functions used across multiple modules.
 """
 
+import hashlib
 import os
 import shutil
 import socket
@@ -11,6 +12,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from dvc.repo import Repo
+from dvc_data.hashfile.hash import file_md5 as _dvc_file_md5
+from dvc_data.hashfile.hash_info import HashInfo
+from dvc_data.hashfile.meta import Meta
+from dvc_data.hashfile.tree import Tree
 
 from .errors import DependencyError, DVCFileError
 
@@ -1060,9 +1065,9 @@ def update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool 
                 modified = True
         
         if modified:
-            # Write back with same formatting
-            with open(dvc_path, 'w') as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            # Write back with DVC-compatible formatting
+            from dvc.utils.serialize import dump_yaml
+            dump_yaml(dvc_path, data)
             if verbose:
                 print(f"  Updated .dvc file hash: {old_hash[:12]}... -> {new_hash[:12]}...")
             
@@ -1079,3 +1084,100 @@ def update_dvc_hash(dvc_path: Path, old_hash: str, new_hash: str, verbose: bool 
         if verbose:
             print(f"  Warning: Could not update .dvc file: {e}")
         return False
+
+
+# =============================================================================
+# Hash / manifest utilities (DVC internals wrappers)
+# =============================================================================
+
+def md5_file(path: Path) -> str:
+    """Compute the raw MD5 hash of a file (v3-style, no line-ending normalisation).
+
+    Delegates to ``dvc_data.hashfile.hash.file_md5`` which hashes the file
+    as-is (plain md5, no dos2unix normalisation).
+
+    Args:
+        path: Path to the file to hash.
+
+    Returns:
+        Hex-encoded MD5 digest.
+    """
+    return _dvc_file_md5(str(path))
+
+
+def md5_bytes(data: bytes) -> str:
+    """Compute the MD5 hash of raw bytes.
+
+    Args:
+        data: Byte content to hash.
+
+    Returns:
+        Hex-encoded MD5 digest.
+    """
+    return hashlib.md5(data).hexdigest()
+
+
+def build_dir_manifest(entries: List[Dict[str, str]]) -> bytes:
+    """Build a .dir manifest in DVC's canonical JSON format.
+
+    Delegates to ``dvc_data.hashfile.tree.Tree.as_bytes()`` which produces
+    the canonical compact JSON layout (sorted by relpath, no trailing
+    newline).
+
+    Args:
+        entries: List of dicts with ``md5`` and ``relpath`` keys.
+
+    Returns:
+        Manifest content as bytes.
+    """
+    tree = Tree()
+    for entry in entries:
+        # Tree keys are tuples of path components
+        key = tuple(entry['relpath'].split('/'))
+        tree.add(key, Meta(), HashInfo('md5', entry['md5']))
+    return tree.as_bytes()
+
+
+# Fields excluded when computing the top-level md5 of a .dvc file.
+# Must match the exclude list used by dvc.stage.utils.compute_md5.
+_DVC_MD5_EXCLUDE_FIELDS = [
+    # Annotation params
+    'desc', 'type', 'labels', 'meta',
+    # Stage-level params
+    'locked', 'frozen',
+    # Output-level params
+    'metric', 'persist',
+    # Meta params
+    'isexec', 'size', 'nfiles',
+]
+
+
+def recompute_dvc_md5(dvc_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Recompute the top-level ``md5`` checksum of a .dvc file.
+
+    Import ``.dvc`` files have a top-level ``md5`` field that checksums the
+    file's own content (excluding that ``md5`` field itself and certain
+    annotation/meta fields).  After modifying the file content we need to
+    update it.
+
+    Uses ``dvc.utils.dict_md5`` — the same function DVC uses internally in
+    ``dvc.stage.utils.compute_md5`` — to ensure hash compatibility.
+
+    For non-import files that lack a top-level ``md5`` field, this is a no-op.
+
+    Args:
+        dvc_data: The .dvc file content dict.
+
+    Returns:
+        Updated dict with recomputed top-level ``md5``, if applicable.
+    """
+    if 'md5' not in dvc_data:
+        return dvc_data
+
+    from dvc.utils import dict_md5
+
+    d = {k: v for k, v in dvc_data.items() if k not in ('md5', 'meta', 'desc')}
+    if d.get('wdir') == '.':
+        del d['wdir']
+    dvc_data['md5'] = dict_md5(d, exclude=_DVC_MD5_EXCLUDE_FIELDS)
+    return dvc_data
