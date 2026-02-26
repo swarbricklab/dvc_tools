@@ -18,6 +18,53 @@ from dt.errors import ImportError_ as ImportError
 
 
 # =============================================================================
+# resolve_out_path
+# =============================================================================
+
+class TestResolveOutPath:
+    """Tests for resolve_out_path()."""
+
+    def test_none_uses_basename(self):
+        """out=None returns basename of path."""
+        result = import_mod.resolve_out_path(None, "data/processed/file.csv")
+        assert result == Path("file.csv")
+
+    def test_file_path_used_directly(self, tmp_path):
+        """Non-directory out is treated as a file path."""
+        result = import_mod.resolve_out_path("my_output.csv", "data/file.csv")
+        assert result == Path("my_output.csv")
+
+    def test_existing_directory_places_inside(self, tmp_path):
+        """Existing directory → basename is appended."""
+        result = import_mod.resolve_out_path(str(tmp_path), "data/file.csv")
+        assert result == tmp_path / "file.csv"
+
+    def test_trailing_slash_creates_directory(self, tmp_path):
+        """Trailing slash creates directory and places import inside."""
+        new_dir = tmp_path / "newdir"
+        result = import_mod.resolve_out_path(str(new_dir) + "/", "data/file.csv")
+        assert result == new_dir / "file.csv"
+        assert new_dir.is_dir()
+
+    def test_nested_trailing_slash_creates_parents(self, tmp_path):
+        """Trailing slash with nested path creates all parents."""
+        nested = tmp_path / "a" / "b" / "c"
+        result = import_mod.resolve_out_path(str(nested) + "/", "data/file.csv")
+        assert result == nested / "file.csv"
+        assert nested.is_dir()
+
+    def test_subdirectory_file_path(self):
+        """out with subdirectory is treated as file path."""
+        result = import_mod.resolve_out_path("subdir/output.csv", "data/file.csv")
+        assert result == Path("subdir/output.csv")
+
+    def test_basename_from_deep_path(self):
+        """Basename is extracted from deeply nested source path."""
+        result = import_mod.resolve_out_path(None, "a/b/c/d/myfile.h5ad")
+        assert result == Path("myfile.h5ad")
+
+
+# =============================================================================
 # create_no_download_dvc_file
 # =============================================================================
 

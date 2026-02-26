@@ -692,6 +692,44 @@ def create_dvc_file(
     return dvc_path
 
 
+def resolve_out_path(out: Optional[str], path: str) -> Path:
+    """Resolve the output path for an import.
+
+    Rules:
+      1. *out* is ``None`` → use the basename of *path*.
+      2. *out* is an existing directory → place the import inside it
+         (basename of *path* is appended).
+      3. *out* ends with ``/`` but is not an existing directory → create
+         that directory and place the import inside.
+      4. Otherwise → treat *out* as a file path.
+
+    Args:
+        out: The user-supplied ``-o/--out`` value (may be ``None``).
+        path: The source path in the remote repo.
+
+    Returns:
+        Resolved :class:`Path` for the output file/directory.
+    """
+    basename = Path(path).name
+
+    if out is None:
+        return Path(basename)
+
+    out_p = Path(out)
+
+    # Existing directory → place inside
+    if out_p.is_dir():
+        return out_p / basename
+
+    # Trailing slash → create directory, place inside
+    if out.endswith('/'):
+        out_p.mkdir(parents=True, exist_ok=True)
+        return out_p / basename
+
+    # Otherwise treat as a file path
+    return out_p
+
+
 def import_data(
     repository: str,
     path: str,
@@ -724,10 +762,7 @@ def import_data(
         raise ImportError(str(e))
     
     # Determine destination path
-    if out:
-        out_path = Path(out)
-    else:
-        out_path = Path(Path(path).name)
+    out_path = resolve_out_path(out, path)
     
     # Step 1: Ensure we have a sparse clone of the repo
     if verbose:
@@ -1068,10 +1103,7 @@ def import_no_download(
         raise ImportError(str(e))
 
     # Determine destination
-    if out:
-        out_path = Path(out)
-    else:
-        out_path = Path(Path(path).name)
+    out_path = resolve_out_path(out, path)
 
     # Resolve repo URL
     repo_url = tmp_mod.resolve_repository_url(repository, owner)
