@@ -455,6 +455,63 @@ class TestImportFromCsv:
         _, kwargs = mock_import.call_args
         assert kwargs['owner'] == 'myorg'
 
+    @patch.object(import_mod, 'import_data')
+    def test_falls_back_to_out_when_no_output_column(self, mock_import, tmp_path, monkeypatch):
+        """When CSV has no 'output' column, uses the out parameter."""
+        monkeypatch.chdir(tmp_path)
+        csv_file = tmp_path / "paths.csv"
+        self._write_csv(csv_file, [
+            {'path': 'data/file.csv'},
+        ])
+        mock_import.return_value = (Path("dest.csv.dvc"), "/cache")
+
+        import_mod.import_from_csv(
+            csv_path=str(csv_file),
+            repository="myrepo",
+            out="dest.csv",
+        )
+
+        _, kwargs = mock_import.call_args
+        assert kwargs['out'] == 'dest.csv'
+
+    @patch.object(import_mod, 'import_data')
+    def test_csv_output_column_overrides_out(self, mock_import, tmp_path, monkeypatch):
+        """CSV 'output' column takes precedence over the out parameter."""
+        monkeypatch.chdir(tmp_path)
+        csv_file = tmp_path / "paths.csv"
+        self._write_csv(csv_file, [
+            {'path': 'data/file.csv', 'output': 'from_csv.csv'},
+        ])
+        mock_import.return_value = (Path("from_csv.csv.dvc"), "/cache")
+
+        import_mod.import_from_csv(
+            csv_path=str(csv_file),
+            repository="myrepo",
+            out="from_cli.csv",
+        )
+
+        _, kwargs = mock_import.call_args
+        assert kwargs['out'] == 'from_csv.csv'
+
+    @patch.object(import_mod, 'import_data')
+    def test_empty_output_cell_falls_back_to_out(self, mock_import, tmp_path, monkeypatch):
+        """Empty 'output' cell in CSV falls back to the out parameter."""
+        monkeypatch.chdir(tmp_path)
+        csv_file = tmp_path / "paths.csv"
+        self._write_csv(csv_file, [
+            {'path': 'data/file.csv', 'output': ''},
+        ])
+        mock_import.return_value = (Path("fallback.csv.dvc"), "/cache")
+
+        import_mod.import_from_csv(
+            csv_path=str(csv_file),
+            repository="myrepo",
+            out="fallback.csv",
+        )
+
+        _, kwargs = mock_import.call_args
+        assert kwargs['out'] == 'fallback.csv'
+
 
 # =============================================================================
 # create_dvc_file (existing function – contrast with no-download)

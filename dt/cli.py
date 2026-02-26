@@ -2003,6 +2003,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
                 csv_path=csv_path,
                 repository=repository,
                 owner=owner,
+                out=out,
                 no_download=no_download,
                 no_checkout=no_checkout,
                 no_refresh=no_refresh,

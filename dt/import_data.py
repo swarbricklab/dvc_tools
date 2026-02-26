@@ -1113,6 +1113,7 @@ def import_from_csv(
     csv_path: str,
     repository: str,
     owner: Optional[str] = None,
+    out: Optional[str] = None,
     no_download: bool = False,
     no_checkout: bool = False,
     no_refresh: bool = False,
@@ -1122,12 +1123,15 @@ def import_from_csv(
     """Repeat ``dt import`` for every row in a CSV file.
 
     The CSV must have a ``path`` column.  An optional ``output`` column
-    is used as the ``-o/--out`` argument.  Other columns are ignored.
+    is used as the ``-o/--out`` argument.  When the CSV has no ``output``
+    column or a row's ``output`` cell is empty, the *out* parameter is
+    used as the fallback (i.e. the CLI ``-o/--out`` value).
 
     Args:
         csv_path: Path to the CSV file.
         repository: Repository name, alias, or URL.
         owner: Optional owner override for short names.
+        out: Fallback destination path when CSV row has no output.
         no_download: If True, create --no-download style .dvc files.
         no_checkout: If True, skip checkout after import.
         no_refresh: If True, skip refreshing the tmp clone.
@@ -1164,7 +1168,7 @@ def import_from_csv(
             results.append(('(empty)', False, 'Missing path'))
             continue
 
-        row_out = row.get('output', '').strip() or None
+        row_out = row.get('output', '').strip() or out
 
         if verbose:
             label = f"[{i}/{len(rows)}]"
