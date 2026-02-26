@@ -1954,13 +1954,16 @@ def tmp_clean(repository, owner, clean_all):
 
 @cli.command('import')
 @click.argument('repository')
-@click.argument('path')
+@click.argument('path', required=False)
 @click.option('-o', '--out', help='Destination path to download files to')
 @click.option('--owner', help='Override the GitHub owner for short names')
 @click.option('--no-checkout', is_flag=True, help='Skip checkout after import')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clone (for offline use)')
+@click.option('--no-download', is_flag=True, help='Create .dvc file without downloading data (like dvc import --no-download)')
+@click.option('--rev', default=None, help='Git revision to lock to (used with --no-download; defaults to tmp clone HEAD)')
+@click.option('--csv', 'csv_path', default=None, type=click.Path(exists=True), help='CSV file with paths to import (requires "path" column, optional "output" column)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
+def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_download, rev, csv_path, verbose):
     """Import DVC-tracked data from another repository.
     
     Creates a .dvc file pointing to data in REPOSITORY at PATH,
@@ -1971,13 +1974,79 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, verbose):
     via `dt cache add-from`.
     
     \b
+    Options:
+      --no-download   Create .dvc file without downloading data.
+                      Uses the tmp clone HEAD (or --rev) for rev_lock.
+      --rev REV       Lock to a specific git revision (with --no-download).
+      --csv FILE      Import every row from a CSV file. The CSV must have
+                      a "path" column; an optional "output" column maps
+                      to -o/--out.
+    
+    \b
     Examples:
         dt import neochemo data/processed
         dt import neochemo data/samples.h5ad -o my_samples.h5ad
         dt import git@github.com:lab/project.git results/model
         dt import neochemo data/large --no-checkout
         dt import neochemo data/file --no-refresh
+        dt import neochemo data/file --no-download
+        dt import neochemo data/file --no-download --rev abc123
+        dt import neochemo --csv paths.csv
+        dt import neochemo --csv paths.csv --no-download
     """
+    # --csv mode: path argument is not required
+    if csv_path:
+        if path:
+            raise click.UsageError("Do not provide PATH when using --csv.")
+        try:
+            results = import_mod.import_from_csv(
+                csv_path=csv_path,
+                repository=repository,
+                owner=owner,
+                out=out,
+                no_download=no_download,
+                no_checkout=no_checkout,
+                no_refresh=no_refresh,
+                rev=rev,
+                verbose=verbose,
+            )
+            
+            successes = sum(1 for _, ok, _ in results if ok)
+            failures = sum(1 for _, ok, _ in results if not ok)
+            
+            for row_path, ok, msg in results:
+                status = "✓" if ok else "✗"
+                click.echo(f"{status} {row_path}: {msg}")
+            
+            click.echo(f"\n{successes} imported, {failures} failed")
+            
+            if failures:
+                raise SystemExit(1)
+                
+        except import_mod.ImportError as e:
+            raise click.ClickException(str(e))
+        return
+    
+    # Normal (non-CSV) mode: path is required
+    if not path:
+        raise click.UsageError("PATH is required (unless using --csv).")
+    
+    if no_download:
+        try:
+            dvc_file = import_mod.import_no_download(
+                repository=repository,
+                path=path,
+                out=out,
+                owner=owner,
+                rev=rev,
+                no_refresh=no_refresh,
+                verbose=verbose,
+            )
+            click.echo(f"Created {dvc_file}")
+        except import_mod.ImportError as e:
+            raise click.ClickException(str(e))
+        return
+    
     try:
         dvc_file, cache_path = import_mod.import_data(
             repository=repository,
