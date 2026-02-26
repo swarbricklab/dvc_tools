@@ -7,6 +7,7 @@ Unlike dvc import, this does not require network access to the remote storage.
 Instead, it uses locally-accessible cache paths.
 """
 
+import csv
 import hashlib
 import json
 import os
@@ -928,3 +929,271 @@ def import_data(
             print("Warning: No primary cache configured. Run 'dvc checkout' manually.")
     
     return dvc_file, cache_path
+
+
+def get_rev_from_tmp_clone(
+    repository: str,
+    owner: Optional[str] = None,
+    refresh: bool = True,
+    verbose: bool = False,
+) -> Tuple[Path, str]:
+    """Get the HEAD revision from an existing tmp clone.
+
+    Uses the tmp clone infrastructure to get the latest commit hash
+    without requiring a full clone each time.
+
+    Args:
+        repository: Repository name, alias, or URL.
+        owner: Optional owner override for short names.
+        refresh: Whether to refresh the clone first.
+        verbose: Print progress messages.
+
+    Returns:
+        Tuple of (clone_path, rev_lock).
+
+    Raises:
+        ImportError: If clone doesn't exist or rev can't be determined.
+    """
+    try:
+        clone_path = tmp_mod.clone_repo(repository, owner=owner, refresh=refresh, verbose=verbose)
+    except tmp_mod.TmpError as e:
+        raise ImportError(f"Failed to clone repository: {e}")
+
+    # Get HEAD commit hash from clone
+    commit_result = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'],
+        cwd=clone_path,
+        capture_output=True,
+        text=True,
+    )
+    if commit_result.returncode != 0:
+        raise ImportError(
+            f"Could not determine revision from clone at {clone_path}"
+        )
+
+    rev_lock = commit_result.stdout.strip()
+    return clone_path, rev_lock
+
+
+def create_no_download_dvc_file(
+    dest_path: Path,
+    name: str,
+    repo_url: str,
+    repo_path: str,
+    rev_lock: str,
+) -> Path:
+    """Create a .dvc file in --no-download format (no hash/size details).
+
+    This produces the same file that ``dvc import --no-download`` would
+    create: a deps section with the source repo info and an outs section
+    that only contains the output path and hash type, without any actual
+    hash value or size.
+
+    Args:
+        dest_path: Destination directory for the .dvc file.
+        name: Name of the output (file or directory basename).
+        repo_url: Source repository URL.
+        repo_path: Path within the source repository.
+        rev_lock: Git commit hash to lock to.
+
+    Returns:
+        Path to the created .dvc file.
+    """
+    content: Dict[str, Any] = {}
+
+    dep: Dict[str, Any] = {
+        'path': repo_path,
+        'repo': {
+            'url': repo_url,
+            'rev_lock': rev_lock,
+        },
+    }
+    content['deps'] = [dep]
+
+    out: Dict[str, Any] = {
+        'path': name,
+        'hash': 'md5',
+    }
+    content['outs'] = [out]
+
+    if name.endswith('/'):
+        name = name.rstrip('/')
+
+    dvc_filename = f"{name}.dvc"
+    dvc_path = dest_path / dvc_filename
+
+    dest_path.mkdir(parents=True, exist_ok=True)
+
+    with open(dvc_path, 'w') as f:
+        yaml.dump(content, f, default_flow_style=False, sort_keys=False)
+
+    return dvc_path
+
+
+def import_no_download(
+    repository: str,
+    path: str,
+    out: Optional[str] = None,
+    owner: Optional[str] = None,
+    rev: Optional[str] = None,
+    no_refresh: bool = False,
+    verbose: bool = False,
+) -> Path:
+    """Create a .dvc import file without downloading data.
+
+    Produces the same .dvc file as ``dvc import --no-download`` but
+    without needing to clone the full source repo each time.  Instead
+    it uses the lightweight tmp clone (or an explicit ``--rev``) to
+    determine the locked revision.
+
+    Args:
+        repository: Repository name, alias, or URL.
+        path: Path to the file/directory in the remote repo.
+        out: Destination path (default: basename of *path*).
+        owner: Optional owner override for short names.
+        rev: Explicit revision to lock to (skips clone rev lookup
+             if provided but still needs clone for URL resolution).
+        no_refresh: If True, skip refreshing the tmp clone.
+        verbose: Print progress messages.
+
+    Returns:
+        Path to the created .dvc file.
+
+    Raises:
+        ImportError: If the operation fails.
+    """
+    try:
+        utils.check_dvc()
+    except utils.DependencyError as e:
+        raise ImportError(str(e))
+
+    # Determine destination
+    if out:
+        out_path = Path(out)
+    else:
+        out_path = Path(Path(path).name)
+
+    # Resolve repo URL
+    repo_url = tmp_mod.resolve_repository_url(repository, owner)
+
+    # Determine revision
+    if rev:
+        rev_lock = rev
+        if verbose:
+            print(f"Using explicit revision: {rev}")
+    else:
+        _, rev_lock = get_rev_from_tmp_clone(
+            repository, owner=owner, refresh=not no_refresh, verbose=verbose,
+        )
+        if verbose:
+            print(f"Using tmp clone revision: {rev_lock[:12]}...")
+
+    # Create no-download .dvc file
+    dvc_file = create_no_download_dvc_file(
+        dest_path=out_path.parent,
+        name=out_path.name,
+        repo_url=repo_url,
+        repo_path=path,
+        rev_lock=rev_lock,
+    )
+
+    if verbose:
+        print(f"Created {dvc_file}")
+
+    # Update .gitignore
+    gitignore_pattern = f"/{out_path.name}"
+    if utils.update_gitignore(gitignore_pattern):
+        if verbose:
+            print(f"Added {gitignore_pattern} to .gitignore")
+
+    return dvc_file
+
+
+def import_from_csv(
+    csv_path: str,
+    repository: str,
+    owner: Optional[str] = None,
+    no_download: bool = False,
+    no_checkout: bool = False,
+    no_refresh: bool = False,
+    rev: Optional[str] = None,
+    verbose: bool = False,
+) -> List[Tuple[str, bool, str]]:
+    """Repeat ``dt import`` for every row in a CSV file.
+
+    The CSV must have a ``path`` column.  An optional ``output`` column
+    is used as the ``-o/--out`` argument.  Other columns are ignored.
+
+    Args:
+        csv_path: Path to the CSV file.
+        repository: Repository name, alias, or URL.
+        owner: Optional owner override for short names.
+        no_download: If True, create --no-download style .dvc files.
+        no_checkout: If True, skip checkout after import.
+        no_refresh: If True, skip refreshing the tmp clone.
+        rev: Explicit revision (passed through to import).
+        verbose: Print progress messages.
+
+    Returns:
+        List of (path, success, message) tuples for each row.
+
+    Raises:
+        ImportError: If the CSV file cannot be read or has no 'path' column.
+    """
+    csv_file = Path(csv_path)
+    if not csv_file.exists():
+        raise ImportError(f"CSV file not found: {csv_path}")
+
+    with open(csv_file, newline='') as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or 'path' not in reader.fieldnames:
+            raise ImportError(
+                f"CSV file must have a 'path' column. "
+                f"Found columns: {reader.fieldnames}"
+            )
+        rows = list(reader)
+
+    if not rows:
+        raise ImportError(f"CSV file is empty: {csv_path}")
+
+    results: List[Tuple[str, bool, str]] = []
+
+    for i, row in enumerate(rows, 1):
+        row_path = row.get('path', '').strip()
+        if not row_path:
+            results.append(('(empty)', False, 'Missing path'))
+            continue
+
+        row_out = row.get('output', '').strip() or None
+
+        if verbose:
+            label = f"[{i}/{len(rows)}]"
+            print(f"\n{label} Importing {row_path}" + (f" -> {row_out}" if row_out else ""))
+
+        try:
+            if no_download:
+                dvc_file = import_no_download(
+                    repository=repository,
+                    path=row_path,
+                    out=row_out,
+                    owner=owner,
+                    rev=rev,
+                    no_refresh=no_refresh,
+                    verbose=verbose,
+                )
+                results.append((row_path, True, f"Created {dvc_file}"))
+            else:
+                dvc_file, cache_path = import_data(
+                    repository=repository,
+                    path=row_path,
+                    out=row_out,
+                    owner=owner,
+                    checkout=not no_checkout,
+                    verbose=verbose,
+                    refresh=not no_refresh,
+                )
+                results.append((row_path, True, f"Created {dvc_file}"))
+        except Exception as e:
+            results.append((row_path, False, str(e)))
+
+    return results
