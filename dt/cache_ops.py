@@ -56,6 +56,22 @@ def _try_copy(source: Path, dest: Path) -> bool:
         return False
 
 
+def _make_readonly(path: Path) -> None:
+    """Make a file read-only (matching DVC cache protection).
+    
+    Sets permissions to 0o444 (read-only for user, group, and others).
+    This matches DVC's cache file protection behavior.
+    
+    Args:
+        path: Path to the file to protect.
+    """
+    try:
+        os.chmod(path, 0o444)
+    except OSError:
+        # Best effort - don't fail if chmod fails (e.g., on some network filesystems)
+        pass
+
+
 def link_file(
     source: Path,
     dest: Path,
@@ -109,6 +125,9 @@ def link_file(
         
         try_func, type_name = methods[cache_type]
         if try_func(source, dest):
+            # Make copied files read-only (reflink and copy create new files)
+            if type_name in ('reflink', 'copy'):
+                _make_readonly(dest)
             if verbose:
                 print(f"  Cached ({type_name}): {display}")
             return True, type_name
@@ -123,17 +142,20 @@ def link_file(
     # Default: try all methods in order
     # 1. Try reflink (copy-on-write) - best option: instant, zero space, safe to modify
     if _try_reflink(source, dest):
+        _make_readonly(dest)
         if verbose:
             print(f"  Cached (reflink): {display}")
         return True, 'reflink'
     
     # 2. Try hardlink - same inode, no extra space, works within same filesystem
+    # Note: hardlink shares permissions with source, which should already be read-only
     if _try_hardlink(source, dest):
         if verbose:
             print(f"  Cached (hardlink): {display}")
         return True, 'hardlink'
     
     # 3. Try symlink - pointer to source, no extra space, works across filesystems
+    # Note: symlink permissions are irrelevant on Unix; target permissions matter
     if _try_symlink(source, dest):
         if verbose:
             print(f"  Cached (symlink): {display}")
@@ -141,6 +163,7 @@ def link_file(
     
     # 4. Fall back to regular copy - slower but universally compatible
     if _try_copy(source, dest):
+        _make_readonly(dest)
         if verbose:
             print(f"  Cached (copy): {display}")
         return True, 'copy'
