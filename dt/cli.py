@@ -2474,6 +2474,40 @@ def index_push(verbose, quiet, dry):
         raise click.ClickException(str(e))
 
 
+@index.command('build')
+@click.option('-v', '--verbose', is_flag=True, help='Show each file being indexed')
+@click.option('--dry', '--dry-run', is_flag=True, help='Show what would be indexed')
+@click.option('--cache', 'cache_path', type=click.Path(exists=True),
+              help='Path to cache directory (default: current repo cache)')
+def index_build(verbose, dry, cache_path):
+    """Build index by trusting cache filenames.
+    
+    Walks the cache directory and builds the ODB index from filenames,
+    avoiding the expensive hash computation. Cache files are named
+    {hash[0:2]}/{hash[2:]}, so we can extract hashes directly.
+    
+    This is much faster than letting DVC build the index by hashing files,
+    especially for large caches. Use `dt cache validate` separately if
+    you need to verify checksum integrity.
+    
+    \b
+    Examples:
+        dt index build              # Build from current repo's cache
+        dt index build -v           # Show each file being indexed
+        dt index build --dry        # Preview what would be indexed
+        dt index build --cache /path/to/cache  # Use specific cache
+    """
+    try:
+        result = index_mod.build(
+            cache_path=cache_path,
+            verbose=verbose,
+            dry=dry,
+        )
+        click.echo(f"Indexed: {result['dir_count']} dirs, {result['file_count']} files")
+    except index_mod.IndexError as e:
+        raise click.ClickException(str(e))
+
+
 @index.command('status')
 @click.option('-v', '--verbose', is_flag=True, help='Show additional details')
 def index_status(verbose):

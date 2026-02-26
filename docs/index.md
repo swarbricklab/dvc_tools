@@ -51,6 +51,32 @@ dt index push -q        # Quiet (no output)
 dt index push --dry     # Preview what would sync
 ```
 
+### dt index build
+
+Build the ODB index by walking the cache and trusting filenames, avoiding expensive hash computation.
+
+```bash
+dt index build              # Build from current repo's cache
+dt index build -v           # Show each file being indexed
+dt index build --dry        # Preview what would be indexed
+dt index build --cache /path/to/cache  # Use specific cache
+```
+
+**Why this is faster:**
+
+DVC's default index-building process reads and hashes every file in the cache, which can take hours for large datasets. `dt index build` bypasses this by trusting that cache files are named correctly (files are stored as `{hash[0:2]}/{hash[2:]}`).
+
+**When to use:**
+
+- After symlinking a large remote cache to a local location
+- When setting up a new compute node with access to a shared cache
+- When the index is missing or corrupted
+- When DVC's automatic index building is taking too long
+
+**Validation:**
+
+Use `dt cache validate` separately if you need to verify checksum integrity. The build command assumes cache filenames are correct.
+
 ### dt index status
 
 Show index configuration and status.
