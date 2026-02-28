@@ -17,6 +17,7 @@ A DVC project may depend on several storage backends simultaneously — a shared
 | [`dt auth check`](#dt-auth-check) | Test access to each endpoint |
 | [`dt auth request`](#dt-auth-request) | Generate an access-request template from failures |
 | [`dt auth teams`](#dt-auth-teams) | Manage GitHub team access for repositories |
+| [`dt auth credentials`](#dt-auth-credentials) | Install S3 credentials from secret managers |
 | [`dt auth grant`](#dt-auth-grant) | Grant a user access to a resource *(planned)* |
 
 ---
@@ -471,6 +472,79 @@ dt auth teams add-user alice data-team --org myorg
 
 ---
 
+## dt auth credentials
+
+Manage S3 remote credentials by fetching them from a secret manager and installing them into `.dvc/config.local`.
+
+### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `dt auth credentials install` | Fetch and install credentials from secret manager |
+| `dt auth credentials uninstall` | Remove credentials from `.dvc/config.local` |
+| `dt auth credentials status` | Show which remotes have credentials installed |
+
+### Configuration
+
+Add to `.dt/config.yaml` or user config:
+
+```yaml
+secrets:
+  backend: gcp
+  prefix: dvc-remote-    # Optional, default "dvc-remote-"
+  gcp:
+    project: my-gcp-project
+```
+
+### Secret format
+
+Secrets are named by **repository** (e.g., `dvc-remote-neochemo` for the `neochemo` repo) and contain **raw DVC INI config** that gets appended directly to `.dvc/config.local`:
+
+```ini
+['remote "cloud"']
+    access_key_id = AKIAXXXXXXXX
+    secret_access_key = xxxxx
+    endpointurl = https://xxx.r2.cloudflarestorage.com
+
+['remote "backup"']
+    access_key_id = AKIAYYYYYYYY
+    secret_access_key = yyyyy
+    endpointurl = https://yyy.r2.cloudflarestorage.com
+```
+
+This is the same format as `.dvc/config.local`. The secret content is appended directly to the file.
+
+### Examples
+
+```bash
+# Install credentials
+dt auth credentials install
+
+# Install with verbose output
+dt auth credentials install -v
+
+# See status of all S3 remotes
+dt auth credentials status
+
+# Remove installed credentials
+dt auth credentials uninstall
+```
+
+### Security
+
+- Credentials are written to `.dvc/config.local`, which is gitignored by default
+- File permissions are set to `600` (owner read/write only)
+- Requires GCP authentication via `gcloud auth login` or service account
+
+### Supported backends
+
+| Backend | Status | Configuration |
+|---------|--------|---------------|
+| GCP Secret Manager | ✅ Available | `secrets.backend: gcp` |
+| AWS Secrets Manager | 🔜 Planned | `secrets.backend: aws` |
+
+---
+
 ## dt auth grant
 
 > **Status**: Not yet implemented.
@@ -499,7 +573,8 @@ This command is being built incrementally:
 3. **`dt auth check`** — read-only access tests ✅
 4. **`dt auth request`** — template generation from check results ✅
 5. **`dt auth teams`** — GitHub team management ✅
-6. **`dt auth grant`** — admin actions (not yet implemented; use `dt auth teams` for GitHub access)
+6. **`dt auth credentials`** — secret manager integration for S3 credentials ✅
+7. **`dt auth grant`** — admin actions (not yet implemented; use `dt auth teams` for GitHub access)
 
 ---
 
