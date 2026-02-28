@@ -474,15 +474,27 @@ dt auth teams add-user alice data-team --org myorg
 
 ## dt auth credentials
 
-Manage S3 remote credentials by fetching them from a secret manager and installing them into `.dvc/config.local`.
+Manage S3 remote credentials by fetching them from a secret manager and installing them into the **global DVC config**. This ensures credentials work both for the current repository and for imported data from other repositories.
 
 ### Subcommands
 
 | Subcommand | Description |
 |------------|-------------|
-| `dt auth credentials install` | Fetch and install credentials from secret manager |
-| `dt auth credentials uninstall` | Remove credentials from `.dvc/config.local` |
+| `dt auth credentials install` | Fetch and install credentials for all required repos |
+| `dt auth credentials uninstall` | Remove credentials from global config |
 | `dt auth credentials status` | Show which remotes have credentials installed |
+
+### How it works
+
+When you run `dt auth credentials install`:
+
+1. **Detects required repos** — scans `.dvc` files for imports and extracts source repo names
+2. **Fetches secrets** — looks up `dvc-remote-{repo_name}` in the configured secret manager
+3. **Merges into global config** — parses the INI config and merges sections, replacing existing sections with the same name (supports credential rotation)
+
+Global config location:
+- **macOS**: `~/Library/Application Support/dvc/config`
+- **Linux**: `~/.config/dvc/config` (or `$XDG_CONFIG_HOME/dvc/config`)
 
 ### Configuration
 
@@ -498,7 +510,7 @@ secrets:
 
 ### Secret format
 
-Secrets are named by **repository** (e.g., `dvc-remote-neochemo` for the `neochemo` repo) and contain **raw DVC INI config** that gets appended directly to `.dvc/config.local`:
+Secrets are named by **repository** (e.g., `dvc-remote-neochemo` for the `neochemo` repo) and contain **raw DVC INI config**:
 
 ```ini
 ['remote "cloud"']
@@ -512,15 +524,13 @@ Secrets are named by **repository** (e.g., `dvc-remote-neochemo` for the `neoche
     endpointurl = https://yyy.r2.cloudflarestorage.com
 ```
 
-This is the same format as `.dvc/config.local`. The secret content is appended directly to the file.
-
 ### Examples
 
 ```bash
-# Install credentials
+# Install credentials for current repo + all source repos from imports
 dt auth credentials install
 
-# Install with verbose output
+# Install with verbose output (shows which repos are detected)
 dt auth credentials install -v
 
 # See status of all S3 remotes
@@ -530,10 +540,27 @@ dt auth credentials status
 dt auth credentials uninstall
 ```
 
+### Example output
+
+```
+$ dt auth credentials install -v
+Primary repo: neochemo
+Found source repo: bcarc_wts (from git@github.com:Swarbricklab/bcarc_wts.git)
+
+Fetching credentials for 2 repo(s)...
+  ✓ bcarc_wts: 1 section(s)
+  ✓ neochemo: 1 section(s)
+
+Merging credentials into /Users/johree/Library/Application Support/dvc/config...
+✓ Credentials installed to /Users/johree/Library/Application Support/dvc/config
+  Permissions: 600
+✓ Installed credentials for 2 repo(s)
+```
+
 ### Security
 
-- Credentials are written to `.dvc/config.local`, which is gitignored by default
-- File permissions are set to `600` (owner read/write only)
+- Credentials are written to global DVC config with `600` permissions (owner read/write only)
+- Global config is outside the repo, so never accidentally committed
 - Requires GCP authentication via `gcloud auth login` or service account
 
 ### Supported backends

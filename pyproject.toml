@@ -30,6 +30,7 @@ classifiers = [
 dependencies = [
     "click>=8.0.0",
     "confuse>=2.0.0",
+    "platformdirs>=3.0.0",
     "pyyaml>=6.0",
 ]
 

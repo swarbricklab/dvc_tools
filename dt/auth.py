@@ -288,38 +288,10 @@ def _discover_import_sources(
     For each unique source repository URL, also discovers its DVC remotes
     via the tmp-clone infrastructure.
     """
-    import yaml
-
     endpoints: List[Endpoint] = []
-    search_root = repo_path or Path.cwd()
 
-    # Collect unique import URLs from .dvc files
-    import_urls: Dict[str, List[str]] = {}  # url -> list of dvc files
-    for dvc_file in sorted(search_root.rglob('*.dvc')):
-        # Skip .dvc directory itself and .dt/tmp clones
-        rel = str(dvc_file.relative_to(search_root))
-        if rel.startswith('.dvc') or rel.startswith('.dt'):
-            continue
-
-        try:
-            with open(dvc_file) as f:
-                data = yaml.safe_load(f)
-        except Exception:
-            continue
-
-        if not isinstance(data, dict):
-            continue
-
-        deps = data.get('deps')
-        if not deps or not isinstance(deps, list):
-            continue
-
-        for dep in deps:
-            repo = dep.get('repo') if isinstance(dep, dict) else None
-            if repo and isinstance(repo, dict):
-                url = repo.get('url')
-                if url:
-                    import_urls.setdefault(url, []).append(rel)
+    # Use shared helper to collect import URLs
+    import_urls = _get_import_urls(repo_path)
 
     # Build endpoints for each unique import source
     for url, dvc_files in import_urls.items():
@@ -2734,11 +2706,37 @@ def _get_dvc_config_local_path() -> Path:
     return Path.cwd() / '.dvc' / 'config.local'
 
 
+def _get_dvc_global_config_path() -> Path:
+    """Get path to DVC global config using platformdirs.
+    
+    Returns the platform-appropriate path:
+    - macOS: ~/Library/Application Support/dvc/config
+    - Linux: ~/.config/dvc/config (or $XDG_CONFIG_HOME/dvc/config)
+    - Windows: %APPDATA%/dvc/config
+    """
+    try:
+        from platformdirs import user_config_dir
+        return Path(user_config_dir('dvc')) / 'config'
+    except ImportError:
+        # Fallback if platformdirs not available
+        import sys
+        if sys.platform == 'darwin':
+            return Path.home() / 'Library' / 'Application Support' / 'dvc' / 'config'
+        elif sys.platform == 'win32':
+            appdata = os.environ.get('APPDATA', '')
+            return Path(appdata) / 'dvc' / 'config' if appdata else Path.home() / 'dvc' / 'config'
+        else:
+            xdg_config = os.environ.get('XDG_CONFIG_HOME', '')
+            if xdg_config:
+                return Path(xdg_config) / 'dvc' / 'config'
+            return Path.home() / '.config' / 'dvc' / 'config'
+
+
 def _ensure_config_local_permissions(path: Path) -> None:
-    """Ensure .dvc/config.local has 600 permissions.
+    """Ensure config file has 600 permissions.
     
     Args:
-        path: Path to config.local file.
+        path: Path to config file.
     """
     if path.exists():
         current_mode = path.stat().st_mode & 0o777
@@ -2746,67 +2744,337 @@ def _ensure_config_local_permissions(path: Path) -> None:
             path.chmod(0o600)
 
 
+def _parse_dvc_ini(content: str) -> Dict[str, Dict[str, str]]:
+    """Parse DVC INI config into sections.
+    
+    Handles DVC's special section syntax like ['remote "name"'].
+    
+    Args:
+        content: INI file content.
+        
+    Returns:
+        Dict mapping section names to key-value dicts.
+        Section names are normalized (e.g., 'remote "bcarc-wts"').
+    """
+    import re
+    
+    sections: Dict[str, Dict[str, str]] = {}
+    current_section = None
+    
+    for line in content.split('\n'):
+        line = line.rstrip()
+        
+        # Skip empty lines and comments
+        if not line or line.startswith('#') or line.startswith(';'):
+            continue
+        
+        # Check for section header
+        # Matches [section] or ['remote "name"']
+        section_match = re.match(r"^\[(.+)\]$", line)
+        if section_match:
+            current_section = section_match.group(1)
+            if current_section not in sections:
+                sections[current_section] = {}
+            continue
+        
+        # Parse key-value pairs
+        if current_section and '=' in line:
+            # Handle indented lines
+            line = line.lstrip()
+            key, _, value = line.partition('=')
+            key = key.strip()
+            value = value.strip()
+            sections[current_section][key] = value
+    
+    return sections
+
+
+def _format_dvc_ini(sections: Dict[str, Dict[str, str]]) -> str:
+    """Format sections back to DVC INI format.
+    
+    Args:
+        sections: Dict mapping section names to key-value dicts.
+        
+    Returns:
+        INI formatted string.
+    """
+    lines = []
+    
+    for section_name, values in sections.items():
+        lines.append(f'[{section_name}]')
+        for key, value in values.items():
+            lines.append(f'    {key} = {value}')
+        lines.append('')  # Empty line between sections
+    
+    return '\n'.join(lines)
+
+
+def _merge_ini_sections(
+    existing: Dict[str, Dict[str, str]],
+    new: Dict[str, Dict[str, str]],
+) -> Dict[str, Dict[str, str]]:
+    """Merge new INI sections into existing, replacing duplicates.
+    
+    Args:
+        existing: Existing sections dict.
+        new: New sections to merge in.
+        
+    Returns:
+        Merged sections dict. Values from 'new' override 'existing'.
+    """
+    result = {k: dict(v) for k, v in existing.items()}
+    
+    for section_name, values in new.items():
+        if section_name in result:
+            # Update existing section with new values
+            result[section_name].update(values)
+        else:
+            # Add new section
+            result[section_name] = dict(values)
+    
+    return result
+
+
+def _extract_repo_name_from_url(url: str) -> Optional[str]:
+    """Extract repository name from a git URL.
+    
+    Handles:
+    - git@github.com:org/repo.git
+    - https://github.com/org/repo.git
+    - https://github.com/org/repo
+    
+    Args:
+        url: Git URL.
+        
+    Returns:
+        Repository name (without .git suffix) or None.
+    """
+    import re
+    
+    # SSH format: git@host:org/repo.git
+    ssh_match = re.match(r'^git@[^:]+:(?:[^/]+/)?([^/]+?)(?:\.git)?$', url)
+    if ssh_match:
+        return ssh_match.group(1)
+    
+    # HTTPS format: https://host/org/repo.git
+    https_match = re.match(r'^https?://[^/]+/(?:[^/]+/)?([^/]+?)(?:\.git)?$', url)
+    if https_match:
+        return https_match.group(1)
+    
+    return None
+
+
+def _get_import_urls(repo_path: Optional[Path] = None) -> Dict[str, List[str]]:
+    """Get unique import source URLs from .dvc files.
+    
+    This is a lightweight scan that just extracts URLs without cloning.
+    Shared between _discover_import_sources() and credentials code.
+    
+    Args:
+        repo_path: Project root (defaults to cwd).
+    
+    Returns:
+        Dict mapping URL to list of .dvc files that import from it.
+    """
+    import yaml
+    
+    search_root = repo_path or Path.cwd()
+    import_urls: Dict[str, List[str]] = {}
+    
+    for dvc_file in sorted(search_root.rglob('*.dvc')):
+        # Skip .dvc directory itself and .dt/tmp clones
+        rel = str(dvc_file.relative_to(search_root))
+        if rel.startswith('.dvc') or rel.startswith('.dt'):
+            continue
+        
+        try:
+            with open(dvc_file) as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            continue
+        
+        if not isinstance(data, dict):
+            continue
+        
+        deps = data.get('deps')
+        if not deps or not isinstance(deps, list):
+            continue
+        
+        for dep in deps:
+            repo = dep.get('repo') if isinstance(dep, dict) else None
+            if repo and isinstance(repo, dict):
+                url = repo.get('url')
+                if url:
+                    import_urls.setdefault(url, []).append(rel)
+    
+    return import_urls
+
+
+@dataclass
+class RepoCredentialInfo:
+    """Info about a repo for credential fetching."""
+    name: str
+    url: Optional[str]  # None for primary repo
+    has_s3_remote: bool
+    remote_types: List[str]
+
+
+def _get_repos_needing_credentials(verbose: bool = False) -> List[RepoCredentialInfo]:
+    """Get list of repos that may need S3 credentials.
+    
+    Returns the primary repo plus source repos from imports, filtered to
+    those with S3 remotes. Uses _discover_import_sources() to check remote types.
+    
+    Args:
+        verbose: Print progress messages.
+        
+    Returns:
+        List of RepoCredentialInfo, filtered to repos with S3 remotes.
+    """
+    repos: List[RepoCredentialInfo] = []
+    seen_names: Set[str] = set()
+    
+    # Primary repo - check project-level DVC config only (not global)
+    primary_name = utils.get_project_name()
+    
+    primary_has_s3 = False
+    primary_types: List[str] = []
+    result = subprocess.run(
+        ['dvc', 'remote', 'list', '--project'],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                _, url = parts[0], parts[1]
+                rtype = classify_url(url)
+                if rtype not in primary_types:
+                    primary_types.append(rtype)
+                if rtype == 's3':
+                    primary_has_s3 = True
+    
+    if primary_has_s3:
+        repos.append(RepoCredentialInfo(
+            name=primary_name,
+            url=None,
+            has_s3_remote=True,
+            remote_types=primary_types,
+        ))
+        seen_names.add(primary_name)
+        if verbose:
+            print(f"Primary repo: {primary_name} (s3)")
+    elif verbose:
+        types_str = ', '.join(primary_types) if primary_types else 'none'
+        print(f"Primary repo: {primary_name} (remotes: {types_str}, no s3)")
+    
+    # Source repos - use _discover_import_sources() which clones and checks remotes
+    source_eps = _discover_import_sources(verbose=False)
+    
+    for ep in source_eps:
+        name = _extract_repo_name_from_url(ep.url)
+        if not name or name in seen_names:
+            continue
+        
+        # Check children (DVC remotes) for S3 type
+        has_s3 = False
+        remote_types: List[str] = []
+        for child in ep.children:
+            if child.type not in remote_types:
+                remote_types.append(child.type)
+            if child.type == 's3':
+                has_s3 = True
+        
+        if has_s3:
+            repos.append(RepoCredentialInfo(
+                name=name,
+                url=ep.url,
+                has_s3_remote=True,
+                remote_types=remote_types,
+            ))
+            seen_names.add(name)
+            if verbose:
+                print(f"Found source repo: {name} (s3)")
+        elif verbose and ep.children:
+            types_str = ', '.join(remote_types)
+            print(f"Skipping source repo: {name} (remotes: {types_str}, no s3)")
+    
+    return repos
+
+
 def _get_installed_credentials() -> Dict[str, Dict[str, str]]:
-    """Get credentials currently installed in .dvc/config.local.
+    """Get credentials currently installed in global DVC config.
     
     Returns:
         Dictionary mapping remote name to credential keys present.
     """
-    result = subprocess.run(
-        ['dvc', 'config', '--local', '--list'],
-        capture_output=True,
-        text=True,
-    )
+    import re
     
-    if result.returncode != 0:
+    config_path = _get_dvc_global_config_path()
+    
+    if not config_path.exists():
         return {}
     
+    sections = _parse_dvc_ini(config_path.read_text())
+    
+    credential_keys = {'access_key_id', 'secret_access_key', 'endpointurl', 'region'}
     credentials: Dict[str, Dict[str, str]] = {}
     
-    for line in result.stdout.strip().split('\n'):
-        if not line:
+    for section_name, values in sections.items():
+        # Check if this is a remote section
+        if not section_name.startswith("'remote "):
             continue
-        # Format: remote.name.key=value
-        if line.startswith('remote.') and '=' in line:
-            parts = line.split('=', 1)
-            if len(parts) == 2:
-                key_path, value = parts
-                key_parts = key_path.split('.')
-                if len(key_parts) == 3:
-                    _, remote_name, key = key_parts
-                    # Only track credential-related keys
-                    if key in ('access_key_id', 'secret_access_key', 'endpointurl', 'region'):
-                        if remote_name not in credentials:
-                            credentials[remote_name] = {}
-                        credentials[remote_name][key] = value
+        
+        # Extract remote name from section name like 'remote "bcarc-wts"'
+        match = re.match(r"'remote \"([^\"]+)\"'", section_name)
+        if not match:
+            continue
+        remote_name = match.group(1)
+        
+        # Collect credential keys
+        for key, value in values.items():
+            if key in credential_keys:
+                if remote_name not in credentials:
+                    credentials[remote_name] = {}
+                credentials[remote_name][key] = value
     
     return credentials
 
 
 def install_credentials(
     verbose: bool = False,
-) -> bool:
-    """Install S3 credentials from secret manager into .dvc/config.local.
+) -> Dict[str, bool]:
+    """Install S3 credentials from secret manager into global DVC config.
     
-    Fetches raw config for the current repository from the configured
-    secret manager and appends it to .dvc/config.local.
+    Fetches credentials for the current repository and all source repos
+    from imports that have S3 remotes, then merges them into the global
+    DVC config.
+    
+    Uses INI merging to properly replace existing credentials rather than
+    appending duplicates.
     
     Args:
         verbose: Print progress messages.
         
     Returns:
-        True if credentials were installed.
+        Dict mapping repo names to success status.
         
     Raises:
-        AuthError: If credentials cannot be fetched or installed.
+        AuthError: If secret backend cannot be configured or no S3 repos found.
     """
     from .secrets import SecretError
     
-    # Get repo name
-    repo_name = utils.get_project_name()
+    # Get repos with S3 remotes
+    repos = _get_repos_needing_credentials(verbose=verbose)
+    
+    if not repos:
+        raise AuthError("No repositories with S3 remotes found")
     
     if verbose:
-        print(f"Fetching credentials for repo: {repo_name}")
+        print(f"\nFetching credentials for {len(repos)} repo(s) with S3 remotes...")
     
     # Get secret backend
     try:
@@ -2814,55 +3082,72 @@ def install_credentials(
     except AuthError:
         raise
     
-    # Fetch raw config
-    try:
-        raw_config = backend.get_raw_config(repo_name)
-    except SecretError as e:
-        raise AuthError(str(e))
+    # Fetch secrets for each repo
+    results: Dict[str, bool] = {}
+    new_sections: Dict[str, Dict[str, str]] = {}
     
-    if not raw_config or not raw_config.strip():
-        raise AuthError(f"Empty config in secret for repo '{repo_name}'")
+    for repo_info in repos:
+        try:
+            raw_config = backend.get_raw_config(repo_info.name)
+            if raw_config and raw_config.strip():
+                parsed = _parse_dvc_ini(raw_config)
+                new_sections = _merge_ini_sections(new_sections, parsed)
+                results[repo_info.name] = True
+                if verbose:
+                    section_names = list(parsed.keys())
+                    print(f"  ✓ {repo_info.name}: {len(section_names)} section(s)")
+            else:
+                results[repo_info.name] = False
+                if verbose:
+                    print(f"  ⚠ {repo_info.name}: empty secret")
+        except SecretError as e:
+            results[repo_info.name] = False
+            if verbose:
+                print(f"  ⚠ {repo_info.name}: {e}")
     
-    # Append to .dvc/config.local
-    config_local_path = _get_dvc_config_local_path()
+    if not new_sections:
+        raise AuthError("No credentials found for any repository with S3 remotes")
+    
+    # Get global config path
+    config_path = _get_dvc_global_config_path()
     
     if verbose:
-        print(f"Appending config to {config_local_path}...")
+        print(f"\nMerging credentials into {config_path}...")
     
     # Ensure parent directory exists
-    config_local_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Read existing content to check if we need a newline separator
-    existing_content = ""
-    if config_local_path.exists():
-        existing_content = config_local_path.read_text()
+    # Read and parse existing config
+    existing_sections: Dict[str, Dict[str, str]] = {}
+    if config_path.exists():
+        existing_content = config_path.read_text()
+        existing_sections = _parse_dvc_ini(existing_content)
     
-    # Ensure we have a newline between existing content and new content
-    separator = ""
-    if existing_content and not existing_content.endswith('\n'):
-        separator = "\n"
-    if existing_content and not existing_content.endswith('\n\n'):
-        separator = "\n\n"
+    # Merge new sections (replaces existing sections with same name)
+    merged = _merge_ini_sections(existing_sections, new_sections)
     
-    # Append the raw config
-    with open(config_local_path, 'a') as f:
-        f.write(separator + raw_config.strip() + '\n')
+    # Write back the merged config
+    config_path.write_text(_format_dvc_ini(merged))
     
     # Ensure proper permissions (600)
-    _ensure_config_local_permissions(config_local_path)
+    _ensure_config_local_permissions(config_path)
     
     if verbose:
-        print(f"Credentials installed successfully")
-        print(f"Permissions on {config_local_path}: 600")
+        print(f"✓ Credentials installed to {config_path}")
+        print(f"  Permissions: 600")
     
-    return True
+    return results
 
 
 def uninstall_credentials(
     remote: Optional[str] = None,
     verbose: bool = False,
 ) -> List[str]:
-    """Remove S3 credentials from .dvc/config.local.
+    """Remove S3 credentials from global DVC config.
+    
+    Removes credential keys (access_key_id, secret_access_key, endpointurl)
+    from remote sections in the global config. Does not remove the entire
+    remote section - leaves url intact.
     
     Args:
         remote: Remove only credentials for this remote. If None, remove all.
@@ -2871,37 +3156,52 @@ def uninstall_credentials(
     Returns:
         List of remote names whose credentials were removed.
     """
-    installed = _get_installed_credentials()
+    config_path = _get_dvc_global_config_path()
     
-    if not installed:
+    if not config_path.exists():
         return []
     
-    # Filter to specific remote if requested
-    if remote:
-        if remote not in installed:
-            return []
-        remotes_to_remove = [remote]
-    else:
-        remotes_to_remove = list(installed.keys())
+    # Parse existing config
+    existing_content = config_path.read_text()
+    sections = _parse_dvc_ini(existing_content)
     
+    credential_keys = {'access_key_id', 'secret_access_key', 'endpointurl', 'region'}
     removed = []
-    credential_keys = ('access_key_id', 'secret_access_key', 'endpointurl', 'region')
     
-    for remote_name in remotes_to_remove:
+    for section_name, values in sections.items():
+        # Check if this is a remote section
+        if not section_name.startswith("'remote "):
+            continue
+        
+        # Extract remote name from section name like 'remote "bcarc-wts"'
+        import re
+        match = re.match(r"'remote \"([^\"]+)\"'", section_name)
+        if not match:
+            continue
+        remote_name = match.group(1)
+        
+        # Skip if we're filtering to a specific remote
+        if remote and remote != remote_name:
+            continue
+        
+        # Check if this remote has any credential keys
+        cred_keys_present = [k for k in values.keys() if k in credential_keys]
+        if not cred_keys_present:
+            continue
+        
         if verbose:
             print(f"Removing credentials for remote '{remote_name}'...")
         
-        # Unset each credential key
-        for key in credential_keys:
-            config_key = f'remote.{remote_name}.{key}'
-            # Use --unset to remove (ignore errors if key doesn't exist)
-            subprocess.run(
-                ['dvc', 'config', '--local', '--unset', config_key],
-                capture_output=True,
-                text=True,
-            )
+        # Remove credential keys from this section
+        for key in cred_keys_present:
+            del sections[section_name][key]
         
         removed.append(remote_name)
+    
+    if removed:
+        # Write back the modified config
+        config_path.write_text(_format_dvc_ini(sections))
+        _ensure_config_local_permissions(config_path)
     
     return removed
 
