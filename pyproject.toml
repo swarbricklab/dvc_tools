@@ -44,12 +44,15 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]
+gcp = [
+    "google-cloud-secret-manager>=2.0.0",
+]
 
 [project.scripts]
 dt = "dt.cli:cli"
 
 [tool.setuptools]
-packages = ["dt"]
+packages = ["dt", "dt.secrets"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
