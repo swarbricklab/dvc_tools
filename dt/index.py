@@ -6,7 +6,7 @@ users benefit from the same index without rebuilding it.
 
 Key concepts:
 - Local index: DVC's site_cache_dir (usually in /tmp)
-- Mirror: Shared network location for index persistence
+- Mirror: Shared network location for index persistence (local path, gs://, s3://)
 - Locking: File-based locks prevent concurrent modifications
 """
 
@@ -15,7 +15,7 @@ import subprocess
 import time
 from functools import wraps
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from . import config as cfg
 from .errors import DTError
@@ -37,15 +37,173 @@ class IndexNotConfigured(IndexError):
 
 
 # =============================================================================
+# Cloud/fsspec utilities
+# =============================================================================
+
+
+def _is_cloud_path(path: str) -> bool:
+    """Check if path is a cloud URL (gs://, s3://, etc.)."""
+    return path.startswith(('gs://', 's3://', 'gcs://'))
+
+
+def _get_filesystem(path: str):
+    """Get fsspec filesystem for a path.
+    
+    Args:
+        path: Local path or cloud URL (gs://, s3://).
+        
+    Returns:
+        Tuple of (filesystem, path_without_protocol).
+        
+    Raises:
+        IndexError: If required fsspec backend not installed.
+    """
+    try:
+        import fsspec
+    except ImportError:
+        raise IndexError(
+            "fsspec not installed. Install with: pip install fsspec"
+        )
+    
+    if path.startswith(('gs://', 'gcs://')):
+        try:
+            import gcsfs  # noqa: F401
+        except ImportError:
+            raise IndexError(
+                "gcsfs not installed for GCS access. Install with: pip install gcsfs"
+            )
+    elif path.startswith('s3://'):
+        try:
+            import s3fs  # noqa: F401
+        except ImportError:
+            raise IndexError(
+                "s3fs not installed for S3 access. Install with: pip install s3fs"
+            )
+    
+    fs, fs_path = fsspec.core.url_to_fs(path)
+    return fs, fs_path
+
+
+def _fsspec_sync(
+    src: str,
+    dst: str,
+    verbose: bool = False,
+    dry: bool = False,
+) -> Tuple[int, int]:
+    """Sync files from src to dst using fsspec.
+    
+    Similar to rsync: copies new/changed files based on size comparison.
+    
+    Args:
+        src: Source path (local or cloud URL).
+        dst: Destination path (local or cloud URL).
+        verbose: Print file operations.
+        dry: Show what would be copied without copying.
+        
+    Returns:
+        Tuple of (files_copied, files_skipped).
+    """
+    src_fs, src_path = _get_filesystem(src)
+    dst_fs, dst_path = _get_filesystem(dst)
+    
+    # Ensure paths don't end with /
+    src_path = src_path.rstrip('/')
+    dst_path = dst_path.rstrip('/')
+    
+    # Get source files
+    try:
+        if not src_fs.exists(src_path):
+            return 0, 0
+        src_files = src_fs.find(src_path)
+    except Exception as e:
+        if verbose:
+            print(f"  Warning: could not list source: {e}")
+        return 0, 0
+    
+    # Get destination files (for comparison)
+    dst_files_info: Dict[str, int] = {}
+    try:
+        if dst_fs.exists(dst_path):
+            for f in dst_fs.find(dst_path, detail=True).values():
+                rel = f['name']
+                if rel.startswith(dst_path):
+                    rel = rel[len(dst_path):].lstrip('/')
+                dst_files_info[rel] = f.get('size', 0)
+    except Exception:
+        pass  # Destination may not exist yet
+    
+    copied = 0
+    skipped = 0
+    
+    for src_file in src_files:
+        # Get relative path
+        if src_file.startswith(src_path):
+            rel_path = src_file[len(src_path):].lstrip('/')
+        else:
+            rel_path = src_file
+        
+        dst_file = f"{dst_path}/{rel_path}"
+        
+        # Check if needs copying (size comparison)
+        try:
+            src_size = src_fs.size(src_file)
+        except Exception:
+            src_size = None
+        
+        needs_copy = True
+        if rel_path in dst_files_info:
+            if src_size is not None and dst_files_info[rel_path] == src_size:
+                needs_copy = False
+        
+        if not needs_copy:
+            skipped += 1
+            continue
+        
+        if dry:
+            if verbose:
+                print(f"  Would copy: {rel_path}")
+            copied += 1
+            continue
+        
+        # Copy file
+        try:
+            # Ensure parent directory exists
+            dst_parent = '/'.join(dst_file.rsplit('/')[:-1])
+            if dst_parent:
+                dst_fs.makedirs(dst_parent, exist_ok=True)
+            
+            # Copy
+            with src_fs.open(src_file, 'rb') as src_f:
+                with dst_fs.open(dst_file, 'wb') as dst_f:
+                    # Copy in chunks for large files
+                    while True:
+                        chunk = src_f.read(8 * 1024 * 1024)  # 8MB chunks
+                        if not chunk:
+                            break
+                        dst_f.write(chunk)
+            
+            if verbose:
+                print(f"  Copied: {rel_path}")
+            copied += 1
+            
+        except Exception as e:
+            if verbose:
+                print(f"  Error copying {rel_path}: {e}")
+    
+    return copied, skipped
+
+
+# =============================================================================
 # Configuration
 # =============================================================================
 
 
-def get_index_paths() -> Tuple[Path, Path]:
+def get_index_paths() -> Tuple[Path, str]:
     """Get local index and mirror paths.
     
     Returns:
-        Tuple of (local_index_path, mirror_path)
+        Tuple of (local_index_path, mirror_path_or_url)
+        The mirror path may be a local path or a cloud URL (gs://, s3://).
         
     Raises:
         IndexNotConfigured: If mirror root not configured or not in DVC repo.
@@ -57,8 +215,6 @@ def get_index_paths() -> Tuple[Path, Path]:
         raise IndexNotConfigured(
             "Index mirror not configured. Set 'index.mirror_root' in dt config."
         )
-    
-    mirror_root = Path(mirror_root)
     
     # Get local index from dvc doctor
     try:
@@ -89,7 +245,14 @@ def get_index_paths() -> Tuple[Path, Path]:
     
     # Mirror path is based on the repo hash (last component of local index)
     repo_hash = local_index.name
-    mirror_path = mirror_root / 'repo' / repo_hash
+    
+    # Handle cloud URLs vs local paths
+    if _is_cloud_path(mirror_root):
+        # Cloud URL: join with /
+        mirror_path = f"{mirror_root.rstrip('/')}/repo/{repo_hash}"
+    else:
+        # Local path: use Path
+        mirror_path = str(Path(mirror_root) / 'repo' / repo_hash)
     
     return local_index, mirror_path
 
@@ -237,16 +400,38 @@ def pull(
             print(f"Warning: {e}")
         return False
     
-    # Check mirror exists and has content
-    if not mirror_path.exists():
-        if verbose and not quiet:
-            print(f"  Mirror does not exist yet: {mirror_path}")
-        return True
+    is_cloud = _is_cloud_path(mirror_path)
     
-    if not any(mirror_path.iterdir()):
-        if verbose and not quiet:
-            print(f"  Mirror is empty: {mirror_path}")
-        return True
+    # Check mirror exists and has content
+    if is_cloud:
+        # Use fsspec to check cloud path
+        try:
+            fs, fs_path = _get_filesystem(mirror_path)
+            if not fs.exists(fs_path):
+                if verbose and not quiet:
+                    print(f"  Mirror does not exist yet: {mirror_path}")
+                return True
+            files = fs.find(fs_path)
+            if not files:
+                if verbose and not quiet:
+                    print(f"  Mirror is empty: {mirror_path}")
+                return True
+        except IndexError as e:
+            if not quiet:
+                print(f"Warning: {e}")
+            return False
+    else:
+        # Local path check
+        mirror_p = Path(mirror_path)
+        if not mirror_p.exists():
+            if verbose and not quiet:
+                print(f"  Mirror does not exist yet: {mirror_path}")
+            return True
+        
+        if not any(mirror_p.iterdir()):
+            if verbose and not quiet:
+                print(f"  Mirror is empty: {mirror_path}")
+            return True
     
     if not quiet:
         if verbose:
@@ -269,40 +454,52 @@ def pull(
         return False
     
     try:
-        # Build rsync command
-        cmd = [
-            'rsync', '-ah',
-            '--perms', '--chmod=ug+rw',
-            '--checksum',
-            '--omit-dir-times',
-        ]
-        
-        if dry:
-            cmd.append('--dry-run')
-            cmd.append('-v')
-        elif verbose:
-            cmd.append('-v')
-        
-        cmd.extend([f"{mirror_path}/", f"{local_index}/"])
-        
-        if verbose and not quiet:
-            print(f"  Running: {' '.join(cmd)}")
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=not verbose,
-            text=True,
-        )
-        
-        if result.returncode != 0:
-            if not quiet:
-                print(f"Warning: rsync failed: {result.stderr}")
-            return False
-        
-        if verbose and not quiet and not dry:
-            print("  Index updated from mirror")
-        
-        return True
+        if is_cloud:
+            # Use fsspec for cloud paths
+            copied, skipped = _fsspec_sync(
+                mirror_path,
+                str(local_index),
+                verbose=verbose,
+                dry=dry,
+            )
+            if verbose and not quiet and not dry:
+                print(f"  Index updated from mirror ({copied} copied, {skipped} skipped)")
+            return True
+        else:
+            # Use rsync for local paths (faster)
+            cmd = [
+                'rsync', '-ah',
+                '--perms', '--chmod=ug+rw',
+                '--checksum',
+                '--omit-dir-times',
+            ]
+            
+            if dry:
+                cmd.append('--dry-run')
+                cmd.append('-v')
+            elif verbose:
+                cmd.append('-v')
+            
+            cmd.extend([f"{mirror_path}/", f"{local_index}/"])
+            
+            if verbose and not quiet:
+                print(f"  Running: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=not verbose,
+                text=True,
+            )
+            
+            if result.returncode != 0:
+                if not quiet:
+                    print(f"Warning: rsync failed: {result.stderr}")
+                return False
+            
+            if verbose and not quiet and not dry:
+                print("  Index updated from mirror")
+            
+            return True
         
     finally:
         release_lock(local_lock)
@@ -330,6 +527,8 @@ def push(
             print(f"Warning: {e}")
         return False
     
+    is_cloud = _is_cloud_path(mirror_path)
+    
     # Check local index exists and has content
     if not local_index.exists():
         if verbose and not quiet:
@@ -349,62 +548,91 @@ def push(
         else:
             print(f"Syncing index...")
     
-    # Create mirror directory if needed
-    mirror_path.mkdir(parents=True, exist_ok=True)
-    
-    # Set group permissions on mirror
-    try:
-        os.chmod(mirror_path, 0o775)
-    except OSError:
-        pass  # May not own the directory
-    
-    # Acquire lock
-    mirror_lock = mirror_path / 'mirror.lock'
-    try:
-        acquire_lock(mirror_lock)
-    except IndexLockTimeout as e:
-        if not quiet:
-            print(f"Warning: {e}")
-        return False
-    
-    try:
-        # Build rsync command
-        cmd = [
-            'rsync', '-ah',
-            '--perms', '--chmod=ug+rw',
-            '--checksum',
-            '--omit-dir-times',
-        ]
-        
-        if dry:
-            cmd.append('--dry-run')
-            cmd.append('-v')
-        elif verbose:
-            cmd.append('-v')
-        
-        cmd.extend([f"{local_index}/", f"{mirror_path}/"])
-        
-        if verbose and not quiet:
-            print(f"  Running: {' '.join(cmd)}")
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=not verbose,
-            text=True,
-        )
-        
-        if result.returncode != 0:
+    if is_cloud:
+        # Use fsspec for cloud paths - no locking for cloud
+        try:
+            fs, fs_path = _get_filesystem(mirror_path)
+            # Ensure parent directory exists (if applicable)
+            # Cloud storage usually creates "directories" implicitly
+        except IndexError as e:
             if not quiet:
-                print(f"Warning: rsync failed: {result.stderr}")
+                print(f"Warning: {e}")
             return False
         
-        if verbose and not quiet and not dry:
-            print("  Index pushed to mirror")
+        try:
+            copied, skipped = _fsspec_sync(
+                str(local_index),
+                mirror_path,
+                verbose=verbose,
+                dry=dry,
+            )
+            if verbose and not quiet and not dry:
+                print(f"  Index pushed to mirror ({copied} copied, {skipped} skipped)")
+            return True
+        except Exception as e:
+            if not quiet:
+                print(f"Warning: fsspec sync failed: {e}")
+            return False
+    else:
+        # Local path - use rsync with locking
+        mirror_p = Path(mirror_path)
         
-        return True
+        # Create mirror directory if needed
+        mirror_p.mkdir(parents=True, exist_ok=True)
         
-    finally:
-        release_lock(mirror_lock)
+        # Set group permissions on mirror
+        try:
+            os.chmod(mirror_p, 0o775)
+        except OSError:
+            pass  # May not own the directory
+        
+        # Acquire lock
+        mirror_lock = mirror_p / 'mirror.lock'
+        try:
+            acquire_lock(mirror_lock)
+        except IndexLockTimeout as e:
+            if not quiet:
+                print(f"Warning: {e}")
+            return False
+        
+        try:
+            # Build rsync command
+            cmd = [
+                'rsync', '-ah',
+                '--perms', '--chmod=ug+rw',
+                '--checksum',
+                '--omit-dir-times',
+            ]
+            
+            if dry:
+                cmd.append('--dry-run')
+                cmd.append('-v')
+            elif verbose:
+                cmd.append('-v')
+            
+            cmd.extend([f"{local_index}/", f"{mirror_path}/"])
+            
+            if verbose and not quiet:
+                print(f"  Running: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=not verbose,
+                text=True,
+            )
+            
+            if result.returncode != 0:
+                if not quiet:
+                    print(f"Warning: rsync failed: {result.stderr}")
+                return False
+            
+            if verbose and not quiet and not dry:
+                print("  Index pushed to mirror")
+            
+            return True
+            
+        finally:
+            release_lock(mirror_lock)
 
 
 def status(verbose: bool = False) -> dict:
@@ -429,7 +657,30 @@ def status(verbose: bool = False) -> dict:
         result['local_index'] = str(local_index)
         result['mirror_path'] = str(mirror_path)
         result['local_exists'] = local_index.exists()
-        result['mirror_exists'] = mirror_path.exists()
+        
+        is_cloud = _is_cloud_path(mirror_path)
+        
+        if is_cloud:
+            # Cloud path - check existence with fsspec
+            try:
+                fs, fs_path = _get_filesystem(mirror_path)
+                result['mirror_exists'] = fs.exists(fs_path)
+                # No locking for cloud mirrors
+                result['mirror_locked'] = False
+            except IndexError:
+                result['mirror_exists'] = False
+                result['mirror_locked'] = False
+        else:
+            # Local path
+            mirror_p = Path(mirror_path)
+            result['mirror_exists'] = mirror_p.exists()
+            
+            if mirror_p.exists():
+                mirror_lock = mirror_p / 'mirror.lock'
+                result['mirror_locked'] = mirror_lock.exists()
+                if result['mirror_locked']:
+                    result['mirror_lock_owner'] = get_lock_owner(mirror_lock)
+                    result['mirror_lock_age'] = get_lock_age(mirror_lock)
         
         if local_index.exists():
             local_lock = local_index / 'local.lock'
@@ -437,13 +688,6 @@ def status(verbose: bool = False) -> dict:
             if result['local_locked']:
                 result['local_lock_owner'] = get_lock_owner(local_lock)
                 result['local_lock_age'] = get_lock_age(local_lock)
-        
-        if mirror_path.exists():
-            mirror_lock = mirror_path / 'mirror.lock'
-            result['mirror_locked'] = mirror_lock.exists()
-            if result['mirror_locked']:
-                result['mirror_lock_owner'] = get_lock_owner(mirror_lock)
-                result['mirror_lock_age'] = get_lock_age(mirror_lock)
                 
     except IndexNotConfigured as e:
         result['error'] = str(e)

@@ -48,6 +48,19 @@ dev = [
 gcp = [
     "google-cloud-secret-manager>=2.0.0",
 ]
+gcs = [
+    "fsspec>=2023.1.0",
+    "gcsfs>=2023.1.0",
+]
+s3 = [
+    "fsspec>=2023.1.0",
+    "s3fs>=2023.1.0",
+]
+cloud = [
+    "fsspec>=2023.1.0",
+    "gcsfs>=2023.1.0",
+    "s3fs>=2023.1.0",
+]
 
 [project.scripts]
 dt = "dt.cli:cli"

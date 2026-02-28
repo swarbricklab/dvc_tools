@@ -88,9 +88,24 @@ class TestGetIndexPaths:
                 local, mirror = get_index_paths()
                 
                 assert isinstance(local, Path)
-                assert isinstance(mirror, Path)
+                assert isinstance(mirror, str)  # mirror can be cloud URL
                 assert str(local) == "/tmp/dvc-cache/abc123"
-                assert "abc123" in str(mirror)
+                assert "abc123" in mirror
+    
+    def test_returns_cloud_mirror_path(self):
+        """Test returns cloud URLs as strings."""
+        mock_doctor_output = MagicMock()
+        mock_doctor_output.returncode = 0
+        mock_doctor_output.stdout = "site_cache_dir /tmp/dvc-cache/abc123\n"
+        
+        with patch("dt.index.cfg.get_value", return_value="gs://my-bucket/index-mirror"):
+            with patch("subprocess.run", return_value=mock_doctor_output):
+                local, mirror = get_index_paths()
+                
+                assert isinstance(local, Path)
+                assert isinstance(mirror, str)
+                assert mirror.startswith("gs://")
+                assert "abc123" in mirror
 
 
 # =============================================================================
