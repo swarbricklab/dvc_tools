@@ -18,14 +18,52 @@ The site cache index allows DVC to quickly look up files across caches. This com
 Configure the mirror location (typically in system or user config):
 
 ```bash
-# Set mirror root (required)
+# Set mirror root (required) - local path
 dt config set index.mirror_root /g/data/a56/dvc/mirror
+
+# Or use a cloud storage location (GCS or S3)
+dt config set index.mirror_root gs://my-bucket/dvc-index-mirror
+dt config set index.mirror_root s3://my-bucket/dvc-index-mirror
 
 # Optional settings
 dt config set index.lock_timeout 120      # Lock timeout in seconds (default: 120)
 dt config set index.retry_interval 5      # Initial retry interval (default: 5)
 dt config set index.auto_sync true        # Enable auto-sync (default: true)
 ```
+
+### Cloud storage support
+
+The index mirror can be stored on cloud storage (Google Cloud Storage or Amazon S3) instead of a local/network path. This is useful when:
+
+- Your DVC remote is on cloud storage
+- You want to share the index across machines without shared network filesystem
+- You're using ephemeral compute instances
+
+**Requirements:**
+
+Install the appropriate cloud storage backend:
+
+```bash
+# For Google Cloud Storage (gs://)
+pip install dvc-tools[gcs]
+
+# For Amazon S3 (s3://)
+pip install dvc-tools[s3]
+
+# For both
+pip install dvc-tools[cloud]
+```
+
+**Authentication:**
+
+- **GCS**: Uses Application Default Credentials (ADC). Run `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS`.
+- **S3**: Uses standard AWS credentials (environment variables, `~/.aws/credentials`, or IAM roles).
+
+**Notes:**
+
+- Cloud mirrors use fsspec for file transfer instead of rsync
+- Locking is not supported for cloud mirrors (concurrent writes may conflict)
+- Size-based comparison is used to detect changed files (not checksums)
 
 ## Commands
 
