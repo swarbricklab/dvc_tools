@@ -1094,6 +1094,11 @@ def auth_credentials_install(verbose):
     try:
         results = auth_mod.install_credentials(verbose=verbose)
         
+        # Handle no S3 remotes case
+        if not results:
+            click.echo('No S3 credentials needed — skipping')
+            return
+        
         # Summary
         success = sum(1 for v in results.values() if v)
         failed = sum(1 for v in results.values() if not v)

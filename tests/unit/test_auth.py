@@ -17,6 +17,7 @@ from dt.auth import (
     STATUS_WARN,
     STATUS_SKIP,
     AccessRequest,
+    AuthError,
     CheckResult,
     Identity,
     TeamInfo,
@@ -28,6 +29,7 @@ from dt.auth import (
     generate_request,
     get_identities,
     detect_identities,
+    install_credentials,
     compare_identities,
     save_detected_identities,
     list_repo_teams,
@@ -2629,3 +2631,25 @@ class TestTeamsWithShortNames:
         mock_run.return_value = MagicMock(returncode=0)
         discover_endpoints_from_repo('repo')
         mock_resolve.assert_called_once_with('repo')
+
+
+# =============================================================================
+# install_credentials tests
+# =============================================================================
+
+class TestInstallCredentials:
+    """Test install_credentials no-op behavior when no S3 remotes found."""
+
+    @patch('dt.auth._get_repos_needing_credentials', return_value=[])
+    def test_returns_empty_dict_when_no_s3_repos(self, mock_repos):
+        """install_credentials returns {} when no S3 remotes are found."""
+        result = install_credentials(verbose=False)
+        assert result == {}
+        mock_repos.assert_called_once()
+
+    @patch('dt.auth._get_repos_needing_credentials', return_value=[])
+    def test_no_error_when_no_s3_repos(self, mock_repos):
+        """install_credentials does not raise AuthError for no S3 repos."""
+        # Should not raise - this is a no-op, not an error
+        result = install_credentials(verbose=True)
+        assert result == {}
