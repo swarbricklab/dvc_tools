@@ -3060,10 +3060,11 @@ def install_credentials(
         verbose: Print progress messages.
         
     Returns:
-        Dict mapping repo names to success status.
+        Dict mapping repo names to success status. Empty dict if no S3 remotes
+        are found (this is not an error).
         
     Raises:
-        AuthError: If secret backend cannot be configured or no S3 repos found.
+        AuthError: If secret backend cannot be configured.
     """
     from .secrets import SecretError
     
@@ -3071,7 +3072,9 @@ def install_credentials(
     repos = _get_repos_needing_credentials(verbose=verbose)
     
     if not repos:
-        raise AuthError("No repositories with S3 remotes found")
+        if verbose:
+            print("No repositories with S3 remotes found — nothing to install")
+        return {}
     
     if verbose:
         print(f"\nFetching credentials for {len(repos)} repo(s) with S3 remotes...")
