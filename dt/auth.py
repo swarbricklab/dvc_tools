@@ -2679,3 +2679,312 @@ def _apply_type_filter(
                     child.source = f"{child.source} (via {ep.source})"
                     filtered.append(child)
     return filtered
+
+
+# =============================================================================
+# Credentials management
+# =============================================================================
+
+def _get_secret_backend():
+    """Get the configured secret backend.
+    
+    Reads configuration from .dt/config.yaml to determine which
+    secret manager to use and how to connect to it.
+    
+    Returns:
+        A SecretBackend instance.
+        
+    Raises:
+        AuthError: If no backend is configured or configuration is invalid.
+    """
+    from .secrets import GCPSecretBackend, SecretError
+    
+    backend_type = cfg.get_value('secrets.backend')
+    if not backend_type:
+        raise AuthError(
+            "No secret backend configured.\n"
+            "Add to .dt/config.yaml:\n"
+            "  secrets:\n"
+            "    backend: gcp\n"
+            "    gcp:\n"
+            "      project: <your-gcp-project>"
+        )
+    
+    if backend_type == 'gcp':
+        project = cfg.get_value('secrets.gcp.project')
+        if not project:
+            raise AuthError(
+                "GCP project not configured for secrets.\n"
+                "Add to .dt/config.yaml:\n"
+                "  secrets:\n"
+                "    gcp:\n"
+                "      project: <your-gcp-project>"
+            )
+        prefix = cfg.get_value('secrets.prefix') or 'dvc-remote-'
+        return GCPSecretBackend(project=project, prefix=prefix)
+    else:
+        raise AuthError(
+            f"Unknown secret backend: {backend_type}\n"
+            f"Supported backends: gcp"
+        )
+
+
+def _get_dvc_config_local_path() -> Path:
+    """Get path to .dvc/config.local."""
+    return Path.cwd() / '.dvc' / 'config.local'
+
+
+def _ensure_config_local_permissions(path: Path) -> None:
+    """Ensure .dvc/config.local has 600 permissions.
+    
+    Args:
+        path: Path to config.local file.
+    """
+    if path.exists():
+        current_mode = path.stat().st_mode & 0o777
+        if current_mode != 0o600:
+            path.chmod(0o600)
+
+
+def _get_installed_credentials() -> Dict[str, Dict[str, str]]:
+    """Get credentials currently installed in .dvc/config.local.
+    
+    Returns:
+        Dictionary mapping remote name to credential keys present.
+    """
+    result = subprocess.run(
+        ['dvc', 'config', '--local', '--list'],
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        return {}
+    
+    credentials: Dict[str, Dict[str, str]] = {}
+    
+    for line in result.stdout.strip().split('\n'):
+        if not line:
+            continue
+        # Format: remote.name.key=value
+        if line.startswith('remote.') and '=' in line:
+            parts = line.split('=', 1)
+            if len(parts) == 2:
+                key_path, value = parts
+                key_parts = key_path.split('.')
+                if len(key_parts) == 3:
+                    _, remote_name, key = key_parts
+                    # Only track credential-related keys
+                    if key in ('access_key_id', 'secret_access_key', 'endpointurl', 'region'):
+                        if remote_name not in credentials:
+                            credentials[remote_name] = {}
+                        credentials[remote_name][key] = value
+    
+    return credentials
+
+
+def install_credentials(
+    verbose: bool = False,
+) -> bool:
+    """Install S3 credentials from secret manager into .dvc/config.local.
+    
+    Fetches raw config for the current repository from the configured
+    secret manager and appends it to .dvc/config.local.
+    
+    Args:
+        verbose: Print progress messages.
+        
+    Returns:
+        True if credentials were installed.
+        
+    Raises:
+        AuthError: If credentials cannot be fetched or installed.
+    """
+    from .secrets import SecretError
+    
+    # Get repo name
+    repo_name = utils.get_project_name()
+    
+    if verbose:
+        print(f"Fetching credentials for repo: {repo_name}")
+    
+    # Get secret backend
+    try:
+        backend = _get_secret_backend()
+    except AuthError:
+        raise
+    
+    # Fetch raw config
+    try:
+        raw_config = backend.get_raw_config(repo_name)
+    except SecretError as e:
+        raise AuthError(str(e))
+    
+    if not raw_config or not raw_config.strip():
+        raise AuthError(f"Empty config in secret for repo '{repo_name}'")
+    
+    # Append to .dvc/config.local
+    config_local_path = _get_dvc_config_local_path()
+    
+    if verbose:
+        print(f"Appending config to {config_local_path}...")
+    
+    # Ensure parent directory exists
+    config_local_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Read existing content to check if we need a newline separator
+    existing_content = ""
+    if config_local_path.exists():
+        existing_content = config_local_path.read_text()
+    
+    # Ensure we have a newline between existing content and new content
+    separator = ""
+    if existing_content and not existing_content.endswith('\n'):
+        separator = "\n"
+    if existing_content and not existing_content.endswith('\n\n'):
+        separator = "\n\n"
+    
+    # Append the raw config
+    with open(config_local_path, 'a') as f:
+        f.write(separator + raw_config.strip() + '\n')
+    
+    # Ensure proper permissions (600)
+    _ensure_config_local_permissions(config_local_path)
+    
+    if verbose:
+        print(f"Credentials installed successfully")
+        print(f"Permissions on {config_local_path}: 600")
+    
+    return True
+
+
+def uninstall_credentials(
+    remote: Optional[str] = None,
+    verbose: bool = False,
+) -> List[str]:
+    """Remove S3 credentials from .dvc/config.local.
+    
+    Args:
+        remote: Remove only credentials for this remote. If None, remove all.
+        verbose: Print progress messages.
+        
+    Returns:
+        List of remote names whose credentials were removed.
+    """
+    installed = _get_installed_credentials()
+    
+    if not installed:
+        return []
+    
+    # Filter to specific remote if requested
+    if remote:
+        if remote not in installed:
+            return []
+        remotes_to_remove = [remote]
+    else:
+        remotes_to_remove = list(installed.keys())
+    
+    removed = []
+    credential_keys = ('access_key_id', 'secret_access_key', 'endpointurl', 'region')
+    
+    for remote_name in remotes_to_remove:
+        if verbose:
+            print(f"Removing credentials for remote '{remote_name}'...")
+        
+        # Unset each credential key
+        for key in credential_keys:
+            config_key = f'remote.{remote_name}.{key}'
+            # Use --unset to remove (ignore errors if key doesn't exist)
+            subprocess.run(
+                ['dvc', 'config', '--local', '--unset', config_key],
+                capture_output=True,
+                text=True,
+            )
+        
+        removed.append(remote_name)
+    
+    return removed
+
+
+@dataclass
+class CredentialStatus:
+    """Status of credentials for a remote."""
+    remote_name: str
+    installed: bool
+    keys_present: List[str]
+
+
+def get_credentials_status(verbose: bool = False) -> List[CredentialStatus]:
+    """Get status of credentials for all S3 remotes.
+    
+    Args:
+        verbose: Print progress messages.
+        
+    Returns:
+        List of CredentialStatus for each S3 remote.
+    """
+    # Get installed credentials
+    installed = _get_installed_credentials()
+    
+    # Get S3 remotes from DVC config
+    s3_remotes = set()
+    result = subprocess.run(
+        ['dvc', 'remote', 'list'],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                remote_name, url = parts[0], parts[1]
+                if url.startswith('s3://'):
+                    s3_remotes.add(remote_name)
+    
+    # Build status for all known remotes
+    all_remotes = s3_remotes | set(installed.keys())
+    
+    statuses = []
+    for remote_name in sorted(all_remotes):
+        keys_present = list(installed.get(remote_name, {}).keys())
+        statuses.append(CredentialStatus(
+            remote_name=remote_name,
+            installed=remote_name in installed,
+            keys_present=keys_present,
+        ))
+    
+    return statuses
+
+
+def format_credentials_status(statuses: List[CredentialStatus]) -> str:
+    """Format credential status for display.
+    
+    Args:
+        statuses: List of CredentialStatus objects.
+        
+    Returns:
+        Formatted string for terminal output.
+    """
+    if not statuses:
+        return "No S3 remotes found."
+    
+    lines = ["S3 Remote Credentials:", ""]
+    
+    for status in statuses:
+        # Status indicator
+        if status.installed:
+            indicator = "✓"
+            keys = ', '.join(status.keys_present)
+            line = f"  {indicator} {status.remote_name}  (installed: {keys})"
+        else:
+            indicator = "✗"
+            line = f"  {indicator} {status.remote_name}  (no credentials)"
+        
+        lines.append(line)
+    
+    lines.append("")
+    lines.append("Legend: ✓ installed  ✗ missing")
+    
+    return '\n'.join(lines)
