@@ -1065,11 +1065,15 @@ def auth_credentials():
 def auth_credentials_install(verbose):
     """Install S3 credentials from secret manager.
     
-    Fetches credentials for the current repository from the configured
-    secret manager and appends them to .dvc/config.local.
+    Fetches credentials for the current repository and all source repos
+    (from imports) and installs them to the global DVC config.
     
     \b
       dt auth credentials install
+      dt auth credentials install -v
+    
+    Credentials are merged into the global config, replacing any existing
+    sections with the same name (supporting credential rotation).
     
     Requires secrets configuration in .dt/config.yaml:
     
@@ -1079,7 +1083,7 @@ def auth_credentials_install(verbose):
         gcp:
           project: my-gcp-project
     
-    The secret should contain INI-format DVC config sections:
+    Secrets are named 'dvc-remote-{repo_name}' and contain INI-format config:
     
     \b
       ['remote "myremote"']
@@ -1088,11 +1092,27 @@ def auth_credentials_install(verbose):
           endpointurl = https://...
     """
     try:
-        success = auth_mod.install_credentials(verbose=verbose)
-        if success:
+        results = auth_mod.install_credentials(verbose=verbose)
+        
+        # Summary
+        success = sum(1 for v in results.values() if v)
+        failed = sum(1 for v in results.values() if not v)
+        
+        config_path = auth_mod._get_dvc_global_config_path()
+        
+        if success > 0:
             click.echo(click.style(
-                '✓ Credentials installed to .dvc/config.local', fg='green',
+                f'✓ Installed credentials for {success} repo(s) to {config_path}',
+                fg='green',
             ))
+        
+        if failed > 0:
+            missing = [k for k, v in results.items() if not v]
+            click.echo(click.style(
+                f'⚠ Missing secrets for: {", ".join(missing)}',
+                fg='yellow',
+            ))
+            
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 
@@ -1103,18 +1123,23 @@ def auth_credentials_install(verbose):
 @click.option('-v', '--verbose', is_flag=True,
               help='Show progress messages.')
 def auth_credentials_uninstall(remote, verbose):
-    """Remove S3 credentials from .dvc/config.local.
+    """Remove S3 credentials from global DVC config.
     
     \b
       dt auth credentials uninstall              # remove all
       dt auth credentials uninstall --remote cloud  # remove specific remote
+    
+    Removes credential keys (access_key_id, secret_access_key, etc.) from
+    remote sections. The remote URL remains intact.
     """
     removed = auth_mod.uninstall_credentials(remote=remote, verbose=verbose)
     if removed:
         remotes = ', '.join(removed)
+        config_path = auth_mod._get_dvc_global_config_path()
         click.echo(click.style(
             f'✓ Removed credentials for: {remotes}', fg='green',
         ))
+        click.echo(f'  Config: {config_path}')
     else:
         click.echo('No credentials to remove.')
 
@@ -1125,8 +1150,8 @@ def auth_credentials_uninstall(remote, verbose):
 def auth_credentials_status(verbose):
     """Show credential status for S3 remotes.
     
-    Displays which remotes have credentials installed in .dvc/config.local
-    and which have credentials available in the secret manager.
+    Displays which remotes have credentials installed in the global DVC config
+    and which are missing credentials.
     """
     try:
         statuses = auth_mod.get_credentials_status(verbose=verbose)
