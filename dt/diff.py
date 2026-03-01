@@ -1,6 +1,10 @@
-"""Show content differences between versions of DVC-tracked files.
+"""Show differences between versions of DVC-tracked data.
 
-Provides a plugin architecture for format-specific diffing (CSV, AnnData, etc.)
+Two modes:
+- Tree view: Shows which files changed (wraps dvc diff with tree formatting)
+- Content view: Shows what changed inside a specific file (format-specific)
+
+Provides a plugin architecture for format-specific content diffing (CSV, etc.)
 with graceful fallback for unsupported formats.
 """
 
@@ -8,10 +12,327 @@ import json
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 from .errors import DiffError
+
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+# Target size for auto-level tree output (fits in GH PR comment)
+MAX_TREE_CHARS = 60000
+
+# Status symbols for tree output
+STATUS_SYMBOLS = {
+    'added': '+',
+    'deleted': '-',
+    'modified': '~',
+    'renamed': '→',
+}
+
+
+# =============================================================================
+# Tree diff functions
+# =============================================================================
+
+def _run_dvc_diff(
+    old_rev: str = "HEAD",
+    new_rev: Optional[str] = None,
+    targets: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Run dvc diff and return parsed JSON output.
+    
+    Args:
+        old_rev: Git revision for old version (default: HEAD)
+        new_rev: Git revision for new version (default: None = workspace)
+        targets: Optional list of paths to filter
+        
+    Returns:
+        Dict with 'added', 'deleted', 'modified', 'renamed' lists
+        
+    Raises:
+        DiffError: If dvc diff fails
+    """
+    cmd = ["dvc", "diff", "--json"]
+    
+    # Add revisions
+    if new_rev:
+        cmd.append(f"{old_rev}...{new_rev}")
+    else:
+        cmd.append(old_rev)
+    
+    # Add targets
+    if targets:
+        cmd.extend(targets)
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+        raise DiffError(f"dvc diff failed: {error_msg}")
+    
+    if not result.stdout.strip():
+        return {'added': [], 'deleted': [], 'modified': [], 'renamed': []}
+    
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise DiffError(f"Failed to parse dvc diff output: {e}")
+
+
+def _build_tree(diff_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a tree structure from dvc diff output.
+    
+    Args:
+        diff_data: Output from dvc diff --json
+        
+    Returns:
+        Nested dict representing directory tree with file info
+    """
+    tree: Dict[str, Any] = {'_files': [], '_counts': defaultdict(int)}
+    
+    for status in ['added', 'deleted', 'modified', 'renamed']:
+        items = diff_data.get(status, [])
+        for item in items:
+            # Handle both dict format and string format
+            if isinstance(item, dict):
+                path = item.get('path', '')
+            else:
+                path = str(item)
+            
+            if not path:
+                continue
+            
+            parts = Path(path).parts
+            current = tree
+            
+            # Navigate/create directories
+            for i, part in enumerate(parts[:-1]):
+                if part not in current:
+                    current[part] = {'_files': [], '_counts': defaultdict(int)}
+                current = current[part]
+            
+            # Add file to leaf directory
+            filename = parts[-1] if parts else path
+            current['_files'].append({
+                'name': filename,
+                'status': status,
+                'path': path,
+            })
+            
+            # Update counts up the tree
+            current['_counts'][status] += 1
+            
+            # Propagate counts up
+            current = tree
+            for part in parts[:-1]:
+                current['_counts'][status] += 1
+                current = current[part]
+    
+    return tree
+
+
+def _count_tree_items(tree: Dict[str, Any]) -> Tuple[int, int]:
+    """Count files and directories in a tree.
+    
+    Returns:
+        Tuple of (file_count, dir_count)
+    """
+    files = len(tree.get('_files', []))
+    dirs = 0
+    
+    for key, value in tree.items():
+        if key.startswith('_'):
+            continue
+        dirs += 1
+        sub_files, sub_dirs = _count_tree_items(value)
+        files += sub_files
+        dirs += sub_dirs
+    
+    return files, dirs
+
+
+def _format_counts(counts: Dict[str, int]) -> str:
+    """Format status counts as a summary string."""
+    parts = []
+    if counts.get('added', 0):
+        parts.append(f"+{counts['added']}")
+    if counts.get('modified', 0):
+        parts.append(f"~{counts['modified']}")
+    if counts.get('deleted', 0):
+        parts.append(f"-{counts['deleted']}")
+    if counts.get('renamed', 0):
+        parts.append(f"→{counts['renamed']}")
+    return ', '.join(parts) if parts else ''
+
+
+def _render_tree(
+    tree: Dict[str, Any],
+    prefix: str = "",
+    max_level: Optional[int] = None,
+    current_level: int = 0,
+    is_last: bool = True,
+    name: str = "",
+) -> List[str]:
+    """Render tree as formatted lines.
+    
+    Args:
+        tree: Tree structure from _build_tree
+        prefix: Current line prefix for indentation
+        max_level: Maximum depth to render (None = unlimited)
+        current_level: Current depth in tree
+        is_last: Whether this is the last item at current level
+        name: Name of current directory
+        
+    Returns:
+        List of formatted lines
+    """
+    lines = []
+    
+    # Get subdirectories and files
+    subdirs = sorted([k for k in tree.keys() if not k.startswith('_')])
+    files = tree.get('_files', [])
+    counts = tree.get('_counts', {})
+    
+    # Check if we should collapse this level
+    if max_level is not None and current_level >= max_level:
+        total = sum(counts.values())
+        if total > 0:
+            count_str = _format_counts(counts)
+            lines.append(f"{prefix}... ({count_str})")
+        return lines
+    
+    # Render files at this level
+    for i, file_info in enumerate(sorted(files, key=lambda f: f['name'])):
+        is_last_item = (i == len(files) - 1) and not subdirs
+        connector = "└── " if is_last_item else "├── "
+        status_sym = STATUS_SYMBOLS.get(file_info['status'], '?')
+        lines.append(f"{prefix}{connector}[{status_sym}] {file_info['name']}")
+    
+    # Render subdirectories
+    for i, subdir in enumerate(subdirs):
+        is_last_subdir = (i == len(subdirs) - 1)
+        connector = "└── " if is_last_subdir else "├── "
+        
+        subdir_counts = tree[subdir].get('_counts', {})
+        count_str = _format_counts(subdir_counts)
+        count_display = f" ({count_str})" if count_str else ""
+        
+        lines.append(f"{prefix}{connector}{subdir}/{count_display}")
+        
+        # Recurse
+        new_prefix = prefix + ("    " if is_last_subdir else "│   ")
+        sub_lines = _render_tree(
+            tree[subdir],
+            prefix=new_prefix,
+            max_level=max_level,
+            current_level=current_level + 1,
+            is_last=is_last_subdir,
+            name=subdir,
+        )
+        lines.extend(sub_lines)
+    
+    return lines
+
+
+def _find_auto_level(tree: Dict[str, Any], max_chars: int = MAX_TREE_CHARS) -> int:
+    """Find the maximum tree depth that fits within character limit.
+    
+    Args:
+        tree: Tree structure from _build_tree
+        max_chars: Maximum output characters
+        
+    Returns:
+        Optimal max_level value
+    """
+    # Try increasing levels until output exceeds limit
+    for level in range(1, 50):
+        lines = _render_tree(tree, max_level=level)
+        output = '\n'.join(lines)
+        if len(output) > max_chars:
+            return max(1, level - 1)
+    
+    # Full tree fits
+    return 50
+
+
+def tree_diff(
+    old_rev: str = "HEAD",
+    new_rev: Optional[str] = None,
+    targets: Optional[List[str]] = None,
+    level: Union[int, str] = "auto",
+    verbose: bool = False,
+) -> str:
+    """Show which files changed between revisions in tree format.
+    
+    Args:
+        old_rev: Git revision for old version (default: HEAD)
+        new_rev: Git revision for new version (default: None = workspace)
+        targets: Optional list of paths to filter
+        level: Max tree depth (int) or "auto" to fit GH comment
+        verbose: Show additional details
+        
+    Returns:
+        Formatted tree string
+        
+    Raises:
+        DiffError: If diff fails
+    """
+    # Get changes from dvc diff
+    diff_data = _run_dvc_diff(old_rev, new_rev, targets)
+    
+    # Count total changes
+    total_changes = sum(len(diff_data.get(s, [])) for s in ['added', 'deleted', 'modified', 'renamed'])
+    
+    if total_changes == 0:
+        return "No changes detected."
+    
+    # Build tree
+    tree = _build_tree(diff_data)
+    
+    # Determine level
+    if level == "auto":
+        max_level = _find_auto_level(tree)
+        if verbose:
+            print(f"Auto-selected level: {max_level}")
+    else:
+        max_level = int(level)
+    
+    # Render
+    lines = []
+    
+    # Header with summary
+    counts = tree.get('_counts', {})
+    summary_parts = []
+    if counts.get('added', 0):
+        summary_parts.append(f"{counts['added']} added")
+    if counts.get('modified', 0):
+        summary_parts.append(f"{counts['modified']} modified")
+    if counts.get('deleted', 0):
+        summary_parts.append(f"{counts['deleted']} deleted")
+    if counts.get('renamed', 0):
+        summary_parts.append(f"{counts['renamed']} renamed")
+    
+    summary = ', '.join(summary_parts)
+    
+    # Revision display
+    if new_rev:
+        rev_display = f"{old_rev}...{new_rev}"
+    else:
+        rev_display = f"{old_rev} → workspace"
+    
+    lines.append(f"Changes ({rev_display}): {summary}")
+    lines.append("")
+    
+    # Tree
+    tree_lines = _render_tree(tree, max_level=max_level)
+    lines.extend(tree_lines)
+    
+    return '\n'.join(lines)
 
 
 # =============================================================================
@@ -169,10 +490,10 @@ class FallbackHandler(DiffHandler):
 
 
 # =============================================================================
-# Main diff function
+# Content diff function (format-specific file comparison)
 # =============================================================================
 
-def diff(
+def content_diff(
     path: str,
     old_rev: str = "HEAD",
     new_rev: Optional[str] = None,
@@ -180,6 +501,8 @@ def diff(
     verbose: bool = False,
 ) -> str:
     """Compute the diff between two versions of a DVC-tracked file.
+    
+    Shows what changed *inside* a specific file using format-specific handlers.
     
     Args:
         path: Path to the DVC-tracked file
@@ -250,3 +573,7 @@ def get_supported_formats() -> str:
     if lines:
         return "Supported formats:\n" + '\n'.join(lines)
     return "No format-specific handlers registered."
+
+
+# Backward compatibility alias
+diff = content_diff

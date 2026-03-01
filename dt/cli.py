@@ -577,47 +577,90 @@ def remote_list(repository, owner, show_all):
 
 
 @cli.command()
-@click.argument('path', type=click.Path())
+@click.argument('paths', nargs=-1, type=click.Path())
 @click.option('--old', 'old_rev', default='HEAD',
               help='The older revision to compare (default: HEAD)')
 @click.option('--new', 'new_rev', default=None,
               help='The newer revision to compare (default: workspace)')
+@click.option('--content', is_flag=True,
+              help='Show content diff of a single file (requires exactly one path)')
+@click.option('--level', default='auto',
+              help='Tree depth: number or "auto" to fit GH comment (default: auto)')
 @click.option('-o', '--output', 'output_format',
               type=click.Choice(['terminal', 'json', 'html', 'md']),
-              default='terminal', help='Output format')
+              default='terminal', help='Output format (only for --content mode)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def diff(path, old_rev, new_rev, output_format, verbose):
-    """Show content differences between versions of a DVC-tracked file.
+def diff(paths, old_rev, new_rev, content, level, output_format, verbose):
+    """Show differences between versions of DVC-tracked data.
     
-    Compares the actual content of files (not just checksums) between
-    git revisions. Uses format-specific handlers for smart diffing
-    (e.g., daff for CSV files).
-    
-    \b
-    Examples:
-        dt diff data.csv                       # Compare HEAD → workspace
-        dt diff data.csv --old HEAD~1          # Compare HEAD~1 → workspace
-        dt diff data.csv --old v1.0 --new v2.0 # Compare two tags
-        dt diff data.csv -o html > diff.html   # HTML output
+    By default, shows which files changed in a tree format (wraps dvc diff).
+    Use --content to see what changed inside a specific file.
     
     \b
-    Supported formats:
+    Tree view (default):
+        dt diff                           # All changes HEAD → workspace
+        dt diff data/                     # Filter to directory
+        dt diff data/ models/             # Multiple paths
+        dt diff --old v1.0                # Compare to tag
+        dt diff --old v1.0 --new v2.0     # Between revisions
+        dt diff --level 3                 # Limit tree depth
+    
+    \b
+    Content view (--content):
+        dt diff data.csv --content        # What changed inside this file?
+        dt diff data.csv --content -o html > changes.html
+    
+    \b
+    Content diff formats:
         CSV/TSV: Uses daff for tabular diff (pip install daff)
         Other: Shows size/metadata comparison
     """
     from . import diff as diff_mod
     
-    try:
-        result = diff_mod.diff(
-            path=path,
-            old_rev=old_rev,
-            new_rev=new_rev,
-            output_format=output_format,
-            verbose=verbose,
-        )
-        click.echo(result)
-    except diff_mod.DiffError as e:
-        raise click.ClickException(str(e))
+    if content:
+        # Content diff mode - requires exactly one path
+        if len(paths) != 1:
+            raise click.ClickException(
+                "--content requires exactly one file path"
+            )
+        
+        try:
+            result = diff_mod.content_diff(
+                path=paths[0],
+                old_rev=old_rev,
+                new_rev=new_rev,
+                output_format=output_format,
+                verbose=verbose,
+            )
+            click.echo(result)
+        except diff_mod.DiffError as e:
+            raise click.ClickException(str(e))
+    else:
+        # Tree diff mode (default)
+        targets = list(paths) if paths else None
+        
+        # Parse level
+        if level == 'auto':
+            level_value = 'auto'
+        else:
+            try:
+                level_value = int(level)
+            except ValueError:
+                raise click.ClickException(
+                    f"--level must be a number or 'auto', got: {level}"
+                )
+        
+        try:
+            result = diff_mod.tree_diff(
+                old_rev=old_rev,
+                new_rev=new_rev,
+                targets=targets,
+                level=level_value,
+                verbose=verbose,
+            )
+            click.echo(result)
+        except diff_mod.DiffError as e:
+            raise click.ClickException(str(e))
 
 
 @cli.command()
