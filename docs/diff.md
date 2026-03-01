@@ -1,18 +1,25 @@
 # dt diff
 
-Show content differences between versions of DVC-tracked files.
+Show differences between versions of DVC-tracked data.
 
 ## Usage
 
 ```bash
-dt diff <path> [options]
+# Tree view (default) - which files changed?
+dt diff [paths...] [options]
+
+# Content view - what changed inside a file?
+dt diff <path> --content [options]
 ```
 
 ## Description
 
-Compares the actual content of DVC-tracked files between git revisions. Unlike `dvc diff` which only shows *which* files changed, `dt diff` shows *what* changed inside the files.
+`dt diff` wraps `dvc diff` with friendlier output formats:
 
-Uses format-specific handlers for smart diffing (e.g., tabular diff for CSV files).
+- **Tree view** (default): Shows which files changed in a collapsible tree structure
+- **Content view** (`--content`): Shows what changed *inside* a specific file
+
+The tree view is designed for large diffs (thousands of files) and automatically collapses to fit in a GitHub PR comment (~60k chars).
 
 ## Options
 
@@ -20,47 +27,90 @@ Uses format-specific handlers for smart diffing (e.g., tabular diff for CSV file
 |--------|-------------|
 | `--old REV` | The older revision to compare (default: HEAD) |
 | `--new REV` | The newer revision to compare (default: workspace) |
-| `-o, --output FORMAT` | Output format: `terminal`, `json`, `html`, `md` |
+| `--content` | Show content diff of a single file (requires one path) |
+| `--level N` | Tree depth: number or "auto" to fit GH comment (default: auto) |
+| `-o, --output FORMAT` | Output format for `--content` mode: `terminal`, `json`, `html`, `md` |
 | `-v, --verbose` | Show detailed progress |
 
-## Examples
+## Tree View (Default)
 
-### Compare HEAD to workspace
+Shows which files changed, organized as a tree with counts at each level.
 
-```bash
-$ dt diff data.csv
-```
-
-Shows what changed since the last commit.
-
-### Compare specific revisions
+### Examples
 
 ```bash
-$ dt diff data.csv --old HEAD~1
-$ dt diff data.csv --old v1.0 --new v2.0
-$ dt diff data.csv --old abc123 --new def456
+# All changes HEAD → workspace
+dt diff
+
+# Filter to specific paths
+dt diff data/
+dt diff data/ models/
+
+# Compare to tag
+dt diff --old v1.0
+
+# Between revisions
+dt diff --old v1.0 --new v2.0
+
+# Limit tree depth
+dt diff --level 3
 ```
 
-### HTML output for sharing
+### Example Output
+
+```
+Changes (HEAD → workspace): 4238 added, 12 modified, 3 deleted
+
+├── data/ (+4238, ~12, -3)
+│   ├── sc/cellranger/ (+4123)
+│   │   ├── annotation/ (+36 files)
+│   │   ├── bam/count/captures/ (+24 files)
+│   │   ├── count/
+│   │   │   ├── filtered/ (+33 files)
+│   │   │   └── predemux/ (+33 files)
+│   │   └── ... (+4012)
+│   └── processed/ (~12, -3)
+│       ├── [~] samples.csv
+│       └── ... (~11, -3)
+└── models/ (+115)
+    └── ... (+115)
+```
+
+Legend:
+- `+` Added
+- `~` Modified
+- `-` Deleted
+- `→` Renamed
+
+### Auto-Level
+
+By default, `--level auto` automatically collapses the tree to fit within ~60k characters (suitable for GitHub PR comments). Use `--level N` to set a specific depth.
+
+## Content View (`--content`)
+
+Shows what changed *inside* a specific file. Requires exactly one path.
+
+### Examples
 
 ```bash
-$ dt diff data.csv --old v1.0 --new v2.0 -o html > changes.html
+# What changed inside this file?
+dt diff data.csv --content
+
+# Compare to older revision
+dt diff data.csv --content --old HEAD~1
+
+# HTML output for sharing
+dt diff data.csv --content --old v1.0 --new v2.0 -o html > changes.html
 ```
 
-### JSON output for scripting
+### Supported Formats
 
-```bash
-$ dt diff data.csv -o json
-```
-
-## Supported Formats
-
-### CSV/TSV Files
+#### CSV/TSV Files
 
 Uses [daff](https://github.com/paulfitz/daff) for tabular diffing:
 
 ```bash
-$ dt diff samples.csv --old HEAD~1
+$ dt diff samples.csv --content --old HEAD~1
 @@,sample_id,value,status
   ,S001,42,active
 + ,S002,38,active
@@ -68,14 +118,9 @@ $ dt diff samples.csv --old HEAD~1
 → ,S004,50→52,pending→active
 ```
 
-Legend:
-- `+` Added row
-- `-` Deleted row  
-- `→` Modified value (shows old→new)
-
 Install daff: `pip install daff`
 
-### Other Formats
+#### Other Formats
 
 For unsupported formats, shows metadata comparison:
 
@@ -83,81 +128,39 @@ For unsupported formats, shows metadata comparison:
 Binary/unsupported format: size changed from 1,234,567 to 1,345,678 bytes (+111,111)
 ```
 
-## Workflow
+## CI/GitHub Integration
 
-### Reviewing recent changes
+The tree view is designed for CI workflows:
 
-```bash
-# What changed since last commit?
-dt diff data.csv
-
-# What changed in the last 3 commits?
-dt diff data.csv --old HEAD~3
+```yaml
+# .github/workflows/dvc-diff.yml
+- name: Show DVC changes
+  run: |
+    dt diff --old ${{ github.event.before }} --new ${{ github.sha }} > diff.md
+    echo "::notice::$(cat diff.md)"
 ```
 
-### Comparing releases
-
-```bash
-# Compare two tagged versions
-dt diff results.csv --old v1.0.0 --new v2.0.0
-
-# Save as HTML report
-dt diff results.csv --old v1.0.0 --new v2.0.0 -o html > release_diff.html
-```
-
-### Combined with dt history
-
-```bash
-# First, see version history
-$ dt history data.csv
-COMMIT     DATE          HASH              MESSAGE
-a1b2c3d    2026-01-15    d41d8cd98f00b204  Add initial dataset
-e5f6g7h    2026-01-20    098f6bcd4621d373  Update with Q4 data
-
-# Then examine specific changes
-$ dt diff data.csv --old a1b2c3d --new e5f6g7h
-```
-
-## How It Works
-
-1. **Fetch old version**: Uses `dvc.api.open()` to get file content at the old revision
-2. **Fetch new version**: Gets workspace file or uses `dvc.api.open()` for specific revision
-3. **Select handler**: Chooses format-specific handler based on file extension
-4. **Compute diff**: Handler generates the appropriate diff format
-
-### Requirements
-
-- Files must be in the DVC cache (run `dvc pull` or `dt fetch` first)
-- For CSV/TSV: `daff` must be installed (`pip install daff`)
-
-## Handler Architecture
-
-`dt diff` uses a plugin system for format-specific diffing:
-
-| Handler | Extensions | Tool |
-|---------|------------|------|
-| CSVHandler | `.csv`, `.tsv`, `.txt` | daff |
-| FallbackHandler | (all others) | Size comparison |
-
-### Future Handlers
-
-Planned for future releases:
-- **AnnData** (`.h5ad`) - Compare obs/var/X matrices
-- **VCF** - Variant comparison
-- **Parquet** - Schema and data diff
-- **Directories** - Recursive file comparison
+The auto-level feature ensures output fits in GitHub PR comments.
 
 ## Error Handling
 
-### File not in cache
+### dvc diff fails
+
+```
+Error: dvc diff failed: Not a DVC repository
+```
+
+**Solution**: Ensure you're in a DVC repository.
+
+### File not in cache (content mode)
 
 ```
 Error: Failed to get 'data.csv' at revision 'HEAD': ...
 ```
 
-**Solution**: Run `dvc pull` or `dt fetch` to populate the cache.
+**Solution**: Run `dvc pull` or `dt fetch` first.
 
-### daff not installed
+### daff not installed (content mode for CSV)
 
 ```
 Error: daff not found. Install with: pip install daff
@@ -165,12 +168,7 @@ Error: daff not found. Install with: pip install daff
 
 **Solution**: `pip install daff`
 
-### Unsupported format
-
-Falls back to metadata comparison (size change).
-
 ## See Also
 
 - [dt history](history.md) - Show version history of files
 - [dt fetch](fetch.md) - Fetch files into cache
-- [daff documentation](https://github.com/paulfitz/daff) - Tabular diff tool
