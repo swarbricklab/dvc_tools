@@ -61,7 +61,7 @@ def _run_dvc_diff(
     
     # Add revisions
     if new_rev:
-        cmd.append(f"{old_rev}...{new_rev}")
+        cmd.extend([old_rev, new_rev])
     else:
         cmd.append(old_rev)
     

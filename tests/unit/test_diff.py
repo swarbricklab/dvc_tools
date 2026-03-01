@@ -542,6 +542,23 @@ class TestRunDvcDiff:
         with pytest.raises(DiffError, match='dvc diff failed'):
             _run_dvc_diff()
 
+    @patch('dt.diff.subprocess.run')
+    def test_two_revisions_passed_as_separate_args(self, mock_run):
+        """Test that old_rev and new_rev are passed as separate args, not range syntax."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"added": [], "deleted": [], "modified": [], "renamed": []}',
+            stderr='',
+        )
+        
+        _run_dvc_diff(old_rev='origin/main', new_rev='HEAD')
+        
+        call_args = mock_run.call_args[0][0]
+        # Should be separate args, not "origin/main...HEAD"
+        assert 'origin/main' in call_args
+        assert 'HEAD' in call_args
+        assert 'origin/main...HEAD' not in call_args
+
 
 class TestTreeDiff:
     """Tests for the tree_diff function."""
