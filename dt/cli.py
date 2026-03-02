@@ -587,8 +587,8 @@ def remote_list(repository, owner, show_all):
 @click.option('--level', default='auto',
               help='Tree depth: number or "auto" to fit GH comment (default: auto)')
 @click.option('-o', '--output', 'output_format',
-              type=click.Choice(['terminal', 'json', 'html', 'md']),
-              default='terminal', help='Output format (only for --content mode)')
+              type=click.Choice(['terminal', 'json', 'html', 'md', 'table', 'csv']),
+              default='terminal', help='Output format')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 def diff(paths, old_rev, new_rev, content, level, output_format, verbose):
     """Show differences between versions of DVC-tracked data.
@@ -604,6 +604,11 @@ def diff(paths, old_rev, new_rev, content, level, output_format, verbose):
         dt diff --old v1.0                # Compare to tag
         dt diff --old v1.0 --new v2.0     # Between revisions
         dt diff --level 3                 # Limit tree depth
+        dt diff -o json                   # Raw JSON output
+        dt diff -o table                  # Markdown table
+        dt diff -o md                     # Tree in diff code block
+        dt diff -o csv                    # CSV format
+        dt diff -o html                   # Collapsible HTML tree
     
     \b
     Content view (--content):
@@ -656,6 +661,7 @@ def diff(paths, old_rev, new_rev, content, level, output_format, verbose):
                 new_rev=new_rev,
                 targets=targets,
                 level=level_value,
+                output_format=output_format,
                 verbose=verbose,
             )
             click.echo(result)

@@ -24,6 +24,13 @@ from dt.diff import (
     _format_counts,
     _find_auto_level,
     _run_dvc_diff,
+    _format_json,
+    _format_csv,
+    _format_md,
+    _format_terminal,
+    _format_html,
+    _render_tree_diff_style,
+    _run_dvc_diff_md,
 )
 from dt.errors import DiffError
 
@@ -608,6 +615,252 @@ class TestTreeDiff:
         mock_run.assert_called_once()
         call_kwargs = mock_run.call_args
         assert 'data/' in call_kwargs[1].get('targets', call_kwargs[0][2] if len(call_kwargs[0]) > 2 else [])
+
+
+class TestFormatJson:
+    """Tests for the _format_json function."""
+
+    def test_returns_valid_json(self):
+        """Test that output is valid JSON."""
+        diff_data = {
+            'added': [{'path': 'data/file.csv'}],
+            'deleted': [],
+            'modified': [],
+            'renamed': [],
+        }
+        
+        result = _format_json(diff_data)
+        
+        parsed = json.loads(result)
+        assert parsed == diff_data
+
+    def test_includes_all_status_types(self):
+        """Test that all status types are included."""
+        diff_data = {
+            'added': [{'path': 'a.csv'}],
+            'deleted': [{'path': 'b.csv'}],
+            'modified': [{'path': 'c.csv'}],
+            'renamed': [{'path': {'old': 'd.csv', 'new': 'e.csv'}}],
+        }
+        
+        result = _format_json(diff_data)
+        parsed = json.loads(result)
+        
+        assert len(parsed['added']) == 1
+        assert len(parsed['deleted']) == 1
+        assert len(parsed['modified']) == 1
+        assert len(parsed['renamed']) == 1
+
+
+class TestFormatCsv:
+    """Tests for the _format_csv function."""
+
+    def test_includes_header_row(self):
+        """Test that CSV has header row."""
+        diff_data = {'added': [], 'deleted': [], 'modified': [], 'renamed': []}
+        
+        result = _format_csv(diff_data)
+        
+        assert result.startswith('change,path,old_hash,new_hash')
+
+    def test_includes_added_files(self):
+        """Test that added files are included."""
+        diff_data = {
+            'added': [{'path': 'data/file.csv', 'hash': {'new': 'abc123'}}],
+            'deleted': [],
+            'modified': [],
+            'renamed': [],
+        }
+        
+        result = _format_csv(diff_data)
+        
+        assert 'added,data/file.csv' in result
+
+    def test_includes_deleted_files(self):
+        """Test that deleted files are included."""
+        diff_data = {
+            'added': [],
+            'deleted': [{'path': 'old/data.csv', 'hash': {'old': 'def456'}}],
+            'modified': [],
+            'renamed': [],
+        }
+        
+        result = _format_csv(diff_data)
+        
+        assert 'deleted,old/data.csv' in result
+
+
+class TestFormatMd:
+    """Tests for the _format_md function."""
+
+    def test_wraps_in_diff_code_block(self):
+        """Test that output is wrapped in diff code block."""
+        tree = {
+            '_counts': {'added': 1},
+            '_files': [{'name': 'file.csv', 'status': 'added'}],
+        }
+        diff_data = {'added': [{'path': 'file.csv'}], 'deleted': [], 'modified': [], 'renamed': []}
+        
+        result = _format_md(tree, diff_data, 'HEAD', None, 50)
+        
+        assert '```diff' in result
+        assert '```' in result
+
+    def test_includes_summary_header(self):
+        """Test that markdown includes summary."""
+        tree = {
+            '_counts': {'added': 2, 'deleted': 1},
+            '_files': [],
+        }
+        diff_data = {'added': [], 'deleted': [], 'modified': [], 'renamed': []}
+        
+        result = _format_md(tree, diff_data, 'HEAD', None, 50)
+        
+        assert '+2 added' in result
+        assert '-1 deleted' in result
+
+
+class TestFormatHtml:
+    """Tests for the _format_html function."""
+
+    def test_returns_valid_html(self):
+        """Test that output is valid HTML structure."""
+        tree = {
+            '_counts': {'added': 1},
+            '_files': [{'name': 'file.csv', 'status': 'added'}],
+        }
+        diff_data = {'added': [{'path': 'file.csv'}], 'deleted': [], 'modified': [], 'renamed': []}
+        
+        result = _format_html(tree, diff_data, 'HEAD', None)
+        
+        assert '<!DOCTYPE html>' in result
+        assert '<html>' in result
+        assert '</html>' in result
+
+    def test_includes_css_styles(self):
+        """Test that HTML includes CSS styles."""
+        tree = {'_counts': {}, '_files': []}
+        diff_data = {'added': [], 'deleted': [], 'modified': [], 'renamed': []}
+        
+        result = _format_html(tree, diff_data, 'HEAD', None)
+        
+        assert '<style>' in result
+        assert '.added' in result
+        assert '.deleted' in result
+
+    def test_includes_collapsible_details(self):
+        """Test that directories use details elements."""
+        tree = {
+            '_counts': {'added': 1},
+            '_files': [],
+            'data': {
+                '_counts': {'added': 1},
+                '_files': [{'name': 'file.csv', 'status': 'added'}],
+            },
+        }
+        diff_data = {'added': [{'path': 'data/file.csv'}], 'deleted': [], 'modified': [], 'renamed': []}
+        
+        result = _format_html(tree, diff_data, 'HEAD', None)
+        
+        assert '<details>' in result
+        assert '<summary>' in result
+
+
+class TestRenderTreeDiffStyle:
+    """Tests for the _render_tree_diff_style function."""
+
+    def test_added_files_have_plus_prefix(self):
+        """Test that added files start with + prefix."""
+        tree = {
+            '_counts': {'added': 1},
+            '_files': [{'name': 'new.csv', 'status': 'added'}],
+        }
+        
+        lines = _render_tree_diff_style(tree)
+        
+        assert any(line.startswith('+ ') for line in lines)
+
+    def test_deleted_files_have_minus_prefix(self):
+        """Test that deleted files start with - prefix."""
+        tree = {
+            '_counts': {'deleted': 1},
+            '_files': [{'name': 'old.csv', 'status': 'deleted'}],
+        }
+        
+        lines = _render_tree_diff_style(tree)
+        
+        assert any(line.startswith('- ') for line in lines)
+
+
+class TestTreeDiffOutputFormats:
+    """Tests for tree_diff with different output formats."""
+
+    @patch('dt.diff._run_dvc_diff')
+    def test_json_format_returns_json(self, mock_run):
+        """Test that json format returns valid JSON."""
+        mock_run.return_value = {
+            'added': [{'path': 'file.csv'}],
+            'deleted': [],
+            'modified': [],
+            'renamed': [],
+        }
+        
+        result = tree_diff(output_format='json')
+        
+        parsed = json.loads(result)
+        assert 'added' in parsed
+
+    @patch('dt.diff._run_dvc_diff')
+    def test_csv_format_returns_csv(self, mock_run):
+        """Test that csv format returns CSV data."""
+        mock_run.return_value = {
+            'added': [{'path': 'file.csv'}],
+            'deleted': [],
+            'modified': [],
+            'renamed': [],
+        }
+        
+        result = tree_diff(output_format='csv')
+        
+        assert 'change,path' in result
+
+    @patch('dt.diff._run_dvc_diff')
+    def test_md_format_returns_markdown(self, mock_run):
+        """Test that md format returns markdown with code block."""
+        mock_run.return_value = {
+            'added': [{'path': 'file.csv'}],
+            'deleted': [],
+            'modified': [],
+            'renamed': [],
+        }
+        
+        result = tree_diff(output_format='md')
+        
+        assert '```diff' in result
+
+    @patch('dt.diff._run_dvc_diff')
+    def test_html_format_returns_html(self, mock_run):
+        """Test that html format returns HTML document."""
+        mock_run.return_value = {
+            'added': [{'path': 'file.csv'}],
+            'deleted': [],
+            'modified': [],
+            'renamed': [],
+        }
+        
+        result = tree_diff(output_format='html')
+        
+        assert '<!DOCTYPE html>' in result
+
+    @patch('dt.diff._run_dvc_diff_md')
+    def test_table_format_calls_dvc_diff_md(self, mock_run_md):
+        """Test that table format calls dvc diff --md."""
+        mock_run_md.return_value = '| Path | Change |'
+        
+        result = tree_diff(output_format='table')
+        
+        mock_run_md.assert_called_once()
+        assert '|' in result
 
 
 class TestContentDiffAlias:

@@ -29,8 +29,38 @@ The tree view is designed for large diffs (thousands of files) and automatically
 | `--new REV` | The newer revision to compare (default: workspace) |
 | `--content` | Show content diff of a single file (requires one path) |
 | `--level N` | Tree depth: number or "auto" to fit GH comment (default: auto) |
-| `-o, --output FORMAT` | Output format for `--content` mode: `terminal`, `json`, `html`, `md` |
+| `-o, --output FORMAT` | Output format: `terminal`, `json`, `html`, `md`, `table`, `csv` |
 | `-v, --verbose` | Show detailed progress |
+
+## Output Formats
+
+| Format | Description |
+|--------|-------------|
+| `terminal` | (default) Tree view for terminal display |
+| `json` | Raw JSON from `dvc diff --json` |
+| `table` | Markdown table from `dvc diff --md` |
+| `md` | Tree view in diff code block (with colors on GitHub) |
+| `csv` | CSV with columns: change, path, old_hash, new_hash |
+| `html` | Interactive collapsible HTML tree |
+
+### Format Examples
+
+```bash
+# Raw JSON output
+dt diff -o json
+
+# Markdown table (like dvc diff --md)
+dt diff -o table
+
+# Markdown with diff syntax highlighting (green/red on GitHub)
+dt diff -o md > changes.md
+
+# CSV for data processing
+dt diff -o csv > changes.csv
+
+# Interactive HTML (collapsible tree)
+dt diff -o html > changes.html
+```
 
 ## Tree View (Default)
 

@@ -260,52 +260,51 @@ def _find_auto_level(tree: Dict[str, Any], max_chars: int = MAX_TREE_CHARS) -> i
     return 50
 
 
-def tree_diff(
+def _run_dvc_diff_md(
     old_rev: str = "HEAD",
     new_rev: Optional[str] = None,
     targets: Optional[List[str]] = None,
-    level: Union[int, str] = "auto",
-    verbose: bool = False,
 ) -> str:
-    """Show which files changed between revisions in tree format.
+    """Run dvc diff with --md flag for markdown table output.
     
     Args:
-        old_rev: Git revision for old version (default: HEAD)
-        new_rev: Git revision for new version (default: None = workspace)
+        old_rev: Git revision for old version
+        new_rev: Git revision for new version
         targets: Optional list of paths to filter
-        level: Max tree depth (int) or "auto" to fit GH comment
-        verbose: Show additional details
         
     Returns:
-        Formatted tree string
+        Markdown table string
         
     Raises:
-        DiffError: If diff fails
+        DiffError: If dvc diff fails
     """
-    # Get changes from dvc diff
-    diff_data = _run_dvc_diff(old_rev, new_rev, targets)
+    cmd = ["dvc", "diff", "--md"]
     
-    # Count total changes
-    total_changes = sum(len(diff_data.get(s, [])) for s in ['added', 'deleted', 'modified', 'renamed'])
-    
-    if total_changes == 0:
-        return "No changes detected."
-    
-    # Build tree
-    tree = _build_tree(diff_data)
-    
-    # Determine level
-    if level == "auto":
-        max_level = _find_auto_level(tree)
-        if verbose:
-            print(f"Auto-selected level: {max_level}")
+    if new_rev:
+        cmd.extend([old_rev, new_rev])
     else:
-        max_level = int(level)
+        cmd.append(old_rev)
     
-    # Render
-    lines = []
+    if targets:
+        cmd.extend(targets)
     
-    # Header with summary
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+        raise DiffError(f"dvc diff failed: {error_msg}")
+    
+    return result.stdout.strip() if result.stdout else "No changes detected."
+
+
+def _format_terminal(
+    tree: Dict[str, Any],
+    diff_data: Dict[str, Any],
+    old_rev: str,
+    new_rev: Optional[str],
+    max_level: int,
+) -> str:
+    """Format tree diff for terminal output."""
     counts = tree.get('_counts', {})
     summary_parts = []
     if counts.get('added', 0):
@@ -319,20 +318,373 @@ def tree_diff(
     
     summary = ', '.join(summary_parts)
     
-    # Revision display
     if new_rev:
         rev_display = f"{old_rev}...{new_rev}"
     else:
         rev_display = f"{old_rev} → workspace"
     
-    lines.append(f"Changes ({rev_display}): {summary}")
-    lines.append("")
-    
-    # Tree
+    lines = [f"Changes ({rev_display}): {summary}", ""]
     tree_lines = _render_tree(tree, max_level=max_level)
     lines.extend(tree_lines)
     
     return '\n'.join(lines)
+
+
+def _format_json(diff_data: Dict[str, Any]) -> str:
+    """Format diff data as JSON."""
+    return json.dumps(diff_data, indent=2)
+
+
+def _format_csv(diff_data: Dict[str, Any]) -> str:
+    """Format diff data as CSV with columns: change,path,old_hash,new_hash."""
+    lines = ["change,path,old_hash,new_hash"]
+    
+    for status in ['added', 'deleted', 'modified', 'renamed']:
+        items = diff_data.get(status, [])
+        for item in items:
+            path = item.get('path', '')
+            old_hash = item.get('hash', {}).get('old', '') if isinstance(item.get('hash'), dict) else ''
+            new_hash = item.get('hash', {}).get('new', '') if isinstance(item.get('hash'), dict) else ''
+            
+            # Handle renamed items (old path in 'path', new path in different field)
+            if status == 'renamed':
+                old_path = item.get('path', {}).get('old', '') if isinstance(item.get('path'), dict) else path
+                new_path = item.get('path', {}).get('new', '') if isinstance(item.get('path'), dict) else path
+                path = f"{old_path} -> {new_path}"
+            
+            # Escape commas in paths
+            if ',' in path:
+                path = f'"{path}"'
+            
+            lines.append(f"{status},{path},{old_hash},{new_hash}")
+    
+    return '\n'.join(lines)
+
+
+def _format_md(
+    tree: Dict[str, Any],
+    diff_data: Dict[str, Any],
+    old_rev: str,
+    new_rev: Optional[str],
+    max_level: int,
+) -> str:
+    """Format tree diff as markdown with diff code block for coloring."""
+    counts = tree.get('_counts', {})
+    summary_parts = []
+    if counts.get('added', 0):
+        summary_parts.append(f"+{counts['added']} added")
+    if counts.get('modified', 0):
+        summary_parts.append(f"~{counts['modified']} modified")
+    if counts.get('deleted', 0):
+        summary_parts.append(f"-{counts['deleted']} deleted")
+    if counts.get('renamed', 0):
+        summary_parts.append(f"→{counts['renamed']} renamed")
+    
+    summary = ', '.join(summary_parts)
+    
+    if new_rev:
+        rev_display = f"`{old_rev}`...`{new_rev}`"
+    else:
+        rev_display = f"`{old_rev}` → workspace"
+    
+    lines = [f"**Changes ({rev_display}):** {summary}", "", "```diff"]
+    
+    # Render tree with diff-style prefixes for coloring
+    tree_lines = _render_tree_diff_style(tree, max_level=max_level)
+    lines.extend(tree_lines)
+    lines.append("```")
+    
+    return '\n'.join(lines)
+
+
+def _render_tree_diff_style(
+    tree: Dict[str, Any],
+    current_path: str = "",
+    prefix: str = "",
+    max_level: int = 50,
+    current_level: int = 0,
+) -> List[str]:
+    """Render tree with diff-style prefixes for markdown coloring.
+    
+    Lines starting with + are green (additions)
+    Lines starting with - are red (deletions)
+    Other lines are neutral
+    """
+    lines = []
+    
+    # Get subdirectories and files
+    subdirs = []
+    for key, value in tree.items():
+        if key.startswith('_'):
+            continue
+        if isinstance(value, dict) and '_counts' in value:
+            subdirs.append((key, value))
+    
+    files = tree.get('_files', [])
+    
+    # Sort entries
+    subdirs.sort(key=lambda x: x[0])
+    files.sort(key=lambda x: x['name'])
+    
+    items = [(name, 'dir', data) for name, data in subdirs] + \
+            [(f['name'], 'file', f) for f in files]
+    
+    for i, (name, item_type, data) in enumerate(items):
+        is_last = i == len(items) - 1
+        
+        if item_type == 'dir':
+            counts = data.get('_counts', {})
+            count_str = _format_counts(counts)
+            
+            # Determine diff prefix based on directory contents
+            if counts.get('added', 0) > 0 and counts.get('deleted', 0) == 0 and counts.get('modified', 0) == 0:
+                diff_prefix = "+ "
+            elif counts.get('deleted', 0) > 0 and counts.get('added', 0) == 0 and counts.get('modified', 0) == 0:
+                diff_prefix = "- "
+            else:
+                diff_prefix = "  "
+            
+            connector = "└── " if is_last else "├── "
+            lines.append(f"{diff_prefix}{prefix}{connector}{name}/ {count_str}")
+            
+            if current_level < max_level:
+                child_prefix = prefix + ("    " if is_last else "│   ")
+                child_lines = _render_tree_diff_style(
+                    data, 
+                    current_path=f"{current_path}{name}/",
+                    prefix=child_prefix,
+                    max_level=max_level,
+                    current_level=current_level + 1,
+                )
+                lines.extend(child_lines)
+        else:
+            status = data.get('status', 'modified')
+            symbol = STATUS_SYMBOLS.get(status, '?')
+            
+            # Diff prefix for coloring
+            if status == 'added':
+                diff_prefix = "+ "
+            elif status == 'deleted':
+                diff_prefix = "- "
+            else:
+                diff_prefix = "  "
+            
+            connector = "└── " if is_last else "├── "
+            lines.append(f"{diff_prefix}{prefix}{connector}[{symbol}] {name}")
+    
+    return lines
+
+
+def _format_html(
+    tree: Dict[str, Any],
+    diff_data: Dict[str, Any],
+    old_rev: str,
+    new_rev: Optional[str],
+) -> str:
+    """Format tree diff as interactive HTML with collapsible sections."""
+    counts = tree.get('_counts', {})
+    summary_parts = []
+    if counts.get('added', 0):
+        summary_parts.append(f'<span class="added">+{counts["added"]} added</span>')
+    if counts.get('modified', 0):
+        summary_parts.append(f'<span class="modified">~{counts["modified"]} modified</span>')
+    if counts.get('deleted', 0):
+        summary_parts.append(f'<span class="deleted">-{counts["deleted"]} deleted</span>')
+    if counts.get('renamed', 0):
+        summary_parts.append(f'<span class="renamed">→{counts["renamed"]} renamed</span>')
+    
+    summary = ', '.join(summary_parts)
+    
+    if new_rev:
+        rev_display = f"<code>{old_rev}</code>...<code>{new_rev}</code>"
+    else:
+        rev_display = f"<code>{old_rev}</code> → workspace"
+    
+    html_tree = _render_tree_html(tree)
+    
+    return f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>DVC Diff</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            line-height: 1.5;
+            padding: 20px;
+            max-width: 900px;
+            margin: 0 auto;
+        }}
+        .summary {{
+            margin-bottom: 20px;
+            padding: 10px 15px;
+            background: #f6f8fa;
+            border-radius: 6px;
+        }}
+        .added {{ color: #22863a; }}
+        .deleted {{ color: #cb2431; }}
+        .modified {{ color: #b08800; }}
+        .renamed {{ color: #6f42c1; }}
+        .tree {{
+            font-family: "SF Mono", Consolas, monospace;
+            font-size: 13px;
+        }}
+        details {{
+            margin-left: 20px;
+        }}
+        details > summary {{
+            cursor: pointer;
+            list-style: none;
+        }}
+        details > summary::-webkit-details-marker {{
+            display: none;
+        }}
+        details > summary::before {{
+            content: "▶ ";
+            font-size: 10px;
+        }}
+        details[open] > summary::before {{
+            content: "▼ ";
+        }}
+        .file {{
+            margin-left: 20px;
+            padding: 2px 0;
+        }}
+        .counts {{
+            color: #6a737d;
+            font-size: 12px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="summary">
+        <strong>Changes ({rev_display}):</strong> {summary}
+    </div>
+    <div class="tree">
+{html_tree}
+    </div>
+    <script>
+        // Expand all / collapse all functionality
+        document.querySelectorAll('details').forEach(d => d.open = false);
+    </script>
+</body>
+</html>'''
+
+
+def _render_tree_html(
+    tree: Dict[str, Any],
+    indent: int = 2,
+) -> str:
+    """Render tree as HTML with collapsible details elements."""
+    lines = []
+    spaces = "    " * indent
+    
+    subdirs = []
+    for key, value in tree.items():
+        if key.startswith('_'):
+            continue
+        if isinstance(value, dict) and '_counts' in value:
+            subdirs.append((key, value))
+    
+    files = tree.get('_files', [])
+    
+    subdirs.sort(key=lambda x: x[0])
+    files.sort(key=lambda x: x['name'])
+    
+    for name, data in subdirs:
+        counts = data.get('_counts', {})
+        count_parts = []
+        if counts.get('added', 0):
+            count_parts.append(f'+{counts["added"]}')
+        if counts.get('modified', 0):
+            count_parts.append(f'~{counts["modified"]}')
+        if counts.get('deleted', 0):
+            count_parts.append(f'-{counts["deleted"]}')
+        if counts.get('renamed', 0):
+            count_parts.append(f'→{counts["renamed"]}')
+        count_str = f' <span class="counts">({", ".join(count_parts)})</span>' if count_parts else ''
+        
+        child_html = _render_tree_html(data, indent + 1)
+        lines.append(f'{spaces}<details>')
+        lines.append(f'{spaces}    <summary>{name}/{count_str}</summary>')
+        lines.append(child_html)
+        lines.append(f'{spaces}</details>')
+    
+    for f in files:
+        status = f.get('status', 'modified')
+        symbol = STATUS_SYMBOLS.get(status, '?')
+        css_class = status
+        lines.append(f'{spaces}<div class="file {css_class}">[{symbol}] {f["name"]}</div>')
+    
+    return '\n'.join(lines)
+
+
+def tree_diff(
+    old_rev: str = "HEAD",
+    new_rev: Optional[str] = None,
+    targets: Optional[List[str]] = None,
+    level: Union[int, str] = "auto",
+    output_format: str = "terminal",
+    verbose: bool = False,
+) -> str:
+    """Show which files changed between revisions.
+    
+    Args:
+        old_rev: Git revision for old version (default: HEAD)
+        new_rev: Git revision for new version (default: None = workspace)
+        targets: Optional list of paths to filter
+        level: Max tree depth (int) or "auto" to fit GH comment
+        output_format: One of terminal, json, table, md, csv, html
+        verbose: Show additional details
+        
+    Returns:
+        Formatted output string
+        
+    Raises:
+        DiffError: If diff fails
+    """
+    # Handle table format separately (uses dvc diff --md)
+    if output_format == "table":
+        return _run_dvc_diff_md(old_rev, new_rev, targets)
+    
+    # Get changes from dvc diff
+    diff_data = _run_dvc_diff(old_rev, new_rev, targets)
+    
+    # JSON format: return raw JSON
+    if output_format == "json":
+        return _format_json(diff_data)
+    
+    # CSV format: tabular output
+    if output_format == "csv":
+        return _format_csv(diff_data)
+    
+    # Count total changes
+    total_changes = sum(len(diff_data.get(s, [])) for s in ['added', 'deleted', 'modified', 'renamed'])
+    
+    if total_changes == 0:
+        return "No changes detected."
+    
+    # Build tree
+    tree = _build_tree(diff_data)
+    
+    # HTML format: interactive tree (doesn't need level)
+    if output_format == "html":
+        return _format_html(tree, diff_data, old_rev, new_rev)
+    
+    # Determine level for tree-based formats
+    if level == "auto":
+        max_level = _find_auto_level(tree)
+        if verbose:
+            print(f"Auto-selected level: {max_level}")
+    else:
+        max_level = int(level)
+    
+    # Markdown format: diff code block
+    if output_format == "md":
+        return _format_md(tree, diff_data, old_rev, new_rev, max_level)
+    
+    # Default: terminal format
+    return _format_terminal(tree, diff_data, old_rev, new_rev, max_level)
 
 
 # =============================================================================
