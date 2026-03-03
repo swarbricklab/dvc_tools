@@ -474,12 +474,12 @@ class TestCalculateDu:
         """Test returns empty list when no tracked files."""
         with patch("dt.du.utils.check_dvc"):
             with patch("dt.du.collect_tracked_files", return_value=[]):
-                result = calculate_du()
+                results, warnings = calculate_du()
                 
-                assert result == []
+                assert results == []
 
-    def test_returns_size_path_tuples(self):
-        """Test that result is list of (size, path) tuples."""
+    def test_returns_size_path_tuples_in_expected_mode(self):
+        """Test that result is list of (size, path) tuples in expected mode."""
         files = [
             {"path": "data.csv", "hash": "abc123", "size": 1000, "is_dir": False},
         ]
@@ -487,10 +487,25 @@ class TestCalculateDu:
         with patch("dt.du.utils.check_dvc"):
             with patch("dt.du.collect_tracked_files", return_value=files):
                 with patch("dt.du.get_cache_dir", return_value=None):
-                    result = calculate_du(cached=False)
+                    results, warnings = calculate_du(mode='expected')
                     
-                    assert len(result) == 1
-                    assert result[0] == (1000, "data.csv")
+                    assert len(results) == 1
+                    assert results[0] == (1000, "data.csv")
+
+    def test_returns_both_columns_in_both_mode(self):
+        """Test that result includes cached and expected in both mode."""
+        files = [
+            {"path": "data.csv", "hash": "abc123", "size": 1000, "is_dir": False},
+        ]
+        
+        with patch("dt.du.utils.check_dvc"):
+            with patch("dt.du.collect_tracked_files", return_value=files):
+                with patch("dt.du.get_cache_dir", return_value=None):
+                    results, warnings = calculate_du(mode='both')
+                    
+                    assert len(results) == 1
+                    # 3-tuple: (cached, expected, path)
+                    assert results[0] == (0, 1000, "data.csv")
 
     def test_results_sorted_by_size_ascending(self):
         """Test that results are sorted by size ascending."""
@@ -503,9 +518,9 @@ class TestCalculateDu:
         with patch("dt.du.utils.check_dvc"):
             with patch("dt.du.collect_tracked_files", return_value=files):
                 with patch("dt.du.get_cache_dir", return_value=None):
-                    result = calculate_du(cached=False)
+                    results, warnings = calculate_du(mode='expected')
                     
-                    sizes = [r[0] for r in result]
+                    sizes = [r[0] for r in results]
                     assert sizes == [100, 1000, 5000]
 
     def test_count_inodes_returns_file_counts(self):
@@ -517,6 +532,35 @@ class TestCalculateDu:
         with patch("dt.du.utils.check_dvc"):
             with patch("dt.du.collect_tracked_files", return_value=files):
                 with patch("dt.du.get_cache_dir", return_value=None):
-                    result = calculate_du(cached=False, count_inodes=True)
+                    results, warnings = calculate_du(mode='expected', count_inodes=True)
                     
-                    assert result[0] == (5, "data.csv")
+                    assert results[0] == (5, "data.csv")
+
+    def test_warns_about_missing_metadata(self):
+        """Test that warning is emitted for files with no size metadata."""
+        files = [
+            {"path": "file1.csv", "hash": "abc123", "size": 0, "is_dir": False},
+            {"path": "file2.csv", "hash": "def456", "size": 1000, "is_dir": False},
+        ]
+        
+        with patch("dt.du.utils.check_dvc"):
+            with patch("dt.du.collect_tracked_files", return_value=files):
+                with patch("dt.du.get_cache_dir", return_value=None):
+                    results, warnings = calculate_du(mode='both')
+                    
+                    assert len(warnings) == 1
+                    assert "1 file(s) have no size metadata" in warnings[0]
+                    assert "dt update" in warnings[0]
+
+    def test_no_warning_in_cached_only_mode(self):
+        """Test that no warning is emitted in cached-only mode."""
+        files = [
+            {"path": "file1.csv", "hash": "abc123", "size": 0, "is_dir": False},
+        ]
+        
+        with patch("dt.du.utils.check_dvc"):
+            with patch("dt.du.collect_tracked_files", return_value=files):
+                with patch("dt.du.get_cache_dir", return_value=None):
+                    results, warnings = calculate_du(mode='cached')
+                    
+                    assert len(warnings) == 0

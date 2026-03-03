@@ -22,12 +22,13 @@ dt du [options] [target...]
 - `-c, --total`: Show a grand total line at the end
 
 **What to measure:**
-- `--cached`: Show only sizes of files actually in local cache (default)
-- `--expected`: Show expected sizes from DVC metadata (what you'd have if fully pulled)
+- `--cached`: Show only sizes of files actually in local cache
+- `--expected`: Show only expected sizes from DVC metadata
+- (default): Show both cached and expected sizes in two columns
 
 ## Examples
 
-### Basic usage
+### Basic usage (shows both cached & expected)
 
 ```bash
 # Show disk usage for all tracked files (sorted by size)
@@ -36,8 +37,11 @@ dt du
 # Human-readable output
 dt du -h
 
-# Specific target
-dt du data/
+# Output (two columns by default):
+# CACHED  EXPECTED   PATH
+#   44K      44K    models/v1.pkl
+#   12M      12M    data/train.csv
+#    0       5.0G    data/images/
 ```
 
 ### Path prefixes
@@ -76,27 +80,28 @@ dt du --inodes
 dt du --inodes -s
 ```
 
-### Cache vs expected
+### Single column output
 
 ```bash
-# What's actually cached locally (default)
+# Only cached sizes (what's locally available)
 dt du --cached -h
 
-# What would be needed if fully checked out
+# Only expected sizes (from metadata)
 dt du --expected -h
 ```
 
 ## Output Format
 
-Output mimics standard `du`, sorted by size (largest last):
+By default, shows both cached and expected sizes with a header:
 
 ```
-   45056   models/v1.pkl
-12845056   data/train.csv
- 5368709120   data/images/
+CACHED  EXPECTED   PATH
+  44K      44K    models/v1.pkl
+  12M      12M    data/train.csv
+   0       5.0G    data/images/
 ```
 
-With `-h`:
+With `--cached` or `--expected`, shows single column (sorted by size, largest last):
 
 ```
    44K    models/v1.pkl
@@ -112,8 +117,20 @@ With `--inodes`:
     1247   data/images/
 ```
 
+## Warnings
+
+When files are missing size metadata (showing 0 expected size), a warning is displayed:
+
+```
+Warning: 3 file(s) have no size metadata. Run 'dt update' to populate.
+```
+
+Run `dt update` on the relevant `.dvc` files to populate the size metadata from the source repository.
+
 ## Notes
 
+- By default, shows both cached and expected sizes side-by-side
+- Use `--cached` or `--expected` to limit output to a single column
 - Sizes are read from DVC metadata (`.dvc` files and `.dir` manifests)
 - `--cached` mode checks which files are actually present in the local cache
 - `--expected` mode reports the full size regardless of cache state
@@ -125,3 +142,4 @@ With `--inodes`:
 - [`dt cache rm`](cache.md#dt-cache-rm) - Remove files from cache
 - [`dt push`](push.md) - Push files to remote
 - [`dt pull`](pull.md) - Pull files from remote
+- [`dt update`](update.md) - Update .dvc files and populate metadata
