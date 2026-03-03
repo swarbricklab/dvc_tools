@@ -265,21 +265,28 @@ def aggregate_by_depth(
 
 def calculate_du(
     targets: Optional[List[str]] = None,
-    cached: bool = True,
+    mode: str = 'both',
     max_depth: Optional[int] = None,
     count_inodes: bool = False,
-) -> List[Tuple[int, str]]:
+) -> Tuple[List[Tuple], List[str]]:
     """Calculate disk usage for DVC-tracked files.
     
     Args:
         targets: Optional targets to report on
-        cached: If True, report cached sizes; if False, report expected sizes
+        mode: 'both' for cached & expected, 'cached' for cached only,
+              'expected' for expected only
         max_depth: Maximum directory depth (None for unlimited)
         count_inodes: If True, count files instead of bytes
         
     Returns:
-        List of (size_or_count, path) tuples, sorted by size ascending
+        Tuple of (results, warnings) where:
+        - results: List of tuples (format depends on mode):
+          - 'both': (cached_value, expected_value, path)
+          - 'cached'/'expected': (value, path)
+        - warnings: List of warning messages
     """
+    warnings = []
+    
     try:
         utils.check_dvc()
     except utils.DependencyError as e:
@@ -289,7 +296,7 @@ def calculate_du(
     files = collect_tracked_files(targets)
     
     if not files:
-        return []
+        return [], warnings
     
     # Get cache directory for cached size lookup
     cache_dir = get_cache_dir()
@@ -303,27 +310,46 @@ def calculate_du(
             f['cached_size'] = 0
             f['cached_nfiles'] = 0
     
+    # Check for missing metadata and add warning if needed
+    if mode in ('both', 'expected'):
+        missing_metadata_count = sum(1 for f in files if f.get('size', 0) == 0)
+        if missing_metadata_count > 0:
+            warnings.append(
+                f"{missing_metadata_count} file(s) have no size metadata. "
+                f"Run 'dt update' to populate."
+            )
+    
     # Aggregate by depth if needed
     if max_depth is not None:
         files = aggregate_by_depth(files, max_depth)
     
-    # Build result
+    # Build result based on mode
     results = []
     for f in files:
-        if count_inodes:
-            if cached:
-                value = f.get('cached_nfiles', 0)
+        if mode == 'both':
+            # Return 3-tuple: (cached, expected, path)
+            if count_inodes:
+                cached_val = f.get('cached_nfiles', 0)
+                expected_val = f.get('nfiles', 1)
             else:
-                value = f.get('nfiles', 1)
+                cached_val = f.get('cached_size', 0)
+                expected_val = f.get('size', 0)
+            results.append((cached_val, expected_val, f['path']))
         else:
-            if cached:
-                value = f.get('cached_size', 0)
+            # Return 2-tuple: (value, path)
+            if count_inodes:
+                if mode == 'cached':
+                    value = f.get('cached_nfiles', 0)
+                else:
+                    value = f.get('nfiles', 1)
             else:
-                value = f.get('size', 0)
-        
-        results.append((value, f['path']))
+                if mode == 'cached':
+                    value = f.get('cached_size', 0)
+                else:
+                    value = f.get('size', 0)
+            results.append((value, f['path']))
     
-    # Sort by size ascending
+    # Sort by size ascending (use first value for both and single modes)
     results.sort(key=lambda x: x[0])
     
-    return results
+    return results, warnings

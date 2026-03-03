@@ -1226,77 +1226,154 @@ def auth_credentials_status(verbose):
               help='Count number of files instead of bytes')
 @click.option('-c', '--total', 'show_total', is_flag=True,
               help='Show a grand total line at the end')
-@click.option('--cached/--expected', default=True,
-              help='Show cached sizes (default) or expected sizes from metadata')
-def du(targets, human, max_depth, summarize, inodes, show_total, cached):
+@click.option('--cached', is_flag=True,
+              help='Show only cached sizes (limit to cache)')
+@click.option('--expected', is_flag=True,
+              help='Show only expected sizes (from metadata)')
+def du(targets, human, max_depth, summarize, inodes, show_total, cached, expected):
     """Report disk usage for DVC-tracked files.
     
     Similar to the standard `du` command, but for DVC-tracked data.
     Output is sorted by size (largest last).
     
+    By default, shows both cached and expected sizes. Use --cached or
+    --expected to limit output to just one column.
+    
     \b
     Examples:
-        dt du                    # All tracked files
+        dt du                    # Both cached & expected sizes
         dt du -h                 # Human-readable sizes
         dt du -s -h              # Summary total only
         dt du -d 1 -h            # One level deep
         dt du --inodes           # Count files
-        dt du --expected -h      # Expected sizes (not just cached)
+        dt du --cached -h        # Only cached sizes
+        dt du --expected -h      # Only expected sizes
     """
+    # Determine mode: both (default), cached-only, or expected-only
+    if cached and not expected:
+        mode = 'cached'
+    elif expected and not cached:
+        mode = 'expected'
+    else:
+        mode = 'both'
+    
     try:
-        results = du_mod.calculate_du(
+        results, warnings = du_mod.calculate_du(
             targets=list(targets) if targets else None,
-            cached=cached,
+            mode=mode,
             max_depth=max_depth,
             count_inodes=inodes,
         )
     except du_mod.DuError as e:
         raise click.ClickException(str(e))
     
+    # Show warnings before output
+    for warning in warnings:
+        click.echo(f"Warning: {warning}", err=True)
+    
     if not results:
         click.echo("No tracked files found.")
         return
     
-    # Calculate grand total first (needed for summarize mode and -c)
-    grand_total = sum(value for value, _ in results)
+    # Check result format (both mode returns 3-tuples, single mode returns 2-tuples)
+    is_both_mode = len(results[0]) == 3
     
-    # Determine what to display
-    if summarize:
-        # -s shows only the grand total
-        display_results = [(grand_total, '.')]
+    if is_both_mode:
+        # Results are (cached, expected, path)
+        cached_total = sum(r[0] for r in results)
+        expected_total = sum(r[1] for r in results)
+        
+        if summarize:
+            display_results = [(cached_total, expected_total, '.')]
+        else:
+            display_results = results
+        
+        # Calculate column widths
+        if inodes:
+            cached_width = max(len(str(r[0])) for r in display_results)
+            expected_width = max(len(str(r[1])) for r in display_results)
+        else:
+            if human:
+                cached_width = max(len(utils.format_size(r[0], True)) for r in display_results)
+                expected_width = max(len(utils.format_size(r[1], True)) for r in display_results)
+            else:
+                cached_width = max(len(str(r[0])) for r in display_results)
+                expected_width = max(len(str(r[1])) for r in display_results)
+        
+        # Add header width considerations
+        cached_width = max(cached_width, 6)   # "CACHED"
+        expected_width = max(expected_width, 8)  # "EXPECTED"
+        
+        # Consider total line width
+        if show_total and not summarize:
+            if human and not inodes:
+                cached_width = max(cached_width, len(utils.format_size(cached_total, True)))
+                expected_width = max(expected_width, len(utils.format_size(expected_total, True)))
+            else:
+                cached_width = max(cached_width, len(str(cached_total)))
+                expected_width = max(expected_width, len(str(expected_total)))
+        
+        # Print header
+        click.echo(f"{'CACHED':>{cached_width}}  {'EXPECTED':>{expected_width}}   PATH")
+        
+        # Print results
+        for cached_val, expected_val, path in display_results:
+            if human and not inodes:
+                cached_str = utils.format_size(cached_val, True)
+                expected_str = utils.format_size(expected_val, True)
+            else:
+                cached_str = str(cached_val)
+                expected_str = str(expected_val)
+            click.echo(f"{cached_str:>{cached_width}}  {expected_str:>{expected_width}}   {path}")
+        
+        # Print total if requested
+        if show_total and not summarize:
+            if human and not inodes:
+                cached_str = utils.format_size(cached_total, True)
+                expected_str = utils.format_size(expected_total, True)
+            else:
+                cached_str = str(cached_total)
+                expected_str = str(expected_total)
+            click.echo(f"{cached_str:>{cached_width}}  {expected_str:>{expected_width}}   total")
     else:
-        display_results = results
-    
-    # Calculate column width for alignment
-    if inodes:
-        max_width = max(len(str(count)) for count, _ in display_results)
-    else:
-        if human:
-            max_width = max(len(utils.format_size(size, True)) for size, _ in display_results)
+        # Single column mode - results are (value, path)
+        grand_total = sum(value for value, _ in results)
+        
+        if summarize:
+            display_results = [(grand_total, '.')]
         else:
-            max_width = max(len(str(size)) for size, _ in display_results)
-    
-    # Also consider grand total width if showing total line
-    if show_total and not summarize:
-        if human and not inodes:
-            total_width = len(utils.format_size(grand_total, True))
+            display_results = results
+        
+        # Calculate column width for alignment
+        if inodes:
+            max_width = max(len(str(count)) for count, _ in display_results)
         else:
-            total_width = len(str(grand_total))
-        max_width = max(max_width, total_width)
-    
-    for value, path in display_results:
-        if human and not inodes:
-            size_str = utils.format_size(value, True)
-        else:
-            size_str = str(value)
-        click.echo(f"{size_str:>{max_width}}   {path}")
-    
-    if show_total and not summarize:
-        if human and not inodes:
-            total_str = utils.format_size(grand_total, True)
-        else:
-            total_str = str(grand_total)
-        click.echo(f"{total_str:>{max_width}}   total")
+            if human:
+                max_width = max(len(utils.format_size(size, True)) for size, _ in display_results)
+            else:
+                max_width = max(len(str(size)) for size, _ in display_results)
+        
+        # Also consider grand total width if showing total line
+        if show_total and not summarize:
+            if human and not inodes:
+                total_width = len(utils.format_size(grand_total, True))
+            else:
+                total_width = len(str(grand_total))
+            max_width = max(max_width, total_width)
+        
+        for value, path in display_results:
+            if human and not inodes:
+                size_str = utils.format_size(value, True)
+            else:
+                size_str = str(value)
+            click.echo(f"{size_str:>{max_width}}   {path}")
+        
+        if show_total and not summarize:
+            if human and not inodes:
+                total_str = utils.format_size(grand_total, True)
+            else:
+                total_str = str(grand_total)
+            click.echo(f"{total_str:>{max_width}}   total")
 
 
 @cli.command()
