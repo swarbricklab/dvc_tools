@@ -191,8 +191,8 @@ def _get_file_listing(
     path: str,
     revision: str,
     verbose: bool = False,
-) -> List[Dict[str, str]]:
-    """Get file listing with hashes from source repo using dvc list.
+) -> List[Dict[str, any]]:
+    """Get file listing with hashes and sizes from source repo using dvc list.
     
     Args:
         repo_url: URL of source repository.
@@ -201,7 +201,8 @@ def _get_file_listing(
         verbose: Print progress messages.
         
     Returns:
-        List of dicts with 'md5' and 'relpath' keys.
+        List of dicts with 'md5', 'relpath', and 'size' keys.
+        Size may be None if not available from source.
         
     Raises:
         UpdateError: If listing fails.
@@ -213,6 +214,7 @@ def _get_file_listing(
         'dvc', 'list',
         '--json',
         '--show-hash',
+        '--size',
         '--recursive',
         repo_url,
         path,
@@ -239,10 +241,18 @@ def _get_file_listing(
             continue
         relpath = f.get('path', '')
         if relpath:
-            entries.append({'md5': md5, 'relpath': relpath})
+            entry = {'md5': md5, 'relpath': relpath}
+            # Include size if available (may be None)
+            if f.get('size') is not None:
+                entry['size'] = f['size']
+            entries.append(entry)
     
     if verbose:
-        print(f"  Found {len(entries)} files")
+        total_size = sum(e.get('size', 0) or 0 for e in entries)
+        if total_size > 0:
+            print(f"  Found {len(entries)} files ({utils.format_size(total_size, human_readable=True)})")
+        else:
+            print(f"  Found {len(entries)} files")
     
     return entries
 
@@ -286,14 +296,18 @@ def _update_dvc_file(
     dvc_path: Path,
     new_hash: str,
     new_rev: Optional[str] = None,
+    size: Optional[int] = None,
+    nfiles: Optional[int] = None,
     verbose: bool = False,
 ) -> bool:
-    """Update the .dvc file with new hash and optionally new revision.
+    """Update the .dvc file with new hash, size, nfiles, and optionally new revision.
     
     Args:
         dvc_path: Path to the .dvc file.
         new_hash: New outs.md5 hash (with .dir suffix if directory).
-        new_rev: New deps.repo.rev (None to keep current).
+        new_rev: New deps.repo.rev_lock (None to keep current).
+        size: Total size in bytes (None to omit).
+        nfiles: Number of files for directories (None to omit).
         verbose: Print progress messages.
         
     Returns:
@@ -305,14 +319,36 @@ def _update_dvc_file(
         
         modified = False
         
-        # Update outs.md5
+        # Update outs section
         if data.get('outs'):
-            old_hash = data['outs'][0].get('md5')
+            outs = data['outs'][0]
+            old_hash = outs.get('md5')
+            
             if old_hash != new_hash:
-                data['outs'][0]['md5'] = new_hash
+                outs['md5'] = new_hash
                 modified = True
                 if verbose:
                     print(f"  Updated outs.md5: {old_hash or 'None'} → {new_hash}")
+            
+            # Update size if provided
+            if size is not None:
+                old_size = outs.get('size')
+                if old_size != size:
+                    outs['size'] = size
+                    modified = True
+                    if verbose:
+                        old_str = utils.format_size(old_size, True) if old_size else 'None'
+                        new_str = utils.format_size(size, True)
+                        print(f"  Updated size: {old_str} → {new_str}")
+            
+            # Update nfiles if provided (for directories)
+            if nfiles is not None:
+                old_nfiles = outs.get('nfiles')
+                if old_nfiles != nfiles:
+                    outs['nfiles'] = nfiles
+                    modified = True
+                    if verbose:
+                        print(f"  Updated nfiles: {old_nfiles or 'None'} → {nfiles}")
         
         # Update deps.repo.rev_lock if specified
         if new_rev:
@@ -538,22 +574,41 @@ def update(
         if is_single_file:
             # Single file import - use the md5 directly (no .dir)
             file_hash = entries[0]['md5']
+            file_size = entries[0].get('size')  # May be None
             if verbose:
-                print(f"  Single file import: {file_hash[:12]}...")
+                size_str = f" ({utils.format_size(file_size, True)})" if file_size else ""
+                print(f"  Single file import: {file_hash[:12]}...{size_str}")
             
-            # Check if hash changed
-            if file_hash != info.current_hash:
+            # Check if hash changed or we need to update metadata
+            needs_update = (
+                file_hash != info.current_hash or 
+                target_rev != info.locked_rev or
+                file_size is not None  # Always update if we have size info
+            )
+            
+            if needs_update:
                 new_rev = target_rev if target_rev != info.locked_rev else None
-                _update_dvc_file(target_path, file_hash, new_rev, verbose)
-                results.append((str(target_path), True, f"Updated hash to {file_hash[:12]}..."))
-                updated_targets.append(str(target_path))
-            elif target_rev != info.locked_rev:
-                _update_dvc_file(target_path, file_hash, target_rev, verbose)
-                results.append((str(target_path), True, f"Updated rev to {target_rev[:12]}..."))
+                _update_dvc_file(
+                    target_path, file_hash, new_rev,
+                    size=file_size,
+                    verbose=verbose
+                )
+                if file_hash != info.current_hash:
+                    results.append((str(target_path), True, f"Updated hash to {file_hash[:12]}..."))
+                elif target_rev != info.locked_rev:
+                    results.append((str(target_path), True, f"Updated rev to {target_rev[:12]}..."))
+                else:
+                    results.append((str(target_path), True, "Updated metadata"))
                 updated_targets.append(str(target_path))
             else:
                 results.append((str(target_path), True, "Already up to date"))
             continue
+        
+        # Directory import - compute totals from entries
+        nfiles = len(entries)
+        total_size = sum(e.get('size', 0) or 0 for e in entries)
+        # Only set total_size if we have size data for at least some files
+        has_size_data = any(e.get('size') is not None for e in entries)
         
         # Build .dir manifest
         manifest_content = utils.build_dir_manifest(entries)
@@ -574,9 +629,14 @@ def update(
         # Write to cache
         dir_hash, dir_file = _write_dir_to_cache(manifest_content, cache_base, verbose)
         
-        # Update .dvc file
+        # Update .dvc file with size and nfiles metadata
         new_rev = target_rev if target_rev != info.locked_rev else None
-        _update_dvc_file(target_path, dir_hash, new_rev, verbose)
+        _update_dvc_file(
+            target_path, dir_hash, new_rev,
+            size=total_size if has_size_data else None,
+            nfiles=nfiles,
+            verbose=verbose
+        )
         
         # Always push to source remote so fetch can find it
         from . import remote as remote_mod
@@ -590,7 +650,8 @@ def update(
                 print(f"  Warning: Could not push to source remote: {e}")
         
         updated_targets.append(str(target_path))
-        results.append((str(target_path), True, f"Built .dir ({len(entries)} files)"))
+        size_str = f", {utils.format_size(total_size, True)}" if has_size_data else ""
+        results.append((str(target_path), True, f"Built .dir ({nfiles} files{size_str})"))
     
     # Run dt fetch for updated targets (unless --no-download)
     if updated_targets and not no_download and not dry_run:
