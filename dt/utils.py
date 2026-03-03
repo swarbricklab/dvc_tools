@@ -155,6 +155,40 @@ def oid_to_path(file_hash: str) -> Optional[Path]:
         return None
 
 
+def _get_dvc_file_metadata(path: str) -> Dict[str, Any]:
+    """Read size and nfiles from .dvc file directly.
+    
+    DVC's internal index may not reflect recent changes to .dvc files,
+    so this function reads the YAML directly to get accurate metadata.
+    
+    Args:
+        path: Path to the tracked file/directory (without .dvc extension).
+        
+    Returns:
+        Dict with 'size' and 'nfiles' keys (may be None if not present).
+    """
+    import yaml
+    
+    dvc_path = Path(f"{path}.dvc")
+    if not dvc_path.exists():
+        return {'size': None, 'nfiles': None}
+    
+    try:
+        with open(dvc_path) as f:
+            data = yaml.safe_load(f)
+        
+        outs = data.get('outs', [])
+        if outs:
+            return {
+                'size': outs[0].get('size'),
+                'nfiles': outs[0].get('nfiles'),
+            }
+    except (OSError, yaml.YAMLError):
+        pass
+    
+    return {'size': None, 'nfiles': None}
+
+
 def collect_tracked_entries(
     targets: Optional[List[str]] = None,
     remote: Optional[str] = None,
@@ -233,11 +267,23 @@ def collect_tracked_entries(
                     is_dir = file_hash.endswith('.dir')
                     meta = entry.meta
                     
+                    # Get size and nfiles from meta, falling back to .dvc file
+                    size = meta.size if meta and meta.size else None
+                    nfiles = meta.nfiles if meta and meta.nfiles else None
+                    
+                    # If meta is missing size/nfiles, try reading from .dvc file
+                    if size is None or nfiles is None:
+                        dvc_meta = _get_dvc_file_metadata(path)
+                        if size is None and dvc_meta['size'] is not None:
+                            size = dvc_meta['size']
+                        if nfiles is None and dvc_meta['nfiles'] is not None:
+                            nfiles = dvc_meta['nfiles']
+                    
                     entries.append({
                         'path': path,
                         'hash': file_hash,
-                        'size': meta.size if meta and meta.size else 0,
-                        'nfiles': meta.nfiles if meta and meta.nfiles else 1,
+                        'size': size if size is not None else 0,
+                        'nfiles': nfiles if nfiles is not None else 1,
                         'is_dir': is_dir,
                         'meta': meta,
                     })

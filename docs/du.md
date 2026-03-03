@@ -10,7 +10,7 @@ dt du [options] [target...]
 
 ### Arguments
 
-- `[target...]`: Optional paths, `.dvc` files, or directories. Defaults to all tracked files.
+- `[target...]`: Optional paths, `.dvc` files, directories, or path prefixes. Defaults to all tracked files. When a path prefix is specified, all DVC targets under that path are included.
 
 ### Options
 
@@ -38,6 +38,19 @@ dt du -h
 
 # Specific target
 dt du data/
+```
+
+### Path prefixes
+
+```bash
+# Show sizes for all targets under a directory path
+dt du data/images/he/whole_slide_images -h
+
+# Summarize total size of all targets under a path
+dt du -s -h data/images/
+
+# Multiple path prefixes
+dt du data/images/ data/annotations/ -h
 ```
 
 ### Depth control
