@@ -15,24 +15,95 @@ get_cache_dir = utils.get_cache_dir
 hash_to_cache_path = utils.hash_to_cache_path
 
 
+def _normalize_path(path: str) -> str:
+    """Normalize a path for consistent matching.
+    
+    Removes trailing slashes and leading ./ for consistent comparison.
+    """
+    path = path.rstrip('/')
+    if path.startswith('./'):
+        path = path[2:]
+    return path
+
+
+def _path_matches_prefix(entry_path: str, prefix: str) -> bool:
+    """Check if an entry path matches a target prefix.
+    
+    Args:
+        entry_path: The path of the tracked entry (e.g., 'data/images/foo.dvc')
+        prefix: The target prefix to match (e.g., 'data/images')
+        
+    Returns:
+        True if entry_path equals prefix or is under prefix directory.
+    """
+    entry_path = _normalize_path(entry_path)
+    prefix = _normalize_path(prefix)
+    
+    if not prefix:
+        return True
+    
+    # Exact match
+    if entry_path == prefix:
+        return True
+    
+    # Entry is under the prefix directory
+    if entry_path.startswith(prefix + '/'):
+        return True
+    
+    return False
+
+
 def collect_tracked_files(
     targets: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Collect all DVC-tracked files with their metadata.
     
+    If targets are specified, this function supports both:
+    - Exact matches (e.g., 'data.csv.dvc' or 'data/')
+    - Path prefixes (e.g., 'data/images' to match all targets under that path)
+    
     Args:
         targets: Optional list of targets. If None, collects all tracked files.
+                 Targets can be exact paths or path prefixes.
         
     Returns:
         List of dicts with 'path', 'hash', 'size', 'nfiles' (for dirs), 'is_dir'
     """
     try:
-        result = utils.collect_tracked_entries(targets=targets, push=False)
+        # First, try to collect with exact targets (for .dvc files and direct matches)
+        try:
+            result = utils.collect_tracked_entries(targets=targets, push=False)
+            entries = result['entries']
+            
+            # If we got entries with exact targets, return them
+            if entries or targets is None:
+                return entries
+        except Exception:
+            # DVC raises NoOutputOrStageError when target doesn't match
+            # Fall through to path prefix matching
+            pass
+        
+        # No entries found with exact targets - try path prefix matching
+        # Collect all entries and filter by path prefixes
+        all_result = utils.collect_tracked_entries(targets=None, push=False)
+        all_entries = all_result['entries']
+        
+        if not all_entries:
+            return []
+        
+        # Filter entries by path prefix
+        filtered = []
+        for entry in all_entries:
+            entry_path = entry['path']
+            for target in targets:
+                if _path_matches_prefix(entry_path, target):
+                    filtered.append(entry)
+                    break
+        
+        return filtered
+        
     except utils.DependencyError as e:
         raise DuError(str(e))
-    
-    # Return entries in the format expected by this module
-    return result['entries']
 
 
 def get_dir_file_count(repo, dir_hash: str) -> int:

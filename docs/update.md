@@ -138,13 +138,38 @@ This updates the .dvc file to point to the new revision and rebuilds the `.dir` 
 1. **Find import files**: If no targets specified, finds all .dvc files with a `deps.repo` section (imports)
 2. **Determine revision**: Uses `--rev` if specified, otherwise uses the locked revision (`rev_lock`) from the .dvc file
 3. **Clone source repo**: Clones the source repository at the target revision (cached in `.dt/tmp/`)
-4. **Query source**: Gets the file listing and hashes from the source repository
+4. **Query source**: Gets the file listing, hashes, and sizes from the source repository using `dvc list --json --show-hash --size --recursive`
 5. **Rebuild .dir**: For directories, rebuilds the `.dir` manifest file from the file listing
-6. **Update .dvc file**: Updates the .dvc file with the new hashes
+6. **Update .dvc file**: Updates the .dvc file with the new hash, `size`, and `nfiles` metadata
 7. **Push .dir**: Pushes the `.dir` file to the source remote so others don't have this issue
 8. **Fetch data**: Downloads the data files to the local cache
 9. **Checkout**: Checks out files from cache to the workspace
 10. **Sync index**: If index mirror is configured, syncs after update
+
+## Metadata population
+
+`dt update` produces first-class `.dvc` files with complete metadata:
+
+```yaml
+outs:
+- hash: md5
+  path: images/
+  md5: abc123def456.dir
+  size: 1073741824    # Total size of all files (1 GiB)
+  nfiles: 42          # Number of files in directory
+```
+
+For single file imports:
+
+```yaml
+outs:
+- hash: md5
+  path: data.csv
+  md5: abc123def456
+  size: 52428800      # File size (50 MiB)
+```
+
+This enables `dt du` to report accurate sizes and file counts. Note that size information is only available if the source repository's `.dvc` files also contain size metadata.
 
 ## Import detection
 

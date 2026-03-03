@@ -15,8 +15,68 @@ from dt.du import (
     get_cached_file_count,
     aggregate_by_depth,
     calculate_du,
+    _normalize_path,
+    _path_matches_prefix,
 )
 from dt.errors import DuError
+
+
+# =============================================================================
+# Path matching helper tests
+# =============================================================================
+
+class TestNormalizePath:
+    """Tests for the _normalize_path function."""
+
+    def test_removes_trailing_slash(self):
+        """Test that trailing slashes are removed."""
+        assert _normalize_path("data/images/") == "data/images"
+        assert _normalize_path("data/") == "data"
+
+    def test_removes_leading_dot_slash(self):
+        """Test that leading ./ is removed."""
+        assert _normalize_path("./data/images") == "data/images"
+        assert _normalize_path("./data") == "data"
+
+    def test_handles_both(self):
+        """Test that both leading ./ and trailing / are handled."""
+        assert _normalize_path("./data/images/") == "data/images"
+
+    def test_returns_unchanged_if_clean(self):
+        """Test that clean paths are returned unchanged."""
+        assert _normalize_path("data/images") == "data/images"
+        assert _normalize_path("file.txt") == "file.txt"
+
+
+class TestPathMatchesPrefix:
+    """Tests for the _path_matches_prefix function."""
+
+    def test_exact_match(self):
+        """Test that exact matches work."""
+        assert _path_matches_prefix("data/images", "data/images") is True
+
+    def test_path_under_prefix(self):
+        """Test that paths under prefix match."""
+        assert _path_matches_prefix("data/images/foo.jpg", "data/images") is True
+        assert _path_matches_prefix("data/images/subdir/foo.jpg", "data/images") is True
+
+    def test_path_not_under_prefix(self):
+        """Test that paths not under prefix don't match."""
+        assert _path_matches_prefix("data/audio/foo.mp3", "data/images") is False
+        assert _path_matches_prefix("other/data", "data") is False
+
+    def test_partial_directory_name_no_match(self):
+        """Test that partial directory names don't match."""
+        # data/images2 should NOT match data/images
+        assert _path_matches_prefix("data/images2/foo.jpg", "data/images") is False
+
+    def test_trailing_slash_handling(self):
+        """Test that trailing slashes are handled."""
+        assert _path_matches_prefix("data/images/foo.jpg", "data/images/") is True
+
+    def test_empty_prefix_matches_all(self):
+        """Test that empty prefix matches everything."""
+        assert _path_matches_prefix("data/images/foo.jpg", "") is True
 
 
 # =============================================================================
@@ -40,14 +100,93 @@ class TestCollectTrackedFiles:
             
             assert result == mock_entries
 
-    def test_passes_targets_to_collect(self):
-        """Test that targets are passed through."""
+    def test_passes_targets_to_collect_with_matches(self):
+        """Test that targets are passed through when exact matches exist."""
+        mock_entries = [
+            {"path": "data.csv", "hash": "abc123", "size": 1000, "is_dir": False},
+        ]
         with patch("dt.du.utils.collect_tracked_entries") as mock_collect:
-            mock_collect.return_value = {"entries": []}
+            mock_collect.return_value = {"entries": mock_entries}
             
-            collect_tracked_files(targets=["data.csv", "images/"])
+            result = collect_tracked_files(targets=["data.csv"])
             
-            mock_collect.assert_called_once_with(targets=["data.csv", "images/"], push=False)
+            mock_collect.assert_called_once_with(targets=["data.csv"], push=False)
+            assert result == mock_entries
+
+    def test_path_prefix_fallback_when_no_exact_match(self):
+        """Test that path prefix matching is used when no exact targets match."""
+        all_entries = [
+            {"path": "data/images/a.jpg", "hash": "abc123", "size": 1000, "is_dir": False},
+            {"path": "data/images/b.jpg", "hash": "def456", "size": 2000, "is_dir": False},
+            {"path": "data/audio/c.mp3", "hash": "ghi789", "size": 3000, "is_dir": False},
+        ]
+        with patch("dt.du.utils.collect_tracked_entries") as mock_collect:
+            # First call with targets returns empty (no exact match)
+            # Second call with no targets returns all entries
+            mock_collect.side_effect = [
+                {"entries": []},
+                {"entries": all_entries},
+            ]
+            
+            result = collect_tracked_files(targets=["data/images"])
+            
+            assert len(result) == 2
+            assert all(e["path"].startswith("data/images/") for e in result)
+
+    def test_path_prefix_with_trailing_slash(self):
+        """Test that path prefixes work with trailing slashes."""
+        all_entries = [
+            {"path": "data/images/a.jpg", "hash": "abc123", "size": 1000, "is_dir": False},
+            {"path": "data/other/b.txt", "hash": "def456", "size": 2000, "is_dir": False},
+        ]
+        with patch("dt.du.utils.collect_tracked_entries") as mock_collect:
+            mock_collect.side_effect = [
+                {"entries": []},
+                {"entries": all_entries},
+            ]
+            
+            result = collect_tracked_files(targets=["data/images/"])
+            
+            assert len(result) == 1
+            assert result[0]["path"] == "data/images/a.jpg"
+
+    def test_path_prefix_with_multiple_prefixes(self):
+        """Test that multiple path prefixes are supported."""
+        all_entries = [
+            {"path": "data/images/a.jpg", "hash": "abc123", "size": 1000, "is_dir": False},
+            {"path": "data/audio/b.mp3", "hash": "def456", "size": 2000, "is_dir": False},
+            {"path": "data/other/c.txt", "hash": "ghi789", "size": 3000, "is_dir": False},
+        ]
+        with patch("dt.du.utils.collect_tracked_entries") as mock_collect:
+            mock_collect.side_effect = [
+                {"entries": []},
+                {"entries": all_entries},
+            ]
+            
+            result = collect_tracked_files(targets=["data/images", "data/audio"])
+            
+            assert len(result) == 2
+            paths = {e["path"] for e in result}
+            assert paths == {"data/images/a.jpg", "data/audio/b.mp3"}
+
+    def test_path_prefix_fallback_on_dvc_exception(self):
+        """Test fallback to prefix matching when DVC raises NoOutputOrStageError."""
+        all_entries = [
+            {"path": "data/images/a.jpg", "hash": "abc123", "size": 1000, "is_dir": False},
+            {"path": "data/images/b.jpg", "hash": "def456", "size": 2000, "is_dir": False},
+        ]
+        with patch("dt.du.utils.collect_tracked_entries") as mock_collect:
+            # First call raises exception (simulating DVC NoOutputOrStageError)
+            # Second call returns all entries
+            mock_collect.side_effect = [
+                Exception("does not exist as an output or a stage name"),
+                {"entries": all_entries},
+            ]
+            
+            result = collect_tracked_files(targets=["data/images"])
+            
+            assert len(result) == 2
+            assert all(e["path"].startswith("data/images/") for e in result)
 
     def test_raises_du_error_on_dependency_error(self):
         """Test that DependencyError is wrapped in DuError."""
