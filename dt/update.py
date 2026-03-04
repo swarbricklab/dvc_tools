@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 from dvc.utils.serialize import dump_yaml
 
+from . import find as find_mod
 from . import tmp as tmp_mod
 from . import utils
 from .errors import UpdateError
@@ -114,55 +115,6 @@ def _get_head_rev(clone_path: Path) -> str:
     return result.stdout.strip()
 
 
-def _find_hash_in_repo(
-    clone_path: Path,
-    target_hash: str,
-    revision: str,
-    verbose: bool = False,
-) -> Optional[str]:
-    """Find the path for a given hash at a specific revision.
-    
-    Uses dvc list to search for a file with the given hash.
-    
-    Args:
-        clone_path: Path to cloned source repo.
-        target_hash: Hash to search for (with or without .dir suffix).
-        revision: Git revision to search at.
-        verbose: Print progress messages.
-        
-    Returns:
-        Path if found, None otherwise.
-    """
-    # Normalize hash (remove .dir suffix for comparison)
-    search_hash = target_hash.replace('.dir', '')
-    
-    if verbose:
-        print(f"  Searching for hash {search_hash[:12]}... at {revision[:12]}...")
-    
-    # Run dvc list to get all tracked files with hashes
-    result = subprocess.run(
-        ['dvc', 'list', '--json', '--show-hash', '--recursive', '.', '--rev', revision],
-        cwd=clone_path,
-        capture_output=True,
-        text=True,
-    )
-    
-    if result.returncode != 0:
-        return None
-    
-    try:
-        items = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-    
-    for item in items:
-        item_hash = item.get('md5', '').replace('.dir', '')
-        if item_hash == search_hash:
-            return item.get('path')
-    
-    return None
-
-
 def _check_source_changes(
     clone_path: Path,
     path: str,
@@ -237,7 +189,9 @@ def _check_source_changes(
         if 'not found' in error_msg.lower() or 'does not exist' in error_msg.lower():
             # Path might have moved - try to find by hash
             if current_hash:
-                new_path = _find_hash_in_repo(clone_path, current_hash, head_rev, verbose)
+                new_path = find_mod.find_hash_in_repo(
+                    current_hash, clone_path, revision=head_rev, verbose=verbose
+                )
                 if new_path:
                     return SourceChanges(
                         has_changes=False,  # Data unchanged, just moved
@@ -285,7 +239,9 @@ def _check_source_changes(
         
         if search_hash in {h.replace('.dir', '') for h in deleted_hashes}:
             # Our data was deleted - check if it moved
-            new_path = _find_hash_in_repo(clone_path, current_hash, head_rev, verbose)
+            new_path = find_mod.find_hash_in_repo(
+                current_hash, clone_path, revision=head_rev, verbose=verbose
+            )
             if new_path and new_path != path:
                 return SourceChanges(
                     has_changes=False,  # Data unchanged, just moved

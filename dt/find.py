@@ -3,8 +3,10 @@
 Reverse lookup: given a hash, find which workspace path(s) it corresponds to.
 """
 
+import json
+import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from dvc.repo import Repo
 
@@ -108,6 +110,78 @@ def find_by_hash(
                 pass
     
     return results
+
+
+def find_hash_in_repo(
+    target_hash: str,
+    repo: Union[str, Path],
+    revision: Optional[str] = None,
+    exact_match: bool = True,
+    verbose: bool = False,
+) -> Optional[str]:
+    """Find the path for a given hash in any DVC repository.
+    
+    Uses `dvc list --show-hash` to search for a file with the given hash.
+    Works with local paths or remote URLs at any git revision.
+    
+    Args:
+        target_hash: Hash to search for (with or without .dir suffix).
+        repo: Path to local repo directory or remote URL.
+        revision: Git revision to search at (default: HEAD).
+        exact_match: If True, require exact hash match; if False, allow prefix.
+        verbose: Print progress messages.
+        
+    Returns:
+        Path within the repo if found, None otherwise.
+    """
+    # Normalize hash (remove .dir suffix for comparison)
+    search_hash = target_hash.replace('.dir', '').lower()
+    
+    if verbose:
+        rev_str = revision[:12] if revision else "HEAD"
+        print(f"  Searching for hash {search_hash[:12]}... at {rev_str}...")
+    
+    # Build command
+    cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', str(repo), '.']
+    if revision:
+        cmd.extend(['--rev', revision])
+    
+    # If repo is a local path, run from that directory
+    cwd = str(repo) if Path(repo).is_dir() else None
+    if cwd:
+        # For local repos, use '.' as the repo arg
+        cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', '.']
+        if revision:
+            cmd.extend(['--rev', revision])
+    
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        if verbose:
+            print(f"  dvc list failed: {result.stderr.strip()}")
+        return None
+    
+    try:
+        items = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    
+    for item in items:
+        item_hash = item.get('md5', '').replace('.dir', '').lower()
+        if exact_match:
+            if item_hash == search_hash:
+                return item.get('path')
+        else:
+            # Prefix matching
+            if item_hash.startswith(search_hash) or search_hash.startswith(item_hash):
+                return item.get('path')
+    
+    return None
 
 
 def format_results(
