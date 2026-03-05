@@ -43,6 +43,7 @@ def _run_dvc_diff(
     old_rev: str = "HEAD",
     new_rev: Optional[str] = None,
     targets: Optional[List[str]] = None,
+    cwd: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Run dvc diff and return parsed JSON output.
     
@@ -50,6 +51,7 @@ def _run_dvc_diff(
         old_rev: Git revision for old version (default: HEAD)
         new_rev: Git revision for new version (default: None = workspace)
         targets: Optional list of paths to filter
+        cwd: Optional working directory to run command in
         
     Returns:
         Dict with 'added', 'deleted', 'modified', 'renamed' lists
@@ -59,17 +61,20 @@ def _run_dvc_diff(
     """
     cmd = ["dvc", "diff", "--json"]
     
-    # Add revisions
+    # Add targets before --
+    if targets:
+        cmd.extend(["--targets"] + targets)
+    
+    # Separator between options/targets and revisions
+    cmd.append("--")
+    
+    # Add revisions after --
     if new_rev:
         cmd.extend([old_rev, new_rev])
     else:
         cmd.append(old_rev)
     
-    # Add targets
-    if targets:
-        cmd.extend(targets)
-    
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
     
     if result.returncode != 0:
         error_msg = result.stderr.strip() if result.stderr else "Unknown error"
@@ -890,8 +895,8 @@ def content_diff(
         
         # Fetch old version
         try:
-            with dvc.api.open(path, rev=old_rev) as f:
-                old_file.write_bytes(f.read() if hasattr(f, 'read') else f)
+            with dvc.api.open(path, rev=old_rev, mode='rb') as f:
+                old_file.write_bytes(f.read())
         except Exception as e:
             raise DiffError(f"Failed to get '{path}' at revision '{old_rev}': {e}")
         
@@ -904,8 +909,8 @@ def content_diff(
             new_file = workspace_path
         else:
             try:
-                with dvc.api.open(path, rev=new_rev) as f:
-                    new_file.write_bytes(f.read() if hasattr(f, 'read') else f)
+                with dvc.api.open(path, rev=new_rev, mode='rb') as f:
+                    new_file.write_bytes(f.read())
             except Exception as e:
                 raise DiffError(f"Failed to get '{path}' at revision '{new_rev}': {e}")
         

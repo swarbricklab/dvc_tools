@@ -20,6 +20,8 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 from dvc.utils.serialize import dump_yaml
 
+from . import diff as diff_mod
+from . import find as find_mod
 from . import tmp as tmp_mod
 from . import utils
 from .errors import UpdateError
@@ -49,6 +51,9 @@ class SourceChanges:
     modified: int  
     deleted: int
     diff_summary: str  # Human-readable summary
+    new_path: Optional[str] = None  # If deleted but moved, the new path
+    diff_error: Optional[str] = None  # Error message if diff failed
+    diff_files: Optional[Dict] = None  # Raw diff data: {added: [...], modified: [...], deleted: [...]}
 
 
 # =============================================================================
@@ -117,19 +122,25 @@ def _check_source_changes(
     path: str,
     locked_rev: str,
     head_rev: str,
+    current_hash: Optional[str] = None,
+    verbose: bool = False,
 ) -> SourceChanges:
     """Check if source data has changed between locked_rev and HEAD.
     
-    Uses `dvc diff` in the cloned source repo to compare revisions.
+    Uses `dvc diff --targets` in the cloned source repo to compare revisions.
+    If the path appears deleted but the hash still exists elsewhere,
+    detects this as a move and returns the new path.
     
     Args:
         clone_path: Path to cloned source repo.
         path: Path within repo to check.
         locked_rev: Currently locked revision.
         head_rev: HEAD revision to compare against.
+        current_hash: Current hash of the tracked data (for move detection).
+        verbose: Print progress messages.
         
     Returns:
-        SourceChanges with comparison results.
+        SourceChanges with comparison results, including new_path if moved.
     """
     if locked_rev == head_rev:
         return SourceChanges(
@@ -141,29 +152,111 @@ def _check_source_changes(
             diff_summary="Same revision",
         )
     
-    # Run dvc diff in the clone
-    result = subprocess.run(
-        ['dvc', 'diff', '--json', locked_rev, head_rev],
+    # First check if locked_rev is valid
+    rev_check = subprocess.run(
+        ['git', 'rev-parse', '--verify', locked_rev],
         cwd=clone_path,
         capture_output=True,
         text=True,
     )
     
-    # Parse diff output
+    if rev_check.returncode != 0:
+        # Locked revision doesn't exist - cannot determine changes
+        return SourceChanges(
+            has_changes=True,  # Treat as changed since we can't verify
+            head_rev=head_rev,
+            added=0,
+            modified=0,
+            deleted=0,
+            diff_summary="Unknown locked revision",
+            diff_error=f"Revision {locked_rev[:12]}... not found in repo",
+        )
+    
+    # Run dvc diff using shared function
     try:
-        diff_data = json.loads(result.stdout) if result.stdout.strip() else {}
-    except json.JSONDecodeError:
-        # If diff fails or returns non-JSON, assume no changes
-        diff_data = {}
+        diff_data = diff_mod._run_dvc_diff(
+            old_rev=locked_rev,
+            new_rev=head_rev,
+            targets=[path],
+            cwd=clone_path,
+        )
+    except diff_mod.DiffError as e:
+        error_msg = str(e)
+        error_lower = error_msg.lower()
+        
+        # Check if it's a path/file not found error - meaning path doesn't exist at one revision
+        is_path_error = any(phrase in error_lower for phrase in [
+            'not found',
+            'does not exist',
+            'no such file or directory',
+        ])
+        
+        if is_path_error:
+            # Path might have moved - try to find by hash
+            if current_hash:
+                if verbose:
+                    print(f"  Path error detected, searching for hash {current_hash[:12]}...")
+                new_path = find_mod.find_hash_in_repo(
+                    current_hash, clone_path, revision=head_rev, verbose=verbose
+                )
+                if new_path:
+                    # Check if actually moved vs same path (rev_lock was just unknown)
+                    if new_path != path:
+                        return SourceChanges(
+                            has_changes=False,  # Data unchanged, just moved
+                            head_rev=head_rev,
+                            added=0,
+                            modified=0,
+                            deleted=1,  # Deleted from old path
+                            diff_summary=f"Moved: {path} → {new_path}",
+                            new_path=new_path,
+                        )
+                    else:
+                        # Same path, same hash - no changes, just rev_lock was unknown
+                        return SourceChanges(
+                            has_changes=False,
+                            head_rev=head_rev,
+                            added=0,
+                            modified=0,
+                            deleted=0,
+                            diff_summary="No changes (locked revision updated)",
+                        )
+        
+        # Other error - cannot determine changes
+        return SourceChanges(
+            has_changes=True,
+            head_rev=head_rev,
+            added=0,
+            modified=0,
+            deleted=0,
+            diff_summary="Diff failed",
+            diff_error=error_msg or "dvc diff returned non-zero",
+        )
     
-    # Filter to only changes in our path
-    def in_path(item):
-        item_path = item.get('path', '')
-        return item_path.startswith(path) or item_path == path
+    added = diff_data.get('added', [])
+    modified = diff_data.get('modified', [])
+    deleted = diff_data.get('deleted', [])
     
-    added = [i for i in diff_data.get('added', []) if in_path(i)]
-    modified = [i for i in diff_data.get('modified', []) if in_path(i)]
-    deleted = [i for i in diff_data.get('deleted', []) if in_path(i)]
+    # Check for moves: if our path is deleted but hash exists elsewhere
+    if deleted and current_hash:
+        deleted_hashes = {d.get('hash', {}).get('old', '') for d in deleted}
+        search_hash = current_hash.replace('.dir', '')
+        
+        if search_hash in {h.replace('.dir', '') for h in deleted_hashes}:
+            # Our data was deleted - check if it moved
+            new_path = find_mod.find_hash_in_repo(
+                current_hash, clone_path, revision=head_rev, verbose=verbose
+            )
+            if new_path and new_path != path:
+                return SourceChanges(
+                    has_changes=False,  # Data unchanged, just moved
+                    head_rev=head_rev,
+                    added=0,
+                    modified=0,
+                    deleted=1,
+                    diff_summary=f"Moved: {path} → {new_path}",
+                    new_path=new_path,
+                )
     
     has_changes = bool(added or modified or deleted)
     
@@ -176,6 +269,13 @@ def _check_source_changes(
     if deleted:
         parts.append(f"-{len(deleted)} deleted")
     
+    # Store file paths for detailed status output
+    diff_files = {
+        'added': [f.get('path', '') for f in added],
+        'modified': [f.get('path', '') for f in modified],
+        'deleted': [f.get('path', '') for f in deleted],
+    }
+    
     return SourceChanges(
         has_changes=has_changes,
         head_rev=head_rev,
@@ -183,7 +283,33 @@ def _check_source_changes(
         modified=len(modified),
         deleted=len(deleted),
         diff_summary=', '.join(parts) if parts else "No changes",
+        diff_files=diff_files,
     )
+
+
+def _print_status_summary(changes: SourceChanges, max_files: int = 5):
+    """Print a compact diff summary for --status output.
+    
+    Args:
+        changes: SourceChanges with diff files data.
+        max_files: Max files to show per category before truncating.
+    """
+    if not changes.diff_files:
+        return
+    
+    for category, prefix in [('added', '+'), ('modified', '~'), ('deleted', '-')]:
+        files = changes.diff_files.get(category, [])
+        if not files:
+            continue
+        
+        # Show up to max_files
+        shown = files[:max_files]
+        for f in shown:
+            print(f"    {prefix} {f}")
+        
+        remaining = len(files) - max_files
+        if remaining > 0:
+            print(f"    {prefix} ... and {remaining} more")
 
 
 def _get_file_listing(
@@ -296,16 +422,18 @@ def _update_dvc_file(
     dvc_path: Path,
     new_hash: str,
     new_rev: Optional[str] = None,
+    new_path: Optional[str] = None,
     size: Optional[int] = None,
     nfiles: Optional[int] = None,
     verbose: bool = False,
 ) -> bool:
-    """Update the .dvc file with new hash, size, nfiles, and optionally new revision.
+    """Update the .dvc file with new hash, size, nfiles, and optionally new revision/path.
     
     Args:
         dvc_path: Path to the .dvc file.
         new_hash: New outs.md5 hash (with .dir suffix if directory).
         new_rev: New deps.repo.rev_lock (None to keep current).
+        new_path: New deps.path if source path has changed (None to keep current).
         size: Total size in bytes (None to omit).
         nfiles: Number of files for directories (None to omit).
         verbose: Print progress messages.
@@ -363,6 +491,17 @@ def _update_dvc_file(
                         if verbose:
                             old_str = f"{old_rev[:12]}..." if old_rev else "None"
                             print(f"  Updated rev_lock: {old_str} → {new_rev[:12]}...")
+        
+        # Update deps.path if source path has changed
+        if new_path:
+            deps = data.get('deps', [])
+            for dep in deps:
+                old_path = dep.get('path', '')
+                if old_path != new_path:
+                    dep['path'] = new_path
+                    modified = True
+                    if verbose:
+                        print(f"  Updated deps.path: {old_path} → {new_path}")
         
         if modified:
             data = utils.recompute_dvc_md5(data)
@@ -431,6 +570,9 @@ def update(
     no_download: bool = False,
     dry_run: bool = False,
     cache: Optional[str] = None,
+    rebuild: bool = False,
+    force: bool = False,
+    show_status: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Update import .dvc files by rebuilding .dir manifests.
     
@@ -441,7 +583,9 @@ def update(
     If --rev is not specified:
     - Checks if data at the import path has changed between locked rev and HEAD
     - If no changes: safely upgrades to HEAD
-    - If changes detected: stops and asks user to specify --rev
+    - If changes detected: stops and asks user to specify --rev or --force
+    - If --rebuild: rebuilds at locked rev (skips change detection)
+    - If --force: accepts changes and updates to HEAD
     
     Args:
         targets: .dvc files to update. If None, updates all import files.
@@ -450,6 +594,9 @@ def update(
         no_download: Skip dt fetch after rebuilding .dir.
         dry_run: Show what would be done without making changes.
         cache: Explicit cache path. If None, uses primary cache.
+        rebuild: Force rebuild at locked rev (skips change detection).
+        force: Accept data changes and update to HEAD.
+        show_status: Show summary output mode (suppresses per-file details).
         
     Note:
         Rebuilt .dir files are always pushed to the source remote.
@@ -468,9 +615,14 @@ def update(
     
     results = []
     updated_targets = []
+    total_targets = len(targets)
     
-    for target in targets:
+    for idx, target in enumerate(targets, 1):
         target_path = Path(target)
+        
+        # Show progress in status mode
+        if show_status:
+            print(f"\rChecking {idx}/{total_targets}...", end="", flush=True)
         
         # Validate target exists
         if not target_path.exists():
@@ -490,10 +642,11 @@ def update(
             results.append((target, False, "No source URL in import"))
             continue
         
-        print(f"\n{target_path}:")
-        print(f"  Source: {info.repo_url}")
-        print(f"  Path: {info.path}")
-        print(f"  Locked rev: {info.locked_rev[:12]}...")
+        if not show_status:
+            print(f"\n{target_path}:")
+            print(f"  Source: {info.repo_url}")
+            print(f"  Path: {info.path}")
+            print(f"  Locked rev: {info.locked_rev[:12]}...")
         
         # Get or create clone
         try:
@@ -503,47 +656,115 @@ def update(
             continue
         
         # Determine target revision
+        # Initialize source_path - may be updated if move is detected
+        source_path = info.path
+        path_changed = False
+        
         if rev:
             # Explicit revision specified
             target_rev = rev
             if target_rev == 'HEAD':
                 target_rev = _get_head_rev(clone_path)
-            print(f"  Target rev: {target_rev[:12]}... (specified)")
+            if not show_status:
+                print(f"  Target rev: {target_rev[:12]}... (specified)")
         else:
             # Smart detection: check for changes
             head_rev = _get_head_rev(clone_path)
             
-            if head_rev == info.locked_rev:
+            if rebuild:
+                # --rebuild: skip change detection, just rebuild at locked rev
+                target_rev = info.locked_rev
+                if not show_status:
+                    print(f"  Rebuilding .dir at locked rev ({target_rev[:12]}...)")
+            elif head_rev == info.locked_rev:
                 # Same revision - just refresh .dir
                 target_rev = info.locked_rev
-                print(f"  HEAD same as locked ({head_rev[:12]}...) - refreshing .dir")
+                if not show_status:
+                    print(f"  HEAD same as locked ({head_rev[:12]}...) - refreshing .dir")
             else:
                 # Check for data changes
-                print(f"  HEAD rev: {head_rev[:12]}...")
-                print(f"  Checking for data changes...")
+                if not show_status:
+                    print(f"  HEAD rev: {head_rev[:12]}...")
+                    print(f"  Checking for data changes...")
                 
                 changes = _check_source_changes(
-                    clone_path, info.path, info.locked_rev, head_rev
+                    clone_path, info.path, info.locked_rev, head_rev,
+                    current_hash=info.current_hash, verbose=verbose
                 )
                 
-                if changes.has_changes:
-                    # Data changed - cannot auto-update
-                    print(f"  ⚠ Data has changed: {changes.diff_summary}")
-                    print()
-                    print(f"  Cannot auto-update when data has changed.")
-                    print(f"  Specify which version:")
-                    print(f"    dt update --rev {info.locked_rev[:12]} {target_path}  # Keep current")
-                    print(f"    dt update --rev HEAD {target_path}  # Get new data")
-                    print()
-                    print(f"  To see details:")
-                    print(f"    (cd {clone_path} && dvc diff {info.locked_rev[:12]} {head_rev[:12]})")
+                # Handle diff errors (e.g., unknown revision)
+                if changes.diff_error:
+                    if not show_status:
+                        print(f"  ⚠ {changes.diff_error}")
+                        print()
+                        print(f"  Cannot auto-detect changes. Specify version explicitly:")
+                        print(f"    dt update --rev HEAD {target_path}  # Use latest")
                     results.append((str(target_path), False, 
-                        f"Data changed ({changes.diff_summary}). Specify --rev"))
+                        f"Diff failed: {changes.diff_error}. Specify --rev"))
                     continue
+                
+                # Handle path move detection
+                if changes.new_path:
+                    if not show_status:
+                        print(f"  ✓ Data moved: {info.path} → {changes.new_path}")
+                    # Update path for subsequent operations
+                    source_path = changes.new_path
+                    path_changed = True
+                else:
+                    source_path = info.path
+                    path_changed = False
+                
+                if changes.has_changes:
+                    # Data changed
+                    if force:
+                        # --force: accept changes and update to HEAD
+                        target_rev = head_rev
+                        if not show_status:
+                            print(f"  ⚠ Data has changed: {changes.diff_summary}")
+                            print(f"  → Updating to HEAD (--force)")
+                    else:
+                        # Stop and show options
+                        if not show_status:
+                            print(f"  ⚠ Data has changed: {changes.diff_summary}")
+                            print()
+                            print(f"  Cannot auto-update when data has changed.")
+                            print(f"  Options:")
+                            print(f"    dt update --force {target_path}  # Accept new data from HEAD")
+                            print(f"    dt update --rebuild {target_path}  # Rebuild .dir at current lock")
+                            print(f"    dt update --rev <rev> {target_path}  # Update to specific revision")
+                            print()
+                            print(f"  To inspect changes at source:")
+                            print(f"    cd {clone_path}")
+                            print(f"    dvc diff {info.locked_rev[:12]} {head_rev[:12]} -- {info.path}")
+                        results.append((str(target_path), False, 
+                            f"Data changed ({changes.diff_summary})"))
+                        continue
                 else:
                     # No data changes - safe to upgrade
                     target_rev = head_rev
-                    print(f"  ✓ No data changes - upgrading to HEAD")
+                    if path_changed:
+                        if dry_run:
+                            if not show_status:
+                                print(f"  ✓ No data changes (path moved) - would update to {head_rev[:12]}...")
+                            results.append((str(target_path), True, f"Up to date (path moved)"))
+                        else:
+                            if not show_status:
+                                print(f"  ✓ No data changes (path moved) - updating to {head_rev[:12]}...")
+                    else:
+                        # Fast path: just update rev_lock without re-listing source
+                        if dry_run:
+                            if not show_status:
+                                print(f"  ✓ No data changes - would update rev_lock to {head_rev[:12]}...")
+                            results.append((str(target_path), True, f"Up to date"))
+                        else:
+                            if not show_status:
+                                print(f"  ✓ No data changes - updating rev_lock to {head_rev[:12]}...")
+                            _update_dvc_file(
+                                target_path, info.current_hash, head_rev,
+                                verbose=verbose
+                            )
+                            results.append((str(target_path), True, f"Updated rev_lock to {head_rev[:12]}..."))
+                        continue
         
         if dry_run:
             results.append((str(target_path), True, f"Would update to {target_rev[:12]}..."))
@@ -552,7 +773,7 @@ def update(
         # Get file listing from source
         try:
             entries = _get_file_listing(
-                info.repo_url, info.path, target_rev, verbose=verbose
+                info.repo_url, source_path, target_rev, verbose=verbose
             )
         except UpdateError as e:
             results.append((str(target_path), False, str(e)))
@@ -565,7 +786,7 @@ def update(
         
         # Check if this is a single file or directory import
         # Single file: exactly 1 entry where path is just the filename
-        source_filename = Path(info.path).name
+        source_filename = Path(source_path).name
         is_single_file = (
             len(entries) == 1 and 
             entries[0]['relpath'] == source_filename
@@ -583,17 +804,21 @@ def update(
             needs_update = (
                 file_hash != info.current_hash or 
                 target_rev != info.locked_rev or
-                file_size is not None  # Always update if we have size info
+                file_size is not None or  # Always update if we have size info
+                path_changed  # Update if source path changed
             )
             
             if needs_update:
                 new_rev = target_rev if target_rev != info.locked_rev else None
                 _update_dvc_file(
                     target_path, file_hash, new_rev,
+                    new_path=source_path if path_changed else None,
                     size=file_size,
                     verbose=verbose
                 )
-                if file_hash != info.current_hash:
+                if path_changed:
+                    results.append((str(target_path), True, f"Moved to {source_path}"))
+                elif file_hash != info.current_hash:
                     results.append((str(target_path), True, f"Updated hash to {file_hash[:12]}..."))
                 elif target_rev != info.locked_rev:
                     results.append((str(target_path), True, f"Updated rev to {target_rev[:12]}..."))
@@ -629,10 +854,11 @@ def update(
         # Write to cache
         dir_hash, dir_file = _write_dir_to_cache(manifest_content, cache_base, verbose)
         
-        # Update .dvc file with size and nfiles metadata
+        # Update .dvc file with size, nfiles, and path metadata
         new_rev = target_rev if target_rev != info.locked_rev else None
         _update_dvc_file(
             target_path, dir_hash, new_rev,
+            new_path=source_path if path_changed else None,
             size=total_size if has_size_data else None,
             nfiles=nfiles,
             verbose=verbose
@@ -651,7 +877,10 @@ def update(
         
         updated_targets.append(str(target_path))
         size_str = f", {utils.format_size(total_size, True)}" if has_size_data else ""
-        results.append((str(target_path), True, f"Built .dir ({nfiles} files{size_str})"))
+        if path_changed:
+            results.append((str(target_path), True, f"Moved to {source_path} ({nfiles} files{size_str})"))
+        else:
+            results.append((str(target_path), True, f"Built .dir ({nfiles} files{size_str})"))
     
     # Run dt fetch for updated targets (unless --no-download)
     if updated_targets and not no_download and not dry_run:
@@ -678,6 +907,10 @@ def update(
                     print(f"  Checked out: {target}")
             except Exception as e:
                 print(f"  Warning: checkout failed for {target}: {e}")
+    
+    # Clear progress line if we were showing status
+    if show_status:
+        print("\r" + " " * 40 + "\r", end="", flush=True)
     
     return results
 
