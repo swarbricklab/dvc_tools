@@ -172,7 +172,7 @@ def find_hash_in_repo(
         return None
     
     for item in items:
-        item_hash = item.get('md5', '').replace('.dir', '').lower()
+        item_hash = (item.get('md5') or '').replace('.dir', '').lower()
         if exact_match:
             if item_hash == search_hash:
                 return item.get('path')
