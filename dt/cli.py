@@ -2317,10 +2317,13 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('--rev', default=None, help='Git revision to update to. If not specified, checks for changes and auto-upgrades to HEAD if safe.')
 @click.option('--no-download', is_flag=True, help='Rebuild .dir only, do not run dt fetch')
-@click.option('--dry-run', is_flag=True, help='Show what would be done without making changes')
+@click.option('--rebuild', is_flag=True, help='Rebuild .dir at locked rev (skips change detection)')
+@click.option('--force', is_flag=True, help='Update to HEAD even when data has changed upstream')
+@click.option('--dry-run', '--dry', is_flag=True, help='Show what would be done without making changes')
+@click.option('--status', is_flag=True, help='Show import status summary (implies --dry-run)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-def update(targets, rev, no_download, dry_run, verbose, no_index_sync):
+def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose, no_index_sync):
     """Update imported data by rebuilding .dir manifests.
     
     Rebuilds .dir files for repo imports where the directory manifest
@@ -2328,30 +2331,32 @@ def update(targets, rev, no_download, dry_run, verbose, no_index_sync):
     populate the cache correctly.
     
     \b
-    Smart Revision Detection:
-    When --rev is not specified, dt update checks if the source data
-    has changed between the locked revision and HEAD:
+    When to use each option:
     
-    - If no changes: safely upgrades to HEAD
-    - If data changed: stops and shows options (--rev locked or --rev HEAD)
-    
-    Use --rev to explicitly specify a version:
-    - --rev HEAD: update to latest
-    - --rev v1.2.0: update to a tag
-    - --rev abc1234: update to a specific commit
-    - --rev <current>: refresh .dir without changing version
+      (no options)  Smart update - upgrades to HEAD if no data changes,
+                    otherwise stops and shows options
+      --rebuild     Fix missing .dir at locked rev without checking HEAD
+      --force       Accept upstream data changes and update to HEAD
+      --rev <rev>   Update to a specific revision (tag, commit, HEAD)
     
     \b
-    Examples:
-        dt update                    # Smart update all imports
-        dt update data/external.dvc  # Update specific file
-        dt update --rev HEAD         # Force update to latest
-        dt update --no-download      # Rebuild .dir only
-        dt update --dry-run          # Show what would be done
+    Common workflows:
     
+      dt update --status           # Check status of all imports
+      dt update --rebuild          # Fix .dir files at current lock
+      dt update --force            # Accept new data from HEAD
+      dt update --rev v1.0.0       # Pin to specific tag
+      dt update data/file.dvc      # Update single import
+    
+    \b
     Note: Rebuilt .dir files are always pushed to the source remote.
     """
     try:
+        # --status implies --dry-run
+        if status:
+            dry_run = True
+            verbose = False  # Suppress per-file details in status mode
+        
         # Sync index from mirror before update (if configured)
         if not no_index_sync and index_mod.is_auto_sync_enabled():
             try:
@@ -2366,19 +2371,69 @@ def update(targets, rev, no_download, dry_run, verbose, no_index_sync):
             verbose=verbose,
             no_download=no_download,
             dry_run=dry_run,
+            rebuild=rebuild,
+            force=force,
+            show_status=status,
         )
         
         any_success = False
         any_failure = False
         
-        for target, success, message in results:
-            status = "✓" if success else "✗"
-            click.echo(f"{status} {target}: {message}")
+        if status:
+            # Status mode: print a clean summary
+            up_to_date = []
+            changed = []
+            errors = []
             
-            if success:
-                any_success = True
-            else:
-                any_failure = True
+            for target, success, message in results:
+                if success:
+                    if 'Up to date' in message or 'Would update rev_lock' in message:
+                        up_to_date.append(target)
+                    else:
+                        up_to_date.append(target)  # Any other success is up to date in status mode
+                    any_success = True
+                else:
+                    if 'Data changed' in message:
+                        changed.append((target, message))
+                    else:
+                        errors.append((target, message))
+                    any_failure = True
+            
+            # Print up-to-date imports
+            if up_to_date:
+                click.echo(f"\nUp to date ({len(up_to_date)} imports):")
+                for target in up_to_date:
+                    click.echo(f"  {target}")
+            
+            # Print changed imports
+            if changed:
+                click.echo(f"\nData changed ({len(changed)} imports):")
+                for target, message in changed:
+                    # Extract change summary from message
+                    summary = message.replace('Data changed (', '').rstrip(')')
+                    click.echo(f"  {target}: {summary}")
+                
+                click.echo()
+                click.echo("To process changed imports:")
+                click.echo("  dt update --force    # Accept new data from HEAD")
+                click.echo("  dt update --rebuild  # Fix .dir at current lock")
+                click.echo("See dt update --help for more options.")
+            
+            # Print errors
+            if errors:
+                click.echo(f"\nErrors ({len(errors)} imports):")
+                for target, message in errors:
+                    click.echo(f"  ✗ {target}: {message}")
+        else:
+            # Normal mode: print per-file results
+            for target, success, message in results:
+                status_char = "✓" if success else "✗"
+                click.echo(f"{status_char} {target}: {message}")
+                
+                if success:
+                    any_success = True
+                else:
+                    any_failure = True
         
         # Sync index to mirror after update (if configured)
         if any_success and not no_index_sync and index_mod.is_auto_sync_enabled():

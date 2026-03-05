@@ -150,9 +150,9 @@ def clone_repo(
 ) -> Path:
     """Clone or refresh a repository in .dt/tmp/clones/.
     
-    Creates a shallow clone with full checkout (not sparse) so that
-    dvc.yaml, dvc.lock, and all .dvc files are available for DVC
-    commands like `dvc list`.
+    Creates a full clone so that dvc.yaml, dvc.lock, and all .dvc files
+    are available for DVC commands like `dvc list` and `dvc diff` can
+    compare against any revision.
     
     Args:
         repo_spec: Repository URL or short name
@@ -197,9 +197,9 @@ def clone_repo(
     if verbose:
         print(f"Cloning {url} to .dt/tmp/clones/{repo_id}...")
 
-    # Full shallow clone (depth 1 for speed, but full checkout for dvc.yaml etc)
+    # Full clone for dvc.yaml etc and to support dvc diff against any revision
     result = subprocess.run(
-        ['git', 'clone', '--depth', '1', '--single-branch', url, str(repo_path)],
+        ['git', 'clone', url, str(repo_path)],
         capture_output=True,
         text=True,
     )

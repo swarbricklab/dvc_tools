@@ -40,54 +40,70 @@ This means running `dt update` without `--rev` will **not** accidentally update 
 | Option | Description |
 |--------|-------------|
 | `--rev TEXT` | Git revision (commit, branch, tag) to update to. |
+| `--rebuild` | Fix .dir at locked rev even if upstream data has changed (warns but continues). |
 | `--no-download` | Rebuild .dir file only, do not download data. |
-| `--dry-run` | Show what would be updated without making changes. |
+| `--dry-run`, `--status` | Show what would be updated without making changes. Useful for checking import status. |
 | `-v, --verbose` | Show detailed progress. |
 | `--no-index-sync` | Skip automatic index mirror sync. |
 
-## Examples
+## Use Cases
 
-### Rebuild .dir manifests at locked revision
+### 1. Fix missing .dir manifests (most common)
 
-The most common use case—rebuild missing `.dir` files without changing the locked revision:
+When `dt fetch` fails because a `.dir` manifest is missing from the remote:
 
 ```bash
 dt update data/external.dvc
 ```
 
-### Preview what would be updated
+This rebuilds the `.dir` at the currently locked revision without changing any data.
+
+### 2. Check import status
+
+See what would be updated across all imports without making changes:
 
 ```bash
+dt update --status
+# or
 dt update --dry-run
 ```
 
-### Update to specific tag
+### 3. Update to new data (like dvc update)
+
+When you want the latest version from upstream:
+
+```bash
+dt update --rev HEAD data/shared.csv.dvc
+```
+
+Or update to a specific tag/commit:
 
 ```bash
 dt update --rev v1.2.0
-```
-
-### Update to branch HEAD
-
-```bash
-dt update --rev main
-```
-
-### Update to specific commit
-
-```bash
 dt update --rev abc1234
 ```
 
-### Update without downloading data
+### 4. Fix .dir when upstream has changed
 
-Rebuild the `.dir` manifest without downloading the actual files:
+When the `.dir` is missing AND upstream data has changed, but you want to stay at your current version:
 
 ```bash
-dt update --no-download data/external.dvc
+dt update --rebuild data/external.dvc
 ```
 
-### Update with verbose output
+This warns about upstream changes but rebuilds the `.dir` at the locked revision.
+
+### 5. Update without downloading
+
+For CI/CD or when you only want to update the reference:
+
+```bash
+dt update --no-download --rev main
+```
+
+This updates references without downloading data - useful for CI/CD.
+
+### 6. Verbose output
 
 ```bash
 dt update -v data/external.dvc
@@ -108,30 +124,13 @@ dt fetch imported/dir.dvc
 # Option 1: Use dt fetch --update (automatic recovery)
 dt fetch --update imported/dir.dvc
 
-# Option 2: Run dt update manually
+# Option 2: Run dt update manually then fetch
 dt update imported/dir.dvc
 dt fetch imported/dir.dvc
+
+# Option 3: If upstream has changed but you want to stay at locked rev
+dt update --rebuild imported/dir.dvc
 ```
-
-### Updating to a new version
-
-When you want the latest version from upstream:
-
-```bash
-dt update --rev main data/shared.csv.dvc
-```
-
-This updates the .dvc file, fetches the data to cache, and checks out the files to your workspace—all in one command.
-
-### Update without downloading
-
-For CI/CD or when you only want to update the reference:
-
-```bash
-dt update --no-download --rev main
-```
-
-This updates the .dvc file to point to the new revision and rebuilds the `.dir` manifest, but doesn't download the actual data files.
 
 ## How it works
 
