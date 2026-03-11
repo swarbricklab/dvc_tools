@@ -25,6 +25,8 @@ from . import ls as ls_mod
 from . import index as index_mod
 from . import cache_index as cache_index_mod
 from . import update as update_mod
+from . import install as install_mod
+from . import status as status_mod
 from . import utils
 
 
@@ -3057,6 +3059,319 @@ def migrate(targets, dry, verbose, cache_root, find_v2):
         raise click.ClickException(
             f'{error_count} file(s) could not be migrated'
         )
+
+
+# =============================================================================
+# dt install / uninstall
+# =============================================================================
+
+@cli.command()
+@click.option('--force', is_flag=True, help='Overwrite existing hooks not installed by dt')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def install(force, verbose):
+    """Install git hooks and DVC merge driver.
+
+    Writes hook scripts to .git/hooks/ that delegate to ``dt hook run``.
+    Also sets up the DVC merge driver for automatic .dvc file conflict
+    resolution, and writes sensible default check configuration to the
+    project config.
+
+    \b
+    Hooks installed:
+        pre-commit      Run dvc status, reject large files
+        post-checkout   Update DVC files after branch switch
+        pre-push        Push DVC cache to remotes
+
+    \b
+    Examples:
+        dt install            # Install hooks
+        dt install --force    # Overwrite existing hooks
+        dt install -v         # Verbose output
+    """
+    try:
+        installed = install_mod.install(force=force, verbose=verbose)
+        if installed:
+            click.echo(f"Installed {len(installed)} hook(s): {', '.join(installed)}")
+            click.echo("Run 'dt hook list' to see configured checks.")
+        else:
+            click.echo("No hooks installed.")
+    except install_mod.InstallError as e:
+        raise click.ClickException(str(e))
+
+
+@cli.command()
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def uninstall(verbose):
+    """Remove git hooks installed by dt.
+
+    Only removes hooks that were installed by ``dt install``.
+    Other hook files are left untouched.
+
+    \b
+    Examples:
+        dt uninstall       # Remove dt hooks
+        dt uninstall -v    # Verbose output
+    """
+    try:
+        removed = install_mod.uninstall(verbose=verbose)
+        if removed:
+            click.echo(f"Removed {len(removed)} hook(s): {', '.join(removed)}")
+        else:
+            click.echo("No dt hooks found to remove.")
+    except install_mod.InstallError as e:
+        raise click.ClickException(str(e))
+
+
+# =============================================================================
+# dt hook
+# =============================================================================
+
+@cli.group()
+def hook():
+    """Manage and run git hook checks.
+
+    Hooks are configured via ``dt config hooks.*`` keys. Use ``dt hook list``
+    to see what checks are enabled for each hook.
+    """
+    pass
+
+
+@hook.command('run')
+@click.argument('hook_name')
+@click.argument('args', nargs=-1)
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def hook_run(hook_name, args, verbose):
+    """Run all enabled checks for a git hook.
+
+    This command is called by the git hook scripts installed by
+    ``dt install``. It reads the check configuration and runs each
+    enabled check in order.
+
+    HOOK_NAME is the git hook (pre-commit, post-checkout, pre-push).
+
+    \b
+    Examples:
+        dt hook run pre-commit
+        dt hook run post-checkout abc123 def456 1
+    """
+    try:
+        install_mod.hook_run(
+            hook_name=hook_name,
+            hook_args=list(args),
+            verbose=verbose,
+        )
+    except install_mod.HookError as e:
+        # Print the error message and exit non-zero to abort the git operation
+        click.echo(str(e), err=True)
+        raise SystemExit(1)
+
+
+@hook.command('list')
+def hook_list():
+    """Show configured checks for each git hook.
+
+    Displays check name, mode (sync/async), config scope, and any
+    extra settings. Disabled checks are marked.
+
+    \b
+    Examples:
+        dt hook list
+    """
+    all_checks = install_mod.hook_list()
+
+    for hook_name, checks in all_checks.items():
+        click.echo(f"{hook_name}:")
+        if not checks:
+            click.echo("  (no checks configured)")
+            continue
+        for check in checks:
+            name = check['name']
+            mode = check.get('mode', 'sync')
+            source = check.get('source', '?')
+            enabled = check.get('enabled', True)
+
+            parts = [f"  {name:<20s} {mode:<6s} ({source})"]
+
+            # Show extra settings
+            if check.get('command'):
+                parts.append(f"  command: {check['command']}")
+            if name == 'large-files':
+                parts.append(f"  max_size={check.get('max_size', '50MB')}")
+            if not enabled:
+                parts.append("  DISABLED")
+
+            click.echo(''.join(parts))
+        click.echo()
+
+
+@hook.command('run-check')
+@click.argument('hook_name')
+@click.argument('check_name')
+@click.argument('args', nargs=-1)
+@click.option('--worker', is_flag=True, hidden=True,
+              help='Internal: run the check directly (used by compute node).')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def hook_run_check(hook_name, check_name, args, worker, verbose):
+    """Run a single check, optionally via qxub.
+
+    Without --worker, submits the check to a compute node via qxub.
+    With --worker, runs the check directly and saves the result to
+    .dt/hook-results/.
+
+    HOOK_NAME is the git hook (pre-commit, post-checkout, pre-push).
+    CHECK_NAME is the name of the check to run.
+
+    \b
+    Examples:
+        dt hook run-check pre-commit dvc-status
+        dt hook run-check pre-commit large-files --worker
+    """
+    try:
+        if worker:
+            passed = install_mod.run_check(
+                hook_name=hook_name,
+                check_name=check_name,
+                hook_args=list(args),
+                verbose=verbose,
+            )
+            if not passed:
+                raise SystemExit(1)
+        else:
+            # Dispatch via qxub
+            job_id = install_mod._dispatch_async_check(
+                name=check_name,
+                hook_name=hook_name,
+                check_cfg={},
+                hook_args=list(args),
+                verbose=verbose,
+            )
+            if job_id:
+                click.echo(f"Submitted job {job_id}")
+                click.echo("Run 'dt hook results' to see results when complete.")
+            else:
+                click.echo("Failed to submit async check.", err=True)
+                raise SystemExit(1)
+    except install_mod.HookError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(1)
+
+
+@hook.command('results')
+@click.option('-n', '--limit', default=20, type=int,
+              help='Maximum number of results to show.')
+@click.option('--clear', is_flag=True, help='Remove result files.')
+@click.option('--days', type=int, default=None,
+              help='With --clear, only remove results older than N days.')
+def hook_results(limit, clear, days):
+    """Show or clear async hook check results.
+
+    Displays recent results from .dt/hook-results/, most recent first.
+    Use --clear to remove old result files.
+
+    \b
+    Examples:
+        dt hook results            # Show recent results
+        dt hook results -n 5       # Show last 5 results
+        dt hook results --clear    # Remove all results
+        dt hook results --clear --days 7   # Remove results older than 7 days
+    """
+    if clear:
+        removed = install_mod.clear_hook_results(older_than_days=days)
+        if days is not None:
+            click.echo(f"Removed {removed} result(s) older than {days} day(s).")
+        else:
+            click.echo(f"Removed {removed} result(s).")
+        return
+
+    results = install_mod.list_hook_results(limit=limit)
+    if not results:
+        click.echo("No hook results found.")
+        return
+
+    for r in results:
+        status_char = '\u2713' if r.get('passed') else '\u2717'
+        ts = r.get('timestamp', '?')
+        # Truncate to seconds
+        if 'T' in ts:
+            ts = ts.split('.')[0].replace('T', ' ')
+        hook = r.get('hook', '?')
+        check = r.get('check', '?')
+        click.echo(f"{status_char} {ts}  {hook}/{check}")
+        output = r.get('output', '')
+        if output:
+            for line in output.splitlines()[:5]:
+                click.echo(f"    {line}")
+            if len(output.splitlines()) > 5:
+                click.echo(f"    ... ({len(output.splitlines()) - 5} more lines)")
+
+
+@hook.group('check')
+def hook_check():
+    """Run individual built-in checks."""
+    pass
+
+
+@hook_check.command('large-files')
+@click.option('--max-size', default='50MB', help='Maximum file size (e.g. 50MB, 1GB)')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def hook_check_large_files(max_size, verbose):
+    """Check that staged files do not exceed a size limit.
+
+    Scans ``git diff --cached`` for files larger than MAX_SIZE.
+    Files with .dvc extension are excluded.
+
+    \b
+    Examples:
+        dt hook check large-files
+        dt hook check large-files --max-size 100MB
+    """
+    try:
+        install_mod.check_large_files(max_size_str=max_size, verbose=verbose)
+        click.echo("All staged files within size limit.")
+    except install_mod.HookError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(1)
+
+
+# =============================================================================
+# dt status
+# =============================================================================
+
+@cli.command(
+    'status',
+    context_settings=dict(
+        ignore_unknown_options=True,
+        allow_extra_args=True,
+    ),
+)
+@click.option('--imports', is_flag=True, help='Also show import freshness (runs dt update --status)')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+@click.pass_context
+def status(ctx, imports, verbose):
+    """Show DVC pipeline and stage status.
+
+    Wraps ``dvc status`` with automatic index sync. Reports changed
+    deps, outs, and missing cache entries.
+
+    Use --imports to additionally check if imports are stale.
+
+    \b
+    Examples:
+        dt status                 # Show pipeline status
+        dt status --imports       # Also check import freshness
+        dt status --granular      # Pass-through to dvc status
+    """
+    try:
+        dvc_args = list(ctx.args) if ctx.args else None
+        rc = status_mod.status(
+            imports=imports,
+            verbose=verbose,
+            dvc_args=dvc_args,
+        )
+        if rc != 0:
+            raise SystemExit(rc)
+    except status_mod.StatusError as e:
+        raise click.ClickException(str(e))
 
 
 if __name__ == '__main__':

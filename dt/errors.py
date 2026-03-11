@@ -135,6 +135,11 @@ class RemoteError(DTError):
     pass
 
 
+class StatusError(DTError):
+    """Error during status operations."""
+    pass
+
+
 class SummaryError(DTError):
     """Error during summary operations."""
     pass
@@ -142,6 +147,16 @@ class SummaryError(DTError):
 
 class TmpError(DTError):
     """Error during tmp operations."""
+    pass
+
+
+class HookError(DTError):
+    """Error during hook operations."""
+    pass
+
+
+class InstallError(DTError):
+    """Error during hook installation."""
     pass
 
 
