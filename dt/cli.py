@@ -3196,7 +3196,7 @@ def hook_list():
             if check.get('command'):
                 parts.append(f"  command: {check['command']}")
             if name == 'large-files':
-                parts.append(f"  max_size={check.get('max_size', '50MB')}")
+                parts.append(f"  max_size={check.get('max_size', '1MB')}")
             if not enabled:
                 parts.append("  DISABLED")
 
@@ -3312,7 +3312,7 @@ def hook_check():
 
 
 @hook_check.command('large-files')
-@click.option('--max-size', default='50MB', help='Maximum file size (e.g. 50MB, 1GB)')
+@click.option('--max-size', default='1MB', help='Maximum file size (e.g. 1MB, 10MB, 1GB)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 def hook_check_large_files(max_size, verbose):
     """Check that staged files do not exceed a size limit.

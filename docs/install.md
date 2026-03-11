@@ -38,7 +38,7 @@ git config so `.dvc` file conflicts are resolved automatically.
 | Hook | Check | Mode | What it does |
 |------|-------|------|--------------|
 | `pre-commit` | `dvc-status` | sync | Runs `dvc status` to warn about uncommitted DVC changes |
-| `pre-commit` | `large-files` | sync | Rejects staged files larger than `max_size` (default 50 MB) |
+| `pre-commit` | `large-files` | sync | Rejects staged files larger than `max_size` (default 1 MB) |
 | `post-checkout` | `dvc-checkout` | sync | Runs `dvc checkout` after branch switch (skips file checkouts and rebases) |
 | `post-checkout` | `index-sync` | sync | Pulls then pushes the site cache index |
 | `pre-push` | `dvc-push` | sync | Pushes DVC cache to remotes before git push |
@@ -101,7 +101,7 @@ Example output:
 ```
 pre-commit:
   dvc-status           sync   (local)
-  large-files          sync   (local)  max_size=50MB
+  large-files          sync   (local)  max_size=1MB
 
 post-checkout:
   dvc-checkout         sync   (local)
@@ -143,7 +143,7 @@ dt hook check large-files [--max-size SIZE] [-v]
 ```
 
 Stand-alone invocation of the built-in large-file guard.  Scans
-`git diff --cached` for files exceeding `SIZE` (default `50MB`).
+`git diff --cached` for files exceeding `SIZE` (default `1MB`).
 Files with `.dvc` extension are excluded.
 
 ```bash
@@ -198,8 +198,12 @@ Displays recent async check results, most recent first:
 ```
 ✓ 2026-03-11 14:32:01  pre-commit/dvc-status
 ✗ 2026-03-11 14:31:58  pre-commit/large-files
-    Files exceed 50MB limit (use DVC to track large files):
+    Files exceed 1MB limit:
       data/big_matrix.npy (128.5MB)
+
+    Track large files with DVC instead:  dt add <file>
+    Adjust the limit:  dt config set hooks.pre-commit.checks.large-files.max_size 10MB
+    Skip this check once:  git commit --no-verify
 ```
 
 ---
@@ -218,7 +222,7 @@ hooks:
       large-files:
         enabled: true
         mode: sync
-        max_size: 50MB
+        max_size: 1MB
       my-linter:
         enabled: true
         mode: async
@@ -232,7 +236,7 @@ hooks:
 | `enabled` | bool | `true` | Whether the check runs |
 | `mode` | string | `sync` | `sync` (blocks git) or `async` (qxub) |
 | `command` | string | — | Shell command for external checks |
-| `max_size` | string | `50MB` | For `large-files` check only |
+| `max_size` | string | `1MB` | For `large-files` check only |
 
 ### Built-in checks
 
@@ -262,6 +266,31 @@ hooks:
         enabled: true
         mode: async
         command: "isort --check-only ."
+```
+
+### Overriding the large-file limit
+
+The default limit is 1 MB—intentionally strict for repos that use DVC for
+data.  There are three ways to override when needed:
+
+**Raise the limit permanently** (in project or local config):
+
+```bash
+dt config set hooks.pre-commit.checks.large-files.max_size 10MB
+```
+
+**Skip the check for a single commit** (e.g. committing a vendored PDF):
+
+```bash
+git commit --no-verify
+```
+
+`--no-verify` skips *all* git hooks for that commit, so use it sparingly.
+
+**Disable the check entirely:**
+
+```bash
+dt config set hooks.pre-commit.checks.large-files.enabled false
 ```
 
 ### Disabling a check

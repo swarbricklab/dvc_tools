@@ -175,22 +175,25 @@ class TestCheckLargeFiles:
         return tmp_path
 
     def test_no_staged_files_passes(self, staged_repo):
-        assert install.check_large_files('50MB') is True
+        assert install.check_large_files('1MB') is True
 
     def test_small_file_passes(self, staged_repo):
         small = staged_repo / 'small.txt'
         small.write_text('hello')
         subprocess.run(['git', 'add', 'small.txt'], capture_output=True, cwd=staged_repo)
 
-        assert install.check_large_files('50MB') is True
+        assert install.check_large_files('1MB') is True
 
     def test_large_file_raises(self, staged_repo):
         large = staged_repo / 'big.bin'
         large.write_bytes(b'\0' * (1024 + 1))
         subprocess.run(['git', 'add', 'big.bin'], capture_output=True, cwd=staged_repo)
 
-        with pytest.raises(HookError, match="exceed.*limit"):
+        with pytest.raises(HookError, match="exceed.*limit") as exc_info:
             install.check_large_files('1KB')
+        msg = str(exc_info.value)
+        assert 'dt add' in msg
+        assert '--no-verify' in msg
 
     def test_dvc_file_excluded(self, staged_repo):
         dvc_file = staged_repo / 'data.csv.dvc'
@@ -330,7 +333,7 @@ class TestHookList:
                 'pre-commit': {
                     'checks': {
                         'dvc-status': {'enabled': True, 'mode': 'sync'},
-                        'large-files': {'enabled': True, 'mode': 'sync', 'max_size': '50MB'},
+                        'large-files': {'enabled': True, 'mode': 'sync', 'max_size': '1MB'},
                     },
                 },
             },
@@ -484,7 +487,7 @@ class TestRunCheck:
             'enabled': True,
             'mode': 'async',
             'command': 'echo OK',
-            'max_size': '50MB',
+            'max_size': '1MB',
         }
         with patch.object(install, '_get_checks', return_value=[check]), \
              patch.object(install, '_save_hook_result', return_value=tmp_path / 'r.json') as mock_save:
@@ -502,7 +505,7 @@ class TestRunCheck:
             'enabled': True,
             'mode': 'async',
             'command': 'exit 1',
-            'max_size': '50MB',
+            'max_size': '1MB',
         }
         with patch.object(install, '_get_checks', return_value=[check]), \
              patch.object(install, '_save_hook_result', return_value=tmp_path / 'r.json') as mock_save:
@@ -518,7 +521,7 @@ class TestRunCheck:
             'enabled': True,
             'mode': 'async',
             'command': None,
-            'max_size': '50MB',
+            'max_size': '1MB',
         }
         with patch.object(install, '_get_checks', return_value=[check]), \
              patch.object(install, '_run_builtin_check', return_value=True), \
@@ -534,7 +537,7 @@ class TestRunCheck:
             'enabled': True,
             'mode': 'async',
             'command': None,
-            'max_size': '50MB',
+            'max_size': '1MB',
         }
         with patch.object(install, '_get_checks', return_value=[check]), \
              patch.object(install, '_run_builtin_check',
@@ -656,7 +659,7 @@ class TestHookRunAsync:
 
         checks = [
             {'name': 'my-async-check', 'enabled': True, 'mode': 'async',
-             'command': None, 'max_size': '50MB'},
+             'command': None, 'max_size': '1MB'},
         ]
         with patch.object(install, '_get_checks', return_value=checks), \
              patch.object(install, '_dispatch_async_check',
@@ -675,9 +678,9 @@ class TestHookRunAsync:
 
         checks = [
             {'name': 'async-check', 'enabled': True, 'mode': 'async',
-             'command': None, 'max_size': '50MB'},
+             'command': None, 'max_size': '1MB'},
             {'name': 'sync-check', 'enabled': True, 'mode': 'sync',
-             'command': 'true', 'max_size': '50MB'},
+             'command': 'true', 'max_size': '1MB'},
         ]
         with patch.object(install, '_get_checks', return_value=checks), \
              patch.object(install, '_dispatch_async_check', return_value=None), \

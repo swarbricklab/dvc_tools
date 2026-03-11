@@ -52,7 +52,7 @@ DEFAULT_HOOKS_CONFIG = {
                 'large-files': {
                     'enabled': True,
                     'mode': 'sync',
-                    'max_size': '50MB',
+                    'max_size': '1MB',
                 },
             },
         },
@@ -303,7 +303,7 @@ def _get_checks(hook_name: str) -> List[Dict]:
             'enabled': settings.get('enabled', True),
             'mode': settings.get('mode', 'sync'),
             'command': settings.get('command'),
-            'max_size': settings.get('max_size', '50MB'),
+            'max_size': settings.get('max_size', '1MB'),
         }
         checks.append(entry)
     return checks
@@ -332,7 +332,7 @@ def _get_checks_with_sources(hook_name: str) -> List[Dict]:
                 'enabled': settings.get('enabled', True),
                 'mode': settings.get('mode', 'sync'),
                 'command': settings.get('command'),
-                'max_size': settings.get('max_size', '50MB'),
+                'max_size': settings.get('max_size', '1MB'),
                 'source': scope,
             }
             if existing:
@@ -348,7 +348,7 @@ def _get_checks_with_sources(hook_name: str) -> List[Dict]:
 # Built-in checks
 # =============================================================================
 
-def check_large_files(max_size_str: str = '50MB', verbose: bool = False) -> bool:
+def check_large_files(max_size_str: str = '1MB', verbose: bool = False) -> bool:
     """Reject staged files that exceed *max_size*.
 
     Only inspects files in the git staging area (``git diff --cached``).
@@ -391,9 +391,13 @@ def check_large_files(max_size_str: str = '50MB', verbose: bool = False) -> bool
             oversized.append((filepath, size))
 
     if oversized:
-        lines = [f"Files exceed {max_size_str} limit (use DVC to track large files):"]
+        lines = [f"Files exceed {max_size_str} limit:"]
         for filepath, size in oversized:
             lines.append(f"  {filepath} ({format_size(size)})")
+        lines.append("")
+        lines.append("Track large files with DVC instead:  dt add <file>")
+        lines.append("Adjust the limit:  dt config set hooks.pre-commit.checks.large-files.max_size 10MB")
+        lines.append("Skip this check once:  git commit --no-verify")
         raise HookError('\n'.join(lines))
 
     if verbose:
@@ -413,7 +417,7 @@ def _run_builtin_check(name: str, hook_name: str, check_cfg: Dict,
         return True
 
     if name == 'large-files':
-        max_size = check_cfg.get('max_size', '50MB')
+        max_size = check_cfg.get('max_size', '1MB')
         return check_large_files(max_size_str=str(max_size), verbose=verbose)
 
     if name == 'dvc-checkout':
