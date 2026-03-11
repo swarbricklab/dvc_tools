@@ -557,6 +557,7 @@ def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
                 result = subprocess.run(
                     command, shell=True,
                     capture_output=True, text=True,
+                    stdin=subprocess.DEVNULL,
                 )
                 if result.returncode != 0:
                     output = (result.stdout + result.stderr).strip()
@@ -688,6 +689,7 @@ def _dispatch_async_check(
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             job_id = result.stdout.strip().split('\n')[0]
@@ -745,6 +747,7 @@ def run_check(
             result = subprocess.run(
                 command, shell=True,
                 capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
             )
             output = (result.stdout + result.stderr).strip()
             if result.returncode != 0:
