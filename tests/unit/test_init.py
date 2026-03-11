@@ -187,16 +187,12 @@ class TestCheckGithubRemote:
 class TestInstallDvcHooks:
     """Tests for the install_dvc_hooks function."""
 
-    def test_runs_dvc_install(self, tmp_path):
-        """Test that dvc install is run."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            
+    def test_runs_dt_install(self, tmp_path):
+        """Test that dt install is run."""
+        with patch("dt.install.install") as mock_install:
             install_dvc_hooks(tmp_path, verbose=False)
             
-            mock_run.assert_called_once()
-            call_args = mock_run.call_args
-            assert call_args[0][0] == ["dvc", "install"]
+            mock_install.assert_called_once_with(tmp_path, verbose=False)
 
 
 # =============================================================================

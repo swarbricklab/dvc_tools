@@ -136,20 +136,18 @@ def init_dvc(repo_path: Path, verbose: bool = True) -> bool:
 
 
 def install_dvc_hooks(repo_path: Path, verbose: bool = True) -> None:
-    """Install DVC git hooks.
+    """Install dt git hooks (replaces dvc install).
     
     Args:
         repo_path: Path to the repository
         verbose: Print progress messages
     """
+    from . import install as install_mod
+
     if verbose:
-        print("Installing DVC git hooks...")
+        print("Installing dt git hooks...")
     
-    subprocess.run(
-        ['dvc', 'install'],
-        cwd=repo_path,
-        capture_output=True,
-    )
+    install_mod.install(repo_path, verbose=verbose)
 
 
 def get_dvc_autostage(repo_path: Path) -> bool:
