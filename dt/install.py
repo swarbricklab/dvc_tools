@@ -91,6 +91,31 @@ _SIZE_UNITS = {
 # Directory name under .dt/ for async hook results
 HOOK_RESULTS_DIR_NAME = 'hook-results'
 
+# Verbosity levels for hook output
+VERBOSITY_QUIET = 0
+VERBOSITY_NORMAL = 1
+VERBOSITY_VERBOSE = 2
+
+_VERBOSITY_MAP = {
+    'quiet': VERBOSITY_QUIET,
+    'normal': VERBOSITY_NORMAL,
+    'verbose': VERBOSITY_VERBOSE,
+}
+
+
+def _get_verbosity(verbose_flag: bool = False) -> int:
+    """Resolve hook verbosity from CLI flag and config.
+
+    CLI ``-v`` forces verbose.  Otherwise reads ``hooks.verbosity``
+    from config (quiet / normal / verbose).  Default is normal.
+    """
+    if verbose_flag:
+        return VERBOSITY_VERBOSE
+    level = cfg.get_value('hooks.verbosity')
+    if level and str(level).lower() in _VERBOSITY_MAP:
+        return _VERBOSITY_MAP[str(level).lower()]
+    return VERBOSITY_NORMAL
+
 
 # =============================================================================
 # Size parsing
@@ -506,12 +531,15 @@ def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
     """Run all enabled checks for *hook_name*.
 
     Sync checks run inline and can abort the git operation (non-zero exit).
-    Async checks are deferred for Phase 2 (currently logged as skipped).
+    Async checks are submitted to compute nodes via qxub.
+
+    Verbosity is controlled by ``hooks.verbosity`` config (quiet / normal /
+    verbose) or the ``-v`` CLI flag which forces verbose.
 
     Args:
         hook_name: One of the supported git hook names.
         hook_args: Additional arguments passed by git to the hook.
-        verbose: Print progress.
+        verbose: If True, force verbose output regardless of config.
 
     Returns:
         True if all sync checks passed.
@@ -522,13 +550,18 @@ def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
     if hook_args is None:
         hook_args = []
 
+    level = _get_verbosity(verbose)
+
     checks = _get_checks(hook_name)
     enabled = [c for c in checks if c.get('enabled', True)]
 
     if not enabled:
-        if verbose:
+        if level >= VERBOSITY_VERBOSE:
             print(f"{hook_name}: no checks configured")
         return True
+
+    if level >= VERBOSITY_NORMAL:
+        print(f"dt: {hook_name}", flush=True)
 
     failures = []
 
@@ -538,17 +571,18 @@ def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
 
         if mode == 'async':
             job_id = _dispatch_async_check(
-                name, hook_name, check, hook_args, verbose=verbose,
+                name, hook_name, check, hook_args,
+                verbose=(level >= VERBOSITY_VERBOSE),
             )
-            if verbose:
+            if level >= VERBOSITY_NORMAL:
                 if job_id:
-                    print(f"  {name}: async job submitted ({job_id})")
+                    print(f"  \u21bb {name} \u2192 {job_id}", flush=True)
                 else:
-                    print(f"  {name}: async dispatch skipped")
+                    print(f"  \u2013 {name} (async skipped)", flush=True)
             continue
 
-        if verbose:
-            print(f"  {name}: running...")
+        if level >= VERBOSITY_VERBOSE:
+            print(f"  {name}: running...", flush=True)
 
         try:
             command = check.get('command')
@@ -565,16 +599,19 @@ def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
             else:
                 # Built-in check
                 handled = _run_builtin_check(
-                    name, hook_name, check, hook_args, verbose=verbose,
+                    name, hook_name, check, hook_args,
+                    verbose=(level >= VERBOSITY_VERBOSE),
                 )
                 if not handled:
-                    if verbose:
-                        print(f"  {name}: unknown built-in, skipping")
+                    if level >= VERBOSITY_VERBOSE:
+                        print(f"  {name}: unknown built-in, skipping", flush=True)
 
-            if verbose:
-                print(f"  {name}: OK")
+            if level >= VERBOSITY_NORMAL:
+                print(f"  \u2713 {name}", flush=True)
 
         except HookError as e:
+            if level >= VERBOSITY_NORMAL:
+                print(f"  \u2717 {name}", flush=True)
             failures.append((name, str(e)))
             # Continue running remaining checks so user sees all failures
 

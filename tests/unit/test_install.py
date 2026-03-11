@@ -13,6 +13,13 @@ from dt import install
 from dt.errors import HookError, InstallError
 
 
+@pytest.fixture(autouse=True)
+def _isolate_config(tmp_path, monkeypatch):
+    """Prevent system/user config from leaking into tests."""
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg_home'))
+    monkeypatch.setenv('XDG_CONFIG_DIRS', str(tmp_path / 'xdg_dirs'))
+
+
 # =============================================================================
 # parse_size / format_size
 # =============================================================================
