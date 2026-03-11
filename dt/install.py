@@ -212,10 +212,17 @@ def install(force: bool = False, verbose: bool = False) -> List[str]:
     if verbose:
         print(f"  Installed merge driver: {MERGE_DRIVER_NAME}")
 
-    # Write default config if no hooks config exists yet
+    # Write default config if no hooks config exists in any scope
     existing = cfg.get_value('hooks')
     if existing is None:
         _write_default_config(verbose=verbose)
+    elif verbose:
+        # Tell the user where existing hooks config was found
+        for scope in cfg.SCOPES:
+            scope_data = cfg.load_scope_config(scope)
+            if scope_data.get('hooks'):
+                print(f"  Hooks config inherited from {scope} scope")
+                break
 
     return installed
 
