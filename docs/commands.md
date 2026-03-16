@@ -26,6 +26,10 @@
 | [`dt worktree`](#dt-worktree) | Manage git worktrees with DVC cache configured |
 | [`dt config`](#dt-config) | View and modify configuration settings |
 | [`dt du`](#dt-du) | Report disk usage for DVC-tracked files |
+| [`dt install`](#dt-install) | Install git hooks and DVC merge driver |
+| [`dt uninstall`](#dt-uninstall) | Remove git hooks installed by dt |
+| [`dt hook`](#dt-hook) | Manage and run git hook checks |
+| [`dt status`](#dt-status) | Show DVC pipeline and stage status |
 | [`dt auth`](#dt-auth) | Verify and diagnose access to storage backends |
 | [`dt doctor`](#dt-doctor) | Diagnose common setup issues |
 
@@ -304,6 +308,58 @@ Verify and diagnose access to all storage backends used by a DVC project.
 | `dt auth grant` | Grant a user access to a resource *(planned)* |
 
 Discovers endpoints from DVC remotes, `.dvc` import files, dt config, and git remotes. Supports filesystem, SSH, S3-compatible (including CloudFlare R2), GCS, and git endpoints. [Full documentation →](auth.md)
+
+---
+
+## dt install
+
+Install git hooks and DVC merge driver.
+
+```bash
+dt install [--force] [-v]
+```
+
+Writes hook scripts to `.git/hooks/` that delegate to `dt hook run`, registers the DVC merge driver, and writes default check configuration. [Full documentation →](install.md)
+
+---
+
+## dt uninstall
+
+Remove git hooks installed by dt.
+
+```bash
+dt uninstall [-v]
+```
+
+Only removes hooks that were installed by `dt install`. Foreign hooks are left untouched. [Full documentation →](install.md)
+
+---
+
+## dt hook
+
+Manage and run git hook checks.
+
+| Subcommand | Description |
+|------------|-------------|
+| `dt hook list` | Show configured checks for each hook |
+| `dt hook run <name>` | Run all enabled checks for a hook |
+| `dt hook run-check <hook> <check>` | Run or submit a single check |
+| `dt hook results` | Show or clear async check results |
+| `dt hook check large-files` | Check staged files against size limit |
+
+Checks are configured via `dt config hooks.*` keys and can run synchronously (blocking git) or asynchronously via qxub on HPC systems. [Full documentation →](install.md)
+
+---
+
+## dt status
+
+Show DVC pipeline and stage status.
+
+```bash
+dt status [--imports] [-v] [-- DVC_OPTIONS...]
+```
+
+Wraps `dvc status` with automatic index sync. Pass `--imports` to also check import freshness via `dt update --status`. Unknown options are passed through to `dvc status`. [Full documentation →](install.md#dt-status)
 
 ---
 
