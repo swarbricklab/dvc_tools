@@ -3059,8 +3059,9 @@ class TestSSHSetup:
     @patch('dt.auth._host_in_ssh_config', return_value=True)
     @patch('dt.auth.check_endpoints')
     @patch('dt.auth.discover_endpoints')
+    @patch('dt.auth.click.prompt', return_value='testuser')
     def test_all_passing_and_configured(
-        self, mock_discover, mock_check, mock_host_in_config,
+        self, mock_prompt, mock_discover, mock_check, mock_host_in_config,
         mock_ssh_dir, mock_find_key, mock_passphrase, tmp_path,
     ):
         ep = Endpoint(type='ssh', url='ssh://host.com/path', source='test')
@@ -3289,6 +3290,79 @@ class TestSSHSetup:
 
         assert 'passphrase' in results[0].message.lower()
         assert 'ssh-add' in results[0].message
+
+    @patch('dt.auth._key_has_passphrase', return_value=False)
+    @patch('dt.auth._deploy_key_ssh_copy_id', return_value=True)
+    @patch('dt.auth._write_ssh_config_stanza')
+    @patch('dt.auth._host_in_ssh_config', return_value=False)
+    @patch('dt.auth._find_existing_key')
+    @patch('dt.auth._ensure_ssh_dir')
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints')
+    @patch('dt.auth.click.prompt', return_value='prompted_user')
+    def test_prompts_for_username_when_missing(
+        self, mock_prompt, mock_discover, mock_check, mock_ssh_dir,
+        mock_find_key, mock_host_in_config, mock_write_stanza,
+        mock_copy_id, mock_passphrase, tmp_path,
+    ):
+        """Should interactively prompt when no --username and no URL user."""
+        ep = Endpoint(
+            type='ssh', url='ssh://host.com/data', source='test',
+        )
+        mock_discover.return_value = [ep]
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_FAIL, summary='failed')
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_find_key.return_value = key_path
+
+        config_file = tmp_path / 'ssh_config'
+        results = ssh_setup(
+            username=None, config_file=config_file, verbose=False,
+        )
+
+        mock_prompt.assert_called_once_with(
+            'SSH username for host.com', type=str,
+        )
+        mock_copy_id.assert_called_once_with(
+            'host.com', 'prompted_user', key_path, verbose=False,
+        )
+
+    @patch('dt.auth._key_has_passphrase', return_value=False)
+    @patch('dt.auth._deploy_key_forge')
+    @patch('dt.auth._write_ssh_config_stanza')
+    @patch('dt.auth._host_in_ssh_config', return_value=False)
+    @patch('dt.auth._find_existing_key')
+    @patch('dt.auth._ensure_ssh_dir')
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints')
+    def test_no_prompt_for_forge_only_hosts(
+        self, mock_discover, mock_check, mock_ssh_dir,
+        mock_find_key, mock_host_in_config, mock_write_stanza,
+        mock_deploy, mock_passphrase, tmp_path,
+    ):
+        """Should NOT prompt when only forge hosts are present."""
+        ep = Endpoint(
+            type='git', url='git@github.com:org/repo.git', source='git remote'
+        )
+        mock_discover.return_value = [ep]
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_FAIL, summary='failed')
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_find_key.return_value = key_path
+        mock_deploy.return_value = True
+
+        config_file = tmp_path / 'ssh_config'
+        # No username — but should NOT prompt since only forge hosts
+        results = ssh_setup(
+            username=None, config_file=config_file, verbose=False,
+        )
+
+        assert len(results) == 1
+        assert results[0].host == 'github.com'
 
 
 class TestKeyHasPassphrase:
