@@ -91,6 +91,7 @@ from dt.auth import (
     _host_in_ssh_config,
     _write_ssh_config_stanza,
     _deploy_key_forge,
+    _key_has_passphrase,
 )
 
 
@@ -2891,6 +2892,7 @@ class TestWriteSSHConfigStanza:
         assert 'HostName example.com' in content
         assert 'User alice' in content
         assert 'IdentityFile /home/user/.ssh/id_ed25519' in content
+        assert 'AddKeysToAgent yes' in content
         assert (config_file.stat().st_mode & 0o777) == 0o600
 
     def test_appends_to_existing(self, tmp_path):
@@ -3005,19 +3007,31 @@ class TestSSHSetup:
         results = ssh_setup(verbose=False)
         assert results == []
 
+    @patch('dt.auth._key_has_passphrase', return_value=False)
+    @patch('dt.auth._find_existing_key')
+    @patch('dt.auth._ensure_ssh_dir')
+    @patch('dt.auth._host_in_ssh_config', return_value=True)
     @patch('dt.auth.check_endpoints')
     @patch('dt.auth.discover_endpoints')
-    def test_all_passing(self, mock_discover, mock_check):
+    def test_all_passing_and_configured(
+        self, mock_discover, mock_check, mock_host_in_config,
+        mock_ssh_dir, mock_find_key, mock_passphrase, tmp_path,
+    ):
         ep = Endpoint(type='ssh', url='ssh://host.com/path', source='test')
         mock_discover.return_value = [ep]
         mock_check.return_value = [
             CheckResult(endpoint=ep, status=STATUS_PASS, summary='OK')
         ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_find_key.return_value = key_path
 
-        results = ssh_setup(verbose=False)
+        config_file = tmp_path / 'ssh_config'
+        results = ssh_setup(config_file=config_file, verbose=False)
         assert len(results) == 1
         assert results[0].already_ok is True
 
+    @patch('dt.auth._key_has_passphrase', return_value=False)
     @patch('dt.auth._deploy_key_forge')
     @patch('dt.auth._write_ssh_config_stanza')
     @patch('dt.auth._host_in_ssh_config', return_value=False)
@@ -3028,7 +3042,7 @@ class TestSSHSetup:
     def test_failing_forge_host(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
-        mock_deploy, tmp_path,
+        mock_deploy, mock_passphrase, tmp_path,
     ):
         ep = Endpoint(
             type='git', url='git@github.com:org/repo.git', source='git remote'
@@ -3058,6 +3072,7 @@ class TestSSHSetup:
         call_kwargs = mock_write_stanza.call_args
         assert call_kwargs[1]['user'] == 'git' or call_kwargs[0][1] == 'git'
 
+    @patch('dt.auth._key_has_passphrase', return_value=False)
     @patch('dt.auth._deploy_key_ssh_copy_id')
     @patch('dt.auth._write_ssh_config_stanza')
     @patch('dt.auth._host_in_ssh_config', return_value=False)
@@ -3068,7 +3083,7 @@ class TestSSHSetup:
     def test_failing_ssh_host_with_username(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
-        mock_copy_id, tmp_path,
+        mock_copy_id, mock_passphrase, tmp_path,
     ):
         ep = Endpoint(
             type='ssh', url='ssh://gadi.nci.org.au/data',
@@ -3095,6 +3110,7 @@ class TestSSHSetup:
             'gadi.nci.org.au', 'alice', key_path, verbose=False,
         )
 
+    @patch('dt.auth._key_has_passphrase', return_value=False)
     @patch('dt.auth._deploy_key_ssh_copy_id')
     @patch('dt.auth._write_ssh_config_stanza')
     @patch('dt.auth._host_in_ssh_config', return_value=True)
@@ -3105,7 +3121,7 @@ class TestSSHSetup:
     def test_skips_existing_config_stanza(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
-        mock_copy_id, tmp_path,
+        mock_copy_id, mock_passphrase, tmp_path,
     ):
         ep = Endpoint(
             type='ssh', url='ssh://host.com/data', source='test',
@@ -3127,6 +3143,7 @@ class TestSSHSetup:
         assert results[0].config_written is False
         mock_write_stanza.assert_not_called()
 
+    @patch('dt.auth._key_has_passphrase', return_value=False)
     @patch('dt.auth._generate_key')
     @patch('dt.auth._find_existing_key', return_value=None)
     @patch('dt.auth._ensure_ssh_dir')
@@ -3138,7 +3155,7 @@ class TestSSHSetup:
     def test_generates_key_when_missing(
         self, mock_discover, mock_check, mock_host_in_config,
         mock_write_stanza, mock_copy_id, mock_ssh_dir,
-        mock_find_key, mock_gen_key, tmp_path,
+        mock_find_key, mock_gen_key, mock_passphrase, tmp_path,
     ):
         ep = Endpoint(
             type='ssh', url='ssh://host.com/data', source='test',
@@ -3158,3 +3175,89 @@ class TestSSHSetup:
 
         mock_gen_key.assert_called_once()
         assert results[0].key_generated is True
+
+    @patch('dt.auth._key_has_passphrase', return_value=False)
+    @patch('dt.auth._write_ssh_config_stanza')
+    @patch('dt.auth._host_in_ssh_config', return_value=False)
+    @patch('dt.auth._find_existing_key')
+    @patch('dt.auth._ensure_ssh_dir')
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints')
+    def test_passing_host_gets_config_stanza(
+        self, mock_discover, mock_check, mock_ssh_dir,
+        mock_find_key, mock_host_in_config, mock_write_stanza,
+        mock_passphrase, tmp_path,
+    ):
+        """A host that passes checks should still get a config stanza."""
+        ep = Endpoint(
+            type='ssh', url='ssh://gadi.nci.org.au/data', source='DVC remote',
+        )
+        mock_discover.return_value = [ep]
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_PASS, summary='OK')
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_find_key.return_value = key_path
+
+        config_file = tmp_path / 'ssh_config'
+        results = ssh_setup(
+            username='jr9959', config_file=config_file, verbose=False,
+        )
+
+        assert len(results) == 1
+        assert results[0].host == 'gadi.nci.org.au'
+        assert results[0].config_written is True
+        assert results[0].key_deployed is False
+        mock_write_stanza.assert_called_once()
+
+    @patch('dt.auth._key_has_passphrase', return_value=True)
+    @patch('dt.auth._deploy_key_ssh_copy_id', return_value=True)
+    @patch('dt.auth._write_ssh_config_stanza')
+    @patch('dt.auth._host_in_ssh_config', return_value=False)
+    @patch('dt.auth._find_existing_key')
+    @patch('dt.auth._ensure_ssh_dir')
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints')
+    def test_passphrase_warning_in_result(
+        self, mock_discover, mock_check, mock_ssh_dir,
+        mock_find_key, mock_host_in_config, mock_write_stanza,
+        mock_copy_id, mock_passphrase, tmp_path,
+    ):
+        """Passphrase-protected key should append a warning to the message."""
+        ep = Endpoint(
+            type='ssh', url='ssh://host.com/data', source='test',
+        )
+        mock_discover.return_value = [ep]
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_FAIL, summary='failed')
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_find_key.return_value = key_path
+
+        config_file = tmp_path / 'ssh_config'
+        results = ssh_setup(
+            username='user', config_file=config_file, verbose=False,
+        )
+
+        assert 'passphrase' in results[0].message.lower()
+        assert 'ssh-add' in results[0].message
+
+
+class TestKeyHasPassphrase:
+    """Tests for _key_has_passphrase."""
+
+    @patch('subprocess.run')
+    def test_no_passphrase(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        assert _key_has_passphrase(Path('/tmp/key')) is False
+
+    @patch('subprocess.run')
+    def test_has_passphrase(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=255)
+        assert _key_has_passphrase(Path('/tmp/key')) is True
+        call_args = mock_run.call_args[0][0]
+        assert 'ssh-keygen' in call_args
+        assert '-P' in call_args
+        assert '' in call_args

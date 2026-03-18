@@ -3397,6 +3397,19 @@ def _generate_key(verbose: bool = False) -> Path:
     return key_path
 
 
+def _key_has_passphrase(key_path: Path) -> bool:
+    """Return True if *key_path* is passphrase-protected.
+
+    Uses ``ssh-keygen -y -P '' -f <key>`` which fails (exit 255) when the
+    key requires a passphrase.
+    """
+    result = subprocess.run(
+        ['ssh-keygen', '-y', '-P', '', '-f', str(key_path)],
+        capture_output=True,
+    )
+    return result.returncode != 0
+
+
 def _parse_ssh_config(config_path: Path) -> Dict[str, Dict[str, str]]:
     """Parse an SSH config file into ``{host_alias: {key: value}}``."""
     hosts: Dict[str, Dict[str, str]] = {}
@@ -3442,6 +3455,7 @@ def _write_ssh_config_stanza(
     if user:
         lines.append(f'    User {user}')
     lines.append(f'    IdentityFile {identity_file}')
+    lines.append(f'    AddKeysToAgent yes')
     if extra:
         for k, v in extra.items():
             lines.append(f'    {k} {v}')
@@ -3557,18 +3571,19 @@ def ssh_setup(
     config_file: Optional[Path] = None,
     verbose: bool = False,
 ) -> List[SSHSetupResult]:
-    """Set up SSH access for every failing SSH and git endpoint.
+    """Set up SSH access for every discovered SSH and git endpoint.
 
     1. Discover endpoints and run ``check_endpoints`` to find failures.
-    2. For each failing SSH/git host:
-       a. Ensure ``~/.ssh`` exists with correct permissions.
-       b. Ensure the user has a keypair (generate if missing).
-       c. Deploy the public key (``ssh-copy-id`` or ``gh``/``glab``).
-       d. Ensure ``~/.ssh/config`` has a stanza for the host.
+    2. Ensure ``~/.ssh`` exists with correct permissions.
+    3. Ensure the user has a keypair (generate if missing).
+    4. For each **failing** SSH/git host, deploy the public key.
+    5. For **all** discovered SSH/git hosts missing a config stanza,
+       write one (with ``AddKeysToAgent yes``).
+    6. Warn about passphrase-protected keys in batch contexts.
 
     Args:
-        username: Remote username for SSH hosts.  If *None*, prompts
-            interactively for each host that needs it.
+        username: Remote username for SSH hosts.  If *None*, defaults
+            to the user embedded in the URL, or the current local user.
         config_file: Path to SSH config file (default ``~/.ssh/config``).
         verbose: Print progress.
 
@@ -3593,39 +3608,33 @@ def ssh_setup(
             print("No SSH or git endpoints discovered.")
         return []
 
+    # Collect ALL unique SSH hosts from discovered endpoints
+    all_hosts: Dict[str, Endpoint] = {}  # host -> representative endpoint
+    for ep in all_eps:
+        host = _extract_ssh_host(ep.url)
+        if host and host not in all_hosts:
+            all_hosts[host] = ep
+
+    if not all_hosts:
+        if verbose:
+            print("No SSH hosts found in discovered endpoints.")
+        return []
+
     results_check = check_endpoints(
         endpoints=endpoints,
         type_filter=ssh_git_types,
         verbose=False,
     )
 
-    # -- 2. Identify failing hosts -----------------------------------------
-    failing_hosts: Dict[str, Endpoint] = {}  # host -> representative endpoint
+    # Identify FAILING hosts (need key deployment)
+    failing_hosts: Set[str] = set()
     for cr in results_check:
-        if cr.status != STATUS_FAIL:
-            continue
-        host = _extract_ssh_host(cr.endpoint.url)
-        if host and host not in failing_hosts:
-            failing_hosts[host] = cr.endpoint
+        if cr.status == STATUS_FAIL:
+            host = _extract_ssh_host(cr.endpoint.url)
+            if host:
+                failing_hosts.add(host)
 
-    if not failing_hosts:
-        if verbose:
-            print("All SSH/git endpoints are reachable — nothing to do.")
-        return [
-            SSHSetupResult(
-                host='(all)', already_ok=True, key_generated=False,
-                key_deployed=False, config_written=False,
-                manual_action_needed=False,
-                message='All SSH/git endpoints already pass checks',
-            )
-        ]
-
-    if verbose:
-        print(f"\n{len(failing_hosts)} host(s) need SSH setup:")
-        for h in failing_hosts:
-            print(f"  • {h}")
-
-    # -- 3. Ensure ~/.ssh and keypair exist --------------------------------
+    # -- 2. Ensure ~/.ssh and keypair exist --------------------------------
     _ensure_ssh_dir(verbose=verbose)
 
     key_path = _find_existing_key()
@@ -3636,44 +3645,66 @@ def ssh_setup(
     elif verbose:
         print(f"  Using existing key: {key_path}")
 
-    # -- 4. Process each failing host --------------------------------------
-    setup_results: List[SSHSetupResult] = []
+    # -- 3. Check for passphrase-protected key -----------------------------
+    has_passphrase = _key_has_passphrase(key_path)
+    if has_passphrase and verbose:
+        print(f"  ⚠ Key {key_path} is passphrase-protected.")
+        print(f"    Run 'ssh-add {key_path}' to load it into your agent.")
+        print(f"    Note: passphrase keys will NOT work in PBS batch jobs")
+        print(f"    unless the agent is forwarded (which NCI does not support).")
 
-    for host, ep in failing_hosts.items():
+    # -- 4. Process each host ----------------------------------------------
+    setup_results: List[SSHSetupResult] = []
+    needs_key_deploy = bool(failing_hosts)
+
+    if verbose:
+        if failing_hosts:
+            print(f"\n{len(failing_hosts)} host(s) need key deployment:")
+            for h in sorted(failing_hosts):
+                print(f"  • {h}")
+        hosts_needing_stanza = [
+            h for h in all_hosts if not _host_in_ssh_config(h, config_file)
+        ]
+        if hosts_needing_stanza:
+            print(f"{len(hosts_needing_stanza)} host(s) need config stanzas:")
+            for h in hosts_needing_stanza:
+                print(f"  • {h}")
+
+    for host, ep in all_hosts.items():
         is_forge = _is_forge_host(host)
+        host_needs_key = host in failing_hosts
 
         # Determine username for this host
         host_user: Optional[str] = None
         if is_forge:
-            # Forge hosts use 'git' user — no need to ask
             host_user = 'git'
         elif username:
             host_user = username
         else:
-            # Extract from URL first
             host_user = _extract_ssh_user(ep.url)
             if not host_user:
-                host_user = getpass.getuser()  # default to current local user
+                host_user = getpass.getuser()
 
-        # Deploy key
+        # Deploy key only for FAILING hosts
         key_deployed = False
         manual_action = False
 
-        if is_forge:
-            key_deployed = _deploy_key_forge(host, key_path, verbose=verbose)
-            if not key_deployed:
-                manual_action = True
-        else:
-            key_deployed = _deploy_key_ssh_copy_id(
-                host, host_user, key_path, verbose=verbose,
-            )
-            if not key_deployed:
-                manual_action = True
-                if verbose:
-                    print(f"  ⚠ ssh-copy-id failed for {host}. "
-                          f"You may need to deploy the key manually.")
+        if host_needs_key:
+            if is_forge:
+                key_deployed = _deploy_key_forge(host, key_path, verbose=verbose)
+                if not key_deployed:
+                    manual_action = True
+            else:
+                key_deployed = _deploy_key_ssh_copy_id(
+                    host, host_user, key_path, verbose=verbose,
+                )
+                if not key_deployed:
+                    manual_action = True
+                    if verbose:
+                        print(f"  ⚠ ssh-copy-id failed for {host}. "
+                              f"You may need to deploy the key manually.")
 
-        # SSH config stanza
+        # SSH config stanza — for ALL hosts, not just failing ones
         config_written = False
         if not _host_in_ssh_config(host, config_file):
             _write_ssh_config_stanza(
@@ -3687,6 +3718,10 @@ def ssh_setup(
         elif verbose:
             print(f"  SSH config stanza for {host} already exists — skipping")
 
+        # Skip result if nothing was done
+        if not host_needs_key and not config_written:
+            continue
+
         msg_parts = []
         if key_deployed:
             msg_parts.append('key deployed')
@@ -3694,16 +3729,36 @@ def ssh_setup(
             msg_parts.append('key deployment needs manual action')
         if config_written:
             msg_parts.append('config stanza added')
-        message = '; '.join(msg_parts) if msg_parts else 'no changes'
+        message = '; '.join(msg_parts) if msg_parts else 'already configured'
 
         setup_results.append(SSHSetupResult(
             host=host,
-            already_ok=False,
+            already_ok=not host_needs_key and not config_written,
             key_generated=key_generated,
             key_deployed=key_deployed,
             config_written=config_written,
             manual_action_needed=manual_action,
             message=message,
         ))
+
+    if not setup_results:
+        if verbose:
+            print("All SSH/git hosts already configured — nothing to do.")
+        return [
+            SSHSetupResult(
+                host='(all)', already_ok=True, key_generated=False,
+                key_deployed=False, config_written=False,
+                manual_action_needed=False,
+                message='All SSH/git hosts already configured',
+            )
+        ]
+
+    # -- 5. Passphrase warning in summary ----------------------------------
+    if has_passphrase:
+        setup_results[0] = SSHSetupResult(
+            **{**setup_results[0].__dict__,
+               'message': setup_results[0].message +
+               ' (⚠ key is passphrase-protected — run ssh-add)'}
+        )
 
     return setup_results
