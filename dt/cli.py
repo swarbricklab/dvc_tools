@@ -1156,61 +1156,6 @@ def auth_teams_add_user(username, team_slug, org, dry):
         raise click.ClickException(str(e))
 
 
-# -- dt auth credentials ----------------------------------------------------
-
-@auth.group('credentials')
-def auth_credentials():
-    """Manage S3 remote credentials from secret managers.
-    
-    Fetch credentials from GCP Secret Manager (or other backends) and
-    install them into .dvc/config.local for S3-compatible remotes.
-    """
-    pass
-
-
-@auth_credentials.command('uninstall')
-@click.option('--remote', default=None,
-              help='Remove credentials for a specific remote only.')
-@click.option('-v', '--verbose', is_flag=True,
-              help='Show progress messages.')
-def auth_credentials_uninstall(remote, verbose):
-    """Remove S3 credentials from global DVC config.
-    
-    \b
-      dt auth credentials uninstall              # remove all
-      dt auth credentials uninstall --remote cloud  # remove specific remote
-    
-    Removes credential keys (access_key_id, secret_access_key, etc.) from
-    remote sections. The remote URL remains intact.
-    """
-    removed = auth_mod.uninstall_credentials(remote=remote, verbose=verbose)
-    if removed:
-        remotes = ', '.join(removed)
-        config_path = auth_mod._get_dvc_global_config_path()
-        click.echo(click.style(
-            f'✓ Removed credentials for: {remotes}', fg='green',
-        ))
-        click.echo(f'  Config: {config_path}')
-    else:
-        click.echo('No credentials to remove.')
-
-
-@auth_credentials.command('status')
-@click.option('-v', '--verbose', is_flag=True,
-              help='Show detailed status.')
-def auth_credentials_status(verbose):
-    """Show credential status for S3 remotes.
-    
-    Displays which remotes have credentials installed in the global DVC config
-    and which are missing credentials.
-    """
-    try:
-        statuses = auth_mod.get_credentials_status(verbose=verbose)
-        click.echo(auth_mod.format_credentials_status(statuses))
-    except auth_mod.AuthError as e:
-        raise click.ClickException(str(e))
-
-
 @cli.command()
 @click.argument('targets', nargs=-1)
 @click.option('-h', '--human-readable', 'human', is_flag=True,
