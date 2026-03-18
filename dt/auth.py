@@ -3291,3 +3291,419 @@ def format_credentials_status(statuses: List[CredentialStatus]) -> str:
     lines.append("Legend: ✓ installed  ✗ missing")
     
     return '\n'.join(lines)
+
+
+# =============================================================================
+# SSH setup
+# =============================================================================
+
+#: Git forge hostnames that use ``gh``/``glab`` for key registration
+#: rather than ``ssh-copy-id``.
+_FORGE_HOSTS: Dict[str, str] = {
+    'github.com': 'gh',
+    'gitlab.com': 'glab',
+}
+
+_DEFAULT_KEY_TYPE = 'ed25519'
+_DEFAULT_KEY_PATH = Path.home() / '.ssh' / f'id_{_DEFAULT_KEY_TYPE}'
+
+
+def _extract_ssh_host(url: str) -> Optional[str]:
+    """Extract the hostname from an SSH or git URL.
+
+    Handles ``ssh://[user@]host/path`` and SCP-style ``user@host:path``.
+    Returns *None* if the URL cannot be parsed as SSH.
+    """
+    import re
+
+    url = url.strip()
+    # ssh://[user@]host/path
+    m = re.match(r'ssh://(?:[^@]+@)?([^/:]+)', url)
+    if m:
+        return m.group(1)
+    # Skip non-SSH scheme URLs (s3://, gs://, http://, etc.)
+    if re.match(r'[a-zA-Z][a-zA-Z0-9+.-]*://', url):
+        return None
+    # SCP-style: [user@]host:path  (git remotes)
+    m = re.match(r'(?:[^@]+@)?([^:]+):', url)
+    if m and '/' not in m.group(1):
+        return m.group(1)
+    return None
+
+
+def _extract_ssh_user(url: str) -> Optional[str]:
+    """Extract the username from an SSH URL, if present."""
+    import re
+
+    url = url.strip()
+    m = re.match(r'ssh://([^@]+)@', url)
+    if m:
+        return m.group(1)
+    m = re.match(r'([^@]+)@[^:]+:', url)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _is_forge_host(host: str) -> bool:
+    """True if *host* is a known git forge (GitHub, GitLab, …)."""
+    return host in _FORGE_HOSTS
+
+
+def _ensure_ssh_dir(verbose: bool = False) -> Path:
+    """Ensure ``~/.ssh`` exists with mode 700.  Returns the path."""
+    ssh_dir = Path.home() / '.ssh'
+    if ssh_dir.exists():
+        mode = ssh_dir.stat().st_mode & 0o777
+        if mode != 0o700:
+            ssh_dir.chmod(0o700)
+            if verbose:
+                print(f"  Fixed permissions on {ssh_dir} (was {oct(mode)}, now 0700)")
+        elif verbose:
+            print(f"  {ssh_dir} exists (permissions OK)")
+    else:
+        ssh_dir.mkdir(mode=0o700)
+        if verbose:
+            print(f"  Created {ssh_dir} (mode 0700)")
+    return ssh_dir
+
+
+def _find_existing_key() -> Optional[Path]:
+    """Return the path to an existing private key, or *None*.
+
+    Checks the common key filenames in preference order.
+    """
+    ssh_dir = Path.home() / '.ssh'
+    for name in ('id_ed25519', 'id_rsa', 'id_ecdsa'):
+        candidate = ssh_dir / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _generate_key(verbose: bool = False) -> Path:
+    """Generate an ed25519 keypair and return the private-key path."""
+    key_path = _DEFAULT_KEY_PATH
+    if key_path.exists():
+        return key_path
+    subprocess.run(
+        ['ssh-keygen', '-t', _DEFAULT_KEY_TYPE, '-f', str(key_path),
+         '-N', '', '-C', f'{getpass.getuser()}@{platform.node()}'],
+        check=True,
+        capture_output=True,
+    )
+    if verbose:
+        print(f"  Generated keypair: {key_path}")
+    return key_path
+
+
+def _parse_ssh_config(config_path: Path) -> Dict[str, Dict[str, str]]:
+    """Parse an SSH config file into ``{host_alias: {key: value}}``."""
+    hosts: Dict[str, Dict[str, str]] = {}
+    current_host: Optional[str] = None
+
+    if not config_path.exists():
+        return hosts
+
+    for raw_line in config_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        key, _, value = line.partition(' ')
+        key = key.strip()
+        value = value.strip()
+        if key.lower() == 'host':
+            current_host = value
+            hosts.setdefault(current_host, {})
+        elif current_host is not None:
+            hosts[current_host][key] = value
+
+    return hosts
+
+
+def _host_in_ssh_config(host: str, config_path: Path) -> bool:
+    """Return True if *host* already has a stanza in the SSH config."""
+    hosts = _parse_ssh_config(config_path)
+    # Exact match or wildcard * (which covers everything)
+    return host in hosts
+
+
+def _write_ssh_config_stanza(
+    host: str,
+    user: Optional[str],
+    identity_file: Path,
+    config_path: Path,
+    extra: Optional[Dict[str, str]] = None,
+    verbose: bool = False,
+) -> None:
+    """Append a ``Host`` stanza to the SSH config file."""
+    lines = [f'\nHost {host}']
+    lines.append(f'    HostName {host}')
+    if user:
+        lines.append(f'    User {user}')
+    lines.append(f'    IdentityFile {identity_file}')
+    if extra:
+        for k, v in extra.items():
+            lines.append(f'    {k} {v}')
+    lines.append('')  # trailing newline
+
+    # Ensure file exists with correct permissions
+    if not config_path.exists():
+        config_path.touch(mode=0o600)
+        if verbose:
+            print(f"  Created {config_path} (mode 0600)")
+    else:
+        mode = config_path.stat().st_mode & 0o777
+        if mode != 0o600:
+            config_path.chmod(0o600)
+            if verbose:
+                print(f"  Fixed permissions on {config_path} (was {oct(mode)}, now 0600)")
+
+    with open(config_path, 'a') as f:
+        f.write('\n'.join(lines))
+
+    if verbose:
+        print(f"  Added SSH config stanza for {host}")
+
+
+def _deploy_key_ssh_copy_id(
+    host: str,
+    user: str,
+    key_path: Path,
+    verbose: bool = False,
+) -> bool:
+    """Deploy a public key to a remote host via ``ssh-copy-id``.
+
+    Returns True on success, False on failure.
+    """
+    pub_key = Path(f'{key_path}.pub')
+    target = f'{user}@{host}'
+    if verbose:
+        print(f"  Deploying key to {target} via ssh-copy-id ...")
+    result = subprocess.run(
+        ['ssh-copy-id', '-i', str(pub_key), target],
+        capture_output=False,  # let user see password prompt
+        stdin=None,            # inherit terminal for password entry
+    )
+    return result.returncode == 0
+
+
+def _deploy_key_forge(
+    host: str,
+    key_path: Path,
+    verbose: bool = False,
+) -> bool:
+    """Deploy a public key to a git forge (GitHub/GitLab) via CLI.
+
+    Returns True if the key was registered, False if the user must
+    register it manually (in which case the public key is printed).
+    """
+    import socket
+
+    pub_key = Path(f'{key_path}.pub')
+    pub_key_text = pub_key.read_text().strip()
+    cli_tool = _FORGE_HOSTS.get(host)
+    title = f'dt@{socket.gethostname()}'
+
+    if cli_tool and shutil.which(cli_tool):
+        if verbose:
+            print(f"  Registering key with {host} via {cli_tool} ...")
+        result = subprocess.run(
+            [cli_tool, 'ssh-key', 'add', str(pub_key), '--title', title],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            if verbose:
+                print(f"  ✓ Key registered with {host}")
+            return True
+        # Check if key already exists (gh returns non-zero)
+        if 'already' in result.stderr.lower():
+            if verbose:
+                print(f"  Key already registered with {host}")
+            return True
+        # Fallback: print key for manual registration
+        if verbose:
+            print(f"  {cli_tool} failed: {result.stderr.strip()}")
+
+    # Manual fallback
+    if host == 'github.com':
+        url = 'https://github.com/settings/ssh/new'
+    elif host == 'gitlab.com':
+        url = 'https://gitlab.com/-/user_settings/ssh_keys'
+    else:
+        url = f'https://{host}'
+
+    print(f"\n  Your public key (copy this):")
+    print(f"    {pub_key_text}")
+    print(f"\n  Add it at: {url}")
+    return False
+
+
+@dataclass
+class SSHSetupResult:
+    """Outcome of SSH setup for one host."""
+    host: str
+    already_ok: bool
+    key_generated: bool
+    key_deployed: bool
+    config_written: bool
+    manual_action_needed: bool
+    message: str
+
+
+def ssh_setup(
+    username: Optional[str] = None,
+    config_file: Optional[Path] = None,
+    verbose: bool = False,
+) -> List[SSHSetupResult]:
+    """Set up SSH access for every failing SSH and git endpoint.
+
+    1. Discover endpoints and run ``check_endpoints`` to find failures.
+    2. For each failing SSH/git host:
+       a. Ensure ``~/.ssh`` exists with correct permissions.
+       b. Ensure the user has a keypair (generate if missing).
+       c. Deploy the public key (``ssh-copy-id`` or ``gh``/``glab``).
+       d. Ensure ``~/.ssh/config`` has a stanza for the host.
+
+    Args:
+        username: Remote username for SSH hosts.  If *None*, prompts
+            interactively for each host that needs it.
+        config_file: Path to SSH config file (default ``~/.ssh/config``).
+        verbose: Print progress.
+
+    Returns:
+        List of :class:`SSHSetupResult` for each host processed.
+    """
+    if config_file is None:
+        config_file = Path.home() / '.ssh' / 'config'
+
+    # -- 1. Discover and check endpoints -----------------------------------
+    ssh_git_types = {'ssh', 'git'}
+    endpoints = discover_endpoints(type_filter=ssh_git_types, verbose=verbose)
+
+    # Flatten children into the list as well
+    all_eps: List[Endpoint] = []
+    for ep in endpoints:
+        all_eps.append(ep)
+        all_eps.extend(ep.children)
+
+    if not all_eps:
+        if verbose:
+            print("No SSH or git endpoints discovered.")
+        return []
+
+    results_check = check_endpoints(
+        endpoints=endpoints,
+        type_filter=ssh_git_types,
+        verbose=False,
+    )
+
+    # -- 2. Identify failing hosts -----------------------------------------
+    failing_hosts: Dict[str, Endpoint] = {}  # host -> representative endpoint
+    for cr in results_check:
+        if cr.status != STATUS_FAIL:
+            continue
+        host = _extract_ssh_host(cr.endpoint.url)
+        if host and host not in failing_hosts:
+            failing_hosts[host] = cr.endpoint
+
+    if not failing_hosts:
+        if verbose:
+            print("All SSH/git endpoints are reachable — nothing to do.")
+        return [
+            SSHSetupResult(
+                host='(all)', already_ok=True, key_generated=False,
+                key_deployed=False, config_written=False,
+                manual_action_needed=False,
+                message='All SSH/git endpoints already pass checks',
+            )
+        ]
+
+    if verbose:
+        print(f"\n{len(failing_hosts)} host(s) need SSH setup:")
+        for h in failing_hosts:
+            print(f"  • {h}")
+
+    # -- 3. Ensure ~/.ssh and keypair exist --------------------------------
+    _ensure_ssh_dir(verbose=verbose)
+
+    key_path = _find_existing_key()
+    key_generated = False
+    if key_path is None:
+        key_path = _generate_key(verbose=verbose)
+        key_generated = True
+    elif verbose:
+        print(f"  Using existing key: {key_path}")
+
+    # -- 4. Process each failing host --------------------------------------
+    setup_results: List[SSHSetupResult] = []
+
+    for host, ep in failing_hosts.items():
+        is_forge = _is_forge_host(host)
+
+        # Determine username for this host
+        host_user: Optional[str] = None
+        if is_forge:
+            # Forge hosts use 'git' user — no need to ask
+            host_user = 'git'
+        elif username:
+            host_user = username
+        else:
+            # Extract from URL first
+            host_user = _extract_ssh_user(ep.url)
+            if not host_user:
+                host_user = getpass.getuser()  # default to current local user
+
+        # Deploy key
+        key_deployed = False
+        manual_action = False
+
+        if is_forge:
+            key_deployed = _deploy_key_forge(host, key_path, verbose=verbose)
+            if not key_deployed:
+                manual_action = True
+        else:
+            key_deployed = _deploy_key_ssh_copy_id(
+                host, host_user, key_path, verbose=verbose,
+            )
+            if not key_deployed:
+                manual_action = True
+                if verbose:
+                    print(f"  ⚠ ssh-copy-id failed for {host}. "
+                          f"You may need to deploy the key manually.")
+
+        # SSH config stanza
+        config_written = False
+        if not _host_in_ssh_config(host, config_file):
+            _write_ssh_config_stanza(
+                host=host,
+                user=host_user if not is_forge else 'git',
+                identity_file=key_path,
+                config_path=config_file,
+                verbose=verbose,
+            )
+            config_written = True
+        elif verbose:
+            print(f"  SSH config stanza for {host} already exists — skipping")
+
+        msg_parts = []
+        if key_deployed:
+            msg_parts.append('key deployed')
+        elif manual_action:
+            msg_parts.append('key deployment needs manual action')
+        if config_written:
+            msg_parts.append('config stanza added')
+        message = '; '.join(msg_parts) if msg_parts else 'no changes'
+
+        setup_results.append(SSHSetupResult(
+            host=host,
+            already_ok=False,
+            key_generated=key_generated,
+            key_deployed=key_deployed,
+            config_written=config_written,
+            manual_action_needed=manual_action,
+            message=message,
+        ))
+
+    return setup_results

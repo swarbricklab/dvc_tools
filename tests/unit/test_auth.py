@@ -79,6 +79,18 @@ from dt.auth import (
     _short_repo_name,
     _apply_type_filter,
     _merge_children,
+    ssh_setup,
+    SSHSetupResult,
+    _extract_ssh_host,
+    _extract_ssh_user,
+    _is_forge_host,
+    _ensure_ssh_dir,
+    _find_existing_key,
+    _generate_key,
+    _parse_ssh_config,
+    _host_in_ssh_config,
+    _write_ssh_config_stanza,
+    _deploy_key_forge,
 )
 
 
@@ -2653,3 +2665,496 @@ class TestInstallCredentials:
         # Should not raise - this is a no-op, not an error
         result = install_credentials(verbose=True)
         assert result == {}
+
+
+# =============================================================================
+# SSH setup helper tests
+# =============================================================================
+
+class TestExtractSSHHost:
+    """Tests for _extract_ssh_host."""
+
+    def test_ssh_url(self):
+        assert _extract_ssh_host('ssh://gadi.nci.org.au/data') == 'gadi.nci.org.au'
+
+    def test_ssh_url_with_user(self):
+        assert _extract_ssh_host('ssh://user@gadi.nci.org.au/data') == 'gadi.nci.org.au'
+
+    def test_scp_style(self):
+        assert _extract_ssh_host('git@github.com:org/repo.git') == 'github.com'
+
+    def test_scp_user_host(self):
+        assert _extract_ssh_host('alice@server.example.com:/path') == 'server.example.com'
+
+    def test_no_ssh(self):
+        assert _extract_ssh_host('/local/path') is None
+
+    def test_s3_url(self):
+        assert _extract_ssh_host('s3://bucket/prefix') is None
+
+    def test_ssh_with_port_path(self):
+        assert _extract_ssh_host('ssh://host.example.com/some/path') == 'host.example.com'
+
+
+class TestExtractSSHUser:
+    """Tests for _extract_ssh_user."""
+
+    def test_ssh_url_with_user(self):
+        assert _extract_ssh_user('ssh://alice@host.com/path') == 'alice'
+
+    def test_ssh_url_no_user(self):
+        assert _extract_ssh_user('ssh://host.com/path') is None
+
+    def test_scp_style(self):
+        assert _extract_ssh_user('git@github.com:repo.git') == 'git'
+
+    def test_plain_path(self):
+        assert _extract_ssh_user('/local/path') is None
+
+
+class TestIsForgeHost:
+    """Tests for _is_forge_host."""
+
+    def test_github(self):
+        assert _is_forge_host('github.com') is True
+
+    def test_gitlab(self):
+        assert _is_forge_host('gitlab.com') is True
+
+    def test_regular_host(self):
+        assert _is_forge_host('gadi.nci.org.au') is False
+
+    def test_empty(self):
+        assert _is_forge_host('') is False
+
+
+class TestEnsureSSHDir:
+    """Tests for _ensure_ssh_dir."""
+
+    def test_creates_dir_when_missing(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / 'home'
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, 'home', staticmethod(lambda: fake_home))
+
+        ssh_dir = _ensure_ssh_dir(verbose=False)
+        assert ssh_dir.exists()
+        assert (ssh_dir.stat().st_mode & 0o777) == 0o700
+
+    def test_fixes_permissions(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / 'home'
+        fake_home.mkdir()
+        ssh_dir = fake_home / '.ssh'
+        ssh_dir.mkdir(mode=0o755)
+        monkeypatch.setattr(Path, 'home', staticmethod(lambda: fake_home))
+
+        _ensure_ssh_dir(verbose=False)
+        assert (ssh_dir.stat().st_mode & 0o777) == 0o700
+
+    def test_leaves_correct_permissions(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / 'home'
+        fake_home.mkdir()
+        ssh_dir = fake_home / '.ssh'
+        ssh_dir.mkdir(mode=0o700)
+        monkeypatch.setattr(Path, 'home', staticmethod(lambda: fake_home))
+
+        result = _ensure_ssh_dir(verbose=False)
+        assert result == ssh_dir
+        assert (ssh_dir.stat().st_mode & 0o777) == 0o700
+
+
+class TestFindExistingKey:
+    """Tests for _find_existing_key."""
+
+    def test_finds_ed25519(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / 'home'
+        ssh_dir = fake_home / '.ssh'
+        ssh_dir.mkdir(parents=True, mode=0o700)
+        (ssh_dir / 'id_ed25519').write_text('key')
+        monkeypatch.setattr(Path, 'home', staticmethod(lambda: fake_home))
+
+        assert _find_existing_key() == ssh_dir / 'id_ed25519'
+
+    def test_finds_rsa_when_no_ed25519(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / 'home'
+        ssh_dir = fake_home / '.ssh'
+        ssh_dir.mkdir(parents=True, mode=0o700)
+        (ssh_dir / 'id_rsa').write_text('key')
+        monkeypatch.setattr(Path, 'home', staticmethod(lambda: fake_home))
+
+        assert _find_existing_key() == ssh_dir / 'id_rsa'
+
+    def test_prefers_ed25519_over_rsa(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / 'home'
+        ssh_dir = fake_home / '.ssh'
+        ssh_dir.mkdir(parents=True, mode=0o700)
+        (ssh_dir / 'id_ed25519').write_text('key')
+        (ssh_dir / 'id_rsa').write_text('key')
+        monkeypatch.setattr(Path, 'home', staticmethod(lambda: fake_home))
+
+        assert _find_existing_key() == ssh_dir / 'id_ed25519'
+
+    def test_returns_none_when_no_keys(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / 'home'
+        ssh_dir = fake_home / '.ssh'
+        ssh_dir.mkdir(parents=True, mode=0o700)
+        monkeypatch.setattr(Path, 'home', staticmethod(lambda: fake_home))
+
+        assert _find_existing_key() is None
+
+
+class TestParseSSHConfig:
+    """Tests for _parse_ssh_config."""
+
+    def test_parses_basic_config(self, tmp_path):
+        config_file = tmp_path / 'config'
+        config_file.write_text(
+            "Host github.com\n"
+            "    HostName github.com\n"
+            "    User git\n"
+            "    IdentityFile ~/.ssh/id_ed25519\n"
+        )
+        hosts = _parse_ssh_config(config_file)
+        assert 'github.com' in hosts
+        assert hosts['github.com']['User'] == 'git'
+        assert hosts['github.com']['IdentityFile'] == '~/.ssh/id_ed25519'
+
+    def test_empty_file(self, tmp_path):
+        config_file = tmp_path / 'config'
+        config_file.write_text('')
+        assert _parse_ssh_config(config_file) == {}
+
+    def test_missing_file(self, tmp_path):
+        config_file = tmp_path / 'nonexistent'
+        assert _parse_ssh_config(config_file) == {}
+
+    def test_multiple_hosts(self, tmp_path):
+        config_file = tmp_path / 'config'
+        config_file.write_text(
+            "Host github.com\n"
+            "    User git\n"
+            "\n"
+            "Host gadi.nci.org.au\n"
+            "    User jr9959\n"
+            "    ForwardAgent yes\n"
+        )
+        hosts = _parse_ssh_config(config_file)
+        assert len(hosts) == 2
+        assert hosts['github.com']['User'] == 'git'
+        assert hosts['gadi.nci.org.au']['User'] == 'jr9959'
+
+    def test_comments_ignored(self, tmp_path):
+        config_file = tmp_path / 'config'
+        config_file.write_text(
+            "# This is a comment\n"
+            "Host example.com\n"
+            "    # Another comment\n"
+            "    User admin\n"
+        )
+        hosts = _parse_ssh_config(config_file)
+        assert 'example.com' in hosts
+        assert hosts['example.com']['User'] == 'admin'
+
+
+class TestHostInSSHConfig:
+    """Tests for _host_in_ssh_config."""
+
+    def test_host_found(self, tmp_path):
+        config_file = tmp_path / 'config'
+        config_file.write_text("Host github.com\n    User git\n")
+        assert _host_in_ssh_config('github.com', config_file) is True
+
+    def test_host_not_found(self, tmp_path):
+        config_file = tmp_path / 'config'
+        config_file.write_text("Host github.com\n    User git\n")
+        assert _host_in_ssh_config('gitlab.com', config_file) is False
+
+    def test_empty_config(self, tmp_path):
+        config_file = tmp_path / 'config'
+        config_file.write_text('')
+        assert _host_in_ssh_config('github.com', config_file) is False
+
+
+class TestWriteSSHConfigStanza:
+    """Tests for _write_ssh_config_stanza."""
+
+    def test_creates_new_file(self, tmp_path):
+        config_file = tmp_path / 'config'
+        key_path = Path('/home/user/.ssh/id_ed25519')
+
+        _write_ssh_config_stanza(
+            host='example.com', user='alice',
+            identity_file=key_path, config_path=config_file,
+        )
+
+        content = config_file.read_text()
+        assert 'Host example.com' in content
+        assert 'HostName example.com' in content
+        assert 'User alice' in content
+        assert 'IdentityFile /home/user/.ssh/id_ed25519' in content
+        assert (config_file.stat().st_mode & 0o777) == 0o600
+
+    def test_appends_to_existing(self, tmp_path):
+        config_file = tmp_path / 'config'
+        config_file.write_text("Host github.com\n    User git\n")
+        config_file.chmod(0o600)
+        key_path = Path('/home/user/.ssh/id_ed25519')
+
+        _write_ssh_config_stanza(
+            host='gadi.nci.org.au', user='jr9959',
+            identity_file=key_path, config_path=config_file,
+        )
+
+        content = config_file.read_text()
+        assert 'Host github.com' in content
+        assert 'Host gadi.nci.org.au' in content
+        assert 'User jr9959' in content
+
+    def test_no_user(self, tmp_path):
+        config_file = tmp_path / 'config'
+        key_path = Path('/home/user/.ssh/id_ed25519')
+
+        _write_ssh_config_stanza(
+            host='example.com', user=None,
+            identity_file=key_path, config_path=config_file,
+        )
+
+        content = config_file.read_text()
+        assert 'Host example.com' in content
+        assert 'User' not in content
+
+    def test_extra_options(self, tmp_path):
+        config_file = tmp_path / 'config'
+        key_path = Path('/home/user/.ssh/id_ed25519')
+
+        _write_ssh_config_stanza(
+            host='example.com', user='alice',
+            identity_file=key_path, config_path=config_file,
+            extra={'ForwardAgent': 'yes'},
+        )
+
+        content = config_file.read_text()
+        assert 'ForwardAgent yes' in content
+
+    def test_fixes_permissions(self, tmp_path):
+        config_file = tmp_path / 'config'
+        config_file.write_text("# existing\n")
+        config_file.chmod(0o644)
+        key_path = Path('/home/user/.ssh/id_ed25519')
+
+        _write_ssh_config_stanza(
+            host='example.com', user='alice',
+            identity_file=key_path, config_path=config_file,
+        )
+
+        assert (config_file.stat().st_mode & 0o777) == 0o600
+
+
+class TestDeployKeyForge:
+    """Tests for _deploy_key_forge."""
+
+    @patch('shutil.which', return_value='/usr/bin/gh')
+    @patch('subprocess.run')
+    def test_github_success(self, mock_run, mock_which, tmp_path):
+        mock_run.return_value = MagicMock(returncode=0)
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('private key')
+        pub_path = tmp_path / 'id_ed25519.pub'
+        pub_path.write_text('ssh-ed25519 AAAA user@host')
+
+        result = _deploy_key_forge('github.com', key_path, verbose=False)
+        assert result is True
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert call_args[0] == 'gh'
+        assert 'ssh-key' in call_args
+
+    @patch('shutil.which', return_value='/usr/bin/gh')
+    @patch('subprocess.run')
+    def test_github_already_registered(self, mock_run, mock_which, tmp_path):
+        mock_run.return_value = MagicMock(
+            returncode=1, stderr='key is already in use'
+        )
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('private key')
+        pub_path = tmp_path / 'id_ed25519.pub'
+        pub_path.write_text('ssh-ed25519 AAAA user@host')
+
+        result = _deploy_key_forge('github.com', key_path, verbose=False)
+        assert result is True
+
+    @patch('shutil.which', return_value=None)
+    def test_no_cli_tool(self, mock_which, tmp_path, capsys):
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('private key')
+        pub_path = tmp_path / 'id_ed25519.pub'
+        pub_path.write_text('ssh-ed25519 AAAA user@host')
+
+        result = _deploy_key_forge('github.com', key_path, verbose=False)
+        assert result is False
+        captured = capsys.readouterr()
+        assert 'ssh-ed25519' in captured.out
+        assert 'github.com/settings/ssh/new' in captured.out
+
+
+class TestSSHSetup:
+    """Tests for ssh_setup orchestration."""
+
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints', return_value=[])
+    def test_no_endpoints(self, mock_discover, mock_check):
+        results = ssh_setup(verbose=False)
+        assert results == []
+
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints')
+    def test_all_passing(self, mock_discover, mock_check):
+        ep = Endpoint(type='ssh', url='ssh://host.com/path', source='test')
+        mock_discover.return_value = [ep]
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_PASS, summary='OK')
+        ]
+
+        results = ssh_setup(verbose=False)
+        assert len(results) == 1
+        assert results[0].already_ok is True
+
+    @patch('dt.auth._deploy_key_forge')
+    @patch('dt.auth._write_ssh_config_stanza')
+    @patch('dt.auth._host_in_ssh_config', return_value=False)
+    @patch('dt.auth._find_existing_key')
+    @patch('dt.auth._ensure_ssh_dir')
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints')
+    def test_failing_forge_host(
+        self, mock_discover, mock_check, mock_ssh_dir,
+        mock_find_key, mock_host_in_config, mock_write_stanza,
+        mock_deploy, tmp_path,
+    ):
+        ep = Endpoint(
+            type='git', url='git@github.com:org/repo.git', source='git remote'
+        )
+        mock_discover.return_value = [ep]
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_FAIL, summary='failed')
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_find_key.return_value = key_path
+        mock_deploy.return_value = True
+
+        config_file = tmp_path / 'ssh_config'
+        results = ssh_setup(
+            username=None, config_file=config_file, verbose=False,
+        )
+
+        assert len(results) == 1
+        assert results[0].host == 'github.com'
+        assert results[0].key_deployed is True
+        mock_deploy.assert_called_once_with(
+            'github.com', key_path, verbose=False,
+        )
+        # Should write config stanza with user='git' for forge hosts
+        mock_write_stanza.assert_called_once()
+        call_kwargs = mock_write_stanza.call_args
+        assert call_kwargs[1]['user'] == 'git' or call_kwargs[0][1] == 'git'
+
+    @patch('dt.auth._deploy_key_ssh_copy_id')
+    @patch('dt.auth._write_ssh_config_stanza')
+    @patch('dt.auth._host_in_ssh_config', return_value=False)
+    @patch('dt.auth._find_existing_key')
+    @patch('dt.auth._ensure_ssh_dir')
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints')
+    def test_failing_ssh_host_with_username(
+        self, mock_discover, mock_check, mock_ssh_dir,
+        mock_find_key, mock_host_in_config, mock_write_stanza,
+        mock_copy_id, tmp_path,
+    ):
+        ep = Endpoint(
+            type='ssh', url='ssh://gadi.nci.org.au/data',
+            source='DVC remote',
+        )
+        mock_discover.return_value = [ep]
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_FAIL, summary='failed')
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_find_key.return_value = key_path
+        mock_copy_id.return_value = True
+
+        config_file = tmp_path / 'ssh_config'
+        results = ssh_setup(
+            username='alice', config_file=config_file, verbose=False,
+        )
+
+        assert len(results) == 1
+        assert results[0].host == 'gadi.nci.org.au'
+        assert results[0].key_deployed is True
+        mock_copy_id.assert_called_once_with(
+            'gadi.nci.org.au', 'alice', key_path, verbose=False,
+        )
+
+    @patch('dt.auth._deploy_key_ssh_copy_id')
+    @patch('dt.auth._write_ssh_config_stanza')
+    @patch('dt.auth._host_in_ssh_config', return_value=True)
+    @patch('dt.auth._find_existing_key')
+    @patch('dt.auth._ensure_ssh_dir')
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints')
+    def test_skips_existing_config_stanza(
+        self, mock_discover, mock_check, mock_ssh_dir,
+        mock_find_key, mock_host_in_config, mock_write_stanza,
+        mock_copy_id, tmp_path,
+    ):
+        ep = Endpoint(
+            type='ssh', url='ssh://host.com/data', source='test',
+        )
+        mock_discover.return_value = [ep]
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_FAIL, summary='failed')
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_find_key.return_value = key_path
+        mock_copy_id.return_value = True
+
+        config_file = tmp_path / 'ssh_config'
+        results = ssh_setup(
+            username='user', config_file=config_file, verbose=False,
+        )
+
+        assert results[0].config_written is False
+        mock_write_stanza.assert_not_called()
+
+    @patch('dt.auth._generate_key')
+    @patch('dt.auth._find_existing_key', return_value=None)
+    @patch('dt.auth._ensure_ssh_dir')
+    @patch('dt.auth._deploy_key_ssh_copy_id', return_value=True)
+    @patch('dt.auth._write_ssh_config_stanza')
+    @patch('dt.auth._host_in_ssh_config', return_value=False)
+    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.discover_endpoints')
+    def test_generates_key_when_missing(
+        self, mock_discover, mock_check, mock_host_in_config,
+        mock_write_stanza, mock_copy_id, mock_ssh_dir,
+        mock_find_key, mock_gen_key, tmp_path,
+    ):
+        ep = Endpoint(
+            type='ssh', url='ssh://host.com/data', source='test',
+        )
+        mock_discover.return_value = [ep]
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_FAIL, summary='failed')
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_gen_key.return_value = key_path
+
+        config_file = tmp_path / 'ssh_config'
+        results = ssh_setup(
+            username='user', config_file=config_file, verbose=False,
+        )
+
+        mock_gen_key.assert_called_once()
+        assert results[0].key_generated is True

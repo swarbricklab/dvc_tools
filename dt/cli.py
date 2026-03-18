@@ -1216,6 +1216,86 @@ def auth_credentials_status(verbose):
         raise click.ClickException(str(e))
 
 
+# -- dt auth ssh -------------------------------------------------------------
+
+@auth.group('ssh')
+def auth_ssh():
+    """Set up SSH keys and config for project endpoints."""
+    pass
+
+
+@auth_ssh.command('setup')
+@click.option('-u', '--username', default=None,
+              help='Remote username for SSH hosts (default: current user).')
+@click.option('--config-file', 'config_file',
+              type=click.Path(dir_okay=False),
+              default=None,
+              help='SSH config file path (default: ~/.ssh/config).')
+@click.option('-v', '--verbose', is_flag=True,
+              help='Show detailed progress.')
+def auth_ssh_setup(username, config_file, verbose):
+    """Set up SSH access for failing endpoints.
+
+    Discovers SSH and git endpoints, checks which ones are failing,
+    then for each failing host:
+
+    \b
+      1. Ensures ~/.ssh exists with correct permissions
+      2. Generates an ed25519 keypair if none exists
+      3. Deploys the public key:
+         - ssh-copy-id for regular SSH hosts
+         - gh/glab CLI for GitHub/GitLab (or prints key for manual add)
+      4. Adds a Host stanza to ~/.ssh/config
+
+    \b
+    Examples:
+      dt auth ssh setup                # interactive
+      dt auth ssh setup -u alice       # specify remote username
+      dt auth ssh setup -v             # verbose output
+    """
+    from pathlib import Path as _Path
+
+    try:
+        cfg_path = _Path(config_file) if config_file else None
+        results = auth_mod.ssh_setup(
+            username=username,
+            config_file=cfg_path,
+            verbose=verbose,
+        )
+
+        if not results:
+            click.echo('No SSH/git endpoints discovered — nothing to do.')
+            return
+
+        # Summary
+        for r in results:
+            if r.already_ok:
+                click.echo(click.style(f'✓ {r.message}', fg='green'))
+            elif r.manual_action_needed:
+                click.echo(click.style(
+                    f'⚠ {r.host}: {r.message}', fg='yellow',
+                ))
+            else:
+                click.echo(click.style(
+                    f'✓ {r.host}: {r.message}', fg='green',
+                ))
+
+        # Overall advice
+        manual = [r for r in results if r.manual_action_needed]
+        if manual:
+            click.echo()
+            click.echo('Some hosts need manual key registration (see above).')
+        elif not any(r.already_ok for r in results):
+            click.echo()
+            click.echo(click.style(
+                'Run `dt auth check --type ssh --type git` to verify.',
+                dim=True,
+            ))
+
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
 @cli.command()
 @click.argument('targets', nargs=-1)
 @click.option('-h', '--human-readable', 'human', is_flag=True,
