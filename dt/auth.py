@@ -3543,11 +3543,16 @@ def _deploy_key_forge(
         if 'admin:public_key' in result.stderr:
             if verbose:
                 print(f"  Token lacks admin:public_key scope — requesting it ...")
+            # Use GH_BROWSER=echo so gh prints the device-code URL
+            # instead of trying to open a browser (which fails on
+            # headless HPC nodes without a display).
+            refresh_env = {**os.environ, 'GH_BROWSER': 'echo'}
             refresh = subprocess.run(
                 [cli_tool, 'auth', 'refresh', '-h', host,
                  '-s', 'admin:public_key'],
-                capture_output=False,  # let user see browser/device flow
+                capture_output=False,  # let user see device code + URL
                 stdin=None,
+                env=refresh_env,
             )
             if refresh.returncode == 0:
                 # Retry the key add

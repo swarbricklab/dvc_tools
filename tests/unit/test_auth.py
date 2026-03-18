@@ -3017,11 +3017,13 @@ class TestDeployKeyForge:
         result = _deploy_key_forge('github.com', key_path, verbose=True)
         assert result is True
         assert mock_run.call_count == 3
-        # Second call should be auth refresh
+        # Second call should be auth refresh with GH_BROWSER=echo
         refresh_args = mock_run.call_args_list[1][0][0]
         assert 'auth' in refresh_args
         assert 'refresh' in refresh_args
         assert 'admin:public_key' in refresh_args
+        refresh_env = mock_run.call_args_list[1][1].get('env', {})
+        assert refresh_env.get('GH_BROWSER') == 'echo'
 
     @patch('shutil.which', return_value='/usr/bin/gh')
     @patch('subprocess.run')
