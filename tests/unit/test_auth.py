@@ -2997,6 +2997,50 @@ class TestDeployKeyForge:
         assert 'ssh-ed25519' in captured.out
         assert 'github.com/settings/ssh/new' in captured.out
 
+    @patch('shutil.which', return_value='/usr/bin/gh')
+    @patch('subprocess.run')
+    def test_scope_refresh_and_retry(self, mock_run, mock_which, tmp_path):
+        """When gh lacks admin:public_key scope, refresh and retry."""
+        # First call: fails with scope error
+        # Second call: gh auth refresh succeeds
+        # Third call: retry succeeds
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stderr='admin:public_key scope'),
+            MagicMock(returncode=0),  # auth refresh
+            MagicMock(returncode=0, stderr=''),  # retry add
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('private key')
+        pub_path = tmp_path / 'id_ed25519.pub'
+        pub_path.write_text('ssh-ed25519 AAAA user@host')
+
+        result = _deploy_key_forge('github.com', key_path, verbose=True)
+        assert result is True
+        assert mock_run.call_count == 3
+        # Second call should be auth refresh
+        refresh_args = mock_run.call_args_list[1][0][0]
+        assert 'auth' in refresh_args
+        assert 'refresh' in refresh_args
+        assert 'admin:public_key' in refresh_args
+
+    @patch('shutil.which', return_value='/usr/bin/gh')
+    @patch('subprocess.run')
+    def test_scope_refresh_cancelled(self, mock_run, mock_which, tmp_path, capsys):
+        """When user cancels the scope refresh, fall back to manual."""
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stderr='admin:public_key scope'),
+            MagicMock(returncode=1),  # auth refresh cancelled
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('private key')
+        pub_path = tmp_path / 'id_ed25519.pub'
+        pub_path.write_text('ssh-ed25519 AAAA user@host')
+
+        result = _deploy_key_forge('github.com', key_path, verbose=False)
+        assert result is False
+        captured = capsys.readouterr()
+        assert 'github.com/settings/ssh/new' in captured.out
+
 
 class TestSSHSetup:
     """Tests for ssh_setup orchestration."""

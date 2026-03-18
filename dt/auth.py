@@ -3511,6 +3511,9 @@ def _deploy_key_forge(
 
     Returns True if the key was registered, False if the user must
     register it manually (in which case the public key is printed).
+
+    When ``gh`` lacks the ``admin:public_key`` scope, automatically
+    runs ``gh auth refresh`` to request it and retries once.
     """
     import socket
 
@@ -3536,9 +3539,40 @@ def _deploy_key_forge(
             if verbose:
                 print(f"  Key already registered with {host}")
             return True
-        # Fallback: print key for manual registration
-        if verbose:
-            print(f"  {cli_tool} failed: {result.stderr.strip()}")
+        # Detect missing OAuth scope and auto-refresh
+        if 'admin:public_key' in result.stderr:
+            if verbose:
+                print(f"  Token lacks admin:public_key scope — requesting it ...")
+            refresh = subprocess.run(
+                [cli_tool, 'auth', 'refresh', '-h', host,
+                 '-s', 'admin:public_key'],
+                capture_output=False,  # let user see browser/device flow
+                stdin=None,
+            )
+            if refresh.returncode == 0:
+                # Retry the key add
+                retry = subprocess.run(
+                    [cli_tool, 'ssh-key', 'add', str(pub_key),
+                     '--title', title],
+                    capture_output=True,
+                    text=True,
+                )
+                if retry.returncode == 0:
+                    if verbose:
+                        print(f"  ✓ Key registered with {host}")
+                    return True
+                if 'already' in retry.stderr.lower():
+                    if verbose:
+                        print(f"  Key already registered with {host}")
+                    return True
+                if verbose:
+                    print(f"  Retry failed: {retry.stderr.strip()}")
+            else:
+                if verbose:
+                    print(f"  Scope refresh failed (user may have cancelled)")
+        else:
+            if verbose:
+                print(f"  {cli_tool} failed: {result.stderr.strip()}")
 
     # Manual fallback
     if host == 'github.com':
