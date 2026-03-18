@@ -510,10 +510,10 @@ class TestDiscoverEndpoints:
 
     def test_prints_scanning_message(self, capsys):
         """Always prints scanning message even without verbose."""
-        with patch('dt.auth._discover_import_sources', return_value=[]), \
-             patch('dt.auth._discover_git_remotes', return_value=[]), \
-             patch('dt.auth._discover_dvc_remotes', return_value=[]), \
-             patch('dt.auth._discover_dt_config', return_value=[]):
+        with patch('dt.auth.endpoints._discover_import_sources', return_value=[]), \
+             patch('dt.auth.endpoints._discover_git_remotes', return_value=[]), \
+             patch('dt.auth.endpoints._discover_dvc_remotes', return_value=[]), \
+             patch('dt.auth.endpoints._discover_dt_config', return_value=[]):
             discover_endpoints()
         captured = capsys.readouterr()
         assert 'Scanning endpoints for project' in captured.out
@@ -521,18 +521,18 @@ class TestDiscoverEndpoints:
     def test_verbose_shows_step_counts(self, capsys):
         """Verbose mode shows per-step endpoint counts."""
         dvc_eps = [Endpoint(type='ssh', url='ssh://h/p', source='remote')]
-        with patch('dt.auth._discover_import_sources', return_value=[]), \
-             patch('dt.auth._discover_git_remotes', return_value=[]), \
-             patch('dt.auth._discover_dvc_remotes', return_value=dvc_eps), \
-             patch('dt.auth._discover_dt_config', return_value=[]):
+        with patch('dt.auth.endpoints._discover_import_sources', return_value=[]), \
+             patch('dt.auth.endpoints._discover_git_remotes', return_value=[]), \
+             patch('dt.auth.endpoints._discover_dvc_remotes', return_value=dvc_eps), \
+             patch('dt.auth.endpoints._discover_dt_config', return_value=[]):
             discover_endpoints(verbose=True)
         captured = capsys.readouterr()
         assert 'DVC remotes (project scope): 1 endpoint(s)' in captured.out
 
-    @patch('dt.auth._discover_import_sources', return_value=[])
-    @patch('dt.auth._discover_git_remotes', return_value=[])
-    @patch('dt.auth._discover_dvc_remotes', return_value=[])
-    @patch('dt.auth._discover_dt_config')
+    @patch('dt.auth.endpoints._discover_import_sources', return_value=[])
+    @patch('dt.auth.endpoints._discover_git_remotes', return_value=[])
+    @patch('dt.auth.endpoints._discover_dvc_remotes', return_value=[])
+    @patch('dt.auth.endpoints._discover_dt_config')
     def test_deduplicates(self, mock_dt, *_):
         """Duplicate (type, url) pairs are merged."""
         mock_dt.return_value = [
@@ -543,10 +543,10 @@ class TestDiscoverEndpoints:
         assert len(eps) == 1
         assert eps[0].source == 'cache.root'  # first wins
 
-    @patch('dt.auth._discover_import_sources', return_value=[])
-    @patch('dt.auth._discover_git_remotes', return_value=[])
-    @patch('dt.auth._discover_dvc_remotes')
-    @patch('dt.auth._discover_dt_config', return_value=[])
+    @patch('dt.auth.endpoints._discover_import_sources', return_value=[])
+    @patch('dt.auth.endpoints._discover_git_remotes', return_value=[])
+    @patch('dt.auth.endpoints._discover_dvc_remotes')
+    @patch('dt.auth.endpoints._discover_dt_config', return_value=[])
     def test_type_filter(self, _, mock_dvc, *__):
         """Type filter keeps only matching endpoints."""
         mock_dvc.return_value = [
@@ -557,10 +557,10 @@ class TestDiscoverEndpoints:
         assert len(eps) == 1
         assert eps[0].type == 's3'
 
-    @patch('dt.auth._discover_import_sources', return_value=[])
-    @patch('dt.auth._discover_git_remotes', return_value=[])
-    @patch('dt.auth._discover_dvc_remotes')
-    @patch('dt.auth._discover_dt_config', return_value=[])
+    @patch('dt.auth.endpoints._discover_import_sources', return_value=[])
+    @patch('dt.auth.endpoints._discover_git_remotes', return_value=[])
+    @patch('dt.auth.endpoints._discover_dvc_remotes')
+    @patch('dt.auth.endpoints._discover_dt_config', return_value=[])
     def test_type_filter_promotes_children(self, _, mock_dvc, *__):
         """When parent is filtered out, matching children are promoted."""
         child = Endpoint(type='ssh', url='ssh://host/p', source='child remote')
@@ -573,19 +573,19 @@ class TestDiscoverEndpoints:
         assert eps[0].type == 'ssh'
         assert 'via' in eps[0].source
 
-    @patch('dt.auth._discover_import_sources', return_value=[])
-    @patch('dt.auth._discover_git_remotes', return_value=[])
-    @patch('dt.auth._discover_dvc_remotes', return_value=[])
-    @patch('dt.auth._discover_dt_config', return_value=[])
+    @patch('dt.auth.endpoints._discover_import_sources', return_value=[])
+    @patch('dt.auth.endpoints._discover_git_remotes', return_value=[])
+    @patch('dt.auth.endpoints._discover_dvc_remotes', return_value=[])
+    @patch('dt.auth.endpoints._discover_dt_config', return_value=[])
     def test_empty_project(self, *_):
         """Empty project returns empty list."""
         eps = discover_endpoints()
         assert eps == []
 
-    @patch('dt.auth._discover_import_sources')
-    @patch('dt.auth._discover_git_remotes', return_value=[])
-    @patch('dt.auth._discover_dvc_remotes')
-    @patch('dt.auth._discover_dt_config', return_value=[])
+    @patch('dt.auth.endpoints._discover_import_sources')
+    @patch('dt.auth.endpoints._discover_git_remotes', return_value=[])
+    @patch('dt.auth.endpoints._discover_dvc_remotes')
+    @patch('dt.auth.endpoints._discover_dt_config', return_value=[])
     def test_children_merged_on_dedup(self, _, mock_dvc, __, mock_imports):
         """When parent endpoints are deduplicated, children are merged."""
         child_a = Endpoint(type='ssh', url='ssh://host/a', source='from dvc')
@@ -1129,7 +1129,7 @@ class TestTryCheck:
         dvc_result = CheckResult(
             endpoint=ep, status=STATUS_PASS, summary='via DVC'
         )
-        with patch('dt.auth._check_dvc_remote', return_value=dvc_result) as mock_dvc:
+        with patch('dt.auth.checks._check_dvc_remote', return_value=dvc_result) as mock_dvc:
             result = _try_check(ep)
         mock_dvc.assert_called_once_with(ep, 'cloud', verbose=False)
         assert result.summary == 'via DVC'
@@ -1146,7 +1146,7 @@ class TestTryCheck:
         """Falls back to per-type checker when DVC is unavailable."""
         ep = Endpoint(type='git', url='git@g:o/r.git',
                       source="DVC remote 'origin'")
-        with patch('dt.auth._check_dvc_remote', return_value=None), \
+        with patch('dt.auth.checks._check_dvc_remote', return_value=None), \
              patch('subprocess.run', return_value=MagicMock(returncode=0)):
             result = _try_check(ep)
         assert result.status == STATUS_PASS
@@ -1156,7 +1156,7 @@ class TestTryCheck:
         DVC-native check since they need a different repo context."""
         ep = Endpoint(type='ssh', url='ssh://host/path',
                       source="DVC remote 'nci' of data-repo")
-        with patch('dt.auth._check_dvc_remote') as mock_dvc, \
+        with patch('dt.auth.checks._check_dvc_remote') as mock_dvc, \
              patch('subprocess.run', return_value=MagicMock(returncode=1)):
             mock_dvc.return_value = None  # should not matter
             result = _try_check(ep)
@@ -1191,7 +1191,7 @@ class TestCheckEndpoints:
 
     def test_discovers_if_not_provided(self):
         """When endpoints=None, calls discover_endpoints."""
-        with patch('dt.auth.discover_endpoints', return_value=[]) as mock_disc:
+        with patch('dt.auth.checks.discover_endpoints', return_value=[]) as mock_disc:
             results = check_endpoints(endpoints=None)
         mock_disc.assert_called_once()
         assert results == []
@@ -1282,7 +1282,7 @@ class TestAccessRequest:
 
 class TestGenerateRequest:
 
-    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.request.check_endpoints')
     def test_collects_failures(self, mock_check):
         ep1 = Endpoint(type='filesystem', url='/ok', source='a')
         ep2 = Endpoint(type='ssh', url='ssh://x/y', source='b')
@@ -1298,7 +1298,7 @@ class TestGenerateRequest:
         assert req.items[0].endpoint.url == 'ssh://x/y'
         assert req.items[1].endpoint.url == 'gs://b'
 
-    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.request.check_endpoints')
     def test_excludes_warnings_when_disabled(self, mock_check):
         ep1 = Endpoint(type='ssh', url='ssh://x/y', source='a')
         ep2 = Endpoint(type='gs', url='gs://b', source='b')
@@ -1310,7 +1310,7 @@ class TestGenerateRequest:
         assert len(req.items) == 1
         assert req.items[0].status == STATUS_FAIL
 
-    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.request.check_endpoints')
     def test_all_pass_empty_items(self, mock_check):
         ep = Endpoint(type='filesystem', url='/x', source='a')
         mock_check.return_value = [
@@ -1319,7 +1319,7 @@ class TestGenerateRequest:
         req = generate_request()
         assert len(req.items) == 0
 
-    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.request.check_endpoints')
     def test_passes_type_filter(self, mock_check):
         mock_check.return_value = []
         generate_request(type_filter={'s3'})
@@ -1327,7 +1327,7 @@ class TestGenerateRequest:
             endpoints=None, type_filter={'s3'}, verbose=False,
         )
 
-    @patch('dt.auth.check_endpoints')
+    @patch('dt.auth.request.check_endpoints')
     def test_metadata_populated(self, mock_check):
         mock_check.return_value = []
         req = generate_request()
@@ -1665,7 +1665,7 @@ class TestSendRequest:
             dt_version='v', request_date='d', items=[item],
         )
 
-    @patch('dt.auth.send_request_slack')
+    @patch('dt.auth.request.send_request_slack')
     @patch('dt.auth.cfg.get_value')
     def test_explicit_slack(self, mock_cfg, mock_send_slack):
         mock_cfg.side_effect = lambda k: {
@@ -1675,7 +1675,7 @@ class TestSendRequest:
         mock_send_slack.assert_called_once()
         assert 'Slack' in msg
 
-    @patch('dt.auth.send_request_email')
+    @patch('dt.auth.request.send_request_email')
     @patch('dt.auth.cfg.get_value')
     def test_explicit_email(self, mock_cfg, mock_send_email):
         mock_cfg.side_effect = lambda k: {
@@ -1699,7 +1699,7 @@ class TestSendRequest:
         with pytest.raises(AuthError, match='Admin email not configured'):
             send_request(self._make_req(), method='email')
 
-    @patch('dt.auth.send_request_slack')
+    @patch('dt.auth.request.send_request_slack')
     @patch('dt.auth.cfg.get_value')
     def test_auto_prefers_slack(self, mock_cfg, mock_send_slack):
         mock_cfg.side_effect = lambda k: {
@@ -1710,7 +1710,7 @@ class TestSendRequest:
         mock_send_slack.assert_called_once()
         assert 'Slack' in msg
 
-    @patch('dt.auth.send_request_email')
+    @patch('dt.auth.request.send_request_email')
     @patch('dt.auth.cfg.get_value')
     def test_auto_falls_back_to_email(self, mock_cfg, mock_send_email):
         def cfg_side(k):
@@ -1879,7 +1879,7 @@ class TestDetectAwsIdentity:
 class TestDetectIdentities:
     """Tests for detect_identities."""
 
-    @patch('dt.auth._DETECT_FNS', {
+    @patch('dt.auth.identity._DETECT_FNS', {
         'auth.github_user': lambda: 'alice-gh',
         'auth.github_teams': lambda: None,
         'auth.gcp_email': lambda: 'a@gcp.com',
@@ -1896,7 +1896,7 @@ class TestDetectIdentities:
         assert 'GitHub teams' not in systems
         assert 'AWS identity' not in systems
 
-    @patch('dt.auth._DETECT_FNS', {
+    @patch('dt.auth.identity._DETECT_FNS', {
         'auth.github_user': lambda: None,
         'auth.github_teams': lambda: None,
         'auth.gcp_email': lambda: None,
@@ -2148,16 +2148,16 @@ class TestAccessRequestIdentities:
 class TestGenerateRequestIdentities:
     """Test that generate_request populates identities."""
 
-    @patch('dt.auth.check_endpoints', return_value=[])
-    @patch('dt.auth.get_identities', return_value=[
+    @patch('dt.auth.request.check_endpoints', return_value=[])
+    @patch('dt.auth.request.get_identities', return_value=[
         Identity('NCI username', 'alice', 'detected'),
         Identity('GitHub user', 'alice-gh', 'config'),
     ])
-    @patch('dt.auth.date')
+    @patch('dt.auth.request.date')
     @patch('dt.auth.platform.node', return_value='gadi')
     @patch('dt.auth.utils.get_project_name', return_value='proj')
     @patch('dt.auth.getpass.getuser', return_value='alice')
-    @patch('dt.auth._get_dt_version', return_value='0.3.0')
+    @patch('dt.auth.request._get_dt_version', return_value='0.3.0')
     def test_identities_populated(self, *mocks):
         req = generate_request()
         assert len(req.identities) == 2
@@ -2239,15 +2239,15 @@ class TestStatCheckUser:
 class TestCheckFilesystemForUser:
     """Tests for _check_filesystem_for_user."""
 
-    @patch('dt.auth._get_user_info', return_value=None)
+    @patch('dt.auth.checks._get_user_info', return_value=None)
     def test_unknown_user_skips(self, mock_info):
         ep = Endpoint(type='filesystem', url='/data', source='test')
         r = _check_filesystem_for_user(ep, 'nobody')
         assert r.status == STATUS_SKIP
         assert 'not found' in r.summary
 
-    @patch('dt.auth._stat_check_user', return_value=(True, True))
-    @patch('dt.auth._get_user_info', return_value=(1001, 100, [100]))
+    @patch('dt.auth.checks._stat_check_user', return_value=(True, True))
+    @patch('dt.auth.checks._get_user_info', return_value=(1001, 100, [100]))
     def test_accessible_dir(self, mock_info, mock_stat, tmp_path):
         d = tmp_path / 'cache'
         d.mkdir()
@@ -2255,8 +2255,8 @@ class TestCheckFilesystemForUser:
         r = _check_filesystem_for_user(ep, 'alice')
         assert r.status == STATUS_PASS
 
-    @patch('dt.auth._stat_check_user', return_value=(False, False))
-    @patch('dt.auth._get_user_info', return_value=(1001, 100, [100]))
+    @patch('dt.auth.checks._stat_check_user', return_value=(False, False))
+    @patch('dt.auth.checks._get_user_info', return_value=(1001, 100, [100]))
     def test_not_readable(self, mock_info, mock_stat, tmp_path):
         d = tmp_path / 'cache'
         d.mkdir()
@@ -2266,7 +2266,7 @@ class TestCheckFilesystemForUser:
         assert 'not readable' in r.summary
 
     def test_nonexistent_path(self):
-        with patch('dt.auth._get_user_info', return_value=(1001, 100, [100])):
+        with patch('dt.auth.checks._get_user_info', return_value=(1001, 100, [100])):
             ep = Endpoint(type='filesystem', url='/nonexistent/path', source='test')
             r = _check_filesystem_for_user(ep, 'alice')
             assert r.status == STATUS_FAIL
@@ -2322,7 +2322,7 @@ class TestCheckGithubForUser:
 class TestTryCheckUser:
     """Tests for _try_check with user parameter."""
 
-    @patch('dt.auth._check_filesystem_for_user')
+    @patch('dt.auth.checks._check_filesystem_for_user')
     def test_filesystem_routes_to_user_checker(self, mock_check):
         mock_check.return_value = CheckResult(
             endpoint=Endpoint(type='filesystem', url='/data', source='test'),
@@ -2332,7 +2332,7 @@ class TestTryCheckUser:
         r = _try_check(ep, user='alice')
         mock_check.assert_called_once_with(ep, 'alice', verbose=False)
 
-    @patch('dt.auth._check_github_for_user')
+    @patch('dt.auth.checks._check_github_for_user')
     def test_git_routes_to_github_checker(self, mock_check):
         mock_check.return_value = CheckResult(
             endpoint=Endpoint(type='git', url='git@github.com:o/r.git', source='test'),
@@ -2348,7 +2348,7 @@ class TestTryCheckUser:
         assert r.status == STATUS_SKIP
         assert 'cannot check' in r.summary
 
-    @patch('dt.auth._check_filesystem_for_user')
+    @patch('dt.auth.checks._check_filesystem_for_user')
     def test_ssh_local_path_routes_to_filesystem(self, mock_check):
         mock_check.return_value = CheckResult(
             endpoint=Endpoint(type='filesystem', url='/local/path', source='test'),
@@ -2369,7 +2369,7 @@ class TestTryCheckUser:
         mock_checker = MagicMock(return_value=CheckResult(
             endpoint=ep, status=STATUS_PASS, summary='ok',
         ))
-        with patch('dt.auth._CHECKERS', {'filesystem': mock_checker}):
+        with patch('dt.auth.checks._CHECKERS', {'filesystem': mock_checker}):
             r = _try_check(ep, user=None)
             mock_checker.assert_called_once()
 
@@ -2449,10 +2449,10 @@ class TestParseGithubOwnerRepo:
 class TestDiscoverFromRepo:
     """Tests for discover_endpoints_from_repo."""
 
-    @patch('dt.auth.discover_endpoints', return_value=[
+    @patch('dt.auth.endpoints.discover_endpoints', return_value=[
         Endpoint(type='git', url='git@github.com:org/repo.git', source='test'),
     ])
-    @patch('dt.auth.subprocess.run')
+    @patch('dt.auth.endpoints.subprocess.run')
     def test_clones_and_discovers(self, mock_run, mock_discover):
         mock_run.return_value = MagicMock(returncode=0)
         result = discover_endpoints_from_repo('git@github.com:org/repo.git')
@@ -2463,7 +2463,7 @@ class TestDiscoverFromRepo:
         assert args[0] == 'git'
         assert args[1] == 'clone'
 
-    @patch('dt.auth.subprocess.run')
+    @patch('dt.auth.endpoints.subprocess.run')
     def test_clone_failure_raises(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=1, stderr='fatal: repo not found',
@@ -2617,8 +2617,8 @@ class TestResolveRepoUrl:
 class TestTeamsWithShortNames:
     """Test that team functions resolve short names."""
 
-    @patch('dt.auth.subprocess.run')
-    @patch('dt.auth.resolve_repo_url',
+    @patch('dt.auth.teams.subprocess.run')
+    @patch('dt.auth.teams.resolve_repo_url',
            return_value='git@github.com:org/repo.git')
     def test_list_repo_teams_resolves(self, mock_resolve, mock_run):
         mock_run.return_value = MagicMock(
@@ -2628,17 +2628,17 @@ class TestTeamsWithShortNames:
         mock_resolve.assert_called_once_with('repo')
         assert len(teams) == 1
 
-    @patch('dt.auth.subprocess.run')
-    @patch('dt.auth.resolve_repo_url',
+    @patch('dt.auth.teams.subprocess.run')
+    @patch('dt.auth.teams.resolve_repo_url',
            return_value='git@github.com:org/repo.git')
     def test_add_team_resolves(self, mock_resolve, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         add_team_to_repo('repo', 'data-team')
         mock_resolve.assert_called_once_with('repo')
 
-    @patch('dt.auth.discover_endpoints', return_value=[])
-    @patch('dt.auth.subprocess.run')
-    @patch('dt.auth.resolve_repo_url',
+    @patch('dt.auth.endpoints.discover_endpoints', return_value=[])
+    @patch('dt.auth.teams.subprocess.run')
+    @patch('dt.auth.endpoints.resolve_repo_url',
            return_value='git@github.com:org/repo.git')
     def test_discover_from_repo_resolves(self, mock_resolve, mock_run, mock_disc):
         mock_run.return_value = MagicMock(returncode=0)
@@ -2653,14 +2653,14 @@ class TestTeamsWithShortNames:
 class TestInstallCredentials:
     """Test install_credentials no-op behavior when no S3 remotes found."""
 
-    @patch('dt.auth._get_repos_needing_credentials', return_value=[])
+    @patch('dt.auth.credentials._get_repos_needing_credentials', return_value=[])
     def test_returns_empty_dict_when_no_s3_repos(self, mock_repos):
         """install_credentials returns {} when no S3 remotes are found."""
         result = install_credentials(verbose=False)
         assert result == {}
         mock_repos.assert_called_once()
 
-    @patch('dt.auth._get_repos_needing_credentials', return_value=[])
+    @patch('dt.auth.credentials._get_repos_needing_credentials', return_value=[])
     def test_no_error_when_no_s3_repos(self, mock_repos):
         """install_credentials does not raise AuthError for no S3 repos."""
         # Should not raise - this is a no-op, not an error
@@ -3047,19 +3047,19 @@ class TestDeployKeyForge:
 class TestSSHSetup:
     """Tests for ssh_setup orchestration."""
 
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints', return_value=[])
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints', return_value=[])
     def test_no_endpoints(self, mock_discover, mock_check):
         results = ssh_setup(verbose=False)
         assert results == []
 
-    @patch('dt.auth._key_has_passphrase', return_value=False)
-    @patch('dt.auth._find_existing_key')
-    @patch('dt.auth._ensure_ssh_dir')
-    @patch('dt.auth._host_in_ssh_config', return_value=True)
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints')
-    @patch('dt.auth.click.prompt', return_value='testuser')
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
+    @patch('dt.auth.ssh._find_existing_key')
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=True)
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
+    @patch('dt.auth.ssh.click.prompt', return_value='testuser')
     def test_all_passing_and_configured(
         self, mock_prompt, mock_discover, mock_check, mock_host_in_config,
         mock_ssh_dir, mock_find_key, mock_passphrase, tmp_path,
@@ -3078,14 +3078,14 @@ class TestSSHSetup:
         assert len(results) == 1
         assert results[0].already_ok is True
 
-    @patch('dt.auth._key_has_passphrase', return_value=False)
-    @patch('dt.auth._deploy_key_forge')
-    @patch('dt.auth._write_ssh_config_stanza')
-    @patch('dt.auth._host_in_ssh_config', return_value=False)
-    @patch('dt.auth._find_existing_key')
-    @patch('dt.auth._ensure_ssh_dir')
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints')
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
+    @patch('dt.auth.ssh._deploy_key_forge')
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=False)
+    @patch('dt.auth.ssh._find_existing_key')
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
     def test_failing_forge_host(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
@@ -3119,14 +3119,14 @@ class TestSSHSetup:
         call_kwargs = mock_write_stanza.call_args
         assert call_kwargs[1]['user'] == 'git' or call_kwargs[0][1] == 'git'
 
-    @patch('dt.auth._key_has_passphrase', return_value=False)
-    @patch('dt.auth._deploy_key_ssh_copy_id')
-    @patch('dt.auth._write_ssh_config_stanza')
-    @patch('dt.auth._host_in_ssh_config', return_value=False)
-    @patch('dt.auth._find_existing_key')
-    @patch('dt.auth._ensure_ssh_dir')
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints')
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
+    @patch('dt.auth.ssh._deploy_key_ssh_copy_id')
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=False)
+    @patch('dt.auth.ssh._find_existing_key')
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
     def test_failing_ssh_host_with_username(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
@@ -3157,14 +3157,14 @@ class TestSSHSetup:
             'gadi.nci.org.au', 'alice', key_path, verbose=False,
         )
 
-    @patch('dt.auth._key_has_passphrase', return_value=False)
-    @patch('dt.auth._deploy_key_ssh_copy_id')
-    @patch('dt.auth._write_ssh_config_stanza')
-    @patch('dt.auth._host_in_ssh_config', return_value=True)
-    @patch('dt.auth._find_existing_key')
-    @patch('dt.auth._ensure_ssh_dir')
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints')
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
+    @patch('dt.auth.ssh._deploy_key_ssh_copy_id')
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=True)
+    @patch('dt.auth.ssh._find_existing_key')
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
     def test_skips_existing_config_stanza(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
@@ -3190,15 +3190,15 @@ class TestSSHSetup:
         assert results[0].config_written is False
         mock_write_stanza.assert_not_called()
 
-    @patch('dt.auth._key_has_passphrase', return_value=False)
-    @patch('dt.auth._generate_key')
-    @patch('dt.auth._find_existing_key', return_value=None)
-    @patch('dt.auth._ensure_ssh_dir')
-    @patch('dt.auth._deploy_key_ssh_copy_id', return_value=True)
-    @patch('dt.auth._write_ssh_config_stanza')
-    @patch('dt.auth._host_in_ssh_config', return_value=False)
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints')
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
+    @patch('dt.auth.ssh._generate_key')
+    @patch('dt.auth.ssh._find_existing_key', return_value=None)
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh._deploy_key_ssh_copy_id', return_value=True)
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=False)
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
     def test_generates_key_when_missing(
         self, mock_discover, mock_check, mock_host_in_config,
         mock_write_stanza, mock_copy_id, mock_ssh_dir,
@@ -3223,13 +3223,13 @@ class TestSSHSetup:
         mock_gen_key.assert_called_once()
         assert results[0].key_generated is True
 
-    @patch('dt.auth._key_has_passphrase', return_value=False)
-    @patch('dt.auth._write_ssh_config_stanza')
-    @patch('dt.auth._host_in_ssh_config', return_value=False)
-    @patch('dt.auth._find_existing_key')
-    @patch('dt.auth._ensure_ssh_dir')
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints')
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=False)
+    @patch('dt.auth.ssh._find_existing_key')
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
     def test_passing_host_gets_config_stanza(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
@@ -3258,14 +3258,14 @@ class TestSSHSetup:
         assert results[0].key_deployed is False
         mock_write_stanza.assert_called_once()
 
-    @patch('dt.auth._key_has_passphrase', return_value=True)
-    @patch('dt.auth._deploy_key_ssh_copy_id', return_value=True)
-    @patch('dt.auth._write_ssh_config_stanza')
-    @patch('dt.auth._host_in_ssh_config', return_value=False)
-    @patch('dt.auth._find_existing_key')
-    @patch('dt.auth._ensure_ssh_dir')
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints')
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=True)
+    @patch('dt.auth.ssh._deploy_key_ssh_copy_id', return_value=True)
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=False)
+    @patch('dt.auth.ssh._find_existing_key')
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
     def test_passphrase_warning_in_result(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
@@ -3291,15 +3291,15 @@ class TestSSHSetup:
         assert 'passphrase' in results[0].message.lower()
         assert 'ssh-add' in results[0].message
 
-    @patch('dt.auth._key_has_passphrase', return_value=False)
-    @patch('dt.auth._deploy_key_ssh_copy_id', return_value=True)
-    @patch('dt.auth._write_ssh_config_stanza')
-    @patch('dt.auth._host_in_ssh_config', return_value=False)
-    @patch('dt.auth._find_existing_key')
-    @patch('dt.auth._ensure_ssh_dir')
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints')
-    @patch('dt.auth.click.prompt', return_value='prompted_user')
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
+    @patch('dt.auth.ssh._deploy_key_ssh_copy_id', return_value=True)
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=False)
+    @patch('dt.auth.ssh._find_existing_key')
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
+    @patch('dt.auth.ssh.click.prompt', return_value='prompted_user')
     def test_prompts_for_username_when_missing(
         self, mock_prompt, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
@@ -3329,14 +3329,14 @@ class TestSSHSetup:
             'host.com', 'prompted_user', key_path, verbose=False,
         )
 
-    @patch('dt.auth._key_has_passphrase', return_value=False)
-    @patch('dt.auth._deploy_key_forge')
-    @patch('dt.auth._write_ssh_config_stanza')
-    @patch('dt.auth._host_in_ssh_config', return_value=False)
-    @patch('dt.auth._find_existing_key')
-    @patch('dt.auth._ensure_ssh_dir')
-    @patch('dt.auth.check_endpoints')
-    @patch('dt.auth.discover_endpoints')
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
+    @patch('dt.auth.ssh._deploy_key_forge')
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=False)
+    @patch('dt.auth.ssh._find_existing_key')
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
     def test_no_prompt_for_forge_only_hosts(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,

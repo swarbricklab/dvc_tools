@@ -739,6 +739,64 @@ def auth():
     pass
 
 
+@auth.command('setup')
+@click.option('-u', '--username', default=None,
+              help='Default SSH username for remote hosts.')
+@click.option('--config', 'config_path',
+              type=click.Path(exists=True, dir_okay=False),
+              default=None,
+              help='YAML config file with per-host usernames/passwords.')
+@click.option('--ssh-config', 'ssh_config_file',
+              type=click.Path(dir_okay=False),
+              default=None,
+              help='SSH config file path (default: ~/.ssh/config).')
+@click.option('-v', '--verbose', is_flag=True,
+              help='Show detailed progress.')
+def auth_setup(username, config_path, ssh_config_file, verbose):
+    """Set up SSH keys, config, and credentials in one step.
+
+    Discovers all endpoints, then:
+
+    \b
+      • SSH/git endpoints → key generation, deployment, config stanzas
+      • S3 endpoints → credential installation from secret manager
+
+    Provide a --config YAML file for non-interactive operation:
+
+    \b
+      hosts:
+        gadi-dm.nci.org.au:
+          username: jr9959
+        github.com: {}
+
+    \b
+    Examples:
+      dt auth setup                        # interactive
+      dt auth setup -u jr9959              # default SSH username
+      dt auth setup --config hosts.yaml    # non-interactive
+      dt auth setup -v                     # verbose output
+    """
+    from pathlib import Path as _Path
+    from .auth.setup import auth_setup as _auth_setup, format_setup_report
+
+    try:
+        cfg = _Path(config_path) if config_path else None
+        ssh_cfg = _Path(ssh_config_file) if ssh_config_file else None
+        report = _auth_setup(
+            config_path=cfg,
+            username=username,
+            ssh_config_file=ssh_cfg,
+            verbose=verbose,
+        )
+        click.echo(format_setup_report(report))
+
+        if report.errors:
+            raise SystemExit(1)
+
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
 @auth.command('list')
 @click.option('--type', 'types', multiple=True,
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
