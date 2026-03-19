@@ -84,7 +84,8 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
 @click.option('--shallow', is_flag=True, help='Perform a shallow clone')
 @click.option('--pull', 'do_pull', is_flag=True, help='Run dt pull after cloning to fetch data')
 @click.option('--no-auth', is_flag=True, help='Skip running auth setup after cloning')
-def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow, do_pull, no_auth):
+@click.option('--no-hooks', is_flag=True, help='Skip installing git hooks and merge driver')
+def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow, do_pull, no_auth, no_hooks):
     """Clone an existing DVC project from GitHub.
     
     REPOSITORY can be either:
@@ -104,8 +105,7 @@ def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_na
         dt clone git@github.com:myorg/myproject.git
     
     This command clones a repository and configures it for the local platform
-    with proper cache and remote setup.  After cloning, it runs auth setup
-    to configure SSH keys and S3 credentials (use --no-auth to skip).
+    with proper cache, remote, hooks, and auth setup.
     """
     try:
         target_dir = clone_mod.clone_repository(
@@ -118,6 +118,7 @@ def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_na
             shallow=shallow,
             do_pull=do_pull,
             no_auth=no_auth,
+            no_hooks=no_hooks,
         )
     except clone_mod.CloneError as e:
         raise click.ClickException(str(e))
