@@ -16,8 +16,8 @@ A DVC project may depend on several storage backends simultaneously — a shared
 | [`dt auth whoami`](#dt-auth-whoami) | Show current user identities across systems |
 | [`dt auth check`](#dt-auth-check) | Test access to each endpoint |
 | [`dt auth request`](#dt-auth-request) | Generate an access-request template from failures |
+| [`dt auth setup`](#dt-auth-setup) | Set up SSH keys, config, and S3 credentials in one step |
 | [`dt auth teams`](#dt-auth-teams) | Manage GitHub team access for repositories |
-| [`dt auth credentials`](#dt-auth-credentials) | Install S3 credentials from secret managers |
 | [`dt auth grant`](#dt-auth-grant) | Grant a user access to a resource *(planned)* |
 
 ---
@@ -472,31 +472,76 @@ dt auth teams add-user alice data-team --org myorg
 
 ---
 
-## dt auth credentials
+## dt auth setup
 
-Manage S3 remote credentials by fetching them from a secret manager and installing them into the **global DVC config**. This ensures credentials work both for the current repository and for imported data from other repositories.
+Set up SSH keys, config stanzas, and S3 credentials in one step. This is the primary onboarding command — run it once on a new machine or after cloning a project to get all access working.
 
-### Subcommands
+### Usage
 
-| Subcommand | Description |
-|------------|-------------|
-| `dt auth credentials install` | Fetch and install credentials for all required repos |
-| `dt auth credentials uninstall` | Remove credentials from global config |
-| `dt auth credentials status` | Show which remotes have credentials installed |
+```bash
+dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [-v]
+```
 
-### How it works
+### Options
 
-When you run `dt auth credentials install`:
+| Option | Description |
+|--------|-------------|
+| `-u, --username USERNAME` | Default SSH username for remote hosts |
+| `--config FILE` | YAML config file with per-host usernames/passwords (enables non-interactive mode) |
+| `--ssh-config FILE` | SSH config file path (default: `~/.ssh/config`) |
+| `-v, --verbose` | Show detailed progress |
 
-1. **Detects required repos** — scans `.dvc` files for imports and extracts source repo names
-2. **Fetches secrets** — looks up `dvc-remote-{repo_name}` in the configured secret manager
-3. **Merges into global config** — parses the INI config and merges sections, replacing existing sections with the same name (supports credential rotation)
+### What it does
+
+`dt auth setup` discovers all endpoints the project uses (same as `dt auth list`), then:
+
+1. **SSH / git endpoints** — generates an SSH key pair (if none exists), writes `~/.ssh/config` stanzas for each host, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts or `gh ssh-key add` for GitHub/GitLab)
+2. **S3 endpoints** — fetches credentials from the configured secret manager and installs them into the global DVC config
+
+Username resolution priority (per host):
+1. YAML config file (`--config`)
+2. CLI flag (`-u / --username`)
+3. Username embedded in the remote URL
+4. Interactive prompt (skipped when `--config` is provided)
+
+### YAML config file
+
+For non-interactive operation, provide a `--config` YAML file:
+
+```yaml
+hosts:
+  gadi-dm.nci.org.au:
+    username: jr9959
+    password: secret       # optional — only used by ssh-copy-id
+  github.com:
+    # forge host — no username needed
+```
+
+### Examples
+
+```bash
+# Interactive — prompts for username per host
+dt auth setup
+
+# Provide a default SSH username
+dt auth setup -u jr9959
+
+# Fully non-interactive with a config file
+dt auth setup --config hosts.yaml
+
+# Verbose output
+dt auth setup -v
+```
+
+### S3 credential management
+
+The S3 credential step uses the same secret-manager integration previously available via `dt auth credentials install`. Credentials are fetched from GCP Secret Manager (or other backends) and merged into the global DVC config.
 
 Global config location:
 - **macOS**: `~/Library/Application Support/dvc/config`
 - **Linux**: `~/.config/dvc/config` (or `$XDG_CONFIG_HOME/dvc/config`)
 
-### Configuration
+#### Secret manager configuration
 
 Add to `.dt/config.yaml` or user config:
 
@@ -508,7 +553,7 @@ secrets:
     project: my-gcp-project
 ```
 
-### Secret format
+#### Secret format
 
 Secrets are named by **repository** (e.g., `dvc-remote-neochemo` for the `neochemo` repo) and contain **raw DVC INI config**:
 
@@ -517,53 +562,15 @@ Secrets are named by **repository** (e.g., `dvc-remote-neochemo` for the `neoche
     access_key_id = AKIAXXXXXXXX
     secret_access_key = xxxxx
     endpointurl = https://xxx.r2.cloudflarestorage.com
-
-['remote "backup"']
-    access_key_id = AKIAYYYYYYYY
-    secret_access_key = yyyyy
-    endpointurl = https://yyy.r2.cloudflarestorage.com
 ```
 
-### Examples
-
-```bash
-# Install credentials for current repo + all source repos from imports
-dt auth credentials install
-
-# Install with verbose output (shows which repos are detected)
-dt auth credentials install -v
-
-# See status of all S3 remotes
-dt auth credentials status
-
-# Remove installed credentials
-dt auth credentials uninstall
-```
-
-### Example output
-
-```
-$ dt auth credentials install -v
-Primary repo: neochemo
-Found source repo: bcarc_wts (from git@github.com:Swarbricklab/bcarc_wts.git)
-
-Fetching credentials for 2 repo(s)...
-  ✓ bcarc_wts: 1 section(s)
-  ✓ neochemo: 1 section(s)
-
-Merging credentials into /Users/johree/Library/Application Support/dvc/config...
-✓ Credentials installed to /Users/johree/Library/Application Support/dvc/config
-  Permissions: 600
-✓ Installed credentials for 2 repo(s)
-```
-
-### Security
+#### Security
 
 - Credentials are written to global DVC config with `600` permissions (owner read/write only)
 - Global config is outside the repo, so never accidentally committed
 - Requires GCP authentication via `gcloud auth login` or service account
 
-### Supported backends
+#### Supported backends
 
 | Backend | Status | Configuration |
 |---------|--------|---------------|
@@ -600,7 +607,7 @@ This command is being built incrementally:
 3. **`dt auth check`** — read-only access tests ✅
 4. **`dt auth request`** — template generation from check results ✅
 5. **`dt auth teams`** — GitHub team management ✅
-6. **`dt auth credentials`** — secret manager integration for S3 credentials ✅
+6. **`dt auth setup`** — combined SSH + credentials setup ✅
 7. **`dt auth grant`** — admin actions (not yet implemented; use `dt auth teams` for GitHub access)
 
 ---

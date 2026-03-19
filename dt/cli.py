@@ -83,7 +83,9 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
 @click.option('--remote-name', help='Override remote directory name')
 @click.option('--shallow', is_flag=True, help='Perform a shallow clone')
 @click.option('--pull', 'do_pull', is_flag=True, help='Run dt pull after cloning to fetch data')
-def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow, do_pull):
+@click.option('--no-auth', is_flag=True, help='Skip running auth setup after cloning')
+@click.option('--no-hooks', is_flag=True, help='Skip installing git hooks and merge driver')
+def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow, do_pull, no_auth, no_hooks):
     """Clone an existing DVC project from GitHub.
     
     REPOSITORY can be either:
@@ -103,7 +105,7 @@ def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_na
         dt clone git@github.com:myorg/myproject.git
     
     This command clones a repository and configures it for the local platform
-    with proper cache and remote setup.
+    with proper cache, remote, hooks, and auth setup.
     """
     try:
         target_dir = clone_mod.clone_repository(
@@ -115,6 +117,8 @@ def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_na
             remote_name=remote_name,
             shallow=shallow,
             do_pull=do_pull,
+            no_auth=no_auth,
+            no_hooks=no_hooks,
         )
     except clone_mod.CloneError as e:
         raise click.ClickException(str(e))
@@ -739,6 +743,64 @@ def auth():
     pass
 
 
+@auth.command('setup')
+@click.option('-u', '--username', default=None,
+              help='Default SSH username for remote hosts.')
+@click.option('--config', 'config_path',
+              type=click.Path(exists=True, dir_okay=False),
+              default=None,
+              help='YAML config file with per-host usernames/passwords.')
+@click.option('--ssh-config', 'ssh_config_file',
+              type=click.Path(dir_okay=False),
+              default=None,
+              help='SSH config file path (default: ~/.ssh/config).')
+@click.option('-v', '--verbose', is_flag=True,
+              help='Show detailed progress.')
+def auth_setup(username, config_path, ssh_config_file, verbose):
+    """Set up SSH keys, config, and credentials in one step.
+
+    Discovers all endpoints, then:
+
+    \b
+      • SSH/git endpoints → key generation, deployment, config stanzas
+      • S3 endpoints → credential installation from secret manager
+
+    Provide a --config YAML file for non-interactive operation:
+
+    \b
+      hosts:
+        gadi-dm.nci.org.au:
+          username: jr9959
+        github.com: {}
+
+    \b
+    Examples:
+      dt auth setup                        # interactive
+      dt auth setup -u jr9959              # default SSH username
+      dt auth setup --config hosts.yaml    # non-interactive
+      dt auth setup -v                     # verbose output
+    """
+    from pathlib import Path as _Path
+    from .auth.setup import auth_setup as _auth_setup, format_setup_report
+
+    try:
+        cfg = _Path(config_path) if config_path else None
+        ssh_cfg = _Path(ssh_config_file) if ssh_config_file else None
+        report = _auth_setup(
+            config_path=cfg,
+            username=username,
+            ssh_config_file=ssh_cfg,
+            verbose=verbose,
+        )
+        click.echo(format_setup_report(report))
+
+        if report.errors:
+            raise SystemExit(1)
+
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
 @auth.command('list')
 @click.option('--type', 'types', multiple=True,
               type=click.Choice(sorted(auth_mod.ENDPOINT_TYPES), case_sensitive=False),
@@ -1094,124 +1156,6 @@ def auth_teams_add_user(username, team_slug, org, dry):
         else:
             msg = auth_mod.add_user_to_team(org, team_slug, username)
             click.echo(click.style(f'✓ {msg}', fg='green'))
-    except auth_mod.AuthError as e:
-        raise click.ClickException(str(e))
-
-
-# -- dt auth credentials ----------------------------------------------------
-
-@auth.group('credentials')
-def auth_credentials():
-    """Manage S3 remote credentials from secret managers.
-    
-    Fetch credentials from GCP Secret Manager (or other backends) and
-    install them into .dvc/config.local for S3-compatible remotes.
-    """
-    pass
-
-
-@auth_credentials.command('install')
-@click.option('-v', '--verbose', is_flag=True,
-              help='Show progress messages.')
-def auth_credentials_install(verbose):
-    """Install S3 credentials from secret manager.
-    
-    Fetches credentials for the current repository and all source repos
-    (from imports) and installs them to the global DVC config.
-    
-    \b
-      dt auth credentials install
-      dt auth credentials install -v
-    
-    Credentials are merged into the global config, replacing any existing
-    sections with the same name (supporting credential rotation).
-    
-    Requires secrets configuration in .dt/config.yaml:
-    
-    \b
-      secrets:
-        backend: gcp
-        gcp:
-          project: my-gcp-project
-    
-    Secrets are named 'dvc-remote-{repo_name}' and contain INI-format config:
-    
-    \b
-      ['remote "myremote"']
-          access_key_id = AKIA...
-          secret_access_key = ...
-          endpointurl = https://...
-    """
-    try:
-        results = auth_mod.install_credentials(verbose=verbose)
-        
-        # Handle no S3 remotes case
-        if not results:
-            click.echo('No S3 credentials needed — skipping')
-            return
-        
-        # Summary
-        success = sum(1 for v in results.values() if v)
-        failed = sum(1 for v in results.values() if not v)
-        
-        config_path = auth_mod._get_dvc_global_config_path()
-        
-        if success > 0:
-            click.echo(click.style(
-                f'✓ Installed credentials for {success} repo(s) to {config_path}',
-                fg='green',
-            ))
-        
-        if failed > 0:
-            missing = [k for k, v in results.items() if not v]
-            click.echo(click.style(
-                f'⚠ Missing secrets for: {", ".join(missing)}',
-                fg='yellow',
-            ))
-            
-    except auth_mod.AuthError as e:
-        raise click.ClickException(str(e))
-
-
-@auth_credentials.command('uninstall')
-@click.option('--remote', default=None,
-              help='Remove credentials for a specific remote only.')
-@click.option('-v', '--verbose', is_flag=True,
-              help='Show progress messages.')
-def auth_credentials_uninstall(remote, verbose):
-    """Remove S3 credentials from global DVC config.
-    
-    \b
-      dt auth credentials uninstall              # remove all
-      dt auth credentials uninstall --remote cloud  # remove specific remote
-    
-    Removes credential keys (access_key_id, secret_access_key, etc.) from
-    remote sections. The remote URL remains intact.
-    """
-    removed = auth_mod.uninstall_credentials(remote=remote, verbose=verbose)
-    if removed:
-        remotes = ', '.join(removed)
-        config_path = auth_mod._get_dvc_global_config_path()
-        click.echo(click.style(
-            f'✓ Removed credentials for: {remotes}', fg='green',
-        ))
-        click.echo(f'  Config: {config_path}')
-    else:
-        click.echo('No credentials to remove.')
-
-
-@auth_credentials.command('status')
-@click.option('-v', '--verbose', is_flag=True,
-              help='Show detailed status.')
-def auth_credentials_status(verbose):
-    """Show credential status for S3 remotes.
-    
-    Displays which remotes have credentials installed in the global DVC config
-    and which are missing credentials.
-    """
-    try:
-        statuses = auth_mod.get_credentials_status(verbose=verbose)
-        click.echo(auth_mod.format_credentials_status(statuses))
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 
