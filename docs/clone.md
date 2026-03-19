@@ -24,6 +24,8 @@ dt clone [options] <repository> [path]
 - `--remote-name <name>`: Override remote directory name (defaults to repository name)
 - `--shallow`: Perform a shallow clone (only recent history)
 - `--pull`: Run `dt pull` after cloning to fetch all data files
+- `--no-auth`: Skip running `dt auth setup` after cloning
+- `--no-hooks`: Skip installing git hooks and DVC merge driver
 
 ## Short Name Feature
 
@@ -58,6 +60,9 @@ This operation includes the following steps:
 1. **Git Clone**: Clones the repository using `git clone`
 2. **Submodule Initialization**: Recursively clones all git submodules and their submodules
 3. **Cache Configuration**: Sets up the shared external cache directory
+4. **Remote Setup**: Configures a local filesystem remote for efficient HPC shared access
+5. **Git Hooks**: Installs pre-commit, post-checkout, and pre-push hooks plus the DVC merge driver (use `--no-hooks` to skip)
+6. **Auth Setup**: Runs `dt auth setup` to configure SSH keys and S3 credentials (use `--no-auth` to skip)
 
 ## Examples
 

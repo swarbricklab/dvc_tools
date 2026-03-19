@@ -102,7 +102,9 @@ class TestCloneRepository:
                 with patch('dt.clone.cache_mod.init_cache'):
                     result = clone.clone_repository(
                         'git@github.com:org/testrepo.git',
-                        verbose=False
+                        verbose=False,
+                        no_auth=True,
+                        no_hooks=True,
                     )
         
         # Check git clone was called
@@ -124,7 +126,9 @@ class TestCloneRepository:
                     clone.clone_repository(
                         'git@github.com:org/testrepo.git',
                         shallow=True,
-                        verbose=False
+                        verbose=False,
+                        no_auth=True,
+                        no_hooks=True,
                     )
         
         first_call = mock_run.call_args_list[0]
@@ -145,7 +149,9 @@ class TestCloneRepository:
                     clone.clone_repository(
                         'git@github.com:org/testrepo.git',
                         no_submodules=True,
-                        verbose=False
+                        verbose=False,
+                        no_auth=True,
+                        no_hooks=True,
                     )
         
         # Should not have --recurse-submodules
@@ -165,7 +171,9 @@ class TestCloneRepository:
                 with pytest.raises(CloneError, match="Git clone failed"):
                     clone.clone_repository(
                         'git@github.com:org/testrepo.git',
-                        verbose=False
+                        verbose=False,
+                        no_auth=True,
+                        no_hooks=True,
                     )
     
     def test_custom_path(self, tmp_path, monkeypatch):
@@ -181,7 +189,9 @@ class TestCloneRepository:
                     result = clone.clone_repository(
                         'git@github.com:org/testrepo.git',
                         path='custom_dir',
-                        verbose=False
+                        verbose=False,
+                        no_auth=True,
+                        no_hooks=True,
                     )
         
         assert result == Path('custom_dir')
@@ -190,3 +200,166 @@ class TestCloneRepository:
         first_call = mock_run.call_args_list[0]
         cmd = first_call[0][0]
         assert 'custom_dir' in cmd
+
+
+class TestCloneAuthSetup:
+    """Tests for auth setup integration in clone_repository."""
+
+    def test_auth_setup_runs_by_default(self, tmp_path, monkeypatch):
+        """auth_setup is called when no_auth is False (default)."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'testrepo').mkdir()
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        mock_report = MagicMock()
+        mock_report.ssh_results = []
+        mock_report.credentials_installed = {}
+        mock_report.skipped_ssh = True
+        mock_report.skipped_credentials = True
+        mock_report.errors = []
+
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.remote_mod.init_remote'):
+                        with patch('dt.clone.install_mod.install', return_value=[]):
+                            with patch('dt.clone.auth_setup_mod.auth_setup', return_value=mock_report) as mock_auth:
+                                clone.clone_repository(
+                                    'git@github.com:org/testrepo.git',
+                                    verbose=False,
+                                )
+
+        mock_auth.assert_called_once_with(verbose=False)
+
+    def test_no_auth_skips_setup(self, tmp_path, monkeypatch):
+        """auth_setup is not called when no_auth is True."""
+        monkeypatch.chdir(tmp_path)
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.auth_setup_mod.auth_setup') as mock_auth:
+                        clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            no_auth=True,
+                            no_hooks=True,
+                            verbose=False,
+                        )
+
+        mock_auth.assert_not_called()
+
+    def test_auth_setup_failure_does_not_abort_clone(self, tmp_path, monkeypatch):
+        """Clone succeeds even if auth_setup raises an exception."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'testrepo').mkdir()
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.remote_mod.init_remote'):
+                        with patch('dt.clone.install_mod.install', return_value=[]):
+                            with patch('dt.clone.auth_setup_mod.auth_setup', side_effect=RuntimeError('gcp error')):
+                                result = clone.clone_repository(
+                                    'git@github.com:org/testrepo.git',
+                                    verbose=False,
+                                )
+
+        assert result == Path('testrepo')
+
+
+class TestCloneHooksAndRemote:
+    """Tests for hooks install and remote setup in clone_repository."""
+
+    def test_hooks_installed_by_default(self, tmp_path, monkeypatch):
+        """install() is called when no_hooks is False (default)."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'testrepo').mkdir()
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.remote_mod.init_remote'):
+                        with patch('dt.clone.install_mod.install', return_value=['pre-commit']) as mock_install:
+                            clone.clone_repository(
+                                'git@github.com:org/testrepo.git',
+                                no_auth=True,
+                                verbose=False,
+                            )
+
+        mock_install.assert_called_once_with(verbose=False)
+
+    def test_no_hooks_skips_install(self, tmp_path, monkeypatch):
+        """install() is not called when no_hooks is True."""
+        monkeypatch.chdir(tmp_path)
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.install_mod.install') as mock_install:
+                        clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            no_auth=True,
+                            no_hooks=True,
+                            verbose=False,
+                        )
+
+        mock_install.assert_not_called()
+
+    def test_remote_init_called(self, tmp_path, monkeypatch):
+        """init_remote is called with repo name and target dir."""
+        monkeypatch.chdir(tmp_path)
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.remote_mod.init_remote') as mock_remote:
+                        clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            no_auth=True,
+                            no_hooks=True,
+                            verbose=False,
+                        )
+
+        mock_remote.assert_called_once_with(
+            name='testrepo',
+            repo_path=Path('testrepo'),
+            verbose=False,
+        )
+
+    def test_remote_failure_does_not_abort(self, tmp_path, monkeypatch):
+        """Clone succeeds even if remote init fails."""
+        monkeypatch.chdir(tmp_path)
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        from dt.errors import RemoteError
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.remote_mod.init_remote', side_effect=RemoteError('no config')):
+                        result = clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            no_auth=True,
+                            no_hooks=True,
+                            verbose=False,
+                        )
+
+        assert result == Path('testrepo')

@@ -3,12 +3,16 @@
 Handles cloning DVC repositories with proper cache and remote setup.
 """
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
 
 from . import config as cfg
 from . import cache as cache_mod
+from . import install as install_mod
+from . import remote as remote_mod
+from .auth import setup as auth_setup_mod
 from .errors import CloneError
 
 
@@ -73,6 +77,8 @@ def clone_repository(
     shallow: bool = False,
     verbose: bool = True,
     do_pull: bool = False,
+    no_auth: bool = False,
+    no_hooks: bool = False,
 ) -> Path:
     """Clone a DVC repository with proper cache setup.
     
@@ -86,6 +92,8 @@ def clone_repository(
         shallow: Perform shallow clone
         verbose: Print progress messages
         do_pull: Run dt pull after cloning to fetch data
+        no_auth: Skip running auth setup after cloning
+        no_hooks: Skip installing git hooks and merge driver
         
     Returns:
         Path to the cloned repository
@@ -141,13 +149,56 @@ def clone_repository(
     except cache_mod.CacheError as e:
         if verbose:
             print(f"Warning: {e}")
-    
+
+    # Set up local remote for HPC shared filesystem access
+    try:
+        remote_mod.init_remote(
+            name=remote_name,
+            repo_path=target_dir,
+            verbose=verbose,
+        )
+    except remote_mod.RemoteError as e:
+        if verbose:
+            print(f"Warning: Remote setup skipped: {e}")
+
+    # Install git hooks and DVC merge driver
+    if not no_hooks:
+        original_dir = os.getcwd()
+        try:
+            os.chdir(target_dir)
+            installed = install_mod.install(verbose=verbose)
+            if verbose and installed:
+                print(f"Installed {len(installed)} hook(s): {', '.join(installed)}")
+        except Exception as exc:
+            if verbose:
+                print(f"Warning: Hook install failed: {exc}")
+        finally:
+            os.chdir(original_dir)
+
+    # Run auth setup (SSH keys + S3 credentials)
+    if not no_auth:
+        if verbose:
+            print(f"\nSetting up authentication...")
+
+        original_dir = os.getcwd()
+        try:
+            os.chdir(target_dir)
+            report = auth_setup_mod.auth_setup(verbose=verbose)
+        except Exception as exc:
+            report = None
+            if verbose:
+                print(f"Warning: Auth setup failed: {exc}")
+        finally:
+            os.chdir(original_dir)
+
+        if report and verbose:
+            print(auth_setup_mod.format_setup_report(report))
+
     # Run dt pull if requested
     if do_pull:
         if verbose:
-            print(f"\nPulling data...")
+            print(f"Pulling data...")
         
-        import os
         from . import pull as pull_mod
         
         # Change to the cloned directory for pull
