@@ -163,6 +163,20 @@ def auth_setup(
     has_ssh_or_git = any(ep.type in ('ssh', 'git') for ep in flat_eps)
     has_s3 = any(ep.type == 's3' for ep in flat_eps)
 
+    # -- 2b. Early GCP auth check (fail fast, not after SSH setup) ---------
+    if has_s3:
+        from ..secrets.gcp import GCPSecretBackend
+        if not GCPSecretBackend._has_adc_credentials() \
+                and not GCPSecretBackend.check_gcloud_authenticated():
+            report.errors.append(
+                "No active GCP authentication. "
+                "Run 'gcloud auth login' then retry."
+            )
+            if verbose:
+                print("\n\u26a0 No active GCP authentication found.")
+                print("  Run 'gcloud auth login' to authenticate, then retry.")
+            has_s3 = False  # skip credential install
+
     # -- 3. SSH setup (if needed) ------------------------------------------
     if has_ssh_or_git:
         if verbose:

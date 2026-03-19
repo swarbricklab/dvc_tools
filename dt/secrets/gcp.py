@@ -1,7 +1,9 @@
 """GCP Secret Manager backend for DVC credentials."""
 
+import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Dict, Optional
 
 from .base import SecretBackend, SecretError
@@ -25,10 +27,54 @@ class GCPSecretBackend(SecretBackend):
         self._client = None
         self._use_cli = False
     
+    @staticmethod
+    def check_gcloud_authenticated() -> Optional[str]:
+        """Quick check whether gcloud CLI has an active authenticated account.
+
+        Returns the active account email, or ``None`` if not authenticated
+        or gcloud is not installed.
+        """
+        gcloud = shutil.which('gcloud')
+        if not gcloud:
+            return None
+        try:
+            result = subprocess.run(
+                [gcloud, 'auth', 'list', '--filter=status:ACTIVE',
+                 '--format=value(account)'],
+                capture_output=True, text=True, timeout=10,
+            )
+            account = result.stdout.strip()
+            return account if account else None
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+
+    @staticmethod
+    def _has_adc_credentials() -> bool:
+        """Check if Application Default Credentials exist locally.
+
+        Returns ``True`` if an explicit credential file is set via
+        ``GOOGLE_APPLICATION_CREDENTIALS`` or gcloud application-default
+        credentials exist on disk.  Does **not** call any GCP API, so
+        this is safe to call without risk of hanging.
+        """
+        explicit = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        if explicit and Path(explicit).is_file():
+            return True
+        adc_path = Path.home() / '.config' / 'gcloud' / 'application_default_credentials.json'
+        return adc_path.is_file()
+
     @property
     def client(self):
-        """Lazy-load the Secret Manager client."""
+        """Lazy-load the Secret Manager client.
+
+        Skips the Python library when no Application Default Credentials
+        are available locally, to avoid a slow timeout on the GCE
+        metadata server.
+        """
         if self._client is None:
+            if not self._has_adc_credentials():
+                self._use_cli = True
+                return None
             try:
                 from google.cloud import secretmanager
             except ImportError:

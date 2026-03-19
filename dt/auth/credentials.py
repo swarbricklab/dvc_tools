@@ -50,6 +50,13 @@ def _get_secret_backend():
                 "      project: <your-gcp-project>"
             )
         prefix = cfg.get_value('secrets.prefix') or 'dvc-remote-'
+        # Quick auth check — fail fast instead of hanging on GCP calls
+        if not GCPSecretBackend._has_adc_credentials() \
+                and not GCPSecretBackend.check_gcloud_authenticated():
+            raise AuthError(
+                "No active GCP authentication found.\n"
+                "Run 'gcloud auth login' to authenticate, then retry."
+            )
         return GCPSecretBackend(project=project, prefix=prefix)
     else:
         raise AuthError(

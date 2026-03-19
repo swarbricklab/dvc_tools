@@ -2669,6 +2669,96 @@ class TestInstallCredentials:
 
 
 # =============================================================================
+# GCP auth pre-check tests
+# =============================================================================
+
+class TestCheckGcloudAuthenticated:
+    """Tests for GCPSecretBackend.check_gcloud_authenticated."""
+
+    @patch('dt.secrets.gcp.shutil.which', return_value=None)
+    def test_no_gcloud_returns_none(self, mock_which):
+        from dt.secrets.gcp import GCPSecretBackend
+        assert GCPSecretBackend.check_gcloud_authenticated() is None
+
+    @patch('dt.secrets.gcp.subprocess.run')
+    @patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud')
+    def test_active_account(self, mock_which, mock_run):
+        from dt.secrets.gcp import GCPSecretBackend
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout='user@example.com\n',
+        )
+        assert GCPSecretBackend.check_gcloud_authenticated() == 'user@example.com'
+
+    @patch('dt.secrets.gcp.subprocess.run')
+    @patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud')
+    def test_no_active_account(self, mock_which, mock_run):
+        from dt.secrets.gcp import GCPSecretBackend
+        mock_run.return_value = MagicMock(returncode=0, stdout='\n')
+        assert GCPSecretBackend.check_gcloud_authenticated() is None
+
+    @patch('dt.secrets.gcp.subprocess.run', side_effect=subprocess.TimeoutExpired('gcloud', 10))
+    @patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud')
+    def test_timeout_returns_none(self, mock_which, mock_run):
+        from dt.secrets.gcp import GCPSecretBackend
+        assert GCPSecretBackend.check_gcloud_authenticated() is None
+
+
+class TestHasAdcCredentials:
+    """Tests for GCPSecretBackend._has_adc_credentials."""
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('dt.secrets.gcp.Path')
+    def test_no_credentials(self, mock_path_cls):
+        from dt.secrets.gcp import GCPSecretBackend
+        mock_home = MagicMock()
+        mock_path_cls.home.return_value = mock_home
+        adc = mock_home / '.config' / 'gcloud' / 'application_default_credentials.json'
+        adc.is_file.return_value = False
+        assert GCPSecretBackend._has_adc_credentials() is False
+
+    @patch.dict('os.environ', {'GOOGLE_APPLICATION_CREDENTIALS': '/tmp/sa.json'})
+    @patch('dt.secrets.gcp.Path')
+    def test_explicit_env_var(self, mock_path_cls):
+        from dt.secrets.gcp import GCPSecretBackend
+        mock_path_cls.return_value.is_file.return_value = True
+        assert GCPSecretBackend._has_adc_credentials() is True
+
+
+class TestGetSecretBackendAuthCheck:
+    """Test that _get_secret_backend checks GCP auth before returning."""
+
+    @patch('dt.secrets.gcp.GCPSecretBackend.check_gcloud_authenticated',
+           return_value=None)
+    @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
+           return_value=False)
+    @patch('dt.config.get_value')
+    def test_raises_when_not_authenticated(self, mock_get_value, mock_adc, mock_gcloud):
+        from dt.auth.credentials import _get_secret_backend
+        mock_get_value.side_effect = lambda k: {
+            'secrets.backend': 'gcp',
+            'secrets.gcp.project': 'my-project',
+            'secrets.prefix': 'dvc-remote-',
+        }.get(k)
+        with pytest.raises(AuthError, match='No active GCP authentication'):
+            _get_secret_backend()
+
+    @patch('dt.secrets.gcp.GCPSecretBackend.check_gcloud_authenticated',
+           return_value='user@example.com')
+    @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
+           return_value=False)
+    @patch('dt.config.get_value')
+    def test_passes_when_gcloud_authenticated(self, mock_get_value, mock_adc, mock_gcloud):
+        from dt.auth.credentials import _get_secret_backend
+        mock_get_value.side_effect = lambda k: {
+            'secrets.backend': 'gcp',
+            'secrets.gcp.project': 'my-project',
+            'secrets.prefix': 'dvc-remote-',
+        }.get(k)
+        backend = _get_secret_backend()
+        assert backend is not None
+
+
+# =============================================================================
 # SSH setup helper tests
 # =============================================================================
 
