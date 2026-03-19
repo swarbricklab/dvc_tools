@@ -537,11 +537,14 @@ def _print_unread_reminder(level: int) -> None:
         unread = count_unread_results()
         if unread > 0:
             noun = 'report' if unread == 1 else 'reports'
-            print(
+            msg = (
                 f"  \u26a0 {unread} unread hook {noun}"
-                f" \u2014 run 'dt hook results' to review",
-                flush=True,
+                f" \u2014 run 'dt hook results' to review"
             )
+            # Yellow (ANSI 33) so the reminder stands out in terminal output
+            if os.isatty(1):
+                msg = f"\033[33m{msg}\033[0m"
+            print(msg, flush=True)
     except Exception:
         pass
 
