@@ -205,6 +205,9 @@ def install(force: bool = False, verbose: bool = False) -> List[str]:
     """
     utils.check_git()
 
+    # Ensure .dt/.gitignore is up to date
+    utils.ensure_dt_gitignore()
+
     hooks_dir = _git_hooks_dir()
     hooks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -526,6 +529,23 @@ def _run_index_sync(verbose: bool = False) -> bool:
 # Hook runner
 # =============================================================================
 
+def _print_unread_reminder(level: int) -> None:
+    """Print a reminder if there are unread hook results."""
+    if level < VERBOSITY_NORMAL:
+        return
+    try:
+        unread = count_unread_results()
+        if unread > 0:
+            noun = 'report' if unread == 1 else 'reports'
+            print(
+                f"  \u26a0 {unread} unread hook {noun}"
+                f" \u2014 run 'dt hook results' to review",
+                flush=True,
+            )
+    except Exception:
+        pass
+
+
 def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
              verbose: bool = False) -> bool:
     """Run all enabled checks for *hook_name*.
@@ -614,6 +634,9 @@ def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
                 print(f"  \u2717 {name}", flush=True)
             failures.append((name, str(e)))
             # Continue running remaining checks so user sees all failures
+
+    # Notify about unread async hook results from previous runs
+    _print_unread_reminder(level)
 
     if failures:
         lines = [f"{hook_name}: {len(failures)} check(s) failed"]
@@ -822,6 +845,44 @@ def run_check(
 # Hook results
 # =============================================================================
 
+LAST_READ_SENTINEL = '.last-read'
+
+
+def mark_results_read() -> None:
+    """Touch the ``.last-read`` sentinel in the hook-results directory."""
+    try:
+        sentinel = _get_hook_results_dir() / LAST_READ_SENTINEL
+        sentinel.touch()
+    except Exception:
+        pass
+
+
+def count_unread_results() -> int:
+    """Return the number of hook-result files newer than ``.last-read``.
+
+    Returns 0 if the results directory doesn't exist or has no results.
+    """
+    try:
+        results_dir = _get_hook_results_dir()
+    except Exception:
+        return 0
+
+    sentinel = results_dir / LAST_READ_SENTINEL
+    if sentinel.exists():
+        threshold = sentinel.stat().st_mtime
+    else:
+        threshold = 0  # everything is unread
+
+    count = 0
+    for path in results_dir.glob('*.json'):
+        try:
+            if path.stat().st_mtime > threshold:
+                count += 1
+        except OSError:
+            continue
+    return count
+
+
 def list_hook_results(limit: int = 20) -> List[Dict]:
     """List recent hook check results.
 
@@ -850,6 +911,9 @@ def list_hook_results(limit: int = 20) -> List[Dict]:
             results.append(data)
         except (json.JSONDecodeError, OSError):
             continue
+
+    # Mark results as read so unread reminder doesn't fire for these
+    mark_results_read()
 
     return results
 

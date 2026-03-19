@@ -12,6 +12,7 @@ from . import config as cfg
 from . import cache as cache_mod
 from . import install as install_mod
 from . import remote as remote_mod
+from . import utils
 from .auth import setup as auth_setup_mod
 from .errors import CloneError
 
@@ -139,6 +140,9 @@ def clone_repository(
             cwd=target_dir
         )
     
+    # Ensure .dt/.gitignore is up to date
+    utils.ensure_dt_gitignore(target_dir)
+
     # Set up cache using the cache module
     try:
         cache_mod.init_cache(

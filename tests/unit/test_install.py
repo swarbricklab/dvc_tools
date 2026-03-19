@@ -1,9 +1,11 @@
 """Tests for dt install module."""
 
+import json
 import os
 import stat
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -696,3 +698,97 @@ class TestHookRunAsync:
             result = install.hook_run('pre-commit')
 
         assert result is True
+
+
+# =============================================================================
+# Unread hook results
+# =============================================================================
+
+class TestUnreadResults:
+    """Tests for count_unread_results, mark_results_read, and the reminder."""
+
+    def _make_results_dir(self, tmp_path):
+        """Create a fake hook-results dir with two JSON files."""
+        results_dir = tmp_path / 'results'
+        results_dir.mkdir()
+        for name in ('a.json', 'b.json'):
+            (results_dir / name).write_text(json.dumps({'check': name}))
+        return results_dir
+
+    def test_all_unread_when_no_sentinel(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            assert install.count_unread_results() == 2
+
+    def test_mark_results_read_creates_sentinel(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.mark_results_read()
+            sentinel = results_dir / install.LAST_READ_SENTINEL
+            assert sentinel.exists()
+
+    def test_zero_unread_after_mark(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.mark_results_read()
+            assert install.count_unread_results() == 0
+
+    def test_new_result_after_mark_is_unread(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.mark_results_read()
+            # Write a new result and set its mtime after the sentinel
+            new_file = results_dir / 'c.json'
+            new_file.write_text(json.dumps({'check': 'c'}))
+            sentinel = results_dir / install.LAST_READ_SENTINEL
+            future = sentinel.stat().st_mtime + 10
+            os.utime(new_file, (future, future))
+            assert install.count_unread_results() == 1
+
+    def test_list_hook_results_marks_read(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.list_hook_results()
+            assert install.count_unread_results() == 0
+
+    def test_print_unread_reminder(self, tmp_path, capsys):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install._print_unread_reminder(install.VERBOSITY_NORMAL)
+            output = capsys.readouterr().out
+            assert '2 unread hook reports' in output
+            assert 'dt hook results' in output
+
+    def test_no_reminder_when_quiet(self, tmp_path, capsys):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install._print_unread_reminder(install.VERBOSITY_QUIET)
+            assert capsys.readouterr().out == ''
+
+    def test_no_reminder_when_all_read(self, tmp_path, capsys):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.mark_results_read()
+            install._print_unread_reminder(install.VERBOSITY_NORMAL)
+            assert capsys.readouterr().out == ''
+
+    def test_hook_run_prints_unread_reminder(self, tmp_path, monkeypatch, capsys):
+        """hook_run calls _print_unread_reminder after checks complete."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / '.git').mkdir()
+        results_dir = tmp_path / '.dt' / 'hook-results'
+        results_dir.mkdir(parents=True)
+        (results_dir / 'x.json').write_text(json.dumps({'check': 'x'}))
+
+        checks = [
+            {'name': 'my-check', 'enabled': True, 'mode': 'sync',
+             'command': 'true'},
+        ]
+        with patch.object(install, '_get_checks', return_value=checks), \
+             patch.object(install.subprocess, 'run',
+                          return_value=MagicMock(returncode=0, stdout='', stderr='')), \
+             patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.hook_run('pre-commit')
+
+        output = capsys.readouterr().out
+        assert 'unread hook report' in output
