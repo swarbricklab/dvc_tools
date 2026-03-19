@@ -751,6 +751,41 @@ class TestUnreadResults:
             install.list_hook_results()
             assert install.count_unread_results() == 0
 
+    def test_list_unread_only(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            # Mark current results as read
+            install.mark_results_read()
+
+            # Set sentinel mtime in the past
+            sentinel = results_dir / install.LAST_READ_SENTINEL
+            past = sentinel.stat().st_mtime - 20
+            os.utime(sentinel, (past, past))
+
+            # Set one file's mtime in the future (unread)
+            future = past + 30
+            new = results_dir / 'c.json'
+            new.write_text(json.dumps({'check': 'c', 'hook': 'h',
+                                       'passed': True, 'timestamp': 'T',
+                                       'output': ''}))
+            os.utime(new, (future, future))
+            # Set the other files' mtime in the past (read)
+            for name in ('a.json', 'b.json'):
+                f = results_dir / name
+                os.utime(f, (past - 10, past - 10))
+
+            unread = install.list_hook_results(unread_only=True)
+            assert len(unread) == 1
+            assert unread[0]['check'] == 'c'
+
+            # Reset sentinel so we can test all mode
+            os.utime(sentinel, (past, past))
+            os.utime(new, (future, future))
+            for name in ('a.json', 'b.json'):
+                os.utime(results_dir / name, (past - 10, past - 10))
+            all_results = install.list_hook_results(unread_only=False)
+            assert len(all_results) == 3
+
     def test_print_unread_reminder(self, tmp_path, capsys):
         results_dir = self._make_results_dir(tmp_path)
         with patch.object(install, '_get_hook_results_dir', return_value=results_dir):

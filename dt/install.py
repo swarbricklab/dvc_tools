@@ -72,7 +72,7 @@ DEFAULT_HOOKS_CONFIG = {
             'checks': {
                 'dvc-push': {
                     'enabled': True,
-                    'mode': 'sync',
+                    'mode': 'async',
                 },
             },
         },
@@ -500,12 +500,13 @@ def _run_dvc_checkout(hook_args: List[str], verbose: bool = False) -> bool:
 
 
 def _run_dvc_push(verbose: bool = False) -> bool:
-    """Run ``dt push --workers 1`` for the pre-push hook.
+    """Run ``dt push --workers 1 --no-wait`` for the pre-push hook.
 
-    Delegates the push to a compute node via qxub so the hook
-    returns quickly and doesn't block on slow remote transfers.
+    Delegates the push to a compute node via qxub.  Uses ``--no-wait``
+    so the hook returns immediately; check results with
+    ``dt hook results``.
     """
-    cmd = ['dt', 'push', '--workers', '1']
+    cmd = ['dt', 'push', '--workers', '1', '--no-wait']
     if verbose:
         cmd.append('-v')
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -902,13 +903,15 @@ def count_unread_results() -> int:
     return count
 
 
-def list_hook_results(limit: int = 20) -> List[Dict]:
+def list_hook_results(limit: int = 20, unread_only: bool = False) -> List[Dict]:
     """List recent hook check results.
 
     Reads JSON result files from ``.dt/hook-results/``, most recent first.
 
     Args:
         limit: Maximum number of results to return.
+        unread_only: If True, only return results newer than the
+            ``.last-read`` sentinel.
 
     Returns:
         List of result dicts with keys: check, hook, passed, timestamp,
@@ -919,11 +922,23 @@ def list_hook_results(limit: int = 20) -> List[Dict]:
     except Exception:
         return []
 
+    # Determine unread threshold
+    threshold = 0
+    if unread_only:
+        sentinel = results_dir / LAST_READ_SENTINEL
+        if sentinel.exists():
+            threshold = sentinel.stat().st_mtime
+        # threshold 0 means everything is unread
+
     result_files = sorted(results_dir.glob('*.json'), reverse=True)
 
     results = []
-    for path in result_files[:limit]:
+    for path in result_files:
+        if len(results) >= limit:
+            break
         try:
+            if unread_only and path.stat().st_mtime <= threshold:
+                continue
             with open(path) as f:
                 data = json.load(f)
             data['file'] = str(path)
