@@ -462,9 +462,7 @@ def _run_builtin_check(name: str, hook_name: str, check_cfg: Dict,
         return _run_index_sync(verbose=verbose)
 
     if name == 'dvc-push':
-        from . import push as push_mod
-        push_mod.push(verbose=verbose)
-        return True
+        return _run_dvc_push(verbose=verbose)
 
     # Unknown built-in — treat as external if it has a command
     return False
@@ -498,6 +496,24 @@ def _run_dvc_checkout(hook_args: List[str], verbose: bool = False) -> bool:
 
     from . import pull as pull_mod
     pull_mod.pull(verbose=verbose)
+    return True
+
+
+def _run_dvc_push(verbose: bool = False) -> bool:
+    """Run ``dt push --workers 1`` for the pre-push hook.
+
+    Delegates the push to a compute node via qxub so the hook
+    returns quickly and doesn't block on slow remote transfers.
+    """
+    cmd = ['dt', 'push', '--workers', '1']
+    if verbose:
+        cmd.append('-v')
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).strip()
+        raise HookError(f"dt push failed:\n{output}")
+    if verbose and result.stdout.strip():
+        print(f"  dvc-push: {result.stdout.strip()}")
     return True
 
 
