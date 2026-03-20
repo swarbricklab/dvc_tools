@@ -530,30 +530,33 @@ def _run_dvc_push(verbose: bool = False) -> bool:
 
 
 def _dvc_push_needs_internet() -> bool:
-    """Check whether a DVC push requires network access.
+    """Check whether the hook's DVC push requires network access.
 
-    Returns True if any project remote lacks a local filesystem path
-    (e.g. S3 or an SSH remote on a different host).  Returns False
-    when all remotes resolve to a local path — meaning ``dvc push``
-    can succeed without internet.
+    Mirrors ``_run_dvc_push`` logic: if a local remote exists we push
+    to that (no internet).  Otherwise we push to the default remote —
+    return True only if *that* remote lacks a local filesystem path.
     """
     from . import remote as remote_mod
 
     try:
         remotes = remote_mod.list_remotes()
     except Exception:
-        # Can't determine — assume internet needed
         return True
 
     if not remotes:
         return False
 
-    for _name, url, _is_default in remotes:
-        local_path = remote_mod.extract_local_path(url)
-        if local_path is None:
-            return True
+    # If a local remote is available, _run_dvc_push uses it — no internet
+    if remote_mod.find_local_remote(remotes):
+        return False
 
-    return False
+    # Otherwise _run_dvc_push falls back to the default remote
+    default = next((url for _name, url, is_def in remotes if is_def), None)
+    if default is None:
+        # No default marked — dvc push picks the first, use that
+        default = remotes[0][1]
+
+    return remote_mod.extract_local_path(default) is None
 
 
 def _run_index_sync(verbose: bool = False) -> bool:

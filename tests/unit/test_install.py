@@ -541,32 +541,41 @@ class TestDispatchAsyncCheck:
 class TestDvcPushNeedsInternet:
     """Tests for _dvc_push_needs_internet."""
 
-    def test_all_local_remotes(self):
-        """Returns False when all remotes resolve to local paths."""
+    def test_false_when_local_remote_available(self):
+        """Returns False when find_local_remote finds a local remote."""
         remotes = [
             ('local', '/g/data/a56/dvc/datasets/test', False),
             ('myremote', 'ssh://gadi-dm.nci.org.au/g/data/a56/dvc/datasets/test', True),
         ]
         with patch('dt.remote.list_remotes', return_value=remotes), \
-             patch('dt.remote.extract_local_path') as mock_extract:
-            mock_extract.side_effect = lambda url: (
-                '/g/data/a56/dvc/datasets/test' if '/g/data' in url else None
-            )
+             patch('dt.remote.find_local_remote',
+                   return_value=('local', '/g/data/a56/dvc/datasets/test')):
             assert install._dvc_push_needs_internet() is False
 
-    def test_s3_remote_needs_internet(self):
-        """Returns True when a remote is S3 (non-local)."""
+    def test_true_when_default_is_s3(self):
+        """Returns True when default remote is S3 and no local remote."""
         remotes = [
             ('r2', 's3://my-bucket/data', True),
         ]
         with patch('dt.remote.list_remotes', return_value=remotes), \
+             patch('dt.remote.find_local_remote', return_value=None), \
              patch('dt.remote.extract_local_path', return_value=None):
             assert install._dvc_push_needs_internet() is True
 
+    def test_false_when_default_is_local_path(self):
+        """Returns False when default remote resolves to local path."""
+        remotes = [
+            ('myremote', 'ssh://gadi-dm/g/data/a56/remote', True),
+        ]
+        with patch('dt.remote.list_remotes', return_value=remotes), \
+             patch('dt.remote.find_local_remote', return_value=None), \
+             patch('dt.remote.extract_local_path',
+                   return_value='/g/data/a56/remote'):
+            assert install._dvc_push_needs_internet() is False
+
     def test_no_remotes(self):
         """Returns False when no remotes configured."""
-        with patch('dt.remote.list_remotes', return_value=[]), \
-             patch('dt.remote.extract_local_path'):
+        with patch('dt.remote.list_remotes', return_value=[]):
             assert install._dvc_push_needs_internet() is False
 
     def test_exception_returns_true(self):
