@@ -118,7 +118,7 @@ def configure_dvc_remote(
         print(f"Configuring local remote: {remote_dir}")
     
     result = subprocess.run(
-        ['dvc', 'remote', 'add', '--local', 'local', str(remote_dir)],
+        ['dvc', 'remote', 'add', '--local', '-d', 'local', str(remote_dir)],
         cwd=repo_path,
         capture_output=True,
         text=True,
