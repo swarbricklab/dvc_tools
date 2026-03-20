@@ -1,9 +1,11 @@
 """Tests for dt install module."""
 
+import json
 import os
 import stat
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -479,6 +481,149 @@ class TestDispatchAsyncCheck:
         idx = worker_cmd.index('--')
         assert worker_cmd[idx + 1:] == ['abc123', 'def456', '1']
 
+    def test_passes_internet_flag_for_dvc_push_non_local(self):
+        """dvc-push check passes --internet when remotes need network."""
+        with patch('dt.install.hpc') as mock_hpc, \
+             patch.object(install.subprocess, 'run') as mock_run, \
+             patch.object(install, '_dvc_push_needs_internet', return_value=True):
+            mock_hpc.check_qxub.return_value = True
+            mock_hpc.build_qxub_command.return_value = ['qxub', 'exec', '--']
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout='12345\n', stderr='',
+            )
+
+            install._dispatch_async_check(
+                'dvc-push', 'pre-push', {}, [],
+            )
+
+        call_args = mock_hpc.build_qxub_command.call_args
+        qxub_args = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get('qxub_args')
+        assert qxub_args == ['--internet']
+
+    def test_no_internet_flag_for_dvc_push_local(self):
+        """dvc-push check omits --internet when all remotes are local."""
+        with patch('dt.install.hpc') as mock_hpc, \
+             patch.object(install.subprocess, 'run') as mock_run, \
+             patch.object(install, '_dvc_push_needs_internet', return_value=False):
+            mock_hpc.check_qxub.return_value = True
+            mock_hpc.build_qxub_command.return_value = ['qxub', 'exec', '--']
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout='12345\n', stderr='',
+            )
+
+            install._dispatch_async_check(
+                'dvc-push', 'pre-push', {}, [],
+            )
+
+        call_args = mock_hpc.build_qxub_command.call_args
+        qxub_args = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get('qxub_args')
+        assert qxub_args is None
+
+    def test_no_internet_flag_for_non_dvc_push(self):
+        """Non-dvc-push checks never get --internet."""
+        with patch('dt.install.hpc') as mock_hpc, \
+             patch.object(install.subprocess, 'run') as mock_run:
+            mock_hpc.check_qxub.return_value = True
+            mock_hpc.build_qxub_command.return_value = ['qxub', 'exec', '--']
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout='12345\n', stderr='',
+            )
+
+            install._dispatch_async_check(
+                'dvc-status', 'pre-commit', {}, [],
+            )
+
+        call_args = mock_hpc.build_qxub_command.call_args
+        qxub_args = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get('qxub_args')
+        assert qxub_args is None
+
+
+class TestDvcPushNeedsInternet:
+    """Tests for _dvc_push_needs_internet."""
+
+    def test_false_when_local_remote_available(self):
+        """Returns False when find_local_remote finds a local remote."""
+        remotes = [
+            ('local', '/g/data/a56/dvc/datasets/test', False),
+            ('myremote', 'ssh://gadi-dm.nci.org.au/g/data/a56/dvc/datasets/test', True),
+        ]
+        with patch('dt.remote.list_remotes', return_value=remotes), \
+             patch('dt.remote.find_local_remote',
+                   return_value=('local', '/g/data/a56/dvc/datasets/test')):
+            assert install._dvc_push_needs_internet() is False
+
+    def test_true_when_default_is_s3(self):
+        """Returns True when default remote is S3 and no local remote."""
+        remotes = [
+            ('r2', 's3://my-bucket/data', True),
+        ]
+        with patch('dt.remote.list_remotes', return_value=remotes), \
+             patch('dt.remote.find_local_remote', return_value=None), \
+             patch('dt.remote.extract_local_path', return_value=None):
+            assert install._dvc_push_needs_internet() is True
+
+    def test_false_when_default_is_local_path(self):
+        """Returns False when default remote resolves to local path."""
+        remotes = [
+            ('myremote', 'ssh://gadi-dm/g/data/a56/remote', True),
+        ]
+        with patch('dt.remote.list_remotes', return_value=remotes), \
+             patch('dt.remote.find_local_remote', return_value=None), \
+             patch('dt.remote.extract_local_path',
+                   return_value='/g/data/a56/remote'):
+            assert install._dvc_push_needs_internet() is False
+
+    def test_no_remotes(self):
+        """Returns False when no remotes configured."""
+        with patch('dt.remote.list_remotes', return_value=[]):
+            assert install._dvc_push_needs_internet() is False
+
+    def test_exception_returns_true(self):
+        """Returns True (assumes internet needed) if listing fails."""
+        with patch('dt.remote.list_remotes', side_effect=Exception("fail")):
+            assert install._dvc_push_needs_internet() is True
+
+
+class TestRunDvcPush:
+    """Tests for _run_dvc_push."""
+
+    def test_uses_local_remote_when_available(self):
+        """Pushes to local remote if find_local_remote succeeds."""
+        remotes = [('local', '/data/remote', False)]
+        with patch('dt.remote.list_remotes', return_value=remotes), \
+             patch('dt.remote.find_local_remote',
+                   return_value=('local', '/data/remote')), \
+             patch.object(install.subprocess, 'run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
+            install._run_dvc_push()
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ['dvc', 'push', '-r', 'local']
+
+    def test_falls_back_to_default_when_no_local(self):
+        """Falls back to plain dvc push if no local remote found."""
+        with patch('dt.remote.list_remotes', return_value=[]), \
+             patch('dt.remote.find_local_remote',
+                   return_value=None), \
+             patch.object(install.subprocess, 'run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
+            install._run_dvc_push()
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ['dvc', 'push']
+
+    def test_raises_hook_error_on_failure(self):
+        """Raises HookError when dvc push fails."""
+        with patch('dt.remote.list_remotes', return_value=[]), \
+             patch('dt.remote.find_local_remote',
+                   return_value=None), \
+             patch.object(install.subprocess, 'run') as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout='', stderr='push error',
+            )
+            with pytest.raises(HookError, match="dvc push failed"):
+                install._run_dvc_push()
+
 
 class TestRunCheck:
     """Tests for run_check (worker-side)."""
@@ -696,3 +841,132 @@ class TestHookRunAsync:
             result = install.hook_run('pre-commit')
 
         assert result is True
+
+
+# =============================================================================
+# Unread hook results
+# =============================================================================
+
+class TestUnreadResults:
+    """Tests for count_unread_results, mark_results_read, and the reminder."""
+
+    def _make_results_dir(self, tmp_path):
+        """Create a fake hook-results dir with two JSON files."""
+        results_dir = tmp_path / 'results'
+        results_dir.mkdir()
+        for name in ('a.json', 'b.json'):
+            (results_dir / name).write_text(json.dumps({'check': name}))
+        return results_dir
+
+    def test_all_unread_when_no_sentinel(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            assert install.count_unread_results() == 2
+
+    def test_mark_results_read_creates_sentinel(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.mark_results_read()
+            sentinel = results_dir / install.LAST_READ_SENTINEL
+            assert sentinel.exists()
+
+    def test_zero_unread_after_mark(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.mark_results_read()
+            assert install.count_unread_results() == 0
+
+    def test_new_result_after_mark_is_unread(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.mark_results_read()
+            # Write a new result and set its mtime after the sentinel
+            new_file = results_dir / 'c.json'
+            new_file.write_text(json.dumps({'check': 'c'}))
+            sentinel = results_dir / install.LAST_READ_SENTINEL
+            future = sentinel.stat().st_mtime + 10
+            os.utime(new_file, (future, future))
+            assert install.count_unread_results() == 1
+
+    def test_list_hook_results_marks_read(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.list_hook_results()
+            assert install.count_unread_results() == 0
+
+    def test_list_unread_only(self, tmp_path):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            # Mark current results as read
+            install.mark_results_read()
+
+            # Set sentinel mtime in the past
+            sentinel = results_dir / install.LAST_READ_SENTINEL
+            past = sentinel.stat().st_mtime - 20
+            os.utime(sentinel, (past, past))
+
+            # Set one file's mtime in the future (unread)
+            future = past + 30
+            new = results_dir / 'c.json'
+            new.write_text(json.dumps({'check': 'c', 'hook': 'h',
+                                       'passed': True, 'timestamp': 'T',
+                                       'output': ''}))
+            os.utime(new, (future, future))
+            # Set the other files' mtime in the past (read)
+            for name in ('a.json', 'b.json'):
+                f = results_dir / name
+                os.utime(f, (past - 10, past - 10))
+
+            unread = install.list_hook_results(unread_only=True)
+            assert len(unread) == 1
+            assert unread[0]['check'] == 'c'
+
+            # Reset sentinel so we can test all mode
+            os.utime(sentinel, (past, past))
+            os.utime(new, (future, future))
+            for name in ('a.json', 'b.json'):
+                os.utime(results_dir / name, (past - 10, past - 10))
+            all_results = install.list_hook_results(unread_only=False)
+            assert len(all_results) == 3
+
+    def test_print_unread_reminder(self, tmp_path, capsys):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install._print_unread_reminder(install.VERBOSITY_NORMAL)
+            output = capsys.readouterr().out
+            assert '2 unread hook reports' in output
+            assert 'dt hook results' in output
+
+    def test_no_reminder_when_quiet(self, tmp_path, capsys):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install._print_unread_reminder(install.VERBOSITY_QUIET)
+            assert capsys.readouterr().out == ''
+
+    def test_no_reminder_when_all_read(self, tmp_path, capsys):
+        results_dir = self._make_results_dir(tmp_path)
+        with patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.mark_results_read()
+            install._print_unread_reminder(install.VERBOSITY_NORMAL)
+            assert capsys.readouterr().out == ''
+
+    def test_hook_run_prints_unread_reminder(self, tmp_path, monkeypatch, capsys):
+        """hook_run calls _print_unread_reminder after checks complete."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / '.git').mkdir()
+        results_dir = tmp_path / '.dt' / 'hook-results'
+        results_dir.mkdir(parents=True)
+        (results_dir / 'x.json').write_text(json.dumps({'check': 'x'}))
+
+        checks = [
+            {'name': 'my-check', 'enabled': True, 'mode': 'sync',
+             'command': 'true'},
+        ]
+        with patch.object(install, '_get_checks', return_value=checks), \
+             patch.object(install.subprocess, 'run',
+                          return_value=MagicMock(returncode=0, stdout='', stderr='')), \
+             patch.object(install, '_get_hook_results_dir', return_value=results_dir):
+            install.hook_run('pre-commit')
+
+        output = capsys.readouterr().out
+        assert 'unread hook report' in output

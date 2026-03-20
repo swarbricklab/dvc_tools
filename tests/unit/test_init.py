@@ -252,7 +252,7 @@ class TestInitDtDirectory:
             assert (tmp_path / ".dt").is_dir()
 
     def test_creates_gitignore(self, tmp_path):
-        """Test that .dt/.gitignore is created."""
+        """Test that .dt/.gitignore is created with all required entries."""
         with patch("dt.init.get_dvc_autostage", return_value=False):
             init_dt_directory(tmp_path, verbose=False)
             
@@ -261,6 +261,7 @@ class TestInitDtDirectory:
             content = gitignore.read_text()
             assert "config.local.yaml" in content
             assert "tmp/" in content
+            assert "hook-results/" in content
 
     def test_autostages_when_dvc_autostage_enabled(self, tmp_path):
         """Test that .gitignore is auto-staged when DVC autostage is on."""

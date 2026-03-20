@@ -3203,19 +3203,22 @@ def hook_run_check(hook_name, check_name, args, worker, verbose):
 @hook.command('results')
 @click.option('-n', '--limit', default=20, type=int,
               help='Maximum number of results to show.')
+@click.option('--all', 'show_all', is_flag=True,
+              help='Show all results, not just unread ones.')
 @click.option('--clear', is_flag=True, help='Remove result files.')
 @click.option('--days', type=int, default=None,
               help='With --clear, only remove results older than N days.')
-def hook_results(limit, clear, days):
+def hook_results(limit, show_all, clear, days):
     """Show or clear async hook check results.
 
-    Displays recent results from .dt/hook-results/, most recent first.
+    By default shows only unread results.  Use --all to see everything.
     Use --clear to remove old result files.
 
     \b
     Examples:
-        dt hook results            # Show recent results
-        dt hook results -n 5       # Show last 5 results
+        dt hook results            # Show unread results
+        dt hook results --all      # Show all recent results
+        dt hook results -n 5       # Show last 5 unread results
         dt hook results --clear    # Remove all results
         dt hook results --clear --days 7   # Remove results older than 7 days
     """
@@ -3227,9 +3230,12 @@ def hook_results(limit, clear, days):
             click.echo(f"Removed {removed} result(s).")
         return
 
-    results = install_mod.list_hook_results(limit=limit)
+    results = install_mod.list_hook_results(limit=limit, unread_only=not show_all)
     if not results:
-        click.echo("No hook results found.")
+        if show_all:
+            click.echo("No hook results found.")
+        else:
+            click.echo("No unread hook results. Use --all to see previous results.")
         return
 
     for r in results:
