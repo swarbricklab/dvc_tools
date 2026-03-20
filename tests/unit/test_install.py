@@ -481,6 +481,140 @@ class TestDispatchAsyncCheck:
         idx = worker_cmd.index('--')
         assert worker_cmd[idx + 1:] == ['abc123', 'def456', '1']
 
+    def test_passes_internet_flag_for_dvc_push_non_local(self):
+        """dvc-push check passes --internet when remotes need network."""
+        with patch('dt.install.hpc') as mock_hpc, \
+             patch.object(install.subprocess, 'run') as mock_run, \
+             patch.object(install, '_dvc_push_needs_internet', return_value=True):
+            mock_hpc.check_qxub.return_value = True
+            mock_hpc.build_qxub_command.return_value = ['qxub', 'exec', '--']
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout='12345\n', stderr='',
+            )
+
+            install._dispatch_async_check(
+                'dvc-push', 'pre-push', {}, [],
+            )
+
+        call_args = mock_hpc.build_qxub_command.call_args
+        qxub_args = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get('qxub_args')
+        assert qxub_args == ['--internet']
+
+    def test_no_internet_flag_for_dvc_push_local(self):
+        """dvc-push check omits --internet when all remotes are local."""
+        with patch('dt.install.hpc') as mock_hpc, \
+             patch.object(install.subprocess, 'run') as mock_run, \
+             patch.object(install, '_dvc_push_needs_internet', return_value=False):
+            mock_hpc.check_qxub.return_value = True
+            mock_hpc.build_qxub_command.return_value = ['qxub', 'exec', '--']
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout='12345\n', stderr='',
+            )
+
+            install._dispatch_async_check(
+                'dvc-push', 'pre-push', {}, [],
+            )
+
+        call_args = mock_hpc.build_qxub_command.call_args
+        qxub_args = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get('qxub_args')
+        assert qxub_args is None
+
+    def test_no_internet_flag_for_non_dvc_push(self):
+        """Non-dvc-push checks never get --internet."""
+        with patch('dt.install.hpc') as mock_hpc, \
+             patch.object(install.subprocess, 'run') as mock_run:
+            mock_hpc.check_qxub.return_value = True
+            mock_hpc.build_qxub_command.return_value = ['qxub', 'exec', '--']
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout='12345\n', stderr='',
+            )
+
+            install._dispatch_async_check(
+                'dvc-status', 'pre-commit', {}, [],
+            )
+
+        call_args = mock_hpc.build_qxub_command.call_args
+        qxub_args = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get('qxub_args')
+        assert qxub_args is None
+
+
+class TestDvcPushNeedsInternet:
+    """Tests for _dvc_push_needs_internet."""
+
+    def test_all_local_remotes(self):
+        """Returns False when all remotes resolve to local paths."""
+        remotes = [
+            ('local', '/g/data/a56/dvc/datasets/test', False),
+            ('myremote', 'ssh://gadi-dm.nci.org.au/g/data/a56/dvc/datasets/test', True),
+        ]
+        with patch('dt.remote.list_remotes', return_value=remotes), \
+             patch('dt.remote.extract_local_path') as mock_extract:
+            mock_extract.side_effect = lambda url: (
+                '/g/data/a56/dvc/datasets/test' if '/g/data' in url else None
+            )
+            assert install._dvc_push_needs_internet() is False
+
+    def test_s3_remote_needs_internet(self):
+        """Returns True when a remote is S3 (non-local)."""
+        remotes = [
+            ('r2', 's3://my-bucket/data', True),
+        ]
+        with patch('dt.remote.list_remotes', return_value=remotes), \
+             patch('dt.remote.extract_local_path', return_value=None):
+            assert install._dvc_push_needs_internet() is True
+
+    def test_no_remotes(self):
+        """Returns False when no remotes configured."""
+        with patch('dt.remote.list_remotes', return_value=[]), \
+             patch('dt.remote.extract_local_path'):
+            assert install._dvc_push_needs_internet() is False
+
+    def test_exception_returns_true(self):
+        """Returns True (assumes internet needed) if listing fails."""
+        with patch('dt.remote.list_remotes', side_effect=Exception("fail")):
+            assert install._dvc_push_needs_internet() is True
+
+
+class TestRunDvcPush:
+    """Tests for _run_dvc_push."""
+
+    def test_uses_local_remote_when_available(self):
+        """Pushes to local remote if find_local_remote succeeds."""
+        remotes = [('local', '/data/remote', False)]
+        with patch('dt.remote.list_remotes', return_value=remotes), \
+             patch('dt.remote.find_local_remote',
+                   return_value=('local', '/data/remote')), \
+             patch.object(install.subprocess, 'run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
+            install._run_dvc_push()
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ['dvc', 'push', '-r', 'local']
+
+    def test_falls_back_to_default_when_no_local(self):
+        """Falls back to plain dvc push if no local remote found."""
+        with patch('dt.remote.list_remotes', return_value=[]), \
+             patch('dt.remote.find_local_remote',
+                   return_value=None), \
+             patch.object(install.subprocess, 'run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
+            install._run_dvc_push()
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ['dvc', 'push']
+
+    def test_raises_hook_error_on_failure(self):
+        """Raises HookError when dvc push fails."""
+        with patch('dt.remote.list_remotes', return_value=[]), \
+             patch('dt.remote.find_local_remote',
+                   return_value=None), \
+             patch.object(install.subprocess, 'run') as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout='', stderr='push error',
+            )
+            with pytest.raises(HookError, match="dvc push failed"):
+                install._run_dvc_push()
+
 
 class TestRunCheck:
     """Tests for run_check (worker-side)."""

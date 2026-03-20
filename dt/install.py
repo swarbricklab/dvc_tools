@@ -500,21 +500,60 @@ def _run_dvc_checkout(hook_args: List[str], verbose: bool = False) -> bool:
 
 
 def _run_dvc_push(verbose: bool = False) -> bool:
-    """Run ``dt push`` for the pre-push hook.
+    """Run ``dvc push`` for the pre-push hook.
 
-    If mode is sync, this blocks until the push completes.
-    If mode is async, this runs isolated on a compute node.
+    Uses the local remote if available (set up by ``dt init`` /
+    ``dt clone`` in ``.dvc/config.local``).  Falls back to the default
+    remote otherwise.
     """
-    cmd = ['dt', 'push']
+    from . import remote as remote_mod
+
+    remotes = remote_mod.list_remotes()
+    local = remote_mod.find_local_remote(remotes)
+
+    if local:
+        remote_name, local_path = local
+        cmd = ['dvc', 'push', '-r', remote_name]
+    else:
+        # No local remote — push to default
+        cmd = ['dvc', 'push']
+
     if verbose:
         cmd.append('-v')
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         output = (result.stdout + result.stderr).strip()
-        raise HookError(f"dt push failed:\n{output}")
+        raise HookError(f"dvc push failed:\n{output}")
     if verbose and result.stdout.strip():
         print(f"  dvc-push: {result.stdout.strip()}")
     return True
+
+
+def _dvc_push_needs_internet() -> bool:
+    """Check whether a DVC push requires network access.
+
+    Returns True if any project remote lacks a local filesystem path
+    (e.g. S3 or an SSH remote on a different host).  Returns False
+    when all remotes resolve to a local path — meaning ``dvc push``
+    can succeed without internet.
+    """
+    from . import remote as remote_mod
+
+    try:
+        remotes = remote_mod.list_remotes()
+    except Exception:
+        # Can't determine — assume internet needed
+        return True
+
+    if not remotes:
+        return False
+
+    for _name, url, _is_default in remotes:
+        local_path = remote_mod.extract_local_path(url)
+        if local_path is None:
+            return True
+
+    return False
 
 
 def _run_index_sync(verbose: bool = False) -> bool:
@@ -760,7 +799,13 @@ def _dispatch_async_check(
         worker_cmd.extend(hook_args)
 
     job_name = f'dt-hook-{hook_name}-{name}'
-    cmd = hpc.build_qxub_command(job_name, worker_cmd)
+
+    # dvc-push may need internet if remotes aren't all local
+    qxub_args = None
+    if name == 'dvc-push' and _dvc_push_needs_internet():
+        qxub_args = ['--internet']
+
+    cmd = hpc.build_qxub_command(job_name, worker_cmd, qxub_args=qxub_args)
 
     if verbose:
         print(f"  {name}: submitting → {' '.join(cmd)}")
