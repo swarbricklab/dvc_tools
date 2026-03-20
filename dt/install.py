@@ -500,13 +500,12 @@ def _run_dvc_checkout(hook_args: List[str], verbose: bool = False) -> bool:
 
 
 def _run_dvc_push(verbose: bool = False) -> bool:
-    """Run ``dt push --workers 1 --no-wait`` for the pre-push hook.
+    """Run ``dt push`` for the pre-push hook.
 
-    Delegates the push to a compute node via qxub.  Uses ``--no-wait``
-    so the hook returns immediately; check results with
-    ``dt hook results``.
+    If mode is sync, this blocks until the push completes.
+    If mode is async, this runs isolated on a compute node.
     """
-    cmd = ['dt', 'push', '--workers', '1', '--no-wait']
+    cmd = ['dt', 'push']
     if verbose:
         cmd.append('-v')
     result = subprocess.run(cmd, capture_output=True, text=True)

@@ -66,7 +66,7 @@ cloud = [
 dt = "dt.cli:cli"
 
 [tool.setuptools]
-packages = ["dt", "dt.secrets"]
+packages = ["dt", "dt.auth", "dt.secrets"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
