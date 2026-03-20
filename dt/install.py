@@ -72,7 +72,7 @@ DEFAULT_HOOKS_CONFIG = {
             'checks': {
                 'dvc-push': {
                     'enabled': True,
-                    'mode': 'sync',
+                    'mode': 'async',
                 },
             },
         },
@@ -204,6 +204,9 @@ def install(force: bool = False, verbose: bool = False) -> List[str]:
         InstallError: If hooks already exist and *force* is False.
     """
     utils.check_git()
+
+    # Ensure .dt/.gitignore is up to date
+    utils.ensure_dt_gitignore()
 
     hooks_dir = _git_hooks_dir()
     hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -459,9 +462,7 @@ def _run_builtin_check(name: str, hook_name: str, check_cfg: Dict,
         return _run_index_sync(verbose=verbose)
 
     if name == 'dvc-push':
-        from . import push as push_mod
-        push_mod.push(verbose=verbose)
-        return True
+        return _run_dvc_push(verbose=verbose)
 
     # Unknown built-in — treat as external if it has a command
     return False
@@ -498,6 +499,66 @@ def _run_dvc_checkout(hook_args: List[str], verbose: bool = False) -> bool:
     return True
 
 
+def _run_dvc_push(verbose: bool = False) -> bool:
+    """Run ``dvc push`` for the pre-push hook.
+
+    Uses the local remote if available (set up by ``dt init`` /
+    ``dt clone`` in ``.dvc/config.local``).  Falls back to the default
+    remote otherwise.
+    """
+    from . import remote as remote_mod
+
+    remotes = remote_mod.list_remotes()
+    local = remote_mod.find_local_remote(remotes)
+
+    if local:
+        remote_name, local_path = local
+        cmd = ['dvc', 'push', '-r', remote_name]
+    else:
+        # No local remote — push to default
+        cmd = ['dvc', 'push']
+
+    if verbose:
+        cmd.append('-v')
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).strip()
+        raise HookError(f"dvc push failed:\n{output}")
+    if verbose and result.stdout.strip():
+        print(f"  dvc-push: {result.stdout.strip()}")
+    return True
+
+
+def _dvc_push_needs_internet() -> bool:
+    """Check whether the hook's DVC push requires network access.
+
+    Mirrors ``_run_dvc_push`` logic: if a local remote exists we push
+    to that (no internet).  Otherwise we push to the default remote —
+    return True only if *that* remote lacks a local filesystem path.
+    """
+    from . import remote as remote_mod
+
+    try:
+        remotes = remote_mod.list_remotes()
+    except Exception:
+        return True
+
+    if not remotes:
+        return False
+
+    # If a local remote is available, _run_dvc_push uses it — no internet
+    if remote_mod.find_local_remote(remotes):
+        return False
+
+    # Otherwise _run_dvc_push falls back to the default remote
+    default = next((url for _name, url, is_def in remotes if is_def), None)
+    if default is None:
+        # No default marked — dvc push picks the first, use that
+        default = remotes[0][1]
+
+    return remote_mod.extract_local_path(default) is None
+
+
 def _run_index_sync(verbose: bool = False) -> bool:
     """Pull then push the site cache index."""
     from . import index as index_mod
@@ -525,6 +586,26 @@ def _run_index_sync(verbose: bool = False) -> bool:
 # =============================================================================
 # Hook runner
 # =============================================================================
+
+def _print_unread_reminder(level: int) -> None:
+    """Print a reminder if there are unread hook results."""
+    if level < VERBOSITY_NORMAL:
+        return
+    try:
+        unread = count_unread_results()
+        if unread > 0:
+            noun = 'report' if unread == 1 else 'reports'
+            msg = (
+                f"  \u26a0 {unread} unread hook {noun}"
+                f" \u2014 run 'dt hook results' to review"
+            )
+            # Yellow (ANSI 33) so the reminder stands out in terminal output
+            if os.isatty(1):
+                msg = f"\033[33m{msg}\033[0m"
+            print(msg, flush=True)
+    except Exception:
+        pass
+
 
 def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
              verbose: bool = False) -> bool:
@@ -614,6 +695,9 @@ def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
                 print(f"  \u2717 {name}", flush=True)
             failures.append((name, str(e)))
             # Continue running remaining checks so user sees all failures
+
+    # Notify about unread async hook results from previous runs
+    _print_unread_reminder(level)
 
     if failures:
         lines = [f"{hook_name}: {len(failures)} check(s) failed"]
@@ -718,7 +802,13 @@ def _dispatch_async_check(
         worker_cmd.extend(hook_args)
 
     job_name = f'dt-hook-{hook_name}-{name}'
-    cmd = hpc.build_qxub_command(job_name, worker_cmd)
+
+    # dvc-push may need internet if remotes aren't all local
+    qxub_args = None
+    if name == 'dvc-push' and _dvc_push_needs_internet():
+        qxub_args = ['--internet']
+
+    cmd = hpc.build_qxub_command(job_name, worker_cmd, qxub_args=qxub_args)
 
     if verbose:
         print(f"  {name}: submitting → {' '.join(cmd)}")
@@ -822,13 +912,53 @@ def run_check(
 # Hook results
 # =============================================================================
 
-def list_hook_results(limit: int = 20) -> List[Dict]:
+LAST_READ_SENTINEL = '.last-read'
+
+
+def mark_results_read() -> None:
+    """Touch the ``.last-read`` sentinel in the hook-results directory."""
+    try:
+        sentinel = _get_hook_results_dir() / LAST_READ_SENTINEL
+        sentinel.touch()
+    except Exception:
+        pass
+
+
+def count_unread_results() -> int:
+    """Return the number of hook-result files newer than ``.last-read``.
+
+    Returns 0 if the results directory doesn't exist or has no results.
+    """
+    try:
+        results_dir = _get_hook_results_dir()
+    except Exception:
+        return 0
+
+    sentinel = results_dir / LAST_READ_SENTINEL
+    if sentinel.exists():
+        threshold = sentinel.stat().st_mtime
+    else:
+        threshold = 0  # everything is unread
+
+    count = 0
+    for path in results_dir.glob('*.json'):
+        try:
+            if path.stat().st_mtime > threshold:
+                count += 1
+        except OSError:
+            continue
+    return count
+
+
+def list_hook_results(limit: int = 20, unread_only: bool = False) -> List[Dict]:
     """List recent hook check results.
 
     Reads JSON result files from ``.dt/hook-results/``, most recent first.
 
     Args:
         limit: Maximum number of results to return.
+        unread_only: If True, only return results newer than the
+            ``.last-read`` sentinel.
 
     Returns:
         List of result dicts with keys: check, hook, passed, timestamp,
@@ -839,17 +969,32 @@ def list_hook_results(limit: int = 20) -> List[Dict]:
     except Exception:
         return []
 
+    # Determine unread threshold
+    threshold = 0
+    if unread_only:
+        sentinel = results_dir / LAST_READ_SENTINEL
+        if sentinel.exists():
+            threshold = sentinel.stat().st_mtime
+        # threshold 0 means everything is unread
+
     result_files = sorted(results_dir.glob('*.json'), reverse=True)
 
     results = []
-    for path in result_files[:limit]:
+    for path in result_files:
+        if len(results) >= limit:
+            break
         try:
+            if unread_only and path.stat().st_mtime <= threshold:
+                continue
             with open(path) as f:
                 data = json.load(f)
             data['file'] = str(path)
             results.append(data)
         except (json.JSONDecodeError, OSError):
             continue
+
+    # Mark results as read so unread reminder doesn't fire for these
+    mark_results_read()
 
     return results
 

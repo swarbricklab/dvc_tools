@@ -171,7 +171,7 @@ def get_dvc_autostage(repo_path: Path) -> bool:
 def init_dt_directory(repo_path: Path, verbose: bool = True) -> Path:
     """Initialize the .dt directory with .gitignore.
     
-    Creates .dt/.gitignore to ignore config.local.yaml and tmp/.
+    Creates .dt/.gitignore ensuring all required ignore entries are present.
     Auto-stages the .gitignore if DVC's core.autostage is enabled.
     
     Args:
@@ -182,19 +182,19 @@ def init_dt_directory(repo_path: Path, verbose: bool = True) -> Path:
         Path to the .dt directory
     """
     dt_dir = repo_path / '.dt'
-    dt_dir.mkdir(parents=True, exist_ok=True)
-    
     gitignore_path = dt_dir / '.gitignore'
-    gitignore_content = """/config.local.yaml
-/tmp/
-"""
-    
-    # Only write if it doesn't exist or content differs
-    if not gitignore_path.exists():
+    existed_before = gitignore_path.exists()
+    old_content = gitignore_path.read_text() if existed_before else ''
+
+    utils.ensure_dt_gitignore(repo_path)
+
+    new_content = gitignore_path.read_text()
+    changed = old_content != new_content
+
+    if changed:
         if verbose:
-            print("Creating .dt/.gitignore...")
-        gitignore_path.write_text(gitignore_content)
-        
+            action = "Updating" if existed_before else "Creating"
+            print(f"{action} .dt/.gitignore...")
         # Auto-stage if DVC autostage is enabled
         if get_dvc_autostage(repo_path):
             subprocess.run(
@@ -204,10 +204,6 @@ def init_dt_directory(repo_path: Path, verbose: bool = True) -> Path:
             )
             if verbose:
                 print("  Auto-staged .dt/.gitignore")
-    elif gitignore_path.read_text() != gitignore_content:
-        if verbose:
-            print("Updating .dt/.gitignore...")
-        gitignore_path.write_text(gitignore_content)
     
     return dt_dir
 

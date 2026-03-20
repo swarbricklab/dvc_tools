@@ -497,4 +497,63 @@ class TestGetCommitInfo:
         assert info['hash'] == 'invalidhash123'
 
 
+# =============================================================================
+# ensure_dt_gitignore tests
+# =============================================================================
+
+class TestEnsureDtGitignore:
+    """Tests for the ensure_dt_gitignore function."""
+
+    def test_creates_gitignore_from_scratch(self, tmp_path):
+        """Creates .dt/.gitignore with all required entries."""
+        result = utils.ensure_dt_gitignore(tmp_path)
+        assert result == tmp_path / '.dt' / '.gitignore'
+        content = result.read_text()
+        for entry in utils._DT_GITIGNORE_ENTRIES:
+            assert entry in content
+
+    def test_preserves_existing_entries(self, tmp_path):
+        """Existing entries in .dt/.gitignore are preserved."""
+        dt_dir = tmp_path / '.dt'
+        dt_dir.mkdir()
+        gitignore = dt_dir / '.gitignore'
+        gitignore.write_text('/my-custom-junk\n')
+
+        utils.ensure_dt_gitignore(tmp_path)
+
+        content = gitignore.read_text()
+        assert '/my-custom-junk' in content
+        for entry in utils._DT_GITIGNORE_ENTRIES:
+            assert entry in content
+
+    def test_no_duplicates_on_rerun(self, tmp_path):
+        """Running twice does not duplicate entries."""
+        utils.ensure_dt_gitignore(tmp_path)
+        utils.ensure_dt_gitignore(tmp_path)
+
+        content = (tmp_path / '.dt' / '.gitignore').read_text()
+        for entry in utils._DT_GITIGNORE_ENTRIES:
+            assert content.count(entry) == 1
+
+    def test_adds_missing_entry_to_existing(self, tmp_path):
+        """Adds only the missing entry when some already exist."""
+        dt_dir = tmp_path / '.dt'
+        dt_dir.mkdir()
+        gitignore = dt_dir / '.gitignore'
+        gitignore.write_text('/config.local.yaml\n/tmp/\n')
+
+        utils.ensure_dt_gitignore(tmp_path)
+
+        content = gitignore.read_text()
+        assert '/hook-results/' in content
+        assert content.count('/config.local.yaml') == 1
+
+    def test_defaults_to_project_root(self, tmp_path, monkeypatch):
+        """Uses find_project_root when no path is given."""
+        monkeypatch.chdir(tmp_path)
+        with patch.object(utils, 'find_project_root', return_value=tmp_path):
+            result = utils.ensure_dt_gitignore()
+        assert result.exists()
+
+
 # Run with: pytest tests/test_utils.py -v

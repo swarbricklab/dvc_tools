@@ -895,6 +895,53 @@ def get_dt_dir(create: bool = True) -> Path:
     return dt_dir
 
 
+# Entries that must appear in .dt/.gitignore.
+# Each entry should use a leading slash for root-relative matching.
+_DT_GITIGNORE_ENTRIES = [
+    '/config.local.yaml',
+    '/tmp/',
+    '/hook-results/',
+]
+
+
+def ensure_dt_gitignore(repo_path: Optional[Path] = None) -> Path:
+    """Ensure .dt/.gitignore contains all required entries.
+
+    Creates the .dt directory and .gitignore file if they don't exist.
+    Appends any missing entries without removing existing ones.
+
+    Args:
+        repo_path: Repository root.  Defaults to :func:`find_project_root`.
+
+    Returns:
+        Path to the .dt/.gitignore file.
+    """
+    if repo_path is None:
+        repo_path = find_project_root()
+    dt_dir = repo_path / '.dt'
+    dt_dir.mkdir(parents=True, exist_ok=True)
+
+    gitignore = dt_dir / '.gitignore'
+
+    if gitignore.exists():
+        existing = gitignore.read_text()
+    else:
+        existing = ''
+
+    existing_lines = {l.strip() for l in existing.splitlines()}
+
+    missing = [e for e in _DT_GITIGNORE_ENTRIES if e not in existing_lines]
+
+    if missing:
+        # Ensure there's a trailing newline before appending
+        if existing and not existing.endswith('\n'):
+            existing += '\n'
+        existing += '\n'.join(missing) + '\n'
+        gitignore.write_text(existing)
+
+    return gitignore
+
+
 # =============================================================================
 # Git revision utilities
 # =============================================================================
