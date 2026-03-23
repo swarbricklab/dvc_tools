@@ -492,6 +492,52 @@ def check_local_remote() -> DiagnosticResult:
         )
 
 
+def check_auth_access() -> DiagnosticResult:
+    """Run auth endpoint checks and summarise as a single diagnostic."""
+    try:
+        from .auth.checks import check_endpoints, STATUS_FAIL, STATUS_WARN
+    except ImportError:
+        return DiagnosticResult(
+            "auth_access", False,
+            "Auth module not available",
+            "Reinstall dvc-tools with 'pip install -e .'"
+        )
+
+    try:
+        results = check_endpoints(verbose=False)
+    except Exception as e:
+        return DiagnosticResult(
+            "auth_access", False,
+            f"Auth check error: {e}",
+        )
+
+    if not results:
+        return DiagnosticResult(
+            "auth_access", True,
+            "Auth access: no endpoints discovered",
+        )
+
+    fails = sum(1 for r in results if r.status == STATUS_FAIL)
+    warns = sum(1 for r in results if r.status == STATUS_WARN)
+    total = len(results)
+
+    if fails:
+        return DiagnosticResult(
+            "auth_access", False,
+            f"Auth access: {fails}/{total} endpoint(s) failed",
+            "Run 'dt auth check -v' for details",
+        )
+    if warns:
+        return DiagnosticResult(
+            "auth_access", True,
+            f"Auth access: {total} endpoint(s) OK, {warns} warning(s)",
+        )
+    return DiagnosticResult(
+        "auth_access", True,
+        f"Auth access: all {total} endpoint(s) accessible",
+    )
+
+
 def run_diagnostics(verbose: bool = False) -> list[DiagnosticResult]:
     """Run all diagnostic checks.
     
@@ -524,6 +570,7 @@ def run_diagnostics(verbose: bool = False) -> list[DiagnosticResult]:
     if verbose:
         results.append(check_network())
         results.append(check_local_remote())
+        results.append(check_auth_access())
     
     return results
 
