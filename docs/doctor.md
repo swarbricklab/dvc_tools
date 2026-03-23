@@ -25,6 +25,17 @@ dt doctor -v        # Verbose output, includes dvc doctor
 | Cache root | `cache.root` is configured and accessible |
 | Remote root | `remote.root` is configured and accessible |
 
+### Verbose-only checks
+
+These additional checks run with `-v` because they may be slow (network
+access, endpoint discovery):
+
+| Check | What it verifies |
+|-------|------------------|
+| Network | Internet connectivity (e.g. `github.com` reachable) |
+| Local remote | A DVC local remote is configured |
+| Auth access | All discovered storage endpoints are accessible (runs `dt auth check` internally) |
+
 ## Example Output
 
 ```
@@ -64,16 +75,17 @@ DVC Tools version: 0.1.0
 
 ## Verbose Mode
 
-With `-v`, also runs `dvc doctor` and shows configuration sources:
+With `-v`, also runs auth access checks, `dvc doctor` and shows configuration sources:
 
 ```bash
 $ dt doctor -v
-DVC Tools version: 0.1.0
+DVC Tools version: 0.4.2
 
 ✓ Git installed (2.39.0)
 ...
+✓ Auth access: all 4 endpoint(s) accessible
 
-All 7 checks passed.
+All 12 checks passed.
 
 --- Configuration (with sources) ---
 user    owner=myorg
@@ -87,5 +99,6 @@ DVC version: 3.55.2
 
 ## See Also
 
+- [dt auth check](auth.md) - Detailed per-endpoint access checks
 - [dt clone](clone.md) - Clone repositories (uses SSH)
 - [dt config](config.md) - Configure cache and remote paths
