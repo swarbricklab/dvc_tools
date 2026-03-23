@@ -686,7 +686,8 @@ def doctor(verbose):
     - SSH key setup and GitHub authentication
     - Cache and remote root configuration
     
-    Use -v for verbose output including dvc doctor results.
+    Use -v for verbose output including auth access checks, config
+    details, and dvc doctor results.
     """
     # Print dt version header
     dt_version = doctor_mod.get_dt_version()
