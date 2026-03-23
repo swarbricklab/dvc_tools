@@ -1728,12 +1728,13 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('--urls', is_flag=True, help='Only fetch URL imports (from dvc import-url)')
 @click.option('--regular', is_flag=True, help='Only fetch regular stages (non-imports)')
 @click.option('--source', type=click.Path(exists=True), help='Explicit source cache path (overrides auto-discovery)')
+@click.option('-r', '--remote', 'remote_name', default=None, help='DVC remote name to fetch from (resolved to local path)')
 @click.option('--destination', type=click.Path(), help='Explicit destination cache path (overrides primary cache)')
 @click.option('--cache-type', type=click.Choice(['reflink', 'hardlink', 'symlink', 'copy']),
               help='Link type for cache population. If not specified, tries reflink → hardlink → symlink → copy.')
 @click.option('--dir-only', is_flag=True, help='Only fetch .dir manifest files, not the data files they reference.')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imports, urls, regular, source, destination, cache_type, dir_only):
+def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imports, urls, regular, source, remote_name, destination, cache_type, dir_only):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1760,7 +1761,8 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imp
         --regular    Only regular stages (non-imports)
     
     \b
-    Explicit cache paths:
+    Remote selection:
+        -r, --remote   Fetch from a named DVC remote (resolved to local path)
         --source       Use this cache as the source (overrides auto-discovery)
         --destination  Write to this cache instead of the primary cache
     
@@ -1782,12 +1784,38 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imp
         dt fetch --imports                 # Only fetch repo imports
         dt fetch --urls --imports          # Only fetch imports (both types)
         dt fetch --regular                 # Only fetch regular stages
+        dt fetch -r myremote               # Fetch from a named DVC remote
         dt fetch --source /path/to/source  # Fetch from explicit source cache
         dt fetch --destination /path/to/dest # Fetch into explicit destination cache
         dt fetch --cache-type symlink      # Only use symlinks for cache population
         dt fetch --dir-only                # Only fetch .dir manifests (no data files)
     """
     from . import fetch as fetch_mod
+    from . import remote as remote_mod
+    from pathlib import Path
+    
+    # Resolve -r/--remote to a local source path
+    if remote_name:
+        if source:
+            raise click.ClickException("Cannot use --remote and --source together")
+        remotes = remote_mod.list_remotes()
+        match = [(name, url) for name, url, _default in remotes if name == remote_name]
+        if not match:
+            available = ', '.join(n for n, _u, _d in remotes) if remotes else '(none)'
+            raise click.ClickException(
+                f"Remote '{remote_name}' not found. Available remotes: {available}"
+            )
+        _name, url = match[0]
+        local_path = remote_mod.extract_local_path(url)
+        if not local_path:
+            raise click.ClickException(
+                f"Remote '{remote_name}' ({url}) is not locally accessible"
+            )
+        if not Path(local_path).exists():
+            raise click.ClickException(
+                f"Remote '{remote_name}' path does not exist: {local_path}"
+            )
+        source = local_path
     
     try:
         # Sync index from mirror before fetch (if configured)

@@ -43,6 +43,7 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | `--regular` | Only fetch regular stages (non-imports) |
 | `--no-index-sync` | Skip automatic index mirror sync |
 | `--dir-only` | Only fetch `.dir` manifest files, not the data files they reference |
+| `-r, --remote NAME` | Fetch from a named DVC remote (resolved to local path) |
 | `--source PATH` | Explicit source cache path (overrides auto-discovery) |
 | `--destination PATH` | Explicit destination cache path (overrides primary cache) |
 | `--cache-type TYPE` | Link type: `reflink`, `hardlink`, `symlink`, or `copy` |
@@ -84,6 +85,26 @@ This is useful when:
 - The source cache is not configured as a DVC remote
 - You want to populate a different cache than the primary one
 - You're copying data between caches on shared filesystems
+
+### Remote Selection
+
+The `-r/--remote` option lets you fetch from a specific named DVC remote instead of relying on auto-discovery. The remote name is resolved to its local filesystem path.
+
+```bash
+# Fetch from a specific remote
+dt fetch -r myremote
+
+# Combine with other options
+dt fetch -r myremote --dir-only
+dt fetch -r myremote data/large_dataset.dvc
+```
+
+This is useful when:
+- You have multiple local remotes and want to choose which one to fetch from
+- Auto-discovery picks the wrong remote
+- You want to be explicit about the data source
+
+Note: `--remote` and `--source` are mutually exclusive. The remote must be locally accessible (local path, `file://` URL, or SSH to the current host).
 
 ### Force Mode
 
