@@ -335,6 +335,99 @@ class TestBuildFetchPlan:
         
         assert len(plan.url_imports) == 2
 
+    def test_dir_only_skips_expansion_for_regular_stages(self):
+        """dir_only=True keeps .dir hashes but does not expand children."""
+        mock_out = MagicMock()
+        mock_out.use_cache = True
+        mock_out.hash_info.value = 'abc123.dir'
+        mock_out.hash_info.name = 'md5'
+        mock_stage = MagicMock()
+        mock_stage.outs = [mock_out]
+        mock_stage.addressing = 'data.dvc'
+
+        cat = fetch.StageCategorization()
+        cat.regular_stages = [mock_stage]
+        cat.has_local_remote = True
+
+        with patch('dt.fetch.remote.list_remotes', return_value={'local': '/p'}), \
+             patch('dt.fetch.remote.find_local_remote', return_value=('local', '/p')), \
+             patch('dt.fetch._create_source_cache_db', return_value=MagicMock()), \
+             patch('dt.fetch._expand_dir_hash') as mock_expand:
+            plan = fetch.build_fetch_plan(cat, dir_only=True)
+
+        mock_expand.assert_not_called()
+        assert plan.total_hashes == 1
+
+    def test_dir_only_false_expands_dir_hashes(self):
+        """Default (dir_only=False) expands .dir hashes to children."""
+        mock_out = MagicMock()
+        mock_out.use_cache = True
+        mock_out.hash_info.value = 'abc123.dir'
+        mock_out.hash_info.name = 'md5'
+        mock_stage = MagicMock()
+        mock_stage.outs = [mock_out]
+        mock_stage.addressing = 'data.dvc'
+
+        cat = fetch.StageCategorization()
+        cat.regular_stages = [mock_stage]
+        cat.has_local_remote = True
+
+        with patch('dt.fetch.remote.list_remotes', return_value={'local': '/p'}), \
+             patch('dt.fetch.remote.find_local_remote', return_value=('local', '/p')), \
+             patch('dt.fetch._create_source_cache_db', return_value=MagicMock()), \
+             patch('dt.fetch._expand_dir_hash', return_value=[('child1', 'f.txt')]) as mock_expand:
+            plan = fetch.build_fetch_plan(cat, dir_only=False)
+
+        mock_expand.assert_called_once()
+        # .dir hash + 1 child
+        assert plan.total_hashes == 2
+
+    def test_dir_only_with_explicit_source(self):
+        """dir_only works with explicit source too."""
+        mock_out = MagicMock()
+        mock_out.use_cache = True
+        mock_out.hash_info.value = 'xyz789.dir'
+        mock_out.hash_info.name = 'md5'
+        mock_stage = MagicMock()
+        mock_stage.outs = [mock_out]
+        mock_stage.addressing = 'data.dvc'
+
+        cat = fetch.StageCategorization()
+        cat.regular_stages = [mock_stage]
+
+        with patch('dt.fetch._create_source_cache_db', return_value=MagicMock()), \
+             patch('dt.fetch._expand_dir_hash') as mock_expand:
+            plan = fetch.build_fetch_plan(
+                cat, explicit_source=Path('/src'), dir_only=True)
+
+        mock_expand.assert_not_called()
+        assert plan.total_hashes == 1
+
+    def test_dir_only_with_repo_imports(self):
+        """dir_only skips expansion for repo import stages."""
+        mock_out = MagicMock()
+        mock_out.use_cache = True
+        mock_out.hash_info.value = 'imp456.dir'
+        mock_out.hash_info.name = 'md5'
+        mock_stage = MagicMock()
+        mock_stage.outs = [mock_out]
+        mock_stage.addressing = 'imported.dvc'
+
+        group = fetch.RepoImportGroup(url='http://example.com', rev='main')
+        group.stages = [mock_stage]
+        group.has_local_cache = True
+        group.local_cache = Path('/cache')
+
+        cat = fetch.StageCategorization()
+        cat.repo_imports['http://example.com'] = group
+
+        with patch('dt.fetch._create_source_cache_db', return_value=MagicMock()), \
+             patch('dt.fetch._expand_dir_hash') as mock_expand:
+            plan = fetch.build_fetch_plan(cat, dir_only=True)
+
+        mock_expand.assert_not_called()
+        assert plan.total_hashes == 1
+
 
 class TestExpandDirHash:
     """Tests for _expand_dir_hash function."""

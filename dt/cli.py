@@ -1731,8 +1731,9 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
 @click.option('--destination', type=click.Path(), help='Explicit destination cache path (overrides primary cache)')
 @click.option('--cache-type', type=click.Choice(['reflink', 'hardlink', 'symlink', 'copy']),
               help='Link type for cache population. If not specified, tries reflink → hardlink → symlink → copy.')
+@click.option('--dir-only', is_flag=True, help='Only fetch .dir manifest files, not the data files they reference.')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imports, urls, regular, source, destination, cache_type):
+def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imports, urls, regular, source, destination, cache_type, dir_only):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -1784,6 +1785,7 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imp
         dt fetch --source /path/to/source  # Fetch from explicit source cache
         dt fetch --destination /path/to/dest # Fetch into explicit destination cache
         dt fetch --cache-type symlink      # Only use symlinks for cache population
+        dt fetch --dir-only                # Only fetch .dir manifests (no data files)
     """
     from . import fetch as fetch_mod
     
@@ -1809,6 +1811,7 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imp
             source=source,
             destination=destination,
             cache_type=cache_type,
+            dir_only=dir_only,
         )
         
         # In dry mode, just exit (summary already printed)

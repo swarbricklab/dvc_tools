@@ -429,6 +429,7 @@ def build_fetch_plan(
     verbose: bool = False,
     explicit_source: Optional[Path] = None,
     destination_db=None,
+    dir_only: bool = False,
 ) -> FetchPlan:
     """Build a fetch plan from categorized stages.
     
@@ -443,6 +444,8 @@ def build_fetch_plan(
         destination_db: Optional destination cache DB for fallback .dir expansion.
             If a .dir file isn't in source but is in destination, we can still
             expand it to get child hashes.
+        dir_only: If True, fetch only .dir manifest files without expanding
+            them to child file hashes.
         
     Returns:
         FetchPlan with hashes grouped by source.
@@ -476,7 +479,7 @@ def build_fetch_plan(
                 if is_v2:
                     plan.v2_hashes.add(h)
                 # Expand directory hashes
-                if h.endswith('.dir') and source_db:
+                if h.endswith('.dir') and source_db and not dir_only:
                     child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                     group.add_hashes_with_paths(child_files, stage_name=stage_name)
                     if is_v2:
@@ -517,7 +520,7 @@ def build_fetch_plan(
                         if is_v2:
                             plan.v2_hashes.add(h)
                         # Expand directory hashes
-                        if h.endswith('.dir') and source_db:
+                        if h.endswith('.dir') and source_db and not dir_only:
                             child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                             group.add_hashes_with_paths(child_files, stage_name=stage_name)
                             if is_v2:
@@ -547,7 +550,7 @@ def build_fetch_plan(
                     if is_v2:
                         plan.v2_hashes.add(h)
                     # Expand directory hashes
-                    if h.endswith('.dir') and source_db:
+                    if h.endswith('.dir') and source_db and not dir_only:
                         child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                         group.add_hashes_with_paths(child_files, stage_name=stage_name)
                         if is_v2:
@@ -1007,6 +1010,7 @@ def fetch(
     source: Optional[str] = None,
     destination: Optional[str] = None,
     cache_type: Optional[str] = None,
+    dir_only: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -1041,6 +1045,8 @@ def fetch(
         destination: Explicit destination cache path (overrides primary cache).
         cache_type: Link type for cache population (reflink, hardlink, symlink, copy).
             If None, tries all in order until one succeeds.
+        dir_only: If True, only fetch .dir manifest files, not the data files
+            they reference.
         
     Returns:
         List of (target, success, message) tuples.
@@ -1117,6 +1123,7 @@ def fetch(
         verbose=verbose,
         explicit_source=Path(source) if source else None,
         destination_db=destination_db,
+        dir_only=dir_only,
     )
     return fetch_from_plan(
         plan=plan,

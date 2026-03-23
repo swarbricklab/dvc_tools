@@ -42,6 +42,7 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | `--urls` | Only fetch URL imports (from `dvc import-url`) |
 | `--regular` | Only fetch regular stages (non-imports) |
 | `--no-index-sync` | Skip automatic index mirror sync |
+| `--dir-only` | Only fetch `.dir` manifest files, not the data files they reference |
 | `--source PATH` | Explicit source cache path (overrides auto-discovery) |
 | `--destination PATH` | Explicit destination cache path (overrides primary cache) |
 | `--cache-type TYPE` | Link type: `reflink`, `hardlink`, `symlink`, or `copy` |
@@ -100,6 +101,23 @@ This is useful when:
 - The `.dir` manifest was rebuilt (e.g., by `dt update`) but child files weren't fetched
 - You suspect some files are missing despite the cache reporting "all cached"
 - Checkout fails even though fetch reported success
+
+### Dir-Only Mode
+
+The `--dir-only` option fetches only the `.dir` manifest files from the remote, without expanding them to fetch the individual data files they reference. This is much faster when you only need directory structure metadata.
+
+```bash
+# Fetch only .dir manifests (skip data files)
+dt fetch --dir-only
+
+# Combine with targets
+dt fetch --dir-only data/large_dataset.dvc
+```
+
+This is useful when:
+- You need `dt du` or `dt diff` to work without pulling all the data
+- You want to inspect what files a directory contains before fetching everything
+- You're on a slow or metered connection and only need metadata
 
 ### Cache Link Type
 
