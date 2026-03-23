@@ -261,52 +261,58 @@ class TestCheckCacheRoot:
 class TestCheckAuthAccess:
     """Tests for check_auth_access function."""
 
-    def _make_check_result(self, status, summary='ok'):
-        from dt.auth.checks import CheckResult
+    def _make_endpoint(self, type='filesystem', url='/tmp/test'):
         from dt.auth.endpoints import Endpoint
-        ep = Endpoint(type='filesystem', url='/tmp/test', source='test')
+        return Endpoint(type=type, url=url, source='test')
+
+    def _make_check_result(self, status, ep=None, summary='ok'):
+        from dt.auth.checks import CheckResult
+        if ep is None:
+            ep = self._make_endpoint()
         return CheckResult(endpoint=ep, status=status, summary=summary)
 
     def test_all_pass(self):
         """Returns passed with summary when all endpoints pass."""
-        results = [self._make_check_result('pass') for _ in range(3)]
-        with patch('dt.auth.checks.check_endpoints', return_value=results):
+        eps = [self._make_endpoint() for _ in range(3)]
+        with patch('dt.auth.endpoints.discover_endpoints', return_value=eps), \
+             patch('dt.auth.checks._try_check',
+                   side_effect=lambda ep, **kw: self._make_check_result('pass', ep)):
             diag = doctor.check_auth_access()
         assert diag.passed is True
         assert '3' in diag.message
 
     def test_some_failures(self):
         """Returns failed when any endpoint fails."""
-        results = [
-            self._make_check_result('pass'),
-            self._make_check_result('fail'),
-        ]
-        with patch('dt.auth.checks.check_endpoints', return_value=results):
+        eps = [self._make_endpoint(url='/a'), self._make_endpoint(url='/b')]
+        statuses = iter(['pass', 'fail'])
+        with patch('dt.auth.endpoints.discover_endpoints', return_value=eps), \
+             patch('dt.auth.checks._try_check',
+                   side_effect=lambda ep, **kw: self._make_check_result(next(statuses), ep)):
             diag = doctor.check_auth_access()
         assert diag.passed is False
         assert '1/2' in diag.message
 
     def test_warnings_still_pass(self):
         """Returns passed with warning count when only warnings present."""
-        results = [
-            self._make_check_result('pass'),
-            self._make_check_result('warn'),
-        ]
-        with patch('dt.auth.checks.check_endpoints', return_value=results):
+        eps = [self._make_endpoint(url='/a'), self._make_endpoint(url='/b')]
+        statuses = iter(['pass', 'warn'])
+        with patch('dt.auth.endpoints.discover_endpoints', return_value=eps), \
+             patch('dt.auth.checks._try_check',
+                   side_effect=lambda ep, **kw: self._make_check_result(next(statuses), ep)):
             diag = doctor.check_auth_access()
         assert diag.passed is True
         assert 'warning' in diag.message.lower()
 
     def test_no_endpoints(self):
         """Returns passed when no endpoints discovered."""
-        with patch('dt.auth.checks.check_endpoints', return_value=[]):
+        with patch('dt.auth.endpoints.discover_endpoints', return_value=[]):
             diag = doctor.check_auth_access()
         assert diag.passed is True
         assert 'no endpoints' in diag.message.lower()
 
     def test_exception_during_check(self):
         """Returns failed on unexpected errors."""
-        with patch('dt.auth.checks.check_endpoints', side_effect=RuntimeError('boom')):
+        with patch('dt.auth.endpoints.discover_endpoints', side_effect=RuntimeError('boom')):
             diag = doctor.check_auth_access()
         assert diag.passed is False
         assert 'boom' in diag.message

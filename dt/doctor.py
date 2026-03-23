@@ -495,7 +495,8 @@ def check_local_remote() -> DiagnosticResult:
 def check_auth_access() -> DiagnosticResult:
     """Run auth endpoint checks and summarise as a single diagnostic."""
     try:
-        from .auth.checks import check_endpoints, STATUS_FAIL, STATUS_WARN
+        from .auth.checks import _try_check, STATUS_FAIL, STATUS_WARN
+        from .auth.endpoints import discover_endpoints
     except ImportError:
         return DiagnosticResult(
             "auth_access", False,
@@ -504,7 +505,18 @@ def check_auth_access() -> DiagnosticResult:
         )
 
     try:
-        results = check_endpoints(verbose=False)
+        print("  Discovering endpoints...", flush=True)
+        endpoints = discover_endpoints(verbose=False)
+        print(f"  Found {len(endpoints)} endpoint(s), running access checks...",
+              flush=True)
+        results = []
+        for i, ep in enumerate(endpoints, 1):
+            print(f"  [{i}/{len(endpoints)}] {ep.type}: {ep.url}", flush=True)
+            result = _try_check(ep)
+            results.append(result)
+            for child in ep.children:
+                print(f"    └ {child.type}: {child.url}", flush=True)
+                results.append(_try_check(child))
     except Exception as e:
         return DiagnosticResult(
             "auth_access", False,
