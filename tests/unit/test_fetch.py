@@ -1414,6 +1414,10 @@ class TestFetchDirOnlyFromRemote:
         mock_result.transferred = {HashInfo('md5', 'abc123.dir'), HashInfo('md5', 'def456.dir')}
         mock_result.failed = set()
 
+        mock_local_odb = mock_repo.cache.local
+        # After transfer, both hashes should exist in local cache
+        mock_local_odb.exists.return_value = True
+
         with patch('dvc.repo.Repo', return_value=mock_repo), \
              patch('dt.fetch._hash_in_odb', return_value=False), \
              patch('dvc_data.hashfile.transfer.transfer', return_value=mock_result):
@@ -1437,12 +1441,16 @@ class TestFetchDirOnlyFromRemote:
         mock_result.transferred = {HashInfo('md5', 'abc123.dir')}
         mock_result.failed = {HashInfo('md5', 'def456.dir')}
 
+        mock_local_odb = mock_repo.cache.local
+        # abc123.dir transferred OK, def456.dir failed
+        mock_local_odb.exists.side_effect = lambda h: h == 'abc123.dir'
+
         with patch('dvc.repo.Repo', return_value=mock_repo), \
              patch('dt.fetch._hash_in_odb', return_value=False), \
              patch('dvc_data.hashfile.transfer.transfer', return_value=mock_result):
             results = _fetch_dir_only_from_remote('myremote', cat)
             assert results[0][1] is False
-            assert '1 failed' in results[0][2]
+            assert 'error' in results[0][2]
 
     def test_remote_open_error(self):
         """Error opening remote ODB reported cleanly."""
@@ -1460,4 +1468,31 @@ class TestFetchDirOnlyFromRemote:
             results = _fetch_dir_only_from_remote('myremote', cat)
             assert results[0][1] is False
             assert 'auth failed' in results[0][2]
+
+    def test_missing_from_remote(self):
+        """Hash not on remote is detected via post-transfer verification."""
+        from dt.fetch import _fetch_dir_only_from_remote
+
+        stage = self._make_stage('data.dvc', ['abc123.dir'])
+        cat = self._make_categorization([stage])
+
+        mock_repo = MagicMock()
+        mock_repo.cache.local = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = MagicMock()
+
+        # transfer() returns 0/0 (hash missing from source, silently ignored)
+        mock_result = MagicMock()
+        mock_result.transferred = set()
+        mock_result.failed = set()
+
+        mock_local_odb = mock_repo.cache.local
+        # Hash still not in local cache after transfer
+        mock_local_odb.exists.return_value = False
+
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dt.fetch._hash_in_odb', return_value=False), \
+             patch('dvc_data.hashfile.transfer.transfer', return_value=mock_result):
+            results = _fetch_dir_only_from_remote('myremote', cat)
+            assert results[0][1] is False
+            assert 'not found on remote' in results[0][2]
 

@@ -1282,24 +1282,39 @@ def _fetch_dir_only_from_remote(
     n_ok = len(result.transferred)
     n_fail = len(result.failed)
 
+    # transfer() silently ignores hashes that don't exist on the source
+    # (they end up in compare_status.missing, which isn't reported).
+    # Verify expected hashes actually landed in local cache.
+    still_missing = [h for h in to_fetch if not local_odb.exists(h)]
+    n_missing = len(still_missing)
+
     if verbose:
         print(f"  Transferred: {n_ok}, Failed: {n_fail}")
+        if still_missing:
+            print(f"  Missing from remote: {n_missing}")
+            for h in still_missing:
+                print(f"    {h}")
         if result.failed:
             for hi in sorted(result.failed, key=lambda x: x.value):
-                print(f"    {hi.value}: not found on remote")
+                print(f"    {hi.value}: transfer error")
 
-    if n_fail:
-        return [(remote_name, False,
-                 f"Fetched {n_ok} .dir manifests, {n_fail} failed")]
+    total_problems = n_fail + n_missing
+    if total_problems:
+        parts = []
+        if n_ok:
+            parts.append(f"fetched {n_ok}")
+        if n_fail:
+            parts.append(f"{n_fail} transfer error(s)")
+        if n_missing:
+            parts.append(f"{n_missing} not found on remote")
+        return [(remote_name, False, ", ".join(parts))]
     return [(remote_name, True, f"Fetched {n_ok} .dir manifests from '{remote_name}'")]
 
 
 def _hash_in_odb(hash_value: str, odb) -> bool:
     """Check whether a hash exists in an object database."""
-    from dvc_data.hashfile.hash_info import HashInfo
     try:
-        hi = HashInfo("md5", hash_value)
-        return odb.exists(hi)
+        return odb.exists(hash_value)
     except Exception:
         return False
 
