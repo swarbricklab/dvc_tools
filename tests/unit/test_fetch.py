@@ -11,6 +11,7 @@ Organized by the new fetch flow:
 
 import os
 import json
+import subprocess
 import tempfile
 import shutil
 from pathlib import Path
@@ -1243,21 +1244,24 @@ class TestFetchRemoteOption:
             assert "not found" in result.output
             assert "other" in result.output
 
-    def test_remote_not_local(self):
-        """--remote with a non-local remote reports an error."""
+    def test_remote_not_local_delegates_to_network_fetch(self):
+        """--remote with a non-local remote delegates to network fetch."""
         from click.testing import CliRunner
         from dt.cli import cli
 
         runner = CliRunner()
         with patch('dt.remote.list_remotes', return_value=[('s3remote', 's3://bucket/path', False)]), \
              patch('dt.remote.extract_local_path', return_value=None), \
-             patch('dt.index.is_auto_sync_enabled', return_value=False):
+             patch('dt.index.is_auto_sync_enabled', return_value=False), \
+             patch('dt.fetch.fetch', return_value=[]) as mock_fetch:
             result = runner.invoke(cli, ['fetch', '-r', 's3remote'])
-            assert result.exit_code != 0
-            assert "not locally accessible" in result.output
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once()
+            assert mock_fetch.call_args.kwargs['remote_name'] == 's3remote'
+            assert mock_fetch.call_args.kwargs['source'] is None
 
-    def test_remote_path_not_exists(self):
-        """--remote with a local path that doesn't exist reports an error."""
+    def test_remote_not_local_path_not_exists_delegates(self):
+        """--remote with a local path that doesn't exist delegates to network fetch."""
         from click.testing import CliRunner
         from dt.cli import cli
 
@@ -1265,10 +1269,12 @@ class TestFetchRemoteOption:
         with patch('dt.remote.list_remotes', return_value=[('gone', '/no/such/path', False)]), \
              patch('dt.remote.extract_local_path', return_value='/no/such/path'), \
              patch('pathlib.Path.exists', return_value=False), \
-             patch('dt.index.is_auto_sync_enabled', return_value=False):
+             patch('dt.index.is_auto_sync_enabled', return_value=False), \
+             patch('dt.fetch.fetch', return_value=[]) as mock_fetch:
             result = runner.invoke(cli, ['fetch', '-r', 'gone'])
-            assert result.exit_code != 0
-            assert "does not exist" in result.output
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once()
+            assert mock_fetch.call_args.kwargs['remote_name'] == 'gone'
 
     def test_remote_and_source_conflict(self):
         """--remote and --source together raises an error."""
@@ -1280,4 +1286,178 @@ class TestFetchRemoteOption:
             result = runner.invoke(cli, ['fetch', '-r', 'myremote', '--source', '/tmp'])
             assert result.exit_code != 0
             assert "Cannot use --remote and --source together" in result.output
+
+
+# =============================================================================
+# Network Remote Fetch Helper Tests
+# =============================================================================
+
+class TestDvcFetchFromRemote:
+    """Tests for _dvc_fetch_from_remote()."""
+
+    def test_success(self):
+        """Successful dvc fetch -r returns success."""
+        from dt.fetch import _dvc_fetch_from_remote
+
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='2 files fetched\n', stderr='',
+        )
+        with patch('subprocess.run', return_value=completed) as mock_run:
+            results = _dvc_fetch_from_remote('myremote')
+            assert len(results) == 1
+            assert results[0][1] is True
+            cmd = mock_run.call_args[0][0]
+            assert cmd == ['dvc', 'fetch', '-r', 'myremote']
+
+    def test_with_targets(self):
+        """Targets are appended to the dvc fetch command."""
+        from dt.fetch import _dvc_fetch_from_remote
+
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='', stderr='',
+        )
+        with patch('subprocess.run', return_value=completed) as mock_run:
+            _dvc_fetch_from_remote('myremote', targets=['data.dvc', 'model.dvc'])
+            cmd = mock_run.call_args[0][0]
+            assert cmd == ['dvc', 'fetch', '-r', 'myremote', 'data.dvc', 'model.dvc']
+
+    def test_failure(self):
+        """Non-zero exit code returns failure."""
+        from dt.fetch import _dvc_fetch_from_remote
+
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout='', stderr='remote error\n',
+        )
+        with patch('subprocess.run', return_value=completed):
+            results = _dvc_fetch_from_remote('myremote')
+            assert results[0][1] is False
+            assert 'remote error' in results[0][2]
+
+    def test_oserror(self):
+        """OSError during subprocess returns failure."""
+        from dt.fetch import _dvc_fetch_from_remote
+
+        with patch('subprocess.run', side_effect=OSError('not found')):
+            results = _dvc_fetch_from_remote('myremote')
+            assert results[0][1] is False
+            assert 'not found' in results[0][2]
+
+
+class TestFetchDirOnlyFromRemote:
+    """Tests for _fetch_dir_only_from_remote()."""
+
+    def _make_categorization(self, stages):
+        """Create a minimal StageCategorization with given stages."""
+        from dt.fetch import StageCategorization
+        cat = StageCategorization()
+        cat.regular_stages = stages
+        return cat
+
+    def _make_stage(self, name, hashes):
+        """Create a mock stage with given output hashes."""
+        stage = MagicMock()
+        stage.addressing = name
+        outs = []
+        for h in hashes:
+            out = MagicMock()
+            out.use_cache = True
+            out.hash_info = MagicMock()
+            out.hash_info.value = h
+            out.hash_info.name = 'md5'
+            out.fspath = f'/repo/{name}'
+            outs.append(out)
+        stage.outs = outs
+        stage.repo = MagicMock()
+        stage.repo.root_dir = '/repo'
+        return stage
+
+    def test_no_dir_hashes(self):
+        """No .dir hashes returns early with success."""
+        from dt.fetch import _fetch_dir_only_from_remote
+
+        stage = self._make_stage('data.dvc', ['abc123'])  # not a .dir
+        cat = self._make_categorization([stage])
+
+        results = _fetch_dir_only_from_remote('myremote', cat)
+        assert results[0][1] is True
+        assert 'No .dir' in results[0][2]
+
+    def test_all_cached(self):
+        """All .dir hashes already in local cache returns early."""
+        from dt.fetch import _fetch_dir_only_from_remote
+
+        stage = self._make_stage('data.dvc', ['abc123.dir'])
+        cat = self._make_categorization([stage])
+
+        mock_repo = MagicMock()
+        mock_repo.cache.local = MagicMock()
+
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dt.fetch._hash_in_odb', return_value=True):
+            results = _fetch_dir_only_from_remote('myremote', cat)
+            assert results[0][1] is True
+            assert 'already in cache' in results[0][2]
+
+    def test_transfer_success(self):
+        """Successful transfer of .dir hashes."""
+        from dt.fetch import _fetch_dir_only_from_remote
+        from dvc_data.hashfile.hash_info import HashInfo
+
+        stage = self._make_stage('data.dvc', ['abc123.dir', 'def456.dir'])
+        cat = self._make_categorization([stage])
+
+        mock_repo = MagicMock()
+        mock_repo.cache.local = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = MagicMock()
+
+        mock_result = MagicMock()
+        mock_result.transferred = {HashInfo('md5', 'abc123.dir'), HashInfo('md5', 'def456.dir')}
+        mock_result.failed = set()
+
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dt.fetch._hash_in_odb', return_value=False), \
+             patch('dvc_data.hashfile.transfer.transfer', return_value=mock_result):
+            results = _fetch_dir_only_from_remote('myremote', cat)
+            assert results[0][1] is True
+            assert '2 .dir manifests' in results[0][2]
+
+    def test_transfer_partial_failure(self):
+        """Partial transfer failure reported correctly."""
+        from dt.fetch import _fetch_dir_only_from_remote
+        from dvc_data.hashfile.hash_info import HashInfo
+
+        stage = self._make_stage('data.dvc', ['abc123.dir', 'def456.dir'])
+        cat = self._make_categorization([stage])
+
+        mock_repo = MagicMock()
+        mock_repo.cache.local = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = MagicMock()
+
+        mock_result = MagicMock()
+        mock_result.transferred = {HashInfo('md5', 'abc123.dir')}
+        mock_result.failed = {HashInfo('md5', 'def456.dir')}
+
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dt.fetch._hash_in_odb', return_value=False), \
+             patch('dvc_data.hashfile.transfer.transfer', return_value=mock_result):
+            results = _fetch_dir_only_from_remote('myremote', cat)
+            assert results[0][1] is False
+            assert '1 failed' in results[0][2]
+
+    def test_remote_open_error(self):
+        """Error opening remote ODB reported cleanly."""
+        from dt.fetch import _fetch_dir_only_from_remote
+
+        stage = self._make_stage('data.dvc', ['abc123.dir'])
+        cat = self._make_categorization([stage])
+
+        mock_repo = MagicMock()
+        mock_repo.cache.local = MagicMock()
+        mock_repo.cloud.get_remote_odb.side_effect = Exception('auth failed')
+
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dt.fetch._hash_in_odb', return_value=False):
+            results = _fetch_dir_only_from_remote('myremote', cat)
+            assert results[0][1] is False
+            assert 'auth failed' in results[0][2]
 

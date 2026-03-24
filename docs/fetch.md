@@ -43,7 +43,7 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | `--regular` | Only fetch regular stages (non-imports) |
 | `--no-index-sync` | Skip automatic index mirror sync |
 | `--dir-only` | Only fetch `.dir` manifest files, not the data files they reference |
-| `-r, --remote NAME` | Fetch from a named DVC remote (resolved to local path) |
+| `-r, --remote NAME` | Fetch from a named DVC remote (local or network) |
 | `--source PATH` | Explicit source cache path (overrides auto-discovery) |
 | `--destination PATH` | Explicit destination cache path (overrides primary cache) |
 | `--cache-type TYPE` | Link type: `reflink`, `hardlink`, `symlink`, or `copy` |
@@ -88,23 +88,33 @@ This is useful when:
 
 ### Remote Selection
 
-The `-r/--remote` option lets you fetch from a specific named DVC remote instead of relying on auto-discovery. The remote name is resolved to its local filesystem path.
+The `-r/--remote` option lets you fetch from a specific named DVC remote instead of relying on auto-discovery.
+
+If the remote is locally accessible (local path, `file://` URL, or SSH to the current host), `dt fetch` uses fast symlink-based fetch. If the remote is not locally accessible (e.g., S3, GCS, HTTP), it falls back to network fetch:
+
+- **Without `--dir-only`**: delegates to `dvc fetch -r <name>` to download all data.
+- **With `--dir-only`**: uses the DVC transfer API to fetch only `.dir` manifest files from the remote, without downloading the data files they reference.
 
 ```bash
-# Fetch from a specific remote
+# Fetch from a local remote (fast symlink)
 dt fetch -r myremote
 
+# Fetch from a cloud remote (network download via dvc fetch)
+dt fetch -r s3remote
+
+# Fetch only .dir manifests from a cloud remote
+dt fetch -r s3remote --dir-only
+
 # Combine with other options
-dt fetch -r myremote --dir-only
 dt fetch -r myremote data/large_dataset.dvc
 ```
 
 This is useful when:
-- You have multiple local remotes and want to choose which one to fetch from
+- You have multiple remotes and want to choose which one to fetch from
 - Auto-discovery picks the wrong remote
-- You want to be explicit about the data source
+- You want to pre-fetch `.dir` manifests from a cloud remote without downloading all data
 
-Note: `--remote` and `--source` are mutually exclusive. The remote must be locally accessible (local path, `file://` URL, or SSH to the current host).
+Note: `--remote` and `--source` are mutually exclusive.
 
 ### Force Mode
 
