@@ -129,6 +129,66 @@ def configure_dvc_remote(
         raise RemoteError(f"Failed to add local remote: {result.stderr}")
 
 
+def configure_local_override(
+    repo_path: Path,
+    verbose: bool = True,
+) -> Optional[str]:
+    """Add a ``local`` remote in ``.dvc/config.local`` derived from existing remotes.
+
+    Reads the project-scope remotes from ``.dvc/config``, finds the first one
+    whose URL resolves to a locally-accessible filesystem path, and writes a
+    ``local`` default remote in ``.dvc/config.local`` pointing to that path.
+
+    This is the correct approach when cloning an **existing** DVC repository
+    whose ``.dvc/config`` already defines remotes — it avoids inventing paths
+    from ``remote.root`` that may not match where data was actually pushed.
+
+    Args:
+        repo_path: Path to the DVC repository.
+        verbose: Print progress messages.
+
+    Returns:
+        The local path that was configured, or *None* if no locally-accessible
+        remote was found.
+    """
+    remotes = list_remotes(repo_path, project_only=True)
+    if not remotes:
+        if verbose:
+            print("  No remotes defined in .dvc/config")
+        return None
+
+    result = find_local_remote(remotes, check_exists=True)
+    if result is None:
+        # Try without existence check — the path may not be mounted yet
+        result = find_local_remote(remotes, check_exists=False)
+        if result is not None:
+            name, local_path = result
+            if verbose:
+                print(f"  Remote '{name}' resolves to {local_path} "
+                      f"(not currently accessible)")
+
+    if result is None:
+        if verbose:
+            print("  No locally-accessible remote found in .dvc/config")
+        return None
+
+    remote_name, local_path = result
+
+    if verbose:
+        print(f"Configuring local remote from '{remote_name}': {local_path}")
+
+    proc = subprocess.run(
+        ['dvc', 'remote', 'add', '--local', '-d', 'local', local_path],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 and 'already exists' not in proc.stderr:
+        raise RemoteError(f"Failed to add local remote: {proc.stderr}")
+
+    return local_path
+
+
 def init_remote(
     name: Optional[str] = None,
     remote_root: Optional[str] = None,

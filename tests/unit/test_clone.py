@@ -100,12 +100,13 @@ class TestCloneRepository:
         with patch('subprocess.run', return_value=mock_subprocess) as mock_run:
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    result = clone.clone_repository(
-                        'git@github.com:org/testrepo.git',
-                        verbose=False,
-                        no_auth=True,
-                        no_hooks=True,
-                    )
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
+                        result = clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            verbose=False,
+                            no_auth=True,
+                            no_hooks=True,
+                        )
         
         # Check git clone was called
         first_call = mock_run.call_args_list[0]
@@ -123,13 +124,14 @@ class TestCloneRepository:
         with patch('subprocess.run', return_value=mock_subprocess) as mock_run:
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    clone.clone_repository(
-                        'git@github.com:org/testrepo.git',
-                        shallow=True,
-                        verbose=False,
-                        no_auth=True,
-                        no_hooks=True,
-                    )
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
+                        clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            shallow=True,
+                            verbose=False,
+                            no_auth=True,
+                            no_hooks=True,
+                        )
         
         first_call = mock_run.call_args_list[0]
         cmd = first_call[0][0]
@@ -146,13 +148,14 @@ class TestCloneRepository:
         with patch('subprocess.run', return_value=mock_subprocess) as mock_run:
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    clone.clone_repository(
-                        'git@github.com:org/testrepo.git',
-                        no_submodules=True,
-                        verbose=False,
-                        no_auth=True,
-                        no_hooks=True,
-                    )
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
+                        clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            no_submodules=True,
+                            verbose=False,
+                            no_auth=True,
+                            no_hooks=True,
+                        )
         
         # Should not have --recurse-submodules
         first_call = mock_run.call_args_list[0]
@@ -186,13 +189,14 @@ class TestCloneRepository:
         with patch('subprocess.run', return_value=mock_subprocess) as mock_run:
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    result = clone.clone_repository(
-                        'git@github.com:org/testrepo.git',
-                        path='custom_dir',
-                        verbose=False,
-                        no_auth=True,
-                        no_hooks=True,
-                    )
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
+                        result = clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            path='custom_dir',
+                            verbose=False,
+                            no_auth=True,
+                            no_hooks=True,
+                        )
         
         assert result == Path('custom_dir')
         
@@ -223,7 +227,7 @@ class TestCloneAuthSetup:
         with patch('subprocess.run', return_value=mock_subprocess):
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    with patch('dt.clone.remote_mod.init_remote'):
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
                         with patch('dt.clone.install_mod.install', return_value=[]):
                             with patch('dt.clone.auth_setup_mod.auth_setup', return_value=mock_report) as mock_auth:
                                 clone.clone_repository(
@@ -243,13 +247,14 @@ class TestCloneAuthSetup:
         with patch('subprocess.run', return_value=mock_subprocess):
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    with patch('dt.clone.auth_setup_mod.auth_setup') as mock_auth:
-                        clone.clone_repository(
-                            'git@github.com:org/testrepo.git',
-                            no_auth=True,
-                            no_hooks=True,
-                            verbose=False,
-                        )
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
+                        with patch('dt.clone.auth_setup_mod.auth_setup') as mock_auth:
+                            clone.clone_repository(
+                                'git@github.com:org/testrepo.git',
+                                no_auth=True,
+                                no_hooks=True,
+                                verbose=False,
+                            )
 
         mock_auth.assert_not_called()
 
@@ -264,7 +269,7 @@ class TestCloneAuthSetup:
         with patch('subprocess.run', return_value=mock_subprocess):
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    with patch('dt.clone.remote_mod.init_remote'):
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
                         with patch('dt.clone.install_mod.install', return_value=[]):
                             with patch('dt.clone.auth_setup_mod.auth_setup', side_effect=RuntimeError('gcp error')):
                                 result = clone.clone_repository(
@@ -289,7 +294,7 @@ class TestCloneHooksAndRemote:
         with patch('subprocess.run', return_value=mock_subprocess):
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    with patch('dt.clone.remote_mod.init_remote'):
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
                         with patch('dt.clone.install_mod.install', return_value=['pre-commit']) as mock_install:
                             clone.clone_repository(
                                 'git@github.com:org/testrepo.git',
@@ -309,18 +314,19 @@ class TestCloneHooksAndRemote:
         with patch('subprocess.run', return_value=mock_subprocess):
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    with patch('dt.clone.install_mod.install') as mock_install:
-                        clone.clone_repository(
-                            'git@github.com:org/testrepo.git',
-                            no_auth=True,
-                            no_hooks=True,
-                            verbose=False,
-                        )
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
+                        with patch('dt.clone.install_mod.install') as mock_install:
+                            clone.clone_repository(
+                                'git@github.com:org/testrepo.git',
+                                no_auth=True,
+                                no_hooks=True,
+                                verbose=False,
+                            )
 
         mock_install.assert_not_called()
 
     def test_remote_init_called(self, tmp_path, monkeypatch):
-        """init_remote is called with repo name and target dir."""
+        """configure_local_override is preferred; init_remote used as fallback."""
         monkeypatch.chdir(tmp_path)
 
         mock_subprocess = MagicMock()
@@ -329,19 +335,49 @@ class TestCloneHooksAndRemote:
         with patch('subprocess.run', return_value=mock_subprocess):
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    with patch('dt.clone.remote_mod.init_remote') as mock_remote:
-                        clone.clone_repository(
-                            'git@github.com:org/testrepo.git',
-                            no_auth=True,
-                            no_hooks=True,
-                            verbose=False,
-                        )
+                    with patch('dt.clone.remote_mod.configure_local_override',
+                               return_value=None) as mock_override:
+                        with patch('dt.clone.remote_mod.init_remote') as mock_remote:
+                            clone.clone_repository(
+                                'git@github.com:org/testrepo.git',
+                                no_auth=True,
+                                no_hooks=True,
+                                verbose=False,
+                            )
 
+        # configure_local_override is tried first
+        mock_override.assert_called_once_with(
+            repo_path=Path('testrepo'),
+            verbose=False,
+        )
+        # Falls back to init_remote when override returns None
         mock_remote.assert_called_once_with(
             name='testrepo',
             repo_path=Path('testrepo'),
             verbose=False,
         )
+
+    def test_configure_local_override_skips_init_remote(self, tmp_path, monkeypatch):
+        """init_remote is NOT called when configure_local_override succeeds."""
+        monkeypatch.chdir(tmp_path)
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.remote_mod.configure_local_override',
+                               return_value='/g/data/a56/dvc/remotes/testrepo'):
+                        with patch('dt.clone.remote_mod.init_remote') as mock_remote:
+                            clone.clone_repository(
+                                'git@github.com:org/testrepo.git',
+                                no_auth=True,
+                                no_hooks=True,
+                                verbose=False,
+                            )
+
+        mock_remote.assert_not_called()
 
     def test_remote_failure_does_not_abort(self, tmp_path, monkeypatch):
         """Clone succeeds even if remote init fails."""
@@ -354,7 +390,8 @@ class TestCloneHooksAndRemote:
         with patch('subprocess.run', return_value=mock_subprocess):
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
-                    with patch('dt.clone.remote_mod.init_remote', side_effect=RemoteError('no config')):
+                    with patch('dt.clone.remote_mod.configure_local_override',
+                               side_effect=RemoteError('no config')):
                         result = clone.clone_repository(
                             'git@github.com:org/testrepo.git',
                             no_auth=True,
