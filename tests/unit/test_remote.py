@@ -11,6 +11,7 @@ from dt.remote import (
     resolve_remote_path,
     init_remote_structure,
     configure_dvc_remote,
+    configure_local_override,
     init_remote,
     list_remotes,
 )
@@ -290,3 +291,115 @@ class TestListRemotes:
                 
                 call_kwargs = mock_run.call_args[1]
                 assert call_kwargs.get("cwd") == Path("/current/dir")
+
+
+# =============================================================================
+# configure_local_override tests
+# =============================================================================
+
+class TestConfigureLocalOverride:
+    """Tests for the configure_local_override function."""
+
+    def test_returns_none_when_no_remotes(self, tmp_path):
+        """Returns None when .dvc/config has no remotes."""
+        with patch("dt.remote.list_remotes", return_value=[]):
+            result = configure_local_override(repo_path=tmp_path, verbose=False)
+
+        assert result is None
+
+    def test_returns_local_path_and_runs_dvc(self, tmp_path):
+        """Adds a local remote when an existing remote resolves locally."""
+        remotes = [("myremote", "ssh://host/g/data/a56/dvc/remotes/proj", True)]
+
+        with patch("dt.remote.list_remotes", return_value=remotes):
+            with patch(
+                "dt.remote.find_local_remote",
+                return_value=("myremote", "/g/data/a56/dvc/remotes/proj"),
+            ):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0, stderr="")
+                    result = configure_local_override(
+                        repo_path=tmp_path, verbose=False,
+                    )
+
+        assert result == "/g/data/a56/dvc/remotes/proj"
+        # Should have run `dvc remote add --local -d local <path>`
+        cmd = mock_run.call_args[0][0]
+        assert cmd == [
+            "dvc", "remote", "add", "--local", "-d", "local",
+            "/g/data/a56/dvc/remotes/proj",
+        ]
+        assert mock_run.call_args[1]["cwd"] == tmp_path
+
+    def test_returns_none_when_no_local_remote(self, tmp_path):
+        """Returns None when no remote resolves to a local path."""
+        remotes = [("s3remote", "s3://bucket/prefix", True)]
+
+        with patch("dt.remote.list_remotes", return_value=remotes):
+            with patch("dt.remote.find_local_remote", return_value=None):
+                result = configure_local_override(
+                    repo_path=tmp_path, verbose=False,
+                )
+
+        assert result is None
+
+    def test_falls_back_to_check_exists_false(self, tmp_path):
+        """Uses check_exists=False when True returns None."""
+        remotes = [("myremote", "ssh://host/unmounted/path", True)]
+
+        with patch("dt.remote.list_remotes", return_value=remotes):
+            with patch("dt.remote.find_local_remote") as mock_find:
+                # First call (check_exists=True) returns None,
+                # second call (check_exists=False) succeeds.
+                mock_find.side_effect = [
+                    None,
+                    ("myremote", "/unmounted/path"),
+                ]
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0, stderr="")
+                    result = configure_local_override(
+                        repo_path=tmp_path, verbose=False,
+                    )
+
+        assert result == "/unmounted/path"
+        assert mock_find.call_count == 2
+        assert mock_find.call_args_list[0][1]["check_exists"] is True
+        assert mock_find.call_args_list[1][1]["check_exists"] is False
+
+    def test_raises_on_dvc_error(self, tmp_path):
+        """Raises RemoteError when dvc remote add fails."""
+        remotes = [("myremote", "/local/path", True)]
+
+        with patch("dt.remote.list_remotes", return_value=remotes):
+            with patch(
+                "dt.remote.find_local_remote",
+                return_value=("myremote", "/local/path"),
+            ):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = MagicMock(
+                        returncode=1, stderr="some error",
+                    )
+                    with pytest.raises(RemoteError, match="Failed to add local remote"):
+                        configure_local_override(
+                            repo_path=tmp_path, verbose=False,
+                        )
+
+    def test_ignores_already_exists_error(self, tmp_path):
+        """Does not raise when local remote already exists."""
+        remotes = [("myremote", "/local/path", True)]
+
+        with patch("dt.remote.list_remotes", return_value=remotes):
+            with patch(
+                "dt.remote.find_local_remote",
+                return_value=("myremote", "/local/path"),
+            ):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = MagicMock(
+                        returncode=1,
+                        stderr="remote 'local' already exists",
+                    )
+                    result = configure_local_override(
+                        repo_path=tmp_path, verbose=False,
+                    )
+
+        assert result == "/local/path"
