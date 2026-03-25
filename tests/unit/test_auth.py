@@ -3134,6 +3134,46 @@ class TestDeployKeyForge:
         assert 'github.com/settings/ssh/new' in captured.out
 
 
+class TestKeyAcceptedByHost:
+    """Tests for _key_accepted_by_host."""
+
+    @patch('dt.auth.ssh.subprocess.run')
+    def test_returns_true_when_key_accepted(self, mock_run, tmp_path):
+        from dt.auth.ssh import _key_accepted_by_host
+        mock_run.return_value = MagicMock(returncode=0)
+        key = tmp_path / 'id_ed25519'
+        assert _key_accepted_by_host('host.com', 'user', key) is True
+
+    @patch('dt.auth.ssh.subprocess.run')
+    def test_returns_false_when_key_rejected(self, mock_run, tmp_path):
+        from dt.auth.ssh import _key_accepted_by_host
+        mock_run.return_value = MagicMock(returncode=255)
+        key = tmp_path / 'id_ed25519'
+        assert _key_accepted_by_host('host.com', 'user', key) is False
+
+    @patch('dt.auth.ssh.subprocess.run')
+    def test_uses_identities_only_and_clears_agent(self, mock_run, tmp_path):
+        from dt.auth.ssh import _key_accepted_by_host
+        mock_run.return_value = MagicMock(returncode=0)
+        key = tmp_path / 'id_ed25519'
+        _key_accepted_by_host('host.com', 'alice', key)
+        args = mock_run.call_args
+        cmd = args[0][0]
+        assert 'IdentitiesOnly=yes' in cmd
+        assert 'PreferredAuthentications=publickey' in cmd
+        assert f'IdentityFile={key}' in cmd
+        assert 'alice@host.com' in cmd
+        # SSH_AUTH_SOCK should be cleared
+        assert args[1]['env']['SSH_AUTH_SOCK'] == ''
+
+    @patch('dt.auth.ssh.subprocess.run')
+    def test_returns_false_on_timeout(self, mock_run, tmp_path):
+        from dt.auth.ssh import _key_accepted_by_host
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd='ssh', timeout=10)
+        key = tmp_path / 'id_ed25519'
+        assert _key_accepted_by_host('host.com', 'user', key) is False
+
+
 class TestSSHSetup:
     """Tests for ssh_setup orchestration."""
 
@@ -3143,6 +3183,7 @@ class TestSSHSetup:
         results = ssh_setup(verbose=False)
         assert results == []
 
+    @patch('dt.auth.ssh._key_accepted_by_host', return_value=True)
     @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
     @patch('dt.auth.ssh._find_existing_key')
     @patch('dt.auth.ssh._ensure_ssh_dir')
@@ -3152,7 +3193,8 @@ class TestSSHSetup:
     @patch('dt.auth.ssh.click.prompt', return_value='testuser')
     def test_all_passing_and_configured(
         self, mock_prompt, mock_discover, mock_check, mock_host_in_config,
-        mock_ssh_dir, mock_find_key, mock_passphrase, tmp_path,
+        mock_ssh_dir, mock_find_key, mock_passphrase, mock_key_accepted,
+        tmp_path,
     ):
         ep = Endpoint(type='ssh', url='ssh://host.com/path', source='test')
         mock_discover.return_value = [ep]
@@ -3313,6 +3355,7 @@ class TestSSHSetup:
         mock_gen_key.assert_called_once()
         assert results[0].key_generated is True
 
+    @patch('dt.auth.ssh._key_accepted_by_host', return_value=True)
     @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
     @patch('dt.auth.ssh._write_ssh_config_stanza')
     @patch('dt.auth.ssh._host_in_ssh_config', return_value=False)
@@ -3323,7 +3366,7 @@ class TestSSHSetup:
     def test_passing_host_gets_config_stanza(
         self, mock_discover, mock_check, mock_ssh_dir,
         mock_find_key, mock_host_in_config, mock_write_stanza,
-        mock_passphrase, tmp_path,
+        mock_passphrase, mock_key_accepted, tmp_path,
     ):
         """A host that passes checks should still get a config stanza."""
         ep = Endpoint(
@@ -3347,6 +3390,48 @@ class TestSSHSetup:
         assert results[0].config_written is True
         assert results[0].key_deployed is False
         mock_write_stanza.assert_called_once()
+
+    @patch('dt.auth.ssh._key_accepted_by_host', return_value=False)
+    @patch('dt.auth.ssh._key_has_passphrase', return_value=False)
+    @patch('dt.auth.ssh._deploy_key_ssh_copy_id', return_value=True)
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh._host_in_ssh_config', return_value=True)
+    @patch('dt.auth.ssh._find_existing_key')
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
+    @patch('dt.auth.ssh.click.prompt', return_value='testuser')
+    def test_agent_passes_but_key_rejected_deploys_key(
+        self, mock_prompt, mock_discover, mock_check, mock_ssh_dir,
+        mock_find_key, mock_host_in_config, mock_write_stanza,
+        mock_copy_id, mock_passphrase, mock_key_accepted, tmp_path,
+    ):
+        """When SSH passes via agent but IdentityFile key is not authorized,
+        key should still be deployed via ssh-copy-id."""
+        ep = Endpoint(
+            type='ssh', url='ssh://gadi-dm.nci.org.au/data',
+            source='DVC remote',
+        )
+        mock_discover.return_value = [ep]
+        # General check passes (agent has an authorized key)
+        mock_check.return_value = [
+            CheckResult(endpoint=ep, status=STATUS_PASS, summary='OK')
+        ]
+        key_path = tmp_path / 'id_ed25519'
+        key_path.write_text('key')
+        mock_find_key.return_value = key_path
+
+        config_file = tmp_path / 'ssh_config'
+        results = ssh_setup(
+            username=None, config_file=config_file, verbose=False,
+        )
+
+        assert len(results) == 1
+        assert results[0].host == 'gadi-dm.nci.org.au'
+        assert results[0].key_deployed is True
+        mock_copy_id.assert_called_once_with(
+            'gadi-dm.nci.org.au', 'testuser', key_path, verbose=False,
+        )
 
     @patch('dt.auth.ssh._key_has_passphrase', return_value=True)
     @patch('dt.auth.ssh._deploy_key_ssh_copy_id', return_value=True)

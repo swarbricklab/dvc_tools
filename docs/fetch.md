@@ -42,6 +42,8 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | `--urls` | Only fetch URL imports (from `dvc import-url`) |
 | `--regular` | Only fetch regular stages (non-imports) |
 | `--no-index-sync` | Skip automatic index mirror sync |
+| `--dir-only` | Only fetch `.dir` manifest files, not the data files they reference |
+| `-r, --remote NAME` | Fetch from a named DVC remote (local or network) |
 | `--source PATH` | Explicit source cache path (overrides auto-discovery) |
 | `--destination PATH` | Explicit destination cache path (overrides primary cache) |
 | `--cache-type TYPE` | Link type: `reflink`, `hardlink`, `symlink`, or `copy` |
@@ -84,6 +86,36 @@ This is useful when:
 - You want to populate a different cache than the primary one
 - You're copying data between caches on shared filesystems
 
+### Remote Selection
+
+The `-r/--remote` option lets you fetch from a specific named DVC remote instead of relying on auto-discovery.
+
+If the remote is locally accessible (local path, `file://` URL, or SSH to the current host), `dt fetch` uses fast symlink-based fetch. If the remote is not locally accessible (e.g., S3, GCS, HTTP), it falls back to network fetch:
+
+- **Without `--dir-only`**: delegates to `dvc fetch -r <name>` to download all data.
+- **With `--dir-only`**: uses the DVC transfer API to fetch only `.dir` manifest files from the remote, without downloading the data files they reference.
+
+```bash
+# Fetch from a local remote (fast symlink)
+dt fetch -r myremote
+
+# Fetch from a cloud remote (network download via dvc fetch)
+dt fetch -r s3remote
+
+# Fetch only .dir manifests from a cloud remote
+dt fetch -r s3remote --dir-only
+
+# Combine with other options
+dt fetch -r myremote data/large_dataset.dvc
+```
+
+This is useful when:
+- You have multiple remotes and want to choose which one to fetch from
+- Auto-discovery picks the wrong remote
+- You want to pre-fetch `.dir` manifests from a cloud remote without downloading all data
+
+Note: `--remote` and `--source` are mutually exclusive.
+
 ### Force Mode
 
 The `--force` option ensures all child files of directory imports are fetched, even if the `.dir` manifest file already exists in the destination cache.
@@ -100,6 +132,27 @@ This is useful when:
 - The `.dir` manifest was rebuilt (e.g., by `dt update`) but child files weren't fetched
 - You suspect some files are missing despite the cache reporting "all cached"
 - Checkout fails even though fetch reported success
+
+### Dir-Only Mode
+
+The `--dir-only` option fetches only the `.dir` manifest files from the remote, without expanding them to fetch the individual data files they reference. This is much faster when you only need directory structure metadata.
+
+```bash
+# Fetch only .dir manifests (skip data files)
+dt fetch --dir-only
+
+# Combine with targets
+dt fetch --dir-only data/large_dataset.dvc
+```
+
+This is useful when:
+- You need `dt du` or `dt diff` to work without pulling all the data
+- You want to inspect what files a directory contains before fetching everything
+
+Both DVC v2 (legacy) and v3 (current) remote cache layouts are handled
+automatically — `.dir` manifests will be located regardless of which DVC
+version was used to push them.
+- You're on a slow or metered connection and only need metadata
 
 ### Cache Link Type
 
