@@ -1213,6 +1213,12 @@ def _fetch_dir_only_from_remote(
     only the ``.dir`` hashes into the local cache, without downloading
     the data files they reference.
 
+    Handles both DVC v2 (legacy) and v3 (current) cache layouts.  Stages
+    pushed with DVC v2 use a flat ``<prefix>/<rest>`` layout on the remote,
+    while v3 stages store objects under ``files/md5/<prefix>/<rest>``.  The
+    correct remote and local ODBs are selected automatically based on the
+    hash format recorded in each ``.dvc`` stage file.
+
     Args:
         remote_name: DVC remote name.
         categorization: Categorized stages from which to extract .dir hashes.
@@ -1226,89 +1232,123 @@ def _fetch_dir_only_from_remote(
     from dvc_data.hashfile.hash_info import HashInfo
     from dvc_data.hashfile.transfer import transfer
 
-    # Collect .dir hashes from all relevant stages
+    # Collect .dir hashes from all relevant stages, separating v2 and v3
     all_stages = (
         categorization.regular_stages
         + [stage for grp in categorization.repo_imports.values()
            for stage in grp.stages]
     )
 
-    dir_hashes = []
+    v2_dir_hashes = []
+    v3_dir_hashes = []
     for stage in all_stages:
-        hash_paths, _ = _collect_hashes_from_stage(stage)
+        hash_paths, is_v2 = _collect_hashes_from_stage(stage)
         for h, _path in hash_paths:
             if h.endswith('.dir'):
-                dir_hashes.append(h)
+                if is_v2:
+                    v2_dir_hashes.append(h)
+                else:
+                    v3_dir_hashes.append(h)
 
-    if not dir_hashes:
+    unique_v2 = sorted(set(v2_dir_hashes))
+    unique_v3 = sorted(set(v3_dir_hashes))
+
+    if not unique_v2 and not unique_v3:
         if verbose:
             print("No .dir hashes found in stages")
         return [("all", True, "No .dir manifests to fetch")]
 
-    unique_hashes = sorted(set(dir_hashes))
-
     repo = Repo()
-    local_odb = repo.cache.local
-    if local_odb is None:
-        raise FetchError("DVC cache not configured.")
 
-    # Skip hashes already in local cache (unless --force)
-    if not force:
-        to_fetch = [h for h in unique_hashes if not _hash_in_odb(h, local_odb)]
-    else:
-        to_fetch = unique_hashes
+    # Build (label, hashes, hash_name, local_odb) groups for each layout.
+    # v2/legacy stages use hash_name='md5-dos2unix' → remote.legacy_odb
+    # v3/current stages use hash_name='md5' → remote.odb
+    odb_groups = []
+    if unique_v2:
+        local_legacy = repo.cache.legacy
+        if local_legacy is None:
+            return [(remote_name, False, "DVC legacy cache not configured.")]
+        odb_groups.append(('v2', unique_v2, 'md5-dos2unix', local_legacy))
+    if unique_v3:
+        local_current = repo.cache.local
+        if local_current is None:
+            return [(remote_name, False, "DVC cache not configured.")]
+        odb_groups.append(('v3', unique_v3, 'md5', local_current))
 
-    if not to_fetch:
-        msg = f"All {len(unique_hashes)} .dir manifests already in cache"
+    total_ok = 0
+    total_fail = 0
+    total_missing = 0
+
+    for label, hashes, hash_name, local_odb in odb_groups:
+        # Skip hashes already in local cache (unless --force)
+        if not force:
+            to_fetch = [h for h in hashes if not _hash_in_odb(h, local_odb)]
+        else:
+            to_fetch = list(hashes)
+
+        if not to_fetch:
+            if verbose:
+                print(f"  All {len(hashes)} {label} .dir manifests already in cache")
+            continue
+
         if verbose:
-            print(msg)
-        return [("all", True, msg)]
+            print(f"  Fetching {len(to_fetch)} {label} .dir manifests from "
+                  f"remote '{remote_name}'...")
 
-    if verbose:
-        print(f"Fetching {len(to_fetch)} .dir manifests from remote '{remote_name}'...")
+        try:
+            remote_odb = repo.cloud.get_remote_odb(
+                name=remote_name, command='fetch', hash_name=hash_name,
+            )
+        except Exception as e:
+            return [(remote_name, False,
+                     f"Cannot open remote '{remote_name}' ({label}): {e}")]
 
-    try:
-        remote_odb = repo.cloud.get_remote_odb(name=remote_name, command='fetch')
-    except Exception as e:
-        return [(remote_name, False, f"Cannot open remote '{remote_name}': {e}")]
+        obj_ids = frozenset(HashInfo("md5", h) for h in to_fetch)
 
-    obj_ids = frozenset(HashInfo("md5", h) for h in to_fetch)
+        try:
+            result = transfer(remote_odb, local_odb, obj_ids, shallow=True)
+        except Exception as e:
+            return [(remote_name, False, f"Transfer failed ({label}): {e}")]
 
-    try:
-        result = transfer(remote_odb, local_odb, obj_ids, shallow=True)
-    except Exception as e:
-        return [(remote_name, False, f"Transfer failed: {e}")]
+        n_ok = len(result.transferred)
+        n_fail = len(result.failed)
 
-    n_ok = len(result.transferred)
-    n_fail = len(result.failed)
+        # transfer() silently ignores hashes that don't exist on the source
+        # (they end up in compare_status.missing, which isn't reported).
+        # Verify expected hashes actually landed in local cache.
+        still_missing = [h for h in to_fetch if not local_odb.exists(h)]
+        n_missing = len(still_missing)
 
-    # transfer() silently ignores hashes that don't exist on the source
-    # (they end up in compare_status.missing, which isn't reported).
-    # Verify expected hashes actually landed in local cache.
-    still_missing = [h for h in to_fetch if not local_odb.exists(h)]
-    n_missing = len(still_missing)
+        if verbose:
+            print(f"    Transferred: {n_ok}, Failed: {n_fail}")
+            if still_missing:
+                print(f"    Missing from remote: {n_missing}")
+                for h in still_missing:
+                    print(f"      {h}")
+            if result.failed:
+                for hi in sorted(result.failed, key=lambda x: x.value):
+                    print(f"      {hi.value}: transfer error")
 
-    if verbose:
-        print(f"  Transferred: {n_ok}, Failed: {n_fail}")
-        if still_missing:
-            print(f"  Missing from remote: {n_missing}")
-            for h in still_missing:
-                print(f"    {h}")
-        if result.failed:
-            for hi in sorted(result.failed, key=lambda x: x.value):
-                print(f"    {hi.value}: transfer error")
+        total_ok += n_ok
+        total_fail += n_fail
+        total_missing += n_missing
 
-    total_problems = n_fail + n_missing
+    total_unique = len(unique_v2) + len(unique_v3)
+    total_problems = total_fail + total_missing
     if total_problems:
         parts = []
-        if n_ok:
-            parts.append(f"fetched {n_ok}")
-        if n_fail:
-            parts.append(f"{n_fail} transfer error(s)")
-        if n_missing:
-            parts.append(f"{n_missing} not found on remote")
+        if total_ok:
+            parts.append(f"fetched {total_ok}")
+        if total_fail:
+            parts.append(f"{total_fail} transfer error(s)")
+        if total_missing:
+            parts.append(f"{total_missing} not found on remote")
         return [(remote_name, False, ", ".join(parts))]
-    return [(remote_name, True, f"Fetched {n_ok} .dir manifests from '{remote_name}'")]
+    if total_ok == 0:
+        msg = f"All {total_unique} .dir manifests already in cache"
+    else:
+        msg = f"Fetched {total_ok} .dir manifests from '{remote_name}'"
+    return [(remote_name, True, msg)]
 
 
 def _hash_in_odb(hash_value: str, odb) -> bool:

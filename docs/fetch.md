@@ -148,6 +148,10 @@ dt fetch --dir-only data/large_dataset.dvc
 This is useful when:
 - You need `dt du` or `dt diff` to work without pulling all the data
 - You want to inspect what files a directory contains before fetching everything
+
+Both DVC v2 (legacy) and v3 (current) remote cache layouts are handled
+automatically — `.dir` manifests will be located regardless of which DVC
+version was used to push them.
 - You're on a slow or metered connection and only need metadata
 
 ### Cache Link Type

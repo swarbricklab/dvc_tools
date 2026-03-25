@@ -461,7 +461,7 @@ class TestCollectHashesFromStage:
         stage = MagicMock()
         stage.outs = [out1, out2]
         
-        result = fetch._collect_hashes_from_stage(stage)
+        result, is_v2 = fetch._collect_hashes_from_stage(stage)
         
         # Returns list of (hash, path) tuples
         hashes = {h for h, p in result}
@@ -482,7 +482,7 @@ class TestCollectHashesFromStage:
         stage = MagicMock()
         stage.outs = [out1, out2]
         
-        result = fetch._collect_hashes_from_stage(stage)
+        result, is_v2 = fetch._collect_hashes_from_stage(stage)
         
         hashes = {h for h, p in result}
         assert hashes == {'cached'}
@@ -496,9 +496,10 @@ class TestCollectHashesFromStage:
         stage = MagicMock()
         stage.outs = [out]
         
-        result = fetch._collect_hashes_from_stage(stage)
+        result, is_v2 = fetch._collect_hashes_from_stage(stage)
         
         assert result == []
+        assert is_v2 is False
 
 
 # =============================================================================
@@ -1353,8 +1354,14 @@ class TestFetchDirOnlyFromRemote:
         cat.regular_stages = stages
         return cat
 
-    def _make_stage(self, name, hashes):
-        """Create a mock stage with given output hashes."""
+    def _make_stage(self, name, hashes, hash_name='md5'):
+        """Create a mock stage with given output hashes.
+
+        Args:
+            name: Stage addressing name.
+            hashes: List of hash value strings.
+            hash_name: Hash algorithm name ('md5' for v3, 'md5-dos2unix' for v2).
+        """
         stage = MagicMock()
         stage.addressing = name
         outs = []
@@ -1363,7 +1370,7 @@ class TestFetchDirOnlyFromRemote:
             out.use_cache = True
             out.hash_info = MagicMock()
             out.hash_info.value = h
-            out.hash_info.name = 'md5'
+            out.hash_info.name = hash_name
             out.fspath = f'/repo/{name}'
             outs.append(out)
         stage.outs = outs
@@ -1495,4 +1502,95 @@ class TestFetchDirOnlyFromRemote:
             results = _fetch_dir_only_from_remote('myremote', cat)
             assert results[0][1] is False
             assert 'not found on remote' in results[0][2]
+
+    def test_v2_hashes_use_legacy_odb(self):
+        """v2 (md5-dos2unix) hashes use legacy ODB for remote and local."""
+        from dt.fetch import _fetch_dir_only_from_remote
+        from dvc_data.hashfile.hash_info import HashInfo
+
+        stage = self._make_stage('data.dvc', ['abc123.dir'],
+                                 hash_name='md5-dos2unix')
+        cat = self._make_categorization([stage])
+
+        mock_repo = MagicMock()
+        mock_legacy_odb = MagicMock()
+        mock_repo.cache.legacy = mock_legacy_odb
+        mock_remote_odb = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = mock_remote_odb
+
+        mock_result = MagicMock()
+        mock_result.transferred = {HashInfo('md5', 'abc123.dir')}
+        mock_result.failed = set()
+
+        # After transfer, hash exists in legacy local cache
+        mock_legacy_odb.exists.return_value = True
+
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dt.fetch._hash_in_odb', return_value=False), \
+             patch('dvc_data.hashfile.transfer.transfer',
+                   return_value=mock_result) as mock_transfer:
+            results = _fetch_dir_only_from_remote('myremote', cat)
+            assert results[0][1] is True
+
+            # Verify legacy ODB was requested with md5-dos2unix hash_name
+            mock_repo.cloud.get_remote_odb.assert_called_once_with(
+                name='myremote', command='fetch', hash_name='md5-dos2unix',
+            )
+
+            # Verify transfer used legacy local ODB as destination
+            mock_transfer.assert_called_once()
+            call_args = mock_transfer.call_args
+            assert call_args[0][0] is mock_remote_odb   # source
+            assert call_args[0][1] is mock_legacy_odb    # dest (legacy)
+
+    def test_mixed_v2_v3_hashes(self):
+        """Mixed v2 and v3 stages transfer to correct ODBs."""
+        from dt.fetch import _fetch_dir_only_from_remote
+        from dvc_data.hashfile.hash_info import HashInfo
+
+        v2_stage = self._make_stage('old.dvc', ['v2hash.dir'],
+                                    hash_name='md5-dos2unix')
+        v3_stage = self._make_stage('new.dvc', ['v3hash.dir'],
+                                    hash_name='md5')
+        cat = self._make_categorization([v2_stage, v3_stage])
+
+        mock_repo = MagicMock()
+        mock_legacy_odb = MagicMock()
+        mock_current_odb = MagicMock()
+        mock_repo.cache.legacy = mock_legacy_odb
+        mock_repo.cache.local = mock_current_odb
+
+        mock_remote_legacy = MagicMock()
+        mock_remote_current = MagicMock()
+
+        def pick_remote_odb(**kwargs):
+            if kwargs.get('hash_name') == 'md5-dos2unix':
+                return mock_remote_legacy
+            return mock_remote_current
+
+        mock_repo.cloud.get_remote_odb.side_effect = pick_remote_odb
+
+        mock_result = MagicMock()
+        mock_result.transferred = {HashInfo('md5', 'placeholder.dir')}
+        mock_result.failed = set()
+
+        # Both ODBs report the hash as present after transfer
+        mock_legacy_odb.exists.return_value = True
+        mock_current_odb.exists.return_value = True
+
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dt.fetch._hash_in_odb', return_value=False), \
+             patch('dvc_data.hashfile.transfer.transfer',
+                   return_value=mock_result) as mock_transfer:
+            results = _fetch_dir_only_from_remote('myremote', cat)
+            assert results[0][1] is True
+
+            # get_remote_odb called twice: once for v2, once for v3
+            assert mock_repo.cloud.get_remote_odb.call_count == 2
+            calls = mock_repo.cloud.get_remote_odb.call_args_list
+            hash_names = {c.kwargs['hash_name'] for c in calls}
+            assert hash_names == {'md5-dos2unix', 'md5'}
+
+            # transfer called twice with different ODB pairs
+            assert mock_transfer.call_count == 2
 
