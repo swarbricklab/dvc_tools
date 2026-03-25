@@ -154,13 +154,22 @@ def clone_repository(
         if verbose:
             print(f"Warning: {e}")
 
-    # Set up local remote for HPC shared filesystem access
+    # Set up local remote for HPC shared filesystem access.
+    # Prefer deriving the local path from the repo's existing .dvc/config
+    # remotes, rather than inventing a path from remote.root.
     try:
-        remote_mod.init_remote(
-            name=remote_name,
+        local_path = remote_mod.configure_local_override(
             repo_path=target_dir,
             verbose=verbose,
         )
+        if local_path is None and verbose:
+            print("  Falling back to remote.root-based remote init")
+        if local_path is None:
+            remote_mod.init_remote(
+                name=remote_name,
+                repo_path=target_dir,
+                verbose=verbose,
+            )
     except remote_mod.RemoteError as e:
         if verbose:
             print(f"Warning: Remote setup skipped: {e}")
