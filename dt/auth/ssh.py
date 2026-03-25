@@ -129,6 +129,44 @@ def _key_has_passphrase(key_path: Path) -> bool:
     return result.returncode != 0
 
 
+def _key_accepted_by_host(
+    host: str,
+    user: str,
+    key_path: Path,
+    verbose: bool = False,
+) -> bool:
+    """Check whether *key_path* is accepted by *host* for public-key auth.
+
+    Disables the SSH agent so that only the specified key file is tested.
+    Returns True if the key is accepted, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            [
+                'ssh', '-T',
+                '-o', 'BatchMode=yes',
+                '-o', 'ConnectTimeout=5',
+                '-o', 'IdentitiesOnly=yes',
+                '-o', f'IdentityFile={key_path}',
+                '-o', 'PreferredAuthentications=publickey',
+                f'{user}@{host}',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, 'SSH_AUTH_SOCK': ''},
+        )
+        # returncode 0 or 1 = authenticated (1 is normal for ssh -T)
+        # returncode 255 = SSH-level failure (auth denied, etc.)
+        accepted = result.returncode != 255
+        if verbose:
+            status = 'accepted' if accepted else 'rejected'
+            print(f"  Key {key_path.name} {status} by {host}")
+        return accepted
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
 def _parse_ssh_config(config_path: Path) -> Dict[str, Dict[str, str]]:
     """Parse an SSH config file into ``{host_alias: {key: value}}``."""
     hosts: Dict[str, Dict[str, str]] = {}
@@ -434,6 +472,13 @@ def ssh_setup(
                 print(f"  SSH config stanza for {host} already exists \u2014 skipping")
 
     # -- 6. Check endpoints (now using correct config) ---------------------
+    #
+    # The general connectivity check uses the system SSH binary, which may
+    # succeed via agent-forwarded keys even though our *configured* key
+    # (IdentityFile) is not in authorized_keys on the remote host.  DVC's
+    # SSH access often doesn't have agent access (e.g. paramiko, sshfs, or
+    # PBS batch jobs), so we must also verify that the *specific key file*
+    # is accepted — not just that "some" authentication method works.
     results_check = check_endpoints(
         endpoints=endpoints,
         type_filter=ssh_git_types,
@@ -446,6 +491,21 @@ def ssh_setup(
             host = _extract_ssh_host(cr.endpoint.url)
             if host:
                 failing_hosts.add(host)
+
+    # For non-forge hosts that passed the general check, verify the
+    # configured key is specifically accepted (agent-less).
+    for host in all_hosts:
+        if host in failing_hosts:
+            continue  # already know it needs key deployment
+        if _is_forge_host(host):
+            continue  # forge hosts use different deploy path
+        if not _key_accepted_by_host(
+            host, host_users[host], key_path, verbose=verbose,
+        ):
+            failing_hosts.add(host)
+            if verbose:
+                print(f"  {host}: connectivity OK via agent, but "
+                      f"configured key {key_path.name} not accepted")
 
     if verbose and failing_hosts:
         print(f"\n{len(failing_hosts)} host(s) need key deployment:")

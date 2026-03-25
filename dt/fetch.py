@@ -429,6 +429,7 @@ def build_fetch_plan(
     verbose: bool = False,
     explicit_source: Optional[Path] = None,
     destination_db=None,
+    dir_only: bool = False,
 ) -> FetchPlan:
     """Build a fetch plan from categorized stages.
     
@@ -443,6 +444,8 @@ def build_fetch_plan(
         destination_db: Optional destination cache DB for fallback .dir expansion.
             If a .dir file isn't in source but is in destination, we can still
             expand it to get child hashes.
+        dir_only: If True, fetch only .dir manifest files without expanding
+            them to child file hashes.
         
     Returns:
         FetchPlan with hashes grouped by source.
@@ -476,7 +479,7 @@ def build_fetch_plan(
                 if is_v2:
                     plan.v2_hashes.add(h)
                 # Expand directory hashes
-                if h.endswith('.dir') and source_db:
+                if h.endswith('.dir') and source_db and not dir_only:
                     child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                     group.add_hashes_with_paths(child_files, stage_name=stage_name)
                     if is_v2:
@@ -517,7 +520,7 @@ def build_fetch_plan(
                         if is_v2:
                             plan.v2_hashes.add(h)
                         # Expand directory hashes
-                        if h.endswith('.dir') and source_db:
+                        if h.endswith('.dir') and source_db and not dir_only:
                             child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                             group.add_hashes_with_paths(child_files, stage_name=stage_name)
                             if is_v2:
@@ -547,7 +550,7 @@ def build_fetch_plan(
                     if is_v2:
                         plan.v2_hashes.add(h)
                     # Expand directory hashes
-                    if h.endswith('.dir') and source_db:
+                    if h.endswith('.dir') and source_db and not dir_only:
                         child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
                         group.add_hashes_with_paths(child_files, stage_name=stage_name)
                         if is_v2:
@@ -1007,6 +1010,8 @@ def fetch(
     source: Optional[str] = None,
     destination: Optional[str] = None,
     cache_type: Optional[str] = None,
+    dir_only: bool = False,
+    remote_name: Optional[str] = None,
 ) -> List[Tuple[str, bool, str]]:
     """Fetch DVC-tracked files into the primary cache.
     
@@ -1019,6 +1024,10 @@ def fetch(
     For non-import .dvc files, checks if there's a locally-accessible remote
     and creates symlinks from it. If no local remote is available and network
     is True, falls back to `dvc fetch`.
+    
+    When remote_name is specified (non-local remote):
+    - Without dir_only: delegates to `dvc fetch -r <name>` (network fetch).
+    - With dir_only: uses DVC transfer API to fetch only .dir manifests.
     
     After fetch, run `dvc checkout` to link files to the workspace.
     
@@ -1041,6 +1050,10 @@ def fetch(
         destination: Explicit destination cache path (overrides primary cache).
         cache_type: Link type for cache population (reflink, hardlink, symlink, copy).
             If None, tries all in order until one succeeds.
+        dir_only: If True, only fetch .dir manifest files, not the data files
+            they reference.
+        remote_name: DVC remote name for network fetch (non-local remote).
+            Mutually exclusive with source.
         
     Returns:
         List of (target, success, message) tuples.
@@ -1101,6 +1114,22 @@ def fetch(
         categorization.print_summary(verbose=verbose)
         return []
     
+    # Non-local remote: delegate to DVC network fetch
+    if remote_name:
+        if dir_only:
+            return _fetch_dir_only_from_remote(
+                remote_name=remote_name,
+                categorization=categorization,
+                verbose=verbose,
+                force=force,
+            )
+        else:
+            return _dvc_fetch_from_remote(
+                remote_name=remote_name,
+                targets=targets,
+                verbose=verbose,
+            )
+    
     # Determine destination DB for fallback .dir expansion
     destination_db = None
     if destination:
@@ -1117,6 +1146,7 @@ def fetch(
         verbose=verbose,
         explicit_source=Path(source) if source else None,
         destination_db=destination_db,
+        dir_only=dir_only,
     )
     return fetch_from_plan(
         plan=plan,
@@ -1128,6 +1158,205 @@ def fetch(
         destination=Path(destination) if destination else None,
         cache_type=cache_type,
     )
+
+
+# =============================================================================
+# Network Remote Fetch Helpers
+# =============================================================================
+
+def _dvc_fetch_from_remote(
+    remote_name: str,
+    targets: Optional[List[str]] = None,
+    verbose: bool = False,
+) -> List[Tuple[str, bool, str]]:
+    """Fetch from a non-local DVC remote via ``dvc fetch -r <name>``.
+
+    This delegates entirely to the ``dvc fetch`` subprocess, which handles
+    authentication, transfer protocols, and progress display.
+
+    Args:
+        remote_name: DVC remote name.
+        targets: Optional list of .dvc file or stage targets.
+        verbose: Print the command being run.
+
+    Returns:
+        List with a single (target, success, message) tuple.
+    """
+    cmd = ['dvc', 'fetch', '-r', remote_name]
+    if targets:
+        cmd.extend(targets)
+
+    if verbose:
+        print(f"Running: {' '.join(cmd)}")
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            msg = result.stdout.strip() or f"Fetched from remote '{remote_name}'"
+            return [(remote_name, True, msg)]
+        else:
+            error = result.stderr.strip() or "Unknown error"
+            return [(remote_name, False, f"dvc fetch -r {remote_name} failed: {error}")]
+    except (OSError, FileNotFoundError) as e:
+        return [(remote_name, False, f"dvc fetch failed: {e}")]
+
+
+def _fetch_dir_only_from_remote(
+    remote_name: str,
+    categorization: 'StageCategorization',
+    verbose: bool = False,
+    force: bool = False,
+) -> List[Tuple[str, bool, str]]:
+    """Fetch only ``.dir`` manifest files from a non-local DVC remote.
+
+    Uses the DVC Python API to open the remote object database and transfer
+    only the ``.dir`` hashes into the local cache, without downloading
+    the data files they reference.
+
+    Handles both DVC v2 (legacy) and v3 (current) cache layouts.  Stages
+    pushed with DVC v2 use a flat ``<prefix>/<rest>`` layout on the remote,
+    while v3 stages store objects under ``files/md5/<prefix>/<rest>``.  The
+    correct remote and local ODBs are selected automatically based on the
+    hash format recorded in each ``.dvc`` stage file.
+
+    Args:
+        remote_name: DVC remote name.
+        categorization: Categorized stages from which to extract .dir hashes.
+        verbose: Print detailed progress.
+        force: Re-fetch even if already in local cache.
+
+    Returns:
+        List of (target, success, message) tuples.
+    """
+    from dvc.repo import Repo
+    from dvc_data.hashfile.hash_info import HashInfo
+    from dvc_data.hashfile.transfer import transfer
+
+    # Collect .dir hashes from all relevant stages, separating v2 and v3
+    all_stages = (
+        categorization.regular_stages
+        + [stage for grp in categorization.repo_imports.values()
+           for stage in grp.stages]
+    )
+
+    v2_dir_hashes = []
+    v3_dir_hashes = []
+    for stage in all_stages:
+        hash_paths, is_v2 = _collect_hashes_from_stage(stage)
+        for h, _path in hash_paths:
+            if h.endswith('.dir'):
+                if is_v2:
+                    v2_dir_hashes.append(h)
+                else:
+                    v3_dir_hashes.append(h)
+
+    unique_v2 = sorted(set(v2_dir_hashes))
+    unique_v3 = sorted(set(v3_dir_hashes))
+
+    if not unique_v2 and not unique_v3:
+        if verbose:
+            print("No .dir hashes found in stages")
+        return [("all", True, "No .dir manifests to fetch")]
+
+    repo = Repo()
+
+    # Build (label, hashes, hash_name, local_odb) groups for each layout.
+    # v2/legacy stages use hash_name='md5-dos2unix' → remote.legacy_odb
+    # v3/current stages use hash_name='md5' → remote.odb
+    odb_groups = []
+    if unique_v2:
+        local_legacy = repo.cache.legacy
+        if local_legacy is None:
+            return [(remote_name, False, "DVC legacy cache not configured.")]
+        odb_groups.append(('v2', unique_v2, 'md5-dos2unix', local_legacy))
+    if unique_v3:
+        local_current = repo.cache.local
+        if local_current is None:
+            return [(remote_name, False, "DVC cache not configured.")]
+        odb_groups.append(('v3', unique_v3, 'md5', local_current))
+
+    total_ok = 0
+    total_fail = 0
+    total_missing = 0
+
+    for label, hashes, hash_name, local_odb in odb_groups:
+        # Skip hashes already in local cache (unless --force)
+        if not force:
+            to_fetch = [h for h in hashes if not _hash_in_odb(h, local_odb)]
+        else:
+            to_fetch = list(hashes)
+
+        if not to_fetch:
+            if verbose:
+                print(f"  All {len(hashes)} {label} .dir manifests already in cache")
+            continue
+
+        if verbose:
+            print(f"  Fetching {len(to_fetch)} {label} .dir manifests from "
+                  f"remote '{remote_name}'...")
+
+        try:
+            remote_odb = repo.cloud.get_remote_odb(
+                name=remote_name, command='fetch', hash_name=hash_name,
+            )
+        except Exception as e:
+            return [(remote_name, False,
+                     f"Cannot open remote '{remote_name}' ({label}): {e}")]
+
+        obj_ids = frozenset(HashInfo("md5", h) for h in to_fetch)
+
+        try:
+            result = transfer(remote_odb, local_odb, obj_ids, shallow=True)
+        except Exception as e:
+            return [(remote_name, False, f"Transfer failed ({label}): {e}")]
+
+        n_ok = len(result.transferred)
+        n_fail = len(result.failed)
+
+        # transfer() silently ignores hashes that don't exist on the source
+        # (they end up in compare_status.missing, which isn't reported).
+        # Verify expected hashes actually landed in local cache.
+        still_missing = [h for h in to_fetch if not local_odb.exists(h)]
+        n_missing = len(still_missing)
+
+        if verbose:
+            print(f"    Transferred: {n_ok}, Failed: {n_fail}")
+            if still_missing:
+                print(f"    Missing from remote: {n_missing}")
+                for h in still_missing:
+                    print(f"      {h}")
+            if result.failed:
+                for hi in sorted(result.failed, key=lambda x: x.value):
+                    print(f"      {hi.value}: transfer error")
+
+        total_ok += n_ok
+        total_fail += n_fail
+        total_missing += n_missing
+
+    total_unique = len(unique_v2) + len(unique_v3)
+    total_problems = total_fail + total_missing
+    if total_problems:
+        parts = []
+        if total_ok:
+            parts.append(f"fetched {total_ok}")
+        if total_fail:
+            parts.append(f"{total_fail} transfer error(s)")
+        if total_missing:
+            parts.append(f"{total_missing} not found on remote")
+        return [(remote_name, False, ", ".join(parts))]
+    if total_ok == 0:
+        msg = f"All {total_unique} .dir manifests already in cache"
+    else:
+        msg = f"Fetched {total_ok} .dir manifests from '{remote_name}'"
+    return [(remote_name, True, msg)]
+
+
+def _hash_in_odb(hash_value: str, odb) -> bool:
+    """Check whether a hash exists in an object database."""
+    try:
+        return odb.exists(hash_value)
+    except Exception:
+        return False
 
 
 def _stage_hashes_in_index(stage: Any, idx) -> bool:
