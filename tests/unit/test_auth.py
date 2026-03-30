@@ -68,6 +68,8 @@ from dt.auth import (
     _discover_import_sources,
     _check_filesystem,
     _check_ssh,
+    _extract_ssh_remote_path,
+    _check_ssh_remote_dir,
     _check_git,
     _check_http,
     _check_s3,
@@ -843,6 +845,65 @@ class TestCheckFilesystem:
 # _check_ssh tests
 # =============================================================================
 
+class TestExtractSshRemotePath:
+    """Tests for _extract_ssh_remote_path."""
+
+    def test_ssh_url(self):
+        assert _extract_ssh_remote_path('ssh://host/g/data/px14') == '/g/data/px14'
+
+    def test_ssh_url_with_user(self):
+        assert _extract_ssh_remote_path('ssh://user@host/g/data/px14') == '/g/data/px14'
+
+    def test_scp_style(self):
+        assert _extract_ssh_remote_path('user@host:/g/data/px14') == '/g/data/px14'
+
+    def test_no_path(self):
+        assert _extract_ssh_remote_path('ssh://host') is None
+
+    def test_relative_scp_path(self):
+        # SCP-style with non-absolute path — not matched
+        assert _extract_ssh_remote_path('user@host:relative/path') is None
+
+
+class TestCheckSshRemoteDir:
+    """Tests for _check_ssh_remote_dir."""
+
+    @patch('subprocess.run')
+    def test_directory_accessible(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        result = _check_ssh_remote_dir('host', '/g/data/px14')
+        assert result is None  # None means success
+
+    @patch('subprocess.run')
+    def test_directory_not_accessible_permission_denied(self, mock_run):
+        # First call (test -d -a -r) fails, second call (test -e) succeeds
+        mock_run.side_effect = [
+            MagicMock(returncode=1),  # not readable/not a dir
+            MagicMock(returncode=0),  # but path exists
+        ]
+        result = _check_ssh_remote_dir('host', '/g/data/px14')
+        assert result is not None
+        assert result.status == STATUS_FAIL
+        assert 'not accessible' in result.summary
+        assert any('membership' in h for h in result.hints)
+
+    @patch('subprocess.run')
+    def test_directory_does_not_exist(self, mock_run):
+        mock_run.side_effect = [
+            MagicMock(returncode=1),  # not readable/not a dir
+            MagicMock(returncode=1),  # does not exist
+        ]
+        result = _check_ssh_remote_dir('host', '/g/data/px14')
+        assert result is not None
+        assert result.status == STATUS_WARN
+        assert 'does not exist' in result.summary
+
+    @patch('subprocess.run', side_effect=subprocess.TimeoutExpired('ssh', 15))
+    def test_timeout_returns_none(self, _):
+        result = _check_ssh_remote_dir('host', '/g/data/px14')
+        assert result is None  # don't block on timeout
+
+
 class TestCheckSsh:
     """Tests for _check_ssh."""
 
@@ -859,12 +920,39 @@ class TestCheckSsh:
         assert r.endpoint.type == 'ssh'
 
     @patch('subprocess.run')
-    def test_remote_ssh_success(self, mock_run):
+    def test_remote_ssh_host_and_dir_ok(self, mock_run):
+        # Both host check and directory check succeed
         mock_run.return_value = MagicMock(returncode=0)
-        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/data', source='r')
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/px14', source='r')
         r = _check_ssh(ep)
         assert r.status == STATUS_PASS
-        assert 'connection OK' in r.summary
+        assert 'remote directory accessible' in r.summary
+
+    @patch('subprocess.run')
+    def test_remote_ssh_host_ok_dir_not_accessible(self, mock_run):
+        # Host check succeeds, directory test -d -a -r fails, test -e succeeds
+        mock_run.side_effect = [
+            MagicMock(returncode=0),   # host connectivity OK
+            MagicMock(returncode=1),   # test -d -a -r fails
+            MagicMock(returncode=0),   # test -e succeeds (path exists)
+        ]
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/px14', source='r')
+        r = _check_ssh(ep)
+        assert r.status == STATUS_FAIL
+        assert 'not accessible' in r.summary
+
+    @patch('subprocess.run')
+    def test_remote_ssh_host_ok_dir_does_not_exist(self, mock_run):
+        # Host check succeeds, directory test -d -a -r fails, test -e fails
+        mock_run.side_effect = [
+            MagicMock(returncode=0),   # host connectivity OK
+            MagicMock(returncode=1),   # test -d -a -r fails
+            MagicMock(returncode=1),   # test -e fails (doesn't exist)
+        ]
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/px14', source='r')
+        r = _check_ssh(ep)
+        assert r.status == STATUS_WARN
+        assert 'does not exist' in r.summary
 
     @patch('subprocess.run')
     def test_remote_ssh_failure(self, mock_run):
@@ -880,6 +968,15 @@ class TestCheckSsh:
         r = _check_ssh(ep)
         assert r.status == STATUS_FAIL
         assert 'timed out' in r.summary
+
+    @patch('subprocess.run')
+    def test_no_path_in_url_still_passes(self, mock_run):
+        """URL without a path component only checks host connectivity."""
+        mock_run.return_value = MagicMock(returncode=0)
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au', source='r')
+        r = _check_ssh(ep)
+        assert r.status == STATUS_PASS
+        assert r.summary == 'connection OK'
 
 
 # =============================================================================
