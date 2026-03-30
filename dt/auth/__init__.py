@@ -120,6 +120,8 @@ from .checks import (  # noqa: F401
     _check_http,
     _check_s3,
     _check_ssh,
+    _check_ssh_remote_dir,
+    _extract_ssh_remote_path,
     _CHECKERS,
     _extract_remote_name,
     _get_owner_info,

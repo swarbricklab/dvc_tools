@@ -174,8 +174,95 @@ def _check_filesystem(ep: Endpoint, verbose: bool = False) -> CheckResult:
     return result
 
 
+def _extract_ssh_remote_path(url: str) -> Optional[str]:
+    """Extract the remote directory path from an SSH URL.
+
+    Handles ``ssh://[user@]host/path`` and SCP-style ``user@host:/path``.
+    Returns *None* if no path component can be extracted.
+    """
+    import re
+
+    url = url.strip()
+    # ssh://[user@]host/path  — host must contain at least one char
+    m = re.match(r'ssh://(?:[^@/]+@)?([^/]+)(/.+)', url)
+    if m:
+        return m.group(2)
+    # SCP-style: [user@]host:/path  (skip scheme:// URLs)
+    if '://' not in url:
+        m = re.match(r'(?:[^@]+@)?[^:]+:(/.+)', url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _check_ssh_remote_dir(
+    host: str, remote_path: str, verbose: bool = False,
+) -> Optional[CheckResult]:
+    """Check whether *remote_path* is accessible on *host* via SSH.
+
+    Returns a :class:`CheckResult` on failure/warning, or *None* when the
+    directory is fully accessible (caller should report its own PASS).
+    """
+    try:
+        result = subprocess.run(
+            ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+             host, 'test', '-d', remote_path, '-a', '-r', remote_path],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        # Cannot determine directory status — don't block on it.
+        return None
+
+    if result.returncode == 0:
+        return None  # directory exists and is readable
+
+    # The test failed — distinguish "does not exist" from "permission denied".
+    # Run a second probe: ``test -e`` tells us if the path exists at all.
+    try:
+        exists_result = subprocess.run(
+            ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+             host, 'test', '-e', remote_path],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+
+    if exists_result.returncode != 0:
+        # Path does not exist — might be expected for a brand-new remote.
+        return CheckResult(
+            endpoint=Endpoint(type='ssh', url='', source=''),  # placeholder
+            status=STATUS_WARN,
+            summary=f'remote directory does not exist: {remote_path}',
+            hints=[
+                f'The directory may need to be created on {host}.',
+                f'Test manually: ssh {host} ls -ld {remote_path}',
+            ],
+        )
+
+    # Path exists but is not a readable directory — permission problem.
+    return CheckResult(
+        endpoint=Endpoint(type='ssh', url='', source=''),  # placeholder
+        status=STATUS_FAIL,
+        summary=f'remote directory not accessible: {remote_path}',
+        hints=[
+            f'You may lack the required project/group membership to access {remote_path}.',
+            f'Test manually: ssh {host} ls -ld {remote_path}',
+        ],
+    )
+
+
 def _check_ssh(ep: Endpoint, verbose: bool = False) -> CheckResult:
-    """Check an SSH endpoint."""
+    """Check an SSH endpoint.
+
+    Performs a two-part check:
+
+    1. SSH host connectivity (can we reach the host at all?).
+    2. Remote directory access (can we read the target path?).
+    """
     if ep.local_path:
         fs_ep = Endpoint(
             type='filesystem', url=ep.local_path, source=ep.source,
@@ -194,6 +281,7 @@ def _check_ssh(ep: Endpoint, verbose: bool = False) -> CheckResult:
     else:
         host = url
 
+    # -- Part 1: SSH host connectivity ------------------------------------
     try:
         result_proc = subprocess.run(
             ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
@@ -202,12 +290,7 @@ def _check_ssh(ep: Endpoint, verbose: bool = False) -> CheckResult:
             text=True,
             timeout=10,
         )
-        if result_proc.returncode != 255:
-            return CheckResult(
-                endpoint=ep, status=STATUS_PASS,
-                summary='connection OK',
-            )
-        else:
+        if result_proc.returncode == 255:
             return CheckResult(
                 endpoint=ep, status=STATUS_FAIL,
                 summary='connection failed',
@@ -231,6 +314,19 @@ def _check_ssh(ep: Endpoint, verbose: bool = False) -> CheckResult:
             summary='ssh command not found',
             hints=['Install OpenSSH or ensure ssh is in your PATH'],
         )
+
+    # -- Part 2: remote directory access ----------------------------------
+    remote_path = _extract_ssh_remote_path(url)
+    if remote_path:
+        dir_result = _check_ssh_remote_dir(host, remote_path, verbose=verbose)
+        if dir_result is not None:
+            dir_result.endpoint = ep
+            return dir_result
+
+    return CheckResult(
+        endpoint=ep, status=STATUS_PASS,
+        summary='connection OK' if not remote_path else 'connection OK, remote directory accessible',
+    )
 
 
 def _get_dvc_remote_config(remote_name: str, key: str) -> Optional[str]:
