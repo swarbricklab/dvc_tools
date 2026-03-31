@@ -42,6 +42,7 @@ from .ssh import (
     _generate_key,
     _host_in_ssh_config,
     _is_forge_host,
+    _key_accepted_by_host,
     _key_has_passphrase,
     _write_ssh_config_stanza,
 )
@@ -323,6 +324,22 @@ def _do_ssh_setup(
         print(f"\n{len(failing_hosts)} host(s) need key deployment:")
         for h in sorted(failing_hosts):
             print(f"  \u2022 {h}")
+
+    # Refine failing_hosts: for non-forge hosts that passed the
+    # connectivity check, verify whether the configured key is already
+    # accepted.  This avoids running ssh-copy-id (which prompts for a
+    # password) when the key is already deployed.
+    for host in list(all_hosts):
+        if host in failing_hosts:
+            continue
+        if _is_forge_host(host):
+            continue
+        if not _key_accepted_by_host(
+            host, host_users[host], key_path, verbose=verbose,
+        ):
+            failing_hosts.add(host)
+            if verbose:
+                print(f"  Key not accepted by {host} — will deploy")
 
     # Deploy keys
     setup_results: List[SSHSetupResult] = []
