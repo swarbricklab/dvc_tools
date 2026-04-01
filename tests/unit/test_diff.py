@@ -765,6 +765,17 @@ class TestFormatHtml:
         assert '<details>' in result
         assert '<summary>' in result
 
+    def test_includes_expand_collapse_buttons(self):
+        """Test that HTML includes expand all / collapse all buttons."""
+        tree = {'_counts': {'added': 1}, '_files': [{'name': 'f.csv', 'status': 'added'}]}
+        diff_data = {'added': [{'path': 'f.csv'}], 'deleted': [], 'modified': [], 'renamed': []}
+
+        result = _format_html(tree, diff_data, 'HEAD', None)
+
+        assert 'Expand all' in result
+        assert 'Collapse all' in result
+        assert 'class="controls"' in result
+
 
 class TestRenderTreeDiffStyle:
     """Tests for the _render_tree_diff_style function."""

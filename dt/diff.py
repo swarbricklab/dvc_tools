@@ -559,17 +559,35 @@ def _format_html(
             color: #6a737d;
             font-size: 12px;
         }}
+        .controls {{
+            margin-bottom: 12px;
+        }}
+        .controls button {{
+            font-size: 13px;
+            padding: 4px 12px;
+            margin-right: 6px;
+            border: 1px solid #d1d5da;
+            border-radius: 4px;
+            background: #f6f8fa;
+            cursor: pointer;
+        }}
+        .controls button:hover {{
+            background: #e1e4e8;
+        }}
     </style>
 </head>
 <body>
     <div class="summary">
         <strong>Changes ({rev_display}):</strong> {summary}
     </div>
+    <div class="controls">
+        <button onclick="document.querySelectorAll('details').forEach(d => d.open = true)">Expand all</button>
+        <button onclick="document.querySelectorAll('details').forEach(d => d.open = false)">Collapse all</button>
+    </div>
     <div class="tree">
 {html_tree}
     </div>
     <script>
-        // Expand all / collapse all functionality
         document.querySelectorAll('details').forEach(d => d.open = false);
     </script>
 </body>
