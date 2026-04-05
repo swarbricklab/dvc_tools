@@ -327,8 +327,14 @@ def _get_installed_credentials() -> Dict[str, Dict[str, str]]:
 
 def install_credentials(
     verbose: bool = False,
+    repo_name: Optional[str] = None,
 ) -> Dict[str, bool]:
     """Install S3 credentials from secret manager into global DVC config.
+
+    Args:
+        verbose:   Show detailed progress.
+        repo_name: If given, only install credentials for this specific repo
+                   (skips discovery; fetches the secret by name directly).
 
     Returns:
         Dict mapping repo names to success status.
@@ -338,7 +344,18 @@ def install_credentials(
     """
     from ..secrets import SecretError
 
-    repos = _get_repos_needing_credentials(verbose=verbose)
+    if repo_name:
+        # Single-repo mode: bypass discovery, fetch the named secret directly
+        repos = [RepoCredentialInfo(
+            name=repo_name,
+            url=None,
+            has_s3_remote=True,
+            remote_types=['s3'],
+        )]
+        if verbose:
+            print(f"Installing credentials for '{repo_name}' only...")
+    else:
+        repos = _get_repos_needing_credentials(verbose=verbose)
 
     if not repos:
         if verbose:
@@ -518,3 +535,111 @@ def format_credentials_status(statuses: List[CredentialStatus]) -> str:
     lines.append("Legend: \u2713 installed  \u2717 missing")
 
     return '\n'.join(lines)
+
+
+# =============================================================================
+# Secret management helpers (list / check / set)
+# =============================================================================
+
+@dataclass
+class SecretInfo:
+    """Info about a single DVC remote secret."""
+    repo_name: str
+    exists: bool
+    accessible: bool
+    error: Optional[str]
+    section_count: int = 0
+    sections: Optional[List[str]] = None
+
+
+def list_repo_secrets(verbose: bool = False) -> List[str]:
+    """List all repo names that have a secret in the configured backend.
+
+    Returns:
+        Sorted list of repo names (prefix stripped).
+    """
+    from ..secrets import SecretError
+
+    backend = _get_secret_backend()
+    try:
+        return backend.list_secrets()
+    except SecretError as e:
+        raise AuthError(f"Failed to list secrets: {e}") from e
+
+
+def check_secret(repo_name: str) -> SecretInfo:
+    """Check whether a secret exists and parse its content.
+
+    Returns:
+        :class:`SecretInfo` with existence, accessibility, and parsed details.
+    """
+    from ..secrets import SecretError
+
+    try:
+        backend = _get_secret_backend()
+    except AuthError as e:
+        return SecretInfo(
+            repo_name=repo_name, exists=False, accessible=False,
+            error=str(e),
+        )
+
+    exists = False
+    try:
+        exists = backend.secret_exists(repo_name)
+    except SecretError as e:
+        return SecretInfo(
+            repo_name=repo_name, exists=False, accessible=False,
+            error=str(e),
+        )
+
+    if not exists:
+        return SecretInfo(
+            repo_name=repo_name, exists=False, accessible=False,
+            error=None,
+        )
+
+    try:
+        raw = backend.get_raw_config(repo_name)
+        sections = _parse_dvc_ini(raw)
+        return SecretInfo(
+            repo_name=repo_name,
+            exists=True,
+            accessible=True,
+            error=None,
+            section_count=len(sections),
+            sections=list(sections.keys()),
+        )
+    except SecretError as e:
+        return SecretInfo(
+            repo_name=repo_name, exists=True, accessible=False,
+            error=str(e),
+        )
+
+
+def set_secret(repo_name: str, content: str) -> None:
+    """Create or update the secret for *repo_name* with raw DVC INI *content*.
+
+    Args:
+        repo_name: Repository name (without prefix).
+        content:   Raw DVC INI config text.
+
+    Raises:
+        AuthError: If the backend is not configured or the operation fails.
+    """
+    from ..secrets import SecretError
+
+    # Validate content is parseable INI before writing
+    try:
+        sections = _parse_dvc_ini(content)
+    except Exception as e:
+        raise AuthError(f"Invalid DVC INI content: {e}") from e
+
+    if not sections:
+        raise AuthError("No valid INI sections found in content.")
+
+    try:
+        backend = _get_secret_backend()
+        backend.set_secret(repo_name, content)
+    except SecretError as e:
+        raise AuthError(f"Failed to set secret for '{repo_name}': {e}") from e
+

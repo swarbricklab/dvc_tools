@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dvc-tools"
-version = "0.4.4"
+version = "0.4.5"
 description = "Convenient tools for working with DVC in HPC environments"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -32,6 +32,7 @@ dependencies = [
     "confuse>=2.0.0",
     "platformdirs>=3.0.0",
     "pyyaml>=6.0",
+    "typing_extensions>=4.0.0",
 ]
 
 [project.urls]
@@ -64,6 +65,12 @@ cloud = [
 
 [project.scripts]
 dt = "dt.cli:cli"
+
+[project.entry-points."dvc_tools.diff_handlers"]
+# This group is intentionally empty in the base package.
+# Plugin packages register handlers here, e.g.:
+#   [project.entry-points."dvc_tools.diff_handlers"]
+#   anndata = "dvc_tools_anndata:AnndataHandler"
 
 [tool.setuptools]
 packages = ["dt", "dt.auth", "dt.secrets"]

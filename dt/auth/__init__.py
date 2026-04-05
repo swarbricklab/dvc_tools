@@ -89,9 +89,13 @@ from .request import (  # noqa: F401
 from .credentials import (  # noqa: F401
     CredentialStatus,
     RepoCredentialInfo,
+    SecretInfo,
+    check_secret,
     format_credentials_status,
     get_credentials_status,
     install_credentials,
+    list_repo_secrets,
+    set_secret,
     uninstall_credentials,
 )
 

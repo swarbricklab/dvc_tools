@@ -130,6 +130,69 @@ class GCPSecretBackend(SecretBackend):
             )
         raise SecretError(f"gcloud error: {result.stderr.strip()}")
 
+    def _cli_list_secrets(self) -> list:
+        """List secret IDs matching the prefix via gcloud CLI."""
+        gcloud = self._require_gcloud()
+        result = subprocess.run(
+            [
+                gcloud, 'secrets', 'list',
+                f'--project={self.project}',
+                f'--filter=name:{self.prefix}',
+                '--format=value(name)',
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise SecretError(f"gcloud error listing secrets: {result.stderr.strip()}")
+        ids = []
+        for line in result.stdout.strip().splitlines():
+            # Full resource name: projects/<proj>/secrets/<id>
+            secret_id = line.rsplit('/', 1)[-1]
+            if secret_id.startswith(self.prefix):
+                ids.append(secret_id[len(self.prefix):])
+        return sorted(ids)
+
+    def _cli_set_secret(self, repo_name: str, content: str) -> None:
+        """Create or update a secret via gcloud CLI."""
+        import tempfile
+        gcloud = self._require_gcloud()
+        secret_id = self._get_secret_id(repo_name)
+
+        # Write to a temp file so we can pipe into gcloud
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False) as f:
+            f.write(content)
+            tmp_path = f.name
+
+        try:
+            # Create secret if it doesn't exist
+            if not self._cli_secret_exists(repo_name):
+                result = subprocess.run(
+                    [gcloud, 'secrets', 'create', secret_id,
+                     f'--project={self.project}',
+                     f'--data-file={tmp_path}'],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    raise SecretError(
+                        f"Failed to create secret '{secret_id}': "
+                        f"{result.stderr.strip()}"
+                    )
+            else:
+                # Add a new version
+                result = subprocess.run(
+                    [gcloud, 'secrets', 'versions', 'add', secret_id,
+                     f'--project={self.project}',
+                     f'--data-file={tmp_path}'],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    raise SecretError(
+                        f"Failed to update secret '{secret_id}': "
+                        f"{result.stderr.strip()}"
+                    )
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
     def _cli_access_secret(self, repo_name: str) -> str:
         gcloud = self._require_gcloud()
         secret_id = self._get_secret_id(repo_name)
@@ -228,3 +291,13 @@ class GCPSecretBackend(SecretBackend):
         
         # Return raw payload as text
         return response.payload.data.decode('utf-8')
+
+    def list_secrets(self) -> list:
+        """List secret IDs matching the prefix."""
+        # Always use CLI — the Python client requires extra list permissions
+        # that users often don't have, whereas gcloud auth login is sufficient.
+        return self._cli_list_secrets()
+
+    def set_secret(self, repo_name: str, content: str) -> None:
+        """Create or update a secret with raw DVC INI content."""
+        self._cli_set_secret(repo_name, content)

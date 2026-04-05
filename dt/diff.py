@@ -11,6 +11,7 @@ with graceful fallback for unsupported formats.
 import json
 import subprocess
 import tempfile
+import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pathlib import Path
@@ -716,12 +717,21 @@ def tree_diff(
 
 class DiffHandler(ABC):
     """Base class for format-specific diff handlers."""
-    
+
     # File extensions this handler supports (e.g., ['.csv', '.tsv'])
     extensions: List[str] = []
-    
+
     # Human-readable format name
     format_name: str = "Unknown"
+
+    # Higher priority handlers are checked first.
+    # Built-in handlers use 0; plugins should use a positive value (e.g. 10)
+    # so they can override built-ins for the same extension if desired.
+    priority: int = 0
+
+    # Python packages required by this handler (informational — used by
+    # `dt diff --list-handlers`).  Example: ['anndata']
+    requires: List[str] = []
     
     @classmethod
     def can_handle(cls, path: str) -> bool:
@@ -735,46 +745,111 @@ class DiffHandler(ABC):
         old_path: Path,
         new_path: Path,
         output_format: str = "terminal",
+        detail_level: str = "normal",
     ) -> str:
         """Compute and format the diff between two file versions.
-        
+
         Args:
-            old_path: Path to the old version of the file
-            new_path: Path to the new version of the file
+            old_path:     Path to the old version of the file
+            new_path:     Path to the new version of the file
             output_format: Output format ('terminal', 'json', 'html', 'md')
-            
+            detail_level: Verbosity of the diff:
+                          'summary'  – brief statistics / key changes only
+                          'normal'   – standard diff (default)
+                          'granular' – exhaustive diff, all changed details
+
         Returns:
             Formatted diff string
         """
         pass
 
 
-# Global registry of handlers
+# Global registry of handlers (built-ins + plugins, kept in priority order)
 _handlers: List[Type[DiffHandler]] = []
+
+# Ensures plugin entry points are only loaded once per process
+_plugin_handlers_loaded: bool = False
 
 
 def register_handler(handler_class: Type[DiffHandler]) -> Type[DiffHandler]:
-    """Decorator to register a diff handler."""
+    """Decorator to register a diff handler.
+
+    Built-in handlers call this at import time.  Plugin packages call it from
+    their own module, which is imported by ``_load_plugin_handlers()``.
+    """
     _handlers.append(handler_class)
     return handler_class
 
 
+def _load_plugin_handlers() -> None:
+    """Discover and load handlers registered via the 'dvc_tools.diff_handlers'
+    entry-point group.
+
+    Plugin packages advertise themselves in their ``pyproject.toml``::
+
+        [project.entry-points."dvc_tools.diff_handlers"]
+        my_format = "my_package:MyHandler"
+
+    The handler class must be a subclass of ``DiffHandler`` and should be
+    decorated with ``@register_handler`` in its own module so that importing
+    the class is sufficient to register it.
+
+    Loading is done lazily (once per process) the first time ``get_handler()``
+    or ``list_handlers()`` is called.
+    """
+    global _plugin_handlers_loaded
+    if _plugin_handlers_loaded:
+        return
+    _plugin_handlers_loaded = True
+
+    try:
+        from importlib.metadata import entry_points
+    except ImportError:
+        # Python < 3.9 — importlib.metadata is available but entry_points()
+        # doesn't accept the 'group' keyword; fall back gracefully.
+        try:
+            from importlib.metadata import entry_points as _ep
+            eps = _ep().get("dvc_tools.diff_handlers", [])
+        except Exception:
+            return
+    else:
+        try:
+            eps = entry_points(group="dvc_tools.diff_handlers")
+        except TypeError:
+            # Python 3.8/3.9 shim
+            eps = entry_points().get("dvc_tools.diff_handlers", [])
+
+    for ep in eps:
+        try:
+            ep.load()  # the module is expected to call @register_handler
+        except Exception as exc:
+            warnings.warn(
+                f"dvc_tools: failed to load diff handler plugin '{ep.name}': {exc}",
+                stacklevel=2,
+            )
+
+
 def get_handler(path: str) -> Optional[DiffHandler]:
-    """Get the appropriate handler for a file path."""
-    for handler_class in _handlers:
+    """Return the highest-priority handler that can process *path*, or None."""
+    _load_plugin_handlers()
+    # Sort descending by priority so higher-priority handlers win
+    for handler_class in sorted(_handlers, key=lambda h: h.priority, reverse=True):
         if handler_class.can_handle(path):
             return handler_class()
     return None
 
 
 def list_handlers() -> List[Dict[str, Any]]:
-    """List all registered handlers and their supported extensions."""
+    """Return metadata for all registered handlers, sorted by priority."""
+    _load_plugin_handlers()
     return [
         {
             'name': h.format_name,
             'extensions': h.extensions,
+            'priority': h.priority,
+            'requires': h.requires,
         }
-        for h in _handlers
+        for h in sorted(_handlers, key=lambda h: h.priority, reverse=True)
     ]
 
 
@@ -782,44 +857,92 @@ def list_handlers() -> List[Dict[str, Any]]:
 # Built-in handlers
 # =============================================================================
 
+def _summarise_daff_json(json_str: str) -> str:
+    """Parse daff JSON output and return a one-line count summary.
+
+    daff rows use the following first-column markers:
+      '!'  – column-header row (skip)
+      '@@' – context ellipsis    (skip)
+      '+'  – added row
+      '-'  – deleted row
+      '->' – modified row
+    """
+    try:
+        data = json.loads(json_str)
+        added = deleted = modified = 0
+        for row in data:
+            if not row:
+                continue
+            marker = str(row[0])
+            if marker == '+':
+                added += 1
+            elif marker in ('-', '---'):
+                deleted += 1
+            elif marker == '->':
+                modified += 1
+        return (
+            f"CSV diff summary: {added} row(s) added, "
+            f"{deleted} row(s) deleted, {modified} row(s) modified"
+        )
+    except Exception:
+        return "CSV diff summary: (could not parse diff statistics)"
+
+
 @register_handler
 class CSVHandler(DiffHandler):
     """Handler for CSV/TSV files using daff."""
-    
+
     extensions = ['.csv', '.tsv', '.txt']
     format_name = "CSV/TSV"
-    
+
     def diff(
         self,
         old_path: Path,
         new_path: Path,
         output_format: str = "terminal",
+        detail_level: str = "normal",
     ) -> str:
-        """Diff CSV files using daff."""
-        # Check if daff is available
+        """Diff CSV files using daff.
+
+        detail_level behaviour:
+          'summary'  – counts of added/deleted/modified rows (no cell details)
+          'normal'   – standard daff output (changed rows + context)
+          'granular' – daff output with all rows shown (--all flag)
+        """
         import shutil
         if not shutil.which('daff'):
             raise DiffError(
                 "daff not found. Install with: pip install daff\n"
                 "See: https://github.com/paulfitz/daff"
             )
-        
-        # Build daff command
+
+        # summary: parse JSON counts, no cell-level output
+        if detail_level == "summary":
+            cmd = ["daff", "--output-format=json", str(old_path), str(new_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0 and result.stderr:
+                raise DiffError(f"daff failed: {result.stderr}")
+            return _summarise_daff_json(result.stdout)
+
+        # normal / granular: full diff
         cmd = ["daff"]
-        
+
+        if detail_level == "granular":
+            cmd.append("--all")  # show all rows, not just changed + context
+
         if output_format == "html":
             cmd.append("--output-format=html")
         elif output_format == "json":
             cmd.append("--output-format=json")
         # terminal/md use default output
-        
+
         cmd.extend([str(old_path), str(new_path)])
-        
+
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
+
         if result.returncode != 0 and result.stderr:
             raise DiffError(f"daff failed: {result.stderr}")
-        
+
         return result.stdout
 
 
@@ -843,24 +966,25 @@ class FallbackHandler(DiffHandler):
         old_path: Path,
         new_path: Path,
         output_format: str = "terminal",
+        detail_level: str = "normal",
     ) -> str:
         """Show basic metadata comparison."""
         old_size = old_path.stat().st_size if old_path.exists() else 0
         new_size = new_path.stat().st_size if new_path.exists() else 0
-        
+
         size_change = new_size - old_size
         sign = "+" if size_change >= 0 else ""
-        
+
         result = {
             'old_size': old_size,
             'new_size': new_size,
             'size_change': size_change,
             'message': f"Binary/unsupported format: size changed from {old_size:,} to {new_size:,} bytes ({sign}{size_change:,})",
         }
-        
+
         if output_format == "json":
             return json.dumps(result, indent=2)
-        
+
         return result['message']
 
 
@@ -872,31 +996,48 @@ def content_diff(
     path: str,
     old_rev: str = "HEAD",
     new_rev: Optional[str] = None,
+    compare_path: Optional[str] = None,
     output_format: str = "terminal",
+    detail_level: str = "normal",
     verbose: bool = False,
 ) -> str:
-    """Compute the diff between two versions of a DVC-tracked file.
-    
-    Shows what changed *inside* a specific file using format-specific handlers.
-    
+    """Compute the content diff between two file versions.
+
+    Two modes:
+
+    **Revision mode** (default): compares two git/DVC revisions of the same
+    file.  ``old_rev`` and ``new_rev`` select the revisions; ``new_rev=None``
+    means the current workspace copy.
+
+        content_diff("data.h5ad", old_rev="HEAD~1")
+
+    **Direct mode**: compares two different files in the workspace, bypassing
+    DVC entirely.  Set ``compare_path`` to the second file; ``old_rev`` and
+    ``new_rev`` are ignored.
+
+        content_diff("atlas_a.h5ad", compare_path="atlas_b.h5ad")
+
     Args:
-        path: Path to the DVC-tracked file
-        old_rev: Git revision for the old version (default: HEAD)
-        new_rev: Git revision for the new version (default: None = workspace)
+        path:          Path to the first (old) file
+        old_rev:       Git revision for the old version (revision mode only;
+                       default: HEAD)
+        new_rev:       Git revision for the new version (revision mode only;
+                       default: None = workspace)
+        compare_path:  Path to the second (new) file for direct comparison.
+                       When set, revision mode is skipped entirely.
         output_format: Output format ('terminal', 'json', 'html', 'md')
-        verbose: Show additional details
-        
+        detail_level:  'summary', 'normal', or 'granular'
+        verbose:       Show additional progress details
+
     Returns:
         Formatted diff string
-        
+
     Raises:
         DiffError: If the diff cannot be computed
     """
-    import dvc.api
-    
     path = str(Path(path))
-    
-    # Get the appropriate handler
+
+    # Choose handler based on the first path's extension
     handler = get_handler(path)
     if handler is None:
         handler = FallbackHandler()
@@ -904,20 +1045,53 @@ def content_diff(
             print(f"No specific handler for {Path(path).suffix}, using fallback")
     elif verbose:
         print(f"Using {handler.format_name} handler")
-    
-    # Create temp files for the versions
+
+    # -------------------------------------------------------------------------
+    # Direct mode: compare two workspace files, no DVC involved
+    # -------------------------------------------------------------------------
+    if compare_path is not None:
+        old_file = Path(path)
+        new_file = Path(compare_path)
+        if not old_file.exists():
+            raise DiffError(f"'{path}' not found in workspace")
+        if not new_file.exists():
+            raise DiffError(f"'{compare_path}' not found in workspace")
+        return handler.diff(old_file, new_file, output_format, detail_level)
+
+    # -------------------------------------------------------------------------
+    # Revision mode: fetch versions from DVC/git
+    # -------------------------------------------------------------------------
+    import os
+
+    repo_abs = os.path.abspath('.')
+
+    if verbose:
+        import dvc as _dvc
+        print(f"DVC version : {_dvc.__version__}")
+        print(f"Repo path   : {repo_abs}")
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         old_file = tmpdir / f"old_{Path(path).name}"
         new_file = tmpdir / f"new_{Path(path).name}"
-        
+
+        def _fetch_revision(rev: str, dest: Path) -> None:
+            """Fetch a DVC-tracked file at a git revision via subprocess."""
+            if verbose:
+                print(f"Fetching    : {path!r} @ {rev!r}")
+            result = subprocess.run(
+                ['dvc', 'get', '--rev', rev, '.', path, '--out', str(dest)],
+                capture_output=True, text=True, cwd=repo_abs,
+            )
+            if result.returncode != 0:
+                raise DiffError(
+                    f"Failed to get '{path}' at revision '{rev}': "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
+
         # Fetch old version
-        try:
-            with dvc.api.open(path, rev=old_rev, mode='rb') as f:
-                old_file.write_bytes(f.read())
-        except Exception as e:
-            raise DiffError(f"Failed to get '{path}' at revision '{old_rev}': {e}")
-        
+        _fetch_revision(old_rev, old_file)
+
         # Fetch new version
         if new_rev is None:
             # Use workspace version
@@ -926,14 +1100,9 @@ def content_diff(
                 raise DiffError(f"'{path}' not found in workspace")
             new_file = workspace_path
         else:
-            try:
-                with dvc.api.open(path, rev=new_rev, mode='rb') as f:
-                    new_file.write_bytes(f.read())
-            except Exception as e:
-                raise DiffError(f"Failed to get '{path}' at revision '{new_rev}': {e}")
-        
-        # Compute diff
-        return handler.diff(old_file, new_file, output_format)
+            _fetch_revision(new_rev, new_file)
+
+        return handler.diff(old_file, new_file, output_format, detail_level)
 
 
 def get_supported_formats() -> str:
