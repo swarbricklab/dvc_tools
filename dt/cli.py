@@ -596,7 +596,13 @@ def remote_list(repository, owner, show_all):
               type=click.Choice(['terminal', 'json', 'html', 'md', 'table', 'csv']),
               default='terminal', help='Output format')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def diff(paths, old_rev, new_rev, content, level, output_format, verbose):
+@click.option('--list-handlers', 'list_handlers', is_flag=True,
+              help='List registered content-diff handlers and exit')
+@click.option('--summary', 'summary', is_flag=True,
+              help='(--content) Show a brief summary of changes')
+@click.option('--granular', 'granular', is_flag=True,
+              help='(--content) Show an exhaustive diff with full detail')
+def diff(paths, old_rev, new_rev, content, level, output_format, verbose, list_handlers, summary, granular):
     """Show differences between versions of DVC-tracked data.
     
     By default, shows which files changed in a tree format (wraps dvc diff).
@@ -618,34 +624,92 @@ def diff(paths, old_rev, new_rev, content, level, output_format, verbose):
     
     \b
     Content view (--content):
-        dt diff data.csv --content        # What changed inside this file?
-        dt diff data.csv --content -o html > changes.html
-    
+        dt diff data.csv --content                      # HEAD → workspace
+        dt diff data.csv --content --old v1.0           # Revision comparison
+        dt diff data.csv --content --summary            # Counts only
+        dt diff data.csv --content --granular           # Exhaustive detail
+        dt diff data.csv --content -o html > diff.html
+
+    \b
+    Direct file comparison (two paths with --content):
+        dt diff old.h5ad new.h5ad --content             # Compare two files directly
+        dt diff old.h5ad new.h5ad --content --summary
+        dt diff old.csv new.csv --content -o html > diff.html
+
+    \b
+    Content diff detail levels (--content only):
+        --summary   Brief statistics / key changes only
+        --granular  Exhaustive diff; handler shows everything it knows
+        (default)   Standard diff — the most useful view for most cases
+
     \b
     Content diff formats:
         CSV/TSV: Uses daff for tabular diff (pip install daff)
         Other: Shows size/metadata comparison
+
+    \b
+    Plugins:
+        Additional format handlers can be installed as packages.
+        Use --list-handlers to see what is currently registered.
     """
     from . import diff as diff_mod
+
+    if list_handlers:
+        handlers = diff_mod.list_handlers()
+        if not handlers:
+            click.echo("No diff handlers registered.")
+            return
+        click.echo("Registered content-diff handlers (highest priority first):")
+        for h in handlers:
+            exts = ', '.join(h['extensions']) if h['extensions'] else '(none)'
+            reqs = ', '.join(h['requires']) if h['requires'] else '—'
+            click.echo(f"  {h['name']:<20} extensions: {exts:<30} requires: {reqs}")
+        return
     
     if content:
-        # Content diff mode - requires exactly one path
-        if len(paths) != 1:
+        if len(paths) not in (1, 2):
             raise click.ClickException(
-                "--content requires exactly one file path"
+                "--content requires one file path (revision mode) "
+                "or two file paths (direct comparison)"
             )
-        
-        try:
-            result = diff_mod.content_diff(
-                path=paths[0],
-                old_rev=old_rev,
-                new_rev=new_rev,
-                output_format=output_format,
-                verbose=verbose,
+
+        if summary and granular:
+            raise click.ClickException(
+                "--summary and --granular are mutually exclusive"
             )
-            click.echo(result)
-        except diff_mod.DiffError as e:
-            raise click.ClickException(str(e))
+        detail_level = "summary" if summary else "granular" if granular else "normal"
+
+        if len(paths) == 2:
+            # Direct comparison: two workspace files, no DVC revision lookup
+            if old_rev != 'HEAD' or new_rev is not None:
+                raise click.ClickException(
+                    "--old/--new cannot be used when comparing two files directly"
+                )
+            try:
+                result = diff_mod.content_diff(
+                    path=paths[0],
+                    compare_path=paths[1],
+                    output_format=output_format,
+                    detail_level=detail_level,
+                    verbose=verbose,
+                )
+                click.echo(result)
+            except diff_mod.DiffError as e:
+                raise click.ClickException(str(e))
+        else:
+            # Revision mode: one path, compare git/DVC revisions
+            try:
+                result = diff_mod.content_diff(
+                    path=paths[0],
+                    old_rev=old_rev,
+                    new_rev=new_rev,
+                    output_format=output_format,
+                    detail_level=detail_level,
+                    verbose=verbose,
+                )
+                click.echo(result)
+            except diff_mod.DiffError as e:
+                raise click.ClickException(str(e))
     else:
         # Tree diff mode (default)
         targets = list(paths) if paths else None
@@ -1157,6 +1221,168 @@ def auth_teams_add_user(username, team_slug, org, dry):
         else:
             msg = auth_mod.add_user_to_team(org, team_slug, username)
             click.echo(click.style(f'✓ {msg}', fg='green'))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
+# dt auth credentials
+# ---------------------------------------------------------------------------
+
+@auth.group('credentials')
+def auth_credentials():
+    """Manage DVC remote credentials in the secret manager.
+
+    \b
+    Listing and checking secrets:
+      dt auth credentials list              # list all secrets in backend
+      dt auth credentials check neochemo   # check a specific secret
+      dt auth credentials status           # show installed vs expected
+
+    \b
+    Installing credentials:
+      dt auth credentials install          # fetch + install all secrets
+      dt auth credentials uninstall        # remove all installed credentials
+
+    \b
+    Writing a secret (admin / setup):
+      dt auth credentials set neochemo --file creds.ini
+      cat creds.ini | dt auth credentials set neochemo
+    """
+
+
+@auth_credentials.command('list')
+def auth_credentials_list():
+    """List all repo secrets in the configured secret backend."""
+    try:
+        names = auth_mod.list_repo_secrets()
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+    if not names:
+        click.echo("No secrets found (or prefix matches nothing).")
+        return
+
+    click.echo(f"Secrets ({len(names)}):")
+    for name in names:
+        click.echo(f"  {name}")
+
+
+@auth_credentials.command('check')
+@click.argument('repo_name')
+def auth_credentials_check(repo_name):
+    """Check whether REPO_NAME has a valid secret.
+
+    Verifies the secret exists and its content is readable DVC INI.
+
+    \b
+      dt auth credentials check neochemo
+      dt auth credentials check bcarc_wgs
+    """
+    info = auth_mod.check_secret(repo_name)
+
+    if not info.exists:
+        msg = f"✗ '{repo_name}': secret not found"
+        if info.error:
+            msg += f"\n  {info.error}"
+        raise click.ClickException(msg)
+
+    if not info.accessible:
+        msg = f"✗ '{repo_name}': secret exists but could not be read"
+        if info.error:
+            msg += f"\n  {info.error}"
+        raise click.ClickException(msg)
+
+    click.echo(click.style(f"✓ '{repo_name}': secret found", fg='green'))
+    if info.sections:
+        for section in info.sections:
+            click.echo(f"  [{section}]")
+
+
+@auth_credentials.command('status')
+def auth_credentials_status():
+    """Show installed credentials vs S3 remotes in this project."""
+    try:
+        statuses = auth_mod.get_credentials_status()
+        click.echo(auth_mod.format_credentials_status(statuses))
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+
+@auth_credentials.command('install')
+@click.argument('repo_name', required=False, default=None,
+                metavar='[REPO_NAME]')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def auth_credentials_install(repo_name, verbose):
+    """Fetch credentials from secret manager and install into DVC global config.
+
+    Without REPO_NAME, discovers all repos with S3 remotes and installs all.
+    With REPO_NAME, installs only that repo's credentials (no discovery needed).
+
+    \b
+      dt auth credentials install               # all repos
+      dt auth credentials install bcarc_wgs     # one repo only
+    """
+    try:
+        results = auth_mod.install_credentials(verbose=verbose, repo_name=repo_name)
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+    ok = [r for r, s in results.items() if s]
+    failed = [r for r, s in results.items() if not s]
+    if ok:
+        click.echo(click.style(f"✓ Installed: {', '.join(ok)}", fg='green'))
+    if failed:
+        click.echo(click.style(f"⚠ Not found: {', '.join(failed)}", fg='yellow'))
+
+
+@auth_credentials.command('uninstall')
+@click.option('--remote', default=None,
+              help='Only remove credentials for this DVC remote name')
+@click.option('-v', '--verbose', is_flag=True)
+def auth_credentials_uninstall(remote, verbose):
+    """Remove credentials from the DVC global config."""
+    try:
+        removed = auth_mod.uninstall_credentials(remote=remote, verbose=verbose)
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+
+    if removed:
+        click.echo(click.style(f"✓ Removed: {', '.join(removed)}", fg='green'))
+    else:
+        click.echo("No credentials were removed.")
+
+
+@auth_credentials.command('set')
+@click.argument('repo_name')
+@click.option('--file', 'input_file', default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help='Read INI content from this file (default: stdin)')
+def auth_credentials_set(repo_name, input_file):
+    """Create or update the secret for REPO_NAME.
+
+    Content must be raw DVC INI format, e.g.:
+
+    \b
+      ['remote "cloud"']
+          access_key_id = AKIAXXXXXXXX
+          secret_access_key = xxxxx
+          endpointurl = https://xxx.r2.cloudflarestorage.com
+
+    \b
+      dt auth credentials set neochemo --file creds.ini
+      cat creds.ini | dt auth credentials set neochemo
+    """
+    if input_file:
+        content = click.open_file(input_file).read()
+    else:
+        if click.get_text_stream('stdin').isatty():
+            click.echo("Paste DVC INI content (Ctrl-D when done):")
+        content = click.get_text_stream('stdin').read()
+
+    try:
+        auth_mod.set_secret(repo_name, content)
+        click.echo(click.style(f"✓ Secret updated for '{repo_name}'", fg='green'))
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 
