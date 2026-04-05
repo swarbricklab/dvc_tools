@@ -88,3 +88,25 @@ class SecretBackend(ABC):
             True if the secret exists, False otherwise.
         """
         ...
+
+    @abstractmethod
+    def list_secrets(self) -> list:
+        """List all secret IDs managed by this backend (matching the prefix).
+
+        Returns:
+            List of secret ID strings (without the prefix).
+        """
+        ...
+
+    @abstractmethod
+    def set_secret(self, repo_name: str, content: str) -> None:
+        """Create or update a secret with raw DVC INI content.
+
+        Args:
+            repo_name: Name of the repository.
+            content:   Raw DVC INI config to store.
+
+        Raises:
+            SecretError: If the operation fails.
+        """
+        ...
