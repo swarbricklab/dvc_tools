@@ -70,10 +70,14 @@ def init_cache_structure(cache_dir: Path, verbose: bool = True) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     utils.set_group_writable(cache_dir)
     
-    # Create runs directory for DVC run cache
+    # Create runs directory for DVC run cache with 00-ff subdirectories
     runs_dir = cache_dir / "runs"
     runs_dir.mkdir(exist_ok=True)
     utils.set_group_writable(runs_dir)
+    for i in range(256):
+        subdir = runs_dir / f"{i:02x}"
+        subdir.mkdir(exist_ok=True)
+        utils.set_group_writable(subdir)
     
     # Create files/md5 structure with 00-ff subdirectories
     utils.create_md5_subdirs(cache_dir, verbose=verbose)
