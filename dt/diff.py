@@ -970,11 +970,9 @@ class CSVHandler(DiffHandler):
         if detail_level == "granular":
             cmd.append("--all")  # show all rows, not just changed + context
 
-        if output_format == "html":
-            cmd.append("--output-format=html")
-        elif output_format == "json":
+        if output_format == "json":
             cmd.append("--output-format=json")
-        # terminal/md use default output
+        # terminal/md/html use default (csv) output from daff
 
         cmd.extend([str(old_path), str(new_path)])
 
@@ -983,7 +981,31 @@ class CSVHandler(DiffHandler):
         if result.returncode != 0 and result.stderr:
             raise DiffError(f"daff failed: {result.stderr}")
 
+        # daff doesn't support --output-format=html; render via daff render
+        if output_format == "html":
+            return self._render_html(result.stdout)
+
         return result.stdout
+
+    @staticmethod
+    def _render_html(diff_csv: str) -> str:
+        """Render a daff CSV diff as HTML using ``daff render``."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False
+        ) as tmp:
+            tmp.write(diff_csv)
+            tmp_path = tmp.name
+        try:
+            render = subprocess.run(
+                ["daff", "render", tmp_path],
+                capture_output=True, text=True,
+            )
+            if render.returncode != 0 and render.stderr:
+                raise DiffError(f"daff render failed: {render.stderr}")
+            return render.stdout
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
 
 
 @register_handler
