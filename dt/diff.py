@@ -139,7 +139,47 @@ def _build_tree(diff_data: Dict[str, Any]) -> Dict[str, Any]:
                 current['_counts'][status] += 1
                 current = current[part]
     
+    # Remove leaf file entries that duplicate a subdirectory (DVC reports
+    # .dir manifests as both a directory change and a file change).
+    _dedup_dir_entries(tree)
+    
     return tree
+
+
+def _dedup_dir_entries(node: Dict[str, Any]) -> None:
+    """Remove file entries whose name matches a subdirectory in the same node.
+
+    DVC diff reports directory manifests (e.g. ``results``) as modified
+    *files* alongside the individual files inside ``results/``.  This
+    causes the directory to appear twice in the tree and inflates counts.
+
+    After removing duplicates, recalculates ``_counts`` bottom-up so that
+    all ancestor counts are correct.
+    """
+    # Recurse into subdirectories first (bottom-up)
+    for key, value in node.items():
+        if key.startswith('_') or not isinstance(value, dict):
+            continue
+        _dedup_dir_entries(value)
+
+    # Remove file entries that duplicate a subdirectory name
+    subdir_names = {
+        k for k in node if not k.startswith('_') and isinstance(node[k], dict)
+    }
+    if subdir_names:
+        node['_files'] = [f for f in node.get('_files', [])
+                          if f['name'] not in subdir_names]
+
+    # Recalculate counts from files + child counts
+    counts: Dict[str, int] = defaultdict(int)
+    for f in node.get('_files', []):
+        counts[f['status']] += 1
+    for key, value in node.items():
+        if key.startswith('_') or not isinstance(value, dict):
+            continue
+        for status, n in value.get('_counts', {}).items():
+            counts[status] += n
+    node['_counts'] = counts
 
 
 def _count_tree_items(tree: Dict[str, Any]) -> Tuple[int, int]:
