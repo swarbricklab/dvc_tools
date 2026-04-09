@@ -232,9 +232,13 @@ class GCPSecretBackend(SecretBackend):
             return self._cli_secret_exists(repo_name)
         
         secret_path = f"projects/{self.project}/secrets/{self._get_secret_id(repo_name)}"
-        
+
+        client = self.client
+        if client is None:
+            return self._cli_secret_exists(repo_name)
+
         try:
-            self.client.get_secret(request={"name": secret_path})
+            client.get_secret(request={"name": secret_path})
             return True
         except gcp_exceptions.NotFound:
             return False
@@ -272,9 +276,13 @@ class GCPSecretBackend(SecretBackend):
             return self._cli_access_secret(repo_name)
         
         secret_name = self._get_secret_name(repo_name)
-        
+
+        client = self.client
+        if client is None:
+            return self._cli_access_secret(repo_name)
+
         try:
-            response = self.client.access_secret_version(
+            response = client.access_secret_version(
                 request={"name": secret_name}
             )
         except gcp_exceptions.NotFound:
