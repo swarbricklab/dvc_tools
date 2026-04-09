@@ -129,4 +129,8 @@ dmypy.json
 
 # Local DVC Tools configuration
 .dt/
+
+# VS Code workspace
+dvc_tools.code-workspace
+
 .dt/tmp/
