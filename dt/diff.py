@@ -106,29 +106,41 @@ def _build_tree(diff_data: Dict[str, Any]) -> Dict[str, Any]:
         for item in items:
             # Handle both dict format and string format
             if isinstance(item, dict):
-                path = item.get('path', '')
+                raw_path = item.get('path', '')
+                # Renamed items have path as {"old": "...", "new": "..."}
+                if isinstance(raw_path, dict):
+                    old_path = raw_path.get('old', '')
+                    new_path = raw_path.get('new', '') or old_path
+                    path = new_path
+                else:
+                    old_path = None
+                    path = raw_path
             else:
+                old_path = None
                 path = str(item)
-            
+
             if not path:
                 continue
-            
+
             parts = Path(path).parts
             current = tree
-            
+
             # Navigate/create directories
             for i, part in enumerate(parts[:-1]):
                 if part not in current:
                     current[part] = {'_files': [], '_counts': defaultdict(int)}
                 current = current[part]
-            
+
             # Add file to leaf directory
             filename = parts[-1] if parts else path
-            current['_files'].append({
+            file_entry: Dict[str, Any] = {
                 'name': filename,
                 'status': status,
                 'path': path,
-            })
+            }
+            if old_path:
+                file_entry['old_path'] = old_path
+            current['_files'].append(file_entry)
             
             # Update counts up the tree
             current['_counts'][status] += 1
