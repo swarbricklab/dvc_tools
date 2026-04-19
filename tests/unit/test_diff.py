@@ -383,11 +383,33 @@ class TestBuildTree:
             'modified': [],
             'renamed': [],
         }
-        
+
         tree = _build_tree(diff_data)
-        
+
         assert tree['_files'] == []
         assert sum(tree['_counts'].values()) == 0
+
+    def test_handles_renamed_items_with_dict_path(self):
+        """Test that renamed items with path as {"old": ..., "new": ...} are handled."""
+        diff_data = {
+            'added': [],
+            'deleted': [],
+            'modified': [],
+            'renamed': [
+                {'path': {'old': 'data/old_name.csv', 'new': 'data/new_name.csv'}},
+            ],
+        }
+
+        tree = _build_tree(diff_data)
+
+        assert tree['_counts']['renamed'] == 1
+        assert 'data' in tree
+        renamed_files = tree['data']['_files']
+        assert len(renamed_files) == 1
+        assert renamed_files[0]['name'] == 'new_name.csv'
+        assert renamed_files[0]['path'] == 'data/new_name.csv'
+        assert renamed_files[0]['old_path'] == 'data/old_name.csv'
+        assert renamed_files[0]['status'] == 'renamed'
 
 
 class TestFormatCounts:
