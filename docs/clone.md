@@ -26,6 +26,8 @@ dt clone [options] <repository> [path]
 - `--pull`: Run `dt pull` after cloning to fetch all data files
 - `--no-auth`: Skip running `dt auth setup` after cloning
 - `--no-hooks`: Skip installing git hooks and DVC merge driver
+- `--rev <revision>`: Check out a specific branch, tag, or commit after cloning
+- `--overwrite`: Remove the target directory if it already exists before cloning
 
 ## Short Name Feature
 
@@ -102,6 +104,33 @@ dt clone --cache-name shared-analysis git@github.com:myorg/my-analysis.git
 
 # Quick clone without submodules for inspection
 dt clone --no-submodules --shallow git@github.com:myorg/my-analysis.git
+```
+
+### Cloning a specific revision
+
+Use `--rev` to clone a repository and immediately check out a branch, tag, or commit:
+
+```bash
+# Clone and check out a specific tag
+dt clone --rev v1.2.0 myproject
+
+# Clone and check out a branch
+dt clone --rev feature/new-pipeline myproject
+
+# Clone and check out a specific commit
+dt clone --rev a3f9c12 myproject
+```
+
+### Overwriting an existing clone
+
+Use `--overwrite` to replace an existing directory with a fresh clone:
+
+```bash
+# Remove the existing directory and clone again
+dt clone --overwrite myproject
+
+# Combine with --rev to reset to a known revision
+dt clone --overwrite --rev v1.2.0 myproject my-local-copy
 ```
 
 ## Typical Workflow

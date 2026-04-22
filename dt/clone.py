@@ -4,6 +4,7 @@ Handles cloning DVC repositories with proper cache and remote setup.
 """
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -80,9 +81,11 @@ def clone_repository(
     do_pull: bool = False,
     no_auth: bool = False,
     no_hooks: bool = False,
+    rev: Optional[str] = None,
+    overwrite: bool = False,
 ) -> Path:
     """Clone a DVC repository with proper cache setup.
-    
+
     Args:
         repository: Repository URL or short name
         path: Target directory (defaults to repo name)
@@ -95,29 +98,43 @@ def clone_repository(
         do_pull: Run dt pull after cloning to fetch data
         no_auth: Skip running auth setup after cloning
         no_hooks: Skip installing git hooks and merge driver
-        
+        rev: Revision (branch, tag, or commit) to check out after cloning
+        overwrite: Remove target directory if it already exists
+
     Returns:
         Path to the cloned repository
-        
+
     Raises:
         CloneError: If cloning fails
     """
     # Resolve repository URL
     repository_url = resolve_repository_url(repository, owner)
     repo_name = extract_repo_name(repository_url)
-    
+
     # Determine target directory
     target_dir = Path(path if path else repo_name)
-    
+
+    # Handle existing target directory
+    if target_dir.exists():
+        if overwrite:
+            if verbose:
+                print(f"Removing existing directory: {target_dir}")
+            shutil.rmtree(target_dir)
+        else:
+            raise CloneError(
+                f"Destination path '{target_dir}' already exists. "
+                f"Use --overwrite to remove it before cloning."
+            )
+
     # Use repo name for cache/remote if not specified
     cache_name = cache_name or repo_name
     remote_name = remote_name or repo_name
-    
+
     if verbose:
         print(f"Cloning {repository_url}")
         if repository != repository_url:
             print(f"  (resolved from '{repository}')")
-    
+
     # Build git clone command
     git_cmd = ['git', 'clone']
     if shallow:
@@ -125,11 +142,19 @@ def clone_repository(
     if not no_submodules:
         git_cmd.append('--recurse-submodules')
     git_cmd.extend([repository_url, str(target_dir)])
-    
+
     # Execute git clone
     result = subprocess.run(git_cmd)
     if result.returncode != 0:
         raise CloneError("Git clone failed.")
+
+    # Check out specific revision if requested
+    if rev:
+        if verbose:
+            print(f"Checking out revision: {rev}")
+        result = subprocess.run(['git', 'checkout', rev], cwd=target_dir)
+        if result.returncode != 0:
+            raise CloneError(f"Failed to checkout revision '{rev}'.")
     
     # Initialize submodules if needed
     if not no_submodules:

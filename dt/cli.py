@@ -85,25 +85,27 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
 @click.option('--pull', 'do_pull', is_flag=True, help='Run dt pull after cloning to fetch data')
 @click.option('--no-auth', is_flag=True, help='Skip running auth setup after cloning')
 @click.option('--no-hooks', is_flag=True, help='Skip installing git hooks and merge driver')
-def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow, do_pull, no_auth, no_hooks):
+@click.option('--rev', default=None, help='Check out a specific revision after cloning')
+@click.option('--overwrite', is_flag=True, help='Remove the target directory if it already exists')
+def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow, do_pull, no_auth, no_hooks, rev, overwrite):
     """Clone an existing DVC project from GitHub.
-    
+
     REPOSITORY can be either:
-    
+
     \b
     - A full URL: git@github.com:owner/repo.git
     - A short name: repo (requires owner to be configured)
-    
+
     When owner is configured, you can use short names:
-    
+
     \b
         dt clone myproject
-    
+
     is equivalent to:
-    
+
     \b
         dt clone git@github.com:myorg/myproject.git
-    
+
     This command clones a repository and configures it for the local platform
     with proper cache, remote, hooks, and auth setup.
     """
@@ -119,6 +121,8 @@ def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_na
             do_pull=do_pull,
             no_auth=no_auth,
             no_hooks=no_hooks,
+            rev=rev,
+            overwrite=overwrite,
         )
     except clone_mod.CloneError as e:
         raise click.ClickException(str(e))
