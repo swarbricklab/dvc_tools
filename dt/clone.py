@@ -113,10 +113,24 @@ def clone_repository(
 
     # Determine target directory
     target_dir = Path(path if path else repo_name)
+    is_current_dir = target_dir.resolve() == Path.cwd().resolve()
 
     # Handle existing target directory
     if target_dir.exists():
-        if overwrite:
+        if is_current_dir and overwrite:
+            raise CloneError(
+                "Refusing to use --overwrite with destination '.'. "
+                "Choose a different path."
+            )
+
+        if is_current_dir:
+            # Minimal safe support for cloning into '.': only when empty.
+            if any(target_dir.iterdir()):
+                raise CloneError(
+                    "Destination path '.' is not empty. "
+                    "Clone into an empty directory or choose a different path."
+                )
+        elif overwrite:
             if verbose:
                 print(f"Removing existing directory: {target_dir}")
             shutil.rmtree(target_dir)

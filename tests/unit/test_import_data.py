@@ -301,6 +301,153 @@ class TestImportNoDownload:
 
 
 # =============================================================================
+# import_data off-world fallback
+# =============================================================================
+
+class TestImportDataFallback:
+    """Tests for off-world fallback to dvc import."""
+
+    @patch.object(utils, 'check_dvc')
+    @patch.object(tmp_mod, 'resolve_repository_url', return_value='git@github.com:org/repo.git')
+    @patch.object(tmp_mod, 'clone_repo')
+    @patch.object(import_mod.remote_mod, 'find_local_remote_from_repo', return_value=None)
+    @patch('subprocess.run')
+    def test_delegates_to_dvc_import_when_no_local_cache(
+        self,
+        mock_run,
+        mock_find_remote,
+        mock_clone,
+        mock_resolve_url,
+        mock_check_dvc,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Falls back to dvc import when source cache is not local."""
+        monkeypatch.chdir(tmp_path)
+        clone_path = tmp_path / 'clone'
+        clone_path.mkdir()
+        mock_clone.return_value = clone_path
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout='abc123\n'),
+            MagicMock(returncode=0, stdout=''),
+        ]
+
+        dvc_file, cache_path = import_mod.import_data(
+            repository='repo',
+            path='data/file.csv',
+            out='imported.csv',
+        )
+
+        assert dvc_file == Path('imported.csv.dvc')
+        assert cache_path is None
+        assert mock_run.call_count == 2
+        assert mock_run.call_args_list[1].args[0] == [
+            'dvc', 'import', 'git@github.com:org/repo.git', 'data/file.csv', '--out', 'imported.csv'
+        ]
+
+    @patch.object(utils, 'check_dvc')
+    @patch.object(tmp_mod, 'resolve_repository_url', return_value='git@github.com:org/repo.git')
+    @patch.object(tmp_mod, 'clone_repo')
+    @patch.object(import_mod.remote_mod, 'find_local_remote_from_repo', return_value=None)
+    @patch('subprocess.run')
+    def test_no_checkout_uses_no_download_with_dvc_import(
+        self,
+        mock_run,
+        mock_find_remote,
+        mock_clone,
+        mock_resolve_url,
+        mock_check_dvc,
+        tmp_path,
+        monkeypatch,
+    ):
+        """When checkout=False, fallback uses dvc import --no-download."""
+        monkeypatch.chdir(tmp_path)
+        clone_path = tmp_path / 'clone'
+        clone_path.mkdir()
+        mock_clone.return_value = clone_path
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout='abc123\n'),
+            MagicMock(returncode=0, stdout=''),
+        ]
+
+        import_mod.import_data(
+            repository='repo',
+            path='data/file.csv',
+            out='imported.csv',
+            checkout=False,
+        )
+
+        assert '--no-download' in mock_run.call_args_list[1].args[0]
+
+    @patch.object(utils, 'check_dvc')
+    @patch.object(tmp_mod, 'resolve_repository_url', return_value='git@github.com:org/repo.git')
+    @patch.object(tmp_mod, 'clone_repo')
+    @patch.object(import_mod.remote_mod, 'find_local_remote_from_repo', return_value=None)
+    @patch('subprocess.run')
+    def test_raises_import_error_when_dvc_import_fails(
+        self,
+        mock_run,
+        mock_find_remote,
+        mock_clone,
+        mock_resolve_url,
+        mock_check_dvc,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Fallback surfaces dvc import errors as ImportError."""
+        monkeypatch.chdir(tmp_path)
+        clone_path = tmp_path / 'clone'
+        clone_path.mkdir()
+        mock_clone.return_value = clone_path
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout='abc123\n'),
+            MagicMock(returncode=1, stderr='network error'),
+        ]
+
+        with pytest.raises(ImportError, match='dvc import failed: network error'):
+            import_mod.import_data(
+                repository='repo',
+                path='data/file.csv',
+            )
+
+    @patch.object(utils, 'check_dvc')
+    @patch.object(tmp_mod, 'resolve_repository_url', return_value='git@github.com:org/repo.git')
+    @patch.object(tmp_mod, 'clone_repo')
+    @patch.object(import_mod.remote_mod, 'find_local_remote_from_repo', return_value=None)
+    @patch('subprocess.run')
+    def test_no_fallback_raises_local_cache_error(
+        self,
+        mock_run,
+        mock_find_remote,
+        mock_clone,
+        mock_resolve_url,
+        mock_check_dvc,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Disabling fallback keeps fail-fast local-cache behavior."""
+        monkeypatch.chdir(tmp_path)
+        clone_path = tmp_path / 'clone'
+        clone_path.mkdir()
+        mock_clone.return_value = clone_path
+
+        mock_run.return_value = MagicMock(returncode=0, stdout='abc123\n')
+
+        with pytest.raises(ImportError, match='No locally-accessible cache found'):
+            import_mod.import_data(
+                repository='repo',
+                path='data/file.csv',
+                allow_dvc_fallback=False,
+            )
+
+        # Only rev-parse should have run; no dvc import call
+        assert mock_run.call_count == 1
+
+
+# =============================================================================
 # import_from_csv
 # =============================================================================
 
@@ -558,6 +705,25 @@ class TestImportFromCsv:
 
         _, kwargs = mock_import.call_args
         assert kwargs['out'] == 'fallback.csv'
+
+    @patch.object(import_mod, 'import_data')
+    def test_passes_allow_dvc_fallback_through(self, mock_import, tmp_path, monkeypatch):
+        """allow_dvc_fallback is forwarded from CSV mode to import_data."""
+        monkeypatch.chdir(tmp_path)
+        csv_file = tmp_path / "paths.csv"
+        self._write_csv(csv_file, [
+            {'path': 'data/file.csv'},
+        ])
+        mock_import.return_value = (Path("file.csv.dvc"), None)
+
+        import_mod.import_from_csv(
+            csv_path=str(csv_file),
+            repository="myrepo",
+            allow_dvc_fallback=False,
+        )
+
+        _, kwargs = mock_import.call_args
+        assert kwargs['allow_dvc_fallback'] is False
 
 
 # =============================================================================

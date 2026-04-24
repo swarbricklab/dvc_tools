@@ -14,6 +14,7 @@ dt clone [options] <repository> [path]
   - Full URL: `git@github.com:myorg/myproject.git`
   - Short name: `myproject` (requires `owner` to be configured)
 - `[path]`: Optional path to the directory name for the clone (defaults to repository name in current directory)
+  - `.` is supported only when the current directory is empty
 
 ## Options
 
@@ -132,6 +133,19 @@ dt clone --overwrite myproject
 # Combine with --rev to reset to a known revision
 dt clone --overwrite --rev v1.2.0 myproject my-local-copy
 ```
+
+`--overwrite` cannot be used with destination `.`.
+
+### Cloning into the current directory
+
+You can clone directly into the current directory by passing `.` as the path,
+but only when the directory is empty:
+
+```bash
+dt clone git@github.com:myorg/my-analysis.git .
+```
+
+If the current directory is not empty, choose a new destination directory instead.
 
 ## Typical Workflow
 

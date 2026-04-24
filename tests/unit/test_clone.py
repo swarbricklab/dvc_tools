@@ -205,6 +205,60 @@ class TestCloneRepository:
         cmd = first_call[0][0]
         assert 'custom_dir' in cmd
 
+    def test_clone_into_current_dir_when_empty(self, tmp_path, monkeypatch):
+        """Allows cloning into '.' only when current directory is empty."""
+        monkeypatch.chdir(tmp_path)
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        with patch('subprocess.run', return_value=mock_subprocess) as mock_run:
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
+                        result = clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            path='.',
+                            verbose=False,
+                            no_auth=True,
+                            no_hooks=True,
+                        )
+
+        assert result == Path('.')
+        first_call = mock_run.call_args_list[0]
+        cmd = first_call[0][0]
+        assert cmd[-1] == '.'
+
+    def test_clone_into_current_dir_rejects_non_empty(self, tmp_path, monkeypatch):
+        """Rejects cloning into '.' when current directory is not empty."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'existing.txt').write_text('present')
+
+        with patch.object(cfg, 'get_value', return_value='testowner'):
+            with pytest.raises(CloneError, match="Destination path '\\.' is not empty"):
+                clone.clone_repository(
+                    'git@github.com:org/testrepo.git',
+                    path='.',
+                    verbose=False,
+                    no_auth=True,
+                    no_hooks=True,
+                )
+
+    def test_clone_into_current_dir_rejects_overwrite(self, tmp_path, monkeypatch):
+        """Refuses destructive --overwrite when destination is '.'."""
+        monkeypatch.chdir(tmp_path)
+
+        with patch.object(cfg, 'get_value', return_value='testowner'):
+            with pytest.raises(CloneError, match='Refusing to use --overwrite with destination'):
+                clone.clone_repository(
+                    'git@github.com:org/testrepo.git',
+                    path='.',
+                    overwrite=True,
+                    verbose=False,
+                    no_auth=True,
+                    no_hooks=True,
+                )
+
 
 class TestCloneAuthSetup:
     """Tests for auth setup integration in clone_repository."""
