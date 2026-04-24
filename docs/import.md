@@ -18,13 +18,14 @@ Imports files or directories from another DVC repository by:
 4. Checking out the files using the discovered cache
 5. Populating your primary cache so standard DVC commands work
 
-Unlike `dvc import`, this does **not** require network access to the remote storage. Instead, it uses locally-accessible cache paths (e.g., shared filesystems on HPC).
+`dt import` first tries a local-cache workflow that does not require network access to remote object storage. If the source repository has no locally-accessible remote/cache, it falls back to `dvc import`.
 
 ## Options
 
 - `--out, -o <path>`: Destination path for imported files (default: basename of source path)
 - `--owner <owner>`: Override the GitHub owner for short repository names
 - `--no-checkout`: Create `.dvc` file without checking out the data
+- `--no-dvc-import-fallback`: Fail if no local source cache is found (do not delegate to `dvc import`)
 - `-v, --verbose`: Show detailed progress
 
 ## Examples
@@ -38,6 +39,9 @@ dt import otherproject data/samples --out my_samples
 
 # Import without checking out (just create .dvc file)
 dt import neochemo data/large_dataset --no-checkout
+
+# Fail fast when source cache is off-world (disable delegation)
+dt import neochemo data/large_dataset --no-dvc-import-fallback
 ```
 
 ## How it works
@@ -74,8 +78,8 @@ dvc checkout      # Standard checkout works
 
 | Feature | `dvc import` | `dt import` |
 |---------|-------------|-------------|
-| Network access required | Yes | No |
-| Uses remote storage | Yes | Uses local cache |
+| Network access required | Yes | No (unless fallback is needed) |
+| Uses remote storage | Yes | Prefers local cache, falls back to remote |
 | Creates `.dvc` file | Yes | Yes |
 | Works offline | No | Yes (if cache accessible) |
 | Tracks source repo | Yes (frozen) | No (standalone) |
@@ -90,9 +94,7 @@ dvc checkout      # Standard checkout works
 
 ### "No locally-accessible cache found"
 
-The source repository doesn't have a remote that resolves to a local path. Options:
-1. Use standard `dvc import` with network access
-2. Copy the cache to a local filesystem
+`dt import` now delegates to `dvc import` in this case. If that fails, it usually means network/auth access to the source remote is unavailable.
 
 ### Files not found in cache
 

@@ -703,6 +703,30 @@ def resolve_out_path(out: Optional[str], path: str) -> Path:
     return out_p
 
 
+def _delegate_to_dvc_import(
+    repo_url: str,
+    path: str,
+    out_path: Path,
+    checkout: bool,
+    verbose: bool = False,
+) -> Path:
+    """Fallback to ``dvc import`` for sources without local cache access."""
+    cmd = ['dvc', 'import', repo_url, path, '--out', str(out_path)]
+    if not checkout:
+        cmd.append('--no-download')
+
+    if verbose:
+        print("No locally-accessible cache found; delegating to dvc import")
+        print(f"Running: {' '.join(cmd)}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        error_text = result.stderr.strip() or result.stdout.strip() or 'Unknown error'
+        raise ImportError(f"dvc import failed: {error_text}")
+
+    return out_path.parent / f"{out_path.name}.dvc"
+
+
 def import_data(
     repository: str,
     path: str,
@@ -711,6 +735,7 @@ def import_data(
     checkout: bool = True,
     verbose: bool = False,
     refresh: bool = True,
+    allow_dvc_fallback: bool = True,
     force: bool = False,
 ) -> Tuple[Path, Optional[str]]:
     """Import DVC-tracked data from a remote repository.
@@ -723,6 +748,7 @@ def import_data(
         checkout: Whether to run checkout after import.
         verbose: Print progress messages.
         refresh: Whether to refresh temp clone (default True).
+        allow_dvc_fallback: If True, delegate to dvc import when no local cache exists.
         force: Overwrite existing output (default False).
         
     Returns:
@@ -794,12 +820,20 @@ def import_data(
         _, cache_path = result
     
     if not cache_path:
+        if allow_dvc_fallback:
+            dvc_file = _delegate_to_dvc_import(
+                repo_url=repo_url,
+                path=path,
+                out_path=out_path,
+                checkout=checkout,
+                verbose=verbose,
+            )
+            return dvc_file, None
         raise ImportError(
             f"No locally-accessible cache found for {repository}.\n"
             f"The source repository's remote may not be on this filesystem.\n"
-            f"Options:\n"
-            f"  1. Ensure the source repo has a locally-accessible remote configured\n"
-            f"  2. Use 'dvc import' and 'dvc pull' to fetch from the remote directly"
+            f"Retry without --no-dvc-import-fallback to delegate to dvc import, or\n"
+            f"configure a locally-accessible remote in the source repository."
         )
     
     if verbose:
@@ -1141,6 +1175,7 @@ def import_from_csv(
     no_checkout: bool = False,
     no_refresh: bool = False,
     rev: Optional[str] = None,
+    allow_dvc_fallback: bool = True,
     verbose: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Repeat ``dt import`` for every row in a CSV file.
@@ -1159,6 +1194,7 @@ def import_from_csv(
         no_checkout: If True, skip checkout after import.
         no_refresh: If True, skip refreshing the tmp clone.
         rev: Explicit revision (passed through to import).
+        allow_dvc_fallback: If True, delegate to dvc import when no local cache exists.
         verbose: Print progress messages.
 
     Returns:
@@ -1218,6 +1254,7 @@ def import_from_csv(
                     checkout=not no_checkout,
                     verbose=verbose,
                     refresh=not no_refresh,
+                    allow_dvc_fallback=allow_dvc_fallback,
                 )
                 results.append((row_path, True, f"Created {dvc_file}"))
         except Exception as e:

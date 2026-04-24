@@ -2417,17 +2417,18 @@ def tmp_clean(repository, owner, clean_all):
 @click.option('--no-download', is_flag=True, help='Create .dvc file without downloading data (like dvc import --no-download)')
 @click.option('--rev', default=None, help='Git revision to lock to (used with --no-download; defaults to tmp clone HEAD)')
 @click.option('--csv', 'csv_path', default=None, type=click.Path(exists=True), help='CSV file with paths to import (requires "path" column, optional "output" column)')
+@click.option('--dvc-import-fallback/--no-dvc-import-fallback', default=True, help='If no local source cache is found, delegate to dvc import (default: enabled).')
 @click.option('-f', '--force', is_flag=True, help='Overwrite existing output')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_download, rev, csv_path, force, verbose):
+def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_download, rev, csv_path, dvc_import_fallback, force, verbose):
     """Import DVC-tracked data from another repository.
     
     Creates a .dvc file pointing to data in REPOSITORY at PATH,
     then checks out the data from locally-accessible caches.
     
-    Unlike `dvc import`, this does not require network access to
-    the remote storage. Instead, it uses cache paths discovered
-    via `dt cache add-from`.
+    Prefers local-cache import via cache paths discovered
+    via `dt cache add-from`. If no locally-accessible source
+    cache is found, it automatically delegates to `dvc import`.
     
     \b
     Options:
@@ -2437,6 +2438,9 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
       --csv FILE      Import every row from a CSV file. The CSV must have
                       a "path" column; an optional "output" column maps
                       to -o/--out.
+    --no-dvc-import-fallback
+                Disable automatic fallback to `dvc import` when the
+                source remote is not locally accessible.
     
     \b
     Examples:
@@ -2464,6 +2468,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
                 no_checkout=no_checkout,
                 no_refresh=no_refresh,
                 rev=rev,
+                allow_dvc_fallback=dvc_import_fallback,
                 verbose=verbose,
             )
             
@@ -2512,6 +2517,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
             checkout=not no_checkout,
             verbose=verbose,
             refresh=not no_refresh,
+            allow_dvc_fallback=dvc_import_fallback,
             force=force,
         )
         
