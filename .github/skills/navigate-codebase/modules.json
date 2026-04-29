@@ -34,7 +34,7 @@
     { "command": "dt auth whoami",        "module": "dt/auth/identity.py","functions": ["detect_identities", "get_identities"] },
     { "command": "dt auth request",       "module": "dt/auth/request.py", "functions": ["generate_request", "send_request"] },
     { "command": "dt auth teams",         "module": "dt/auth/teams.py",   "functions": ["list_repo_teams", "list_user_teams"] },
-    { "command": "dt auth credentials",   "module": "dt/auth/credentials.py", "functions": ["install_credentials", "uninstall_credentials", "get_credentials_status", "check_secret", "list_repo_secrets", "set_secret"] }
+    { "command": "dt auth credentials",   "module": "dt/auth/credentials.py", "functions": ["install_credentials", "uninstall_credentials", "get_credentials_status", "configure_remotes", "migrate_credentials", "check_secret", "list_repo_secrets", "set_secret"] }
   ],
   "modules": [
     { "file": "dt/cli.py",                "description": "All Click CLI commands (~3600 lines). Each command delegates immediately to its module." },
@@ -48,7 +48,7 @@
     { "file": "dt/diff.py",               "description": "Diff system. DiffHandler ABC, plugin registry (dvc_tools.diff_handlers entry-point group), content_diff(), tree_diff(). File fetching via 'dvc get --rev' subprocess (not dvc.api).", "exports": ["DiffHandler", "register_handler", "get_handler", "list_handlers", "content_diff", "tree_diff"] },
     { "file": "dt/summary.py",            "description": "Project summary generation. generate_dag() runs 'dvc dag --md' → docs/dag.md. generate_tree() runs 'dvc list --tree' → docs/tree.txt.", "exports": ["generate_dag", "generate_tree", "generate_all"] },
     { "file": "dt/auth/__init__.py",      "description": "Re-exports all public auth names. Backward-compat patch target." },
-    { "file": "dt/auth/credentials.py",   "description": "S3 credential install/uninstall/status for DVC remotes. SecretInfo dataclass, check/list/set secret helpers.", "exports": ["install_credentials", "uninstall_credentials", "get_credentials_status", "SecretInfo", "check_secret", "list_repo_secrets", "set_secret"] },
+    { "file": "dt/auth/credentials.py",   "description": "S3 credential management: install/uninstall AWS profiles in ~/.aws/{credentials,config}, configure committed .dvc/config remotes, migrate legacy DVC-INI secrets to AWS-INI. Status and check helpers.", "exports": ["install_credentials", "uninstall_credentials", "get_credentials_status", "format_credentials_status", "configure_remotes", "format_configure_remotes_result", "ConfigureRemotesResult", "migrate_credentials", "format_migrate_result", "MigrateResult", "SecretInfo", "check_secret", "list_repo_secrets", "set_secret"] },
     { "file": "dt/auth/endpoints.py",     "description": "Discover DVC remotes and import sources. Classify URLs by protocol (s3/gs/ssh/https).", "exports": ["Endpoint", "classify_url", "discover_endpoints", "discover_endpoints_from_repo"] },
     { "file": "dt/auth/checks.py",        "description": "Per-protocol connectivity checks (S3, GS, SSH, HTTP, GDrive). Used by dt auth check.", "exports": ["check_endpoints", "CheckResult"] },
     { "file": "dt/auth/identity.py",      "description": "Identity detection (dt auth whoami): git, gh CLI, gcloud.", "exports": ["detect_identities", "get_identities", "Identity"] },

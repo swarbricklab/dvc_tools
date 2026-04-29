@@ -87,14 +87,20 @@ from .request import (  # noqa: F401
 
 # -- Credentials -------------------------------------------------------------
 from .credentials import (  # noqa: F401
+    ConfigureRemotesResult,
     CredentialStatus,
+    MigrateResult,
     RepoCredentialInfo,
     SecretInfo,
     check_secret,
+    configure_remotes,
+    format_configure_remotes_result,
     format_credentials_status,
+    format_migrate_result,
     get_credentials_status,
     install_credentials,
     list_repo_secrets,
+    migrate_credentials,
     set_secret,
     uninstall_credentials,
 )

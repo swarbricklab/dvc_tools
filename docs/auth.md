@@ -17,6 +17,7 @@ A DVC project may depend on several storage backends simultaneously — a shared
 | [`dt auth check`](#dt-auth-check) | Test access to each endpoint |
 | [`dt auth request`](#dt-auth-request) | Generate an access-request template from failures |
 | [`dt auth setup`](#dt-auth-setup) | Set up SSH keys, config, and S3 credentials in one step |
+| [`dt auth credentials`](#dt-auth-credentials) | Manage S3 credentials in `~/.aws/{credentials,config}` |
 | [`dt auth teams`](#dt-auth-teams) | Manage GitHub team access for repositories |
 | [`dt auth grant`](#dt-auth-grant) | Grant a user access to a resource *(planned)* |
 
@@ -496,7 +497,7 @@ dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [-v]
 `dt auth setup` discovers all endpoints the project uses (same as `dt auth list`), then:
 
 1. **SSH / git endpoints** — generates an SSH key pair (if none exists), writes `~/.ssh/config` stanzas for each host, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts or `gh ssh-key add` for GitHub/GitLab)
-2. **S3 endpoints** — fetches credentials from the configured secret manager and installs them into the global DVC config
+2. **S3 endpoints** — fetches credentials from the configured secret manager and installs them as a profile in `~/.aws/credentials` / `~/.aws/config` (one profile per repo, named after the repo)
 
 Username resolution priority (per host):
 1. YAML config file (`--config`)
@@ -535,42 +536,147 @@ dt auth setup -v
 
 ### S3 credential management
 
-The S3 credential step uses the same secret-manager integration previously available via `dt auth credentials install`. Credentials are fetched from GCP Secret Manager (or other backends) and merged into the global DVC config.
+For full details, see [`dt auth credentials`](#dt-auth-credentials).
 
-Global config location:
-- **macOS**: `~/Library/Application Support/dvc/config`
-- **Linux**: `~/.config/dvc/config` (or `$XDG_CONFIG_HOME/dvc/config`)
+In short: credentials are written as an AWS profile (named after the repo) in
+`~/.aws/credentials` and `~/.aws/config` — **not** the DVC global config. The
+project's committed `.dvc/config` selects the profile via `profile = <repo>`
+and the endpoint via `endpointurl = https://...`.
 
-#### Secret manager configuration
+---
+
+## dt auth credentials
+
+Manage S3 / R2 credentials sourced from a secret manager (currently GCP Secret
+Manager). Credentials are stored as **AWS profiles** in the standard
+`~/.aws/credentials` and `~/.aws/config` files, one profile per repo.
+
+### Why AWS files (not DVC global config)?
+
+Recent versions of `aiobotocore` (used by DVC's S3 backend) no longer read
+`access_key_id` / `secret_access_key` from `~/.config/dvc/config`. The standard
+AWS credential resolution chain (env vars → `~/.aws/credentials` profile →
+instance metadata) is the only reliable path. `dt auth credentials` writes
+standard AWS files; the project's `.dvc/config` references them by profile
+name.
+
+### Layout
+
+```text
+~/.aws/credentials              ← secret keys
+  [<repo_name>]
+      aws_access_key_id = AKIA...
+      aws_secret_access_key = ...
+
+~/.aws/config                   ← non-secret per-profile settings
+  [profile <repo_name>]
+      region = auto
+
+<repo>/.dvc/config              ← committed, references the profile
+  ['remote "cloud"']
+      url = s3://bucket/path
+      endpointurl = https://....r2.cloudflarestorage.com
+      profile = <repo_name>
+```
+
+The profile name always matches the **repository name** so a single profile is
+shared across all the project's S3 remotes. If a repo's secret contains keys
+for multiple distinct (key_id, secret) pairs, install fails loudly.
+
+### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `dt auth credentials list` | List all repo secrets in the secret backend |
+| `dt auth credentials check REPO` | Verify a secret is fetchable and parseable |
+| `dt auth credentials status` | Show installed profile vs project remote requirements |
+| `dt auth credentials install [REPO]` | Fetch from secret manager → write `~/.aws/*` |
+| `dt auth credentials uninstall` | Remove the profile and any legacy global creds |
+| `dt auth credentials configure-remotes` | Add `endpointurl` + `profile` to `.dvc/config` (maintainer) |
+| `dt auth credentials migrate [REPO]` | Convert legacy DVC-INI secrets to AWS-INI and reinstall |
+| `dt auth credentials set REPO` | Upload a new secret to the backend (admin) |
+
+### Secret format
+
+Secrets in the backend are named `<prefix><repo_name>` (default prefix:
+`dvc-remote-`) and contain **AWS INI**:
+
+```ini
+[<repo_name>]
+aws_access_key_id = AKIAXXXXXXXX
+aws_secret_access_key = xxxxx
+```
+
+The endpoint URL is **not** stored in the secret — it lives in the project's
+committed `.dvc/config`.
+
+### dt auth credentials install
+
+Fetches the secret(s) and writes a profile to `~/.aws/credentials` and
+`~/.aws/config`. Without `REPO`, discovers all S3 remotes in the current
+project and installs each repo's credential. With `REPO`, installs only that
+one (no project context required).
+
+Install fails loudly if the fetched secret is in the legacy DVC-INI format —
+run `dt auth credentials migrate` to convert.
+
+After install, redundant `access_key_id` / `secret_access_key` keys in
+`~/.config/dvc/config` for the project's S3 remotes are stripped
+automatically.
+
+### dt auth credentials uninstall
+
+Removes the profile from both `~/.aws/credentials` and `~/.aws/config`, and
+also clears any legacy `access_key_id` / `secret_access_key` entries from
+`~/.config/dvc/config` for the project's S3 remotes.
+
+```bash
+dt auth credentials uninstall                  # all
+dt auth credentials uninstall --repo bcarc_wgs # only this repo's profile
+dt auth credentials uninstall --remote cloud   # only legacy global keys for this remote
+```
+
+### dt auth credentials configure-remotes
+
+*Maintainer command.* For each S3 remote in the project's committed
+`.dvc/config`, adds `endpointurl = <endpoint>` and `profile = <repo_name>`,
+then stages the change with `git add` so the maintainer can review and commit.
+
+```bash
+dt auth credentials configure-remotes --endpoint https://xxx.r2.cloudflarestorage.com
+```
+
+If `--endpoint` is omitted, falls back to `secrets.default_endpointurl` from
+`dt config`.
+
+### dt auth credentials migrate
+
+For secrets stored in the legacy DVC-INI format, fetches the current secret,
+rebuilds it as AWS-INI keyed by the repo name, re-uploads it to the backend,
+and installs it as an AWS profile. Use `--dry-run` to preview.
+
+### Secret manager configuration
 
 Add to `.dt/config.yaml` or user config:
 
 ```yaml
 secrets:
   backend: gcp
-  prefix: dvc-remote-    # Optional, default "dvc-remote-"
+  prefix: dvc-remote-              # optional, default "dvc-remote-"
+  default_endpointurl: https://...  # used by configure-remotes if --endpoint omitted
   gcp:
     project: my-gcp-project
 ```
 
-#### Secret format
+### Security
 
-Secrets are named by **repository** (e.g., `dvc-remote-neochemo` for the `neochemo` repo) and contain **raw DVC INI config**:
+- `~/.aws/credentials` is written with `600` permissions (owner only)
+- Endpoint is in the *committed* `.dvc/config` (it is non-secret); secret keys
+  never leave `~/.aws/credentials`
+- Requires GCP authentication via `gcloud auth login` or service account to
+  fetch from the backend
 
-```ini
-['remote "cloud"']
-    access_key_id = AKIAXXXXXXXX
-    secret_access_key = xxxxx
-    endpointurl = https://xxx.r2.cloudflarestorage.com
-```
-
-#### Security
-
-- Credentials are written to global DVC config with `600` permissions (owner read/write only)
-- Global config is outside the repo, so never accidentally committed
-- Requires GCP authentication via `gcloud auth login` or service account
-
-#### Supported backends
+### Supported backends
 
 | Backend | Status | Configuration |
 |---------|--------|---------------|
