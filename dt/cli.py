@@ -1249,6 +1249,14 @@ def auth_credentials():
       dt auth credentials uninstall        # remove all installed credentials
 
     \b
+    Configuring committed remotes (maintainer):
+      dt auth credentials configure-remotes --endpoint https://...
+
+    \b
+    Migrating from the legacy global-DVC-config layout:
+      dt auth credentials migrate          # convert + reinstall
+
+    \b
     Writing a secret (admin / setup):
       dt auth credentials set neochemo --file creds.ini
       cat creds.ini | dt auth credentials set neochemo
@@ -1341,13 +1349,18 @@ def auth_credentials_install(repo_name, verbose):
 
 
 @auth_credentials.command('uninstall')
+@click.option('--repo', 'repo_name', default=None,
+              help='Only remove the AWS profile for this repo (default: all '
+                   'discovered).')
 @click.option('--remote', default=None,
-              help='Only remove credentials for this DVC remote name')
+              help='Restrict legacy DVC global config cleanup to this remote.')
 @click.option('-v', '--verbose', is_flag=True)
-def auth_credentials_uninstall(remote, verbose):
-    """Remove credentials from the DVC global config."""
+def auth_credentials_uninstall(repo_name, remote, verbose):
+    """Remove credentials from ``~/.aws/*`` and the legacy DVC global config."""
     try:
-        removed = auth_mod.uninstall_credentials(remote=remote, verbose=verbose)
+        removed = auth_mod.uninstall_credentials(
+            repo_name=repo_name, remote=remote, verbose=verbose,
+        )
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 
@@ -1355,6 +1368,57 @@ def auth_credentials_uninstall(remote, verbose):
         click.echo(click.style(f"✓ Removed: {', '.join(removed)}", fg='green'))
     else:
         click.echo("No credentials were removed.")
+
+
+@auth_credentials.command('configure-remotes')
+@click.option('--endpoint', 'endpoint', default=None,
+              help='S3 endpoint URL (default: secrets.default_endpointurl from '
+                   'dt config).')
+@click.option('-v', '--verbose', is_flag=True)
+def auth_credentials_configure_remotes(endpoint, verbose):
+    """Update committed ``.dvc/config`` to add ``endpointurl`` and ``profile``.
+
+    For each S3 remote in the current project's ``.dvc/config``, sets:
+
+    \b
+      endpointurl = <endpoint>
+      profile     = <repo_name>
+
+    The change is staged with ``git add`` so the maintainer can review and
+    commit. Run from the root of the DVC project.
+    """
+    try:
+        result = auth_mod.configure_remotes(endpoint=endpoint, verbose=verbose)
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+    click.echo(auth_mod.format_configure_remotes_result(result))
+
+
+@auth_credentials.command('migrate')
+@click.argument('repo_name', required=False, default=None,
+                metavar='[REPO_NAME]')
+@click.option('--dry-run', is_flag=True,
+              help='Show what would change without writing anything.')
+@click.option('-v', '--verbose', is_flag=True)
+def auth_credentials_migrate(repo_name, dry_run, verbose):
+    """Migrate legacy secrets and credentials to the AWS-files layout.
+
+    For each repo (or REPO_NAME if given):
+
+    \b
+      1. If the GCP secret is in legacy DVC-INI format, re-upload it as
+         AWS-INI.
+      2. Install the credential as a profile in ``~/.aws/credentials``.
+      3. Remove now-redundant credential keys from ``~/.config/dvc/config``
+         for S3 remotes in the current project.
+    """
+    try:
+        result = auth_mod.migrate_credentials(
+            repo_name=repo_name, dry_run=dry_run, verbose=verbose,
+        )
+    except auth_mod.AuthError as e:
+        raise click.ClickException(str(e))
+    click.echo(auth_mod.format_migrate_result(result))
 
 
 @auth_credentials.command('set')
@@ -1365,13 +1429,12 @@ def auth_credentials_uninstall(remote, verbose):
 def auth_credentials_set(repo_name, input_file):
     """Create or update the secret for REPO_NAME.
 
-    Content must be raw DVC INI format, e.g.:
+    Content must be raw AWS-INI format, e.g.:
 
     \b
-      ['remote "cloud"']
-          access_key_id = AKIAXXXXXXXX
-          secret_access_key = xxxxx
-          endpointurl = https://xxx.r2.cloudflarestorage.com
+      [<repo_name>]
+      aws_access_key_id = AKIAXXXXXXXX
+      aws_secret_access_key = xxxxx
 
     \b
       dt auth credentials set neochemo --file creds.ini
