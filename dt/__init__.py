@@ -1,3 +1,3 @@
 """DVC Tools - Convenient tools for working with DVC in HPC environments."""
 
-__version__ = "0.5.7"
+__version__ = "0.5.8"
