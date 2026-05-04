@@ -40,56 +40,6 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Debug GCP identity
-        run: |
-          echo "::group::gcloud auth list"
-          gcloud auth list
-          echo "::endgroup::"
-          echo "::group::gcloud config list"
-          gcloud config list
-          echo "::endgroup::"
-          echo "::group::active account email"
-          gcloud config get-value account
-          echo "::endgroup::"
-          echo "::group::IAP tunnel access check (instance IAM)"
-          gcloud compute instances get-iam-policy absconda-builder \
-            --zone=australia-southeast1-a --project="$GCP_PROJECT" \
-            --format=json 2>&1 || true
-          echo "::endgroup::"
-          echo "::group::Project IAM bindings for active SA"
-          ACTIVE_SA=$(gcloud config get-value account)
-          gcloud projects get-iam-policy "$GCP_PROJECT" \
-            --flatten='bindings[].members' \
-            --filter="bindings.members:${ACTIVE_SA}" \
-            --format='value(bindings.role)' 2>&1 || true
-          echo "::endgroup::"
-          echo "::group::Direct IAP tunnel probe (active SA)"
-          # Start the instance first (idempotent) and then try to open the tunnel
-          # for 5 seconds to surface the real error before absconda runs.
-          gcloud compute instances start absconda-builder \
-            --zone=australia-southeast1-a --project="$GCP_PROJECT" 2>&1 | tail -5 || true
-          timeout 15s gcloud compute start-iap-tunnel absconda-builder 22 \
-            --local-host-port=localhost:2222 \
-            --zone=australia-southeast1-a --project="$GCP_PROJECT" \
-            --verbosity=info 2>&1 | tail -30 || true
-          echo "::endgroup::"
-          echo "::group::Attached SA tunnel probe (grunner-sa)"
-          # Temporarily switch to the runner VM's attached SA to see if IT can tunnel.
-          ACTIVATE_SA=$(gcloud auth list --format='value(account)' --filter='-account:***' | head -1)
-          if [[ -n "$ACTIVATE_SA" ]]; then
-            echo "Activating $ACTIVATE_SA"
-            gcloud config set account "$ACTIVATE_SA" 2>&1 || true
-            timeout 15s gcloud compute start-iap-tunnel absconda-builder 22 \
-              --local-host-port=localhost:2223 \
-              --zone=australia-southeast1-a --project="$GCP_PROJECT" \
-              --verbosity=info 2>&1 | tail -30 || true
-            # Switch back
-            gcloud config set account "$(gcloud auth list --format='value(account)' --filter='-account:'"$ACTIVATE_SA" | head -1)" 2>&1 || true
-          else
-            echo "(no second account to test)"
-          fi
-          echo "::endgroup::"
-
       - name: Resolve OS Login username
         run: |
           GCP_OS_LOGIN_USER=$(gcloud compute os-login describe-profile \
@@ -138,13 +88,31 @@ jobs:
 
       - name: Publish image via remote builder
         run: |
+          mkdir -p build-logs
+          LOG_FILE="build-logs/publish-${IMAGE_TAG}.log"
+          echo "PUBLISH_LOG=$LOG_FILE" >> "$GITHUB_ENV"
+          set -o pipefail
+          echo "::group::absconda publish output (full log uploaded as artifact)"
           absconda publish \
             --dockerfile docker/Dockerfile \
             --repository "$IMAGE_REPO" \
             --tag "$IMAGE_TAG" \
             --env-name dt \
             --remote-builder "$REMOTE_BUILDER_NAME" \
-            --remote-off
+            --remote-off 2>&1 | tee "$LOG_FILE"
+          status=${PIPESTATUS[0]}
+          echo "::endgroup::"
+          echo "absconda publish exit status: $status"
+          exit "$status"
+
+      - name: Upload publish log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-log-${{ steps.version.outputs.image_tag }}
+          path: build-logs/
+          retention-days: 30
+          if-no-files-found: warn
 
   deploy:
     needs: publish
