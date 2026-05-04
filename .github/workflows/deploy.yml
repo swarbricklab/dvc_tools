@@ -40,6 +40,24 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      - name: Debug GCP identity
+        run: |
+          echo "::group::gcloud auth list"
+          gcloud auth list
+          echo "::endgroup::"
+          echo "::group::gcloud config list"
+          gcloud config list
+          echo "::endgroup::"
+          echo "::group::active account email"
+          gcloud config get-value account
+          echo "::endgroup::"
+          echo "::group::IAP tunnel access check"
+          # Check if the federated identity has the role needed to open an IAP tunnel
+          gcloud compute instances get-iam-policy absconda-builder \
+            --zone=australia-southeast1-a --project="$GCP_PROJECT" \
+            --format=json 2>&1 || true
+          echo "::endgroup::"
+
       - name: Resolve OS Login username
         run: |
           GCP_OS_LOGIN_USER=$(gcloud compute os-login describe-profile \
