@@ -110,6 +110,30 @@ jobs:
           echo "Builder SSH did not become ready in time." >&2
           exit 1
 
+      - name: Pin git deps to commit SHAs
+        # The conda env spec installs dvc_tools and qxub from `git+https://...`
+        # URLs without a ref. pip's wheel cache keys on URL only, so on a warm
+        # builder every subsequent build would silently reuse whichever SHA was
+        # built first (we hit this when 0.5.9 still reported `dt --version`
+        # 0.5.3). Pin both URLs to a concrete SHA so each build invalidates the
+        # cache and the image contains the same code as the workflow run.
+        id: pin
+        run: |
+          DVC_TOOLS_SHA="${GITHUB_SHA}"
+          QXUB_SHA=$(gh api repos/swarbricklab/qxub/commits/main --jq .sha)
+          echo "dvc_tools SHA: $DVC_TOOLS_SHA"
+          echo "qxub SHA:      $QXUB_SHA"
+          PINNED=conda/dt.pinned.yaml
+          sed -e "s|git+https://github.com/swarbricklab/dvc_tools.git|&@${DVC_TOOLS_SHA}|" \
+              -e "s|git+https://github.com/swarbricklab/qxub.git|&@${QXUB_SHA}|" \
+              conda/dt.yaml > "$PINNED"
+          echo "::group::Pinned env spec"
+          cat "$PINNED"
+          echo "::endgroup::"
+          echo "PINNED_ENV=$PINNED" >> "$GITHUB_ENV"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Publish image via remote builder
         run: |
           mkdir -p build-logs
@@ -118,7 +142,7 @@ jobs:
           set -o pipefail
           echo "::group::absconda publish output (full log uploaded as artifact)"
           absconda publish \
-            --file conda/dt.yaml \
+            --file "$PINNED_ENV" \
             --repository "$IMAGE_REPO" \
             --tag "$IMAGE_TAG" \
             --env-name dt \
@@ -189,6 +213,6 @@ jobs:
             absconda deploy "$IMAGE_REF" \
               --commands dt,dvc,gh,aws,daff,qxub,qxi,qxtat,qxet,qx \
               --env-dir /opt/conda/envs/dt \
-              --shims singularity
+              --shims singularity,pbs
 
           rm -f "$GHCR_CRED_FILE"
