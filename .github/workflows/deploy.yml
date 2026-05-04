@@ -1,0 +1,150 @@
+name: Deploy to NCI
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE_REPO: ghcr.io/swarbricklab/dt
+  REMOTE_BUILDER_NAME: gcp-builder
+  REMOTE_BUILDER_HOST: absconda-builder
+  GCP_REGION: australia-southeast1
+  GCP_ZONE: australia-southeast1-a
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.merged == true
+    runs-on: [self-hosted, qxub-runner]
+    permissions:
+      contents: read
+      id-token: write
+
+    outputs:
+      image_tag: ${{ steps.version.outputs.image_tag }}
+
+    env:
+      GCP_PROJECT: ${{ secrets.PROJECT_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resolve OS Login username
+        run: |
+          GCP_OS_LOGIN_USER=$(gcloud compute os-login describe-profile \
+            --format='value(posixAccounts[0].username)')
+          echo "GCP_OS_LOGIN_USER=$GCP_OS_LOGIN_USER" >> "$GITHUB_ENV"
+
+      - name: Install absconda
+        run: pip install --user git+https://github.com/swarbricklab/absconda.git
+
+      - name: Configure absconda
+        run: |
+          absconda config set registry ghcr.io
+          absconda config set organization swarbricklab
+          absconda config set gcp_project "$GCP_PROJECT"
+          absconda config set gcp_region "$GCP_REGION"
+          absconda config set gcp_zone "$GCP_ZONE"
+          absconda config set default_remote_builder "$REMOTE_BUILDER_NAME"
+
+          BUILDER="remote_builders.${REMOTE_BUILDER_NAME}"
+          absconda config set "${BUILDER}.host" "$REMOTE_BUILDER_HOST"
+          absconda config set "${BUILDER}.workspace" /var/lib/absconda
+          absconda config set "${BUILDER}.ssh_key" "$HOME/.ssh/google_compute_engine"
+          absconda config set "${BUILDER}.ssh_port" 22
+          absconda config set "${BUILDER}.project" "$GCP_PROJECT"
+          absconda config set "${BUILDER}.zone" "$GCP_ZONE"
+          absconda config set "${BUILDER}.user" "$GCP_OS_LOGIN_USER"
+          absconda config set "${BUILDER}.ssh_options" \
+            "[\"-o\",\"CheckHostIP=no\",\"-o\",\"StrictHostKeyChecking=accept-new\",\"-o\",\"ProxyCommand=gcloud compute start-iap-tunnel %h %p --listen-on-stdin --zone=${GCP_ZONE} --project=${GCP_PROJECT} --verbosity=warning\",\"-o\",\"ProxyUseFdpass=no\"]"
+          absconda config set "${BUILDER}.start_command" \
+            "[\"gcloud\",\"compute\",\"instances\",\"start\",\"${REMOTE_BUILDER_HOST}\",\"--zone=${GCP_ZONE}\",\"--project=${GCP_PROJECT}\"]"
+          absconda config set "${BUILDER}.stop_command" \
+            "[\"gcloud\",\"compute\",\"instances\",\"stop\",\"${REMOTE_BUILDER_HOST}\",\"--zone=${GCP_ZONE}\",\"--project=${GCP_PROJECT}\"]"
+          absconda config set "${BUILDER}.health_command" \
+            "[\"gcloud\",\"compute\",\"instances\",\"describe\",\"${REMOTE_BUILDER_HOST}\",\"--zone=${GCP_ZONE}\",\"--project=${GCP_PROJECT}\",\"--format=value(status)\"]"
+
+          absconda config list
+
+      - name: Resolve image tag from project version
+        id: version
+        run: |
+          VERSION=$(grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
+          echo "IMAGE_TAG=$VERSION" >> "$GITHUB_ENV"
+          echo "image_tag=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish image via remote builder
+        run: |
+          absconda publish \
+            --dockerfile env/Dockerfile \
+            --repository "$IMAGE_REPO" \
+            --tag "$IMAGE_TAG" \
+            --env-name dt \
+            --remote-builder "$REMOTE_BUILDER_NAME" \
+            --remote-off
+
+  deploy:
+    needs: publish
+    runs-on: [self-hosted, qxub-runner]
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      GCP_PROJECT: ${{ secrets.PROJECT_ID }}
+      IMAGE_TAG: ${{ needs.publish.outputs.image_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resolve OS Login username
+        run: |
+          GCP_OS_LOGIN_USER=$(gcloud compute os-login describe-profile \
+            --format='value(posixAccounts[0].username)')
+          echo "GCP_OS_LOGIN_USER=$GCP_OS_LOGIN_USER" >> "$GITHUB_ENV"
+
+      - name: Upgrade qxub to latest
+        run: /opt/qxub-venv/bin/pip install --force-reinstall --no-deps git+https://github.com/swarbricklab/qxub.git
+
+      - name: Fetch GHCR token from Secret Manager
+        run: |
+          GHCR_TOKEN=$(gcloud secrets versions access latest \
+            --secret=absconda-github-token \
+            --project="$GCP_PROJECT")
+          CRED_FILE=$(mktemp)
+          echo "$GHCR_TOKEN" > "$CRED_FILE"
+          chmod 600 "$CRED_FILE"
+          echo "GHCR_CRED_FILE=$CRED_FILE" >> "$GITHUB_ENV"
+
+      - name: Deploy to NCI
+        run: |
+          IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
+
+          qxub exec -v --mod absconda --mem 4GB --resources jobfs=4GB --internet \
+            --vars SINGULARITY_DOCKER_USERNAME=swarbricklab,SINGULARITY_DOCKER_PASSWORD=$(cat $GHCR_CRED_FILE) \
+            -- \
+            absconda deploy "$IMAGE_REF" \
+              --commands dt,dvc,gh,aws,daff,qxub \
+              --env-dir /opt/conda/envs/dt \
+              --shims singularity
+
+          rm -f "$GHCR_CRED_FILE"
