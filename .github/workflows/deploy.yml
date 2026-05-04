@@ -51,7 +51,6 @@ jobs:
           python3 -m pip install --user git+https://github.com/swarbricklab/absconda.git
           USER_BIN=$(python3 -c 'import site, os; print(os.path.join(site.getuserbase(), "bin"))')
           echo "$USER_BIN" >> "$GITHUB_PATH"
-
       - name: Configure absconda
         run: |
           absconda config set registry ghcr.io
