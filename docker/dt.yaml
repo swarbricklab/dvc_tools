@@ -1,0 +1,24 @@
+name: dt
+
+channels:
+    - conda-forge
+    - default
+
+dependencies:
+    - dvc
+    - dvc-ssh
+    - dvc-gs
+    - dvc-s3
+    - dvc-gdrive
+    - pandas
+    - yq
+    - parallel
+    - gh
+    - google-cloud-secret-manager
+    - awscli
+    - pip
+    - pip:
+        - daff
+        - git+https://github.com/swarbricklab/dvc_tools.git
+        - git+https://github.com/swarbricklab/qxub.git
+
