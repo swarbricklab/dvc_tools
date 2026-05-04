@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dvc-tools"
-version = "0.5.0"
+version = "0.5.1"
 description = "Convenient tools for working with DVC in HPC environments"
 readme = "README.md"
 requires-python = ">=3.8"
