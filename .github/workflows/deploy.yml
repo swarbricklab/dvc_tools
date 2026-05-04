@@ -88,13 +88,31 @@ jobs:
 
       - name: Publish image via remote builder
         run: |
+          mkdir -p build-logs
+          LOG_FILE="build-logs/publish-${IMAGE_TAG}.log"
+          echo "PUBLISH_LOG=$LOG_FILE" >> "$GITHUB_ENV"
+          set -o pipefail
+          echo "::group::absconda publish output (full log uploaded as artifact)"
           absconda publish \
-            --dockerfile docker/Dockerfile \
+            --file conda/dt.yaml \
             --repository "$IMAGE_REPO" \
             --tag "$IMAGE_TAG" \
             --env-name dt \
             --remote-builder "$REMOTE_BUILDER_NAME" \
-            --remote-off
+            --remote-off 2>&1 | tee "$LOG_FILE"
+          status=${PIPESTATUS[0]}
+          echo "::endgroup::"
+          echo "absconda publish exit status: $status"
+          exit "$status"
+
+      - name: Upload publish log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-log-${{ steps.version.outputs.image_tag }}
+          path: build-logs/
+          retention-days: 30
+          if-no-files-found: warn
 
   deploy:
     needs: publish
@@ -145,7 +163,7 @@ jobs:
             --vars SINGULARITY_DOCKER_USERNAME=swarbricklab,SINGULARITY_DOCKER_PASSWORD=$(cat $GHCR_CRED_FILE) \
             -- \
             absconda deploy "$IMAGE_REF" \
-              --commands dt,dvc,gh,aws,daff,qxub \
+              --commands dt,dvc,gh,aws,daff,qxub,qxi,qxtat,qxet,qx \
               --env-dir /opt/conda/envs/dt \
               --shims singularity
 
