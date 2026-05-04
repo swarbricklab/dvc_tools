@@ -30,6 +30,7 @@ These are non-obvious things we hit while bringing the pipeline up. Keep this li
 - **`absconda generate > Dockerfile` corrupts long lines on absconda < 0.2.6.** `Console.print` hard-wraps at the detected terminal width when stdout is redirected, snapping long `RUN` lines mid-shell. We sidestep this entirely by using `absconda publish --file conda/dt.yaml` (no Dockerfile is committed). (See [absconda#50](https://github.com/swarbricklab/absconda/pull/50).)
 - **`pip install --user` and PATH.** Self-hosted runners do not have `~/.local/bin` on `$PATH`. After `pip install --user`, append the user-base bin dir to `$GITHUB_PATH` explicitly.
 - **Publish log artifact.** The build is verbose (~1.5k lines). It is captured to `build-logs/publish-<version>.log`, wrapped in an Actions log group, and uploaded as a workflow artifact for 30 days — pull it from the run page when diagnosing build failures.
+- **pip wheel cache traps unpinned `git+https://` deps.** The conda env spec installs `dvc_tools` and `qxub` from git URLs. pip's wheel cache keys on URL only, so on a warm builder every subsequent build silently reuses whichever SHA was built first (we hit this when 0.5.9 still reported `dt --version` 0.5.3). The "Pin git deps to commit SHAs" step rewrites both URLs to include `@<sha>` before passing the spec to absconda — this both invalidates the cache and guarantees the image contains the same code as the workflow run.
 
 ## Open questions
 
