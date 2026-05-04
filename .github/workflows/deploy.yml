@@ -94,7 +94,7 @@ jobs:
           set -o pipefail
           echo "::group::absconda publish output (full log uploaded as artifact)"
           absconda publish \
-            --dockerfile docker/Dockerfile \
+            --file conda/dt.yaml \
             --repository "$IMAGE_REPO" \
             --tag "$IMAGE_TAG" \
             --env-name dt \
@@ -163,7 +163,7 @@ jobs:
             --vars SINGULARITY_DOCKER_USERNAME=swarbricklab,SINGULARITY_DOCKER_PASSWORD=$(cat $GHCR_CRED_FILE) \
             -- \
             absconda deploy "$IMAGE_REF" \
-              --commands dt,dvc,gh,aws,daff,qxub \
+              --commands dt,dvc,gh,aws,daff,qxub,qxi,qxtat,qxet,qx \
               --env-dir /opt/conda/envs/dt \
               --shims singularity
 
