@@ -86,6 +86,30 @@ jobs:
           echo "IMAGE_TAG=$VERSION" >> "$GITHUB_ENV"
           echo "image_tag=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Pre-warm builder SSH
+        # Mitigate the IAP/sshd cold-start race: 'gcloud compute instances start'
+        # returns when the GCE control plane sees RUNNING, but sshd inside the
+        # guest may not be listening yet, so absconda's first remote command
+        # (mkdir on the workspace) fails with ssh exit 255. Start the instance
+        # and poll SSH until it answers.
+        run: |
+          gcloud compute instances start "$REMOTE_BUILDER_HOST" \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" >/dev/null
+          for attempt in $(seq 1 30); do
+            if gcloud compute ssh "$REMOTE_BUILDER_HOST" \
+                 --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+                 --tunnel-through-iap --quiet \
+                 --ssh-flag="-o ConnectTimeout=10" \
+                 --command="true" >/dev/null 2>&1; then
+              echo "Builder SSH ready after $attempt attempt(s)."
+              exit 0
+            fi
+            echo "Attempt $attempt: SSH not ready yet, retrying in 5s..."
+            sleep 5
+          done
+          echo "Builder SSH did not become ready in time." >&2
+          exit 1
+
       - name: Publish image via remote builder
         run: |
           mkdir -p build-logs
