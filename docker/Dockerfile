@@ -38,8 +38,7 @@ RUN micromamba install -y -n base --channel conda-forge --channel default conda-
     mkdir -p /opt/conda/envs/dt && \
     tar -xzf /tmp/absconda-env.tar.gz -C /opt/conda/envs/dt && \
     rm /tmp/absconda-env.tar.gz && \
-    if [ -x "/opt/conda/envs/dt/bin/conda-unpack" ]; then micromamba run -n base python /opt/conda/envs/dt/bin/conda-unpack && rm -rf
-/opt/conda/envs/dt/conda-meta/history; fi
+    if [ -x "/opt/conda/envs/dt/bin/conda-unpack" ]; then micromamba run -n base python /opt/conda/envs/dt/bin/conda-unpack && rm -rf /opt/conda/envs/dt/conda-meta/history; fi
 
 
 FROM debian:bookworm-slim AS runtime
