@@ -89,7 +89,7 @@ jobs:
       - name: Publish image via remote builder
         run: |
           absconda publish \
-            --dockerfile env/Dockerfile \
+            --dockerfile docker/Dockerfile \
             --repository "$IMAGE_REPO" \
             --tag "$IMAGE_TAG" \
             --env-name dt \
