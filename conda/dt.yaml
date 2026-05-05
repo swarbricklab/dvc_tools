@@ -16,6 +16,8 @@ dependencies:
     - gh
     - google-cloud-secret-manager
     - awscli
+    - git
+    - rsync
     - pip
     - pip:
         - daff
