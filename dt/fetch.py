@@ -1467,11 +1467,17 @@ def _run_repo_import_network_fetch(
         print(f"  Running: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        if verbose:
+            # Let DVC write its own progress to the terminal so the user
+            # can see what is happening (SSH clone, S3 download, etc.)
+            result = subprocess.run(cmd)
+            error_msg = "(see above)" if result.returncode != 0 else ""
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
         if result.returncode == 0:
             return (True, "Fetched via dvc update (network)")
         else:
-            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
             return (False, f"dvc update failed: {error_msg}")
     except (OSError, FileNotFoundError) as e:
         return (False, f"dvc update failed: {e}")
@@ -1492,15 +1498,15 @@ def _run_dvc_fetch(dvc_path: Path, verbose: bool = False) -> Tuple[bool, str]:
         print(f"  Running: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        if verbose:
+            result = subprocess.run(cmd)
+            error_msg = "(see above)" if result.returncode != 0 else ""
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
         if result.returncode == 0:
             return (True, "Fetched via dvc fetch (network)")
         else:
-            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
             return (False, f"dvc fetch failed: {error_msg}")
     except (OSError, FileNotFoundError) as e:
         return (False, f"dvc fetch failed: {e}")
