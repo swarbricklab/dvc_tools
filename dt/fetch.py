@@ -17,6 +17,7 @@ This is the "dt" equivalent of `dvc fetch`, but works with local caches
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
@@ -684,9 +685,16 @@ def fetch_from_plan(
     if plan.no_source:
         if network:
             if verbose:
-                print(f"\nFalling back to dvc fetch for {len(plan.no_source)} stages...")
+                print(f"\nNetwork fetch for {len(plan.no_source)} stages without local source...")
             for stage in plan.no_source:
-                success, msg = _run_dvc_fetch(stage.addressing, verbose)
+                if stage.is_repo_import:
+                    # Use dvc update --rev <rev_lock> so we go to the source
+                    # repo rather than the current project's remote.  This
+                    # handles git-tracked sources and avoids auth errors from
+                    # S3 remotes that don't hold imported data.
+                    success, msg = _run_repo_import_network_fetch(stage, verbose)
+                else:
+                    success, msg = _run_dvc_fetch(stage.addressing, verbose)
                 results.append((stage.addressing, success, msg))
         else:
             # Show detailed errors for stages that look like they should be local
@@ -789,6 +797,10 @@ def fetch_from_plan(
     if verbose:
         print(f"\nTotal hashes to process: {len(all_hashes)}")
     
+    # Repo imports whose files weren't found in any local source cache; will
+    # be retried via ``dvc update --rev <rev_lock>`` when --network is set.
+    network_fallback_stages: set = set()
+
     # Fetch from each source
     for source_path, group in plan.sources.items():
         if force:
@@ -833,8 +845,12 @@ def fetch_from_plan(
                     # Check source exists first so we can report why it failed
                     source_file = cache_ops.find_source_file(h, Path(source_path))
                     if source_file is None:
-                        failed += 1
-                        failed_hashes.append((h, "not found in source"))
+                        stage_name = group.get_stage_for_hash(h)
+                        if network and stage_name and stage_name.endswith('.dvc'):
+                            network_fallback_stages.add(stage_name)
+                        else:
+                            failed += 1
+                            failed_hashes.append((h, "not found in source"))
                         continue
                     
                     # Use v3 layout for v3 files, v2 layout for v2 files
@@ -861,8 +877,12 @@ def fetch_from_plan(
             for h in sorted(hashes_to_try):
                 source_file = cache_ops.find_source_file(h, Path(source_path))
                 if source_file is None:
-                    failed += 1
-                    failed_hashes.append((h, "not found in source"))
+                    stage_name = group.get_stage_for_hash(h)
+                    if network and stage_name and stage_name.endswith('.dvc'):
+                        network_fallback_stages.add(stage_name)
+                    else:
+                        failed += 1
+                        failed_hashes.append((h, "not found in source"))
                     continue
                 
                 # Use v3 layout for v3 files, v2 layout for v2 files
@@ -977,6 +997,19 @@ def fetch_from_plan(
         )
         results.extend(recovery_results)
     
+    # Network fallback: repo imports whose files weren't in any local source cache
+    if network_fallback_stages:
+        if verbose:
+            print(f"\nNetwork fallback for {len(network_fallback_stages)} repo import(s) not found in local cache...")
+        for stage_name in sorted(network_fallback_stages):
+            mock_stage = SimpleNamespace(path=stage_name, addressing=stage_name)
+            success, msg = _run_repo_import_network_fetch(mock_stage, verbose)
+            if success:
+                total_fetched += 1
+            else:
+                total_failed += 1
+            results.append((stage_name, success, msg))
+
     # Report v2 files (placed in v2 location)
     if plan.v2_hashes and verbose:
         print(f"\nNote: {len(plan.v2_hashes)} files from v2 format .dvc files placed in legacy cache location.")
@@ -1422,30 +1455,84 @@ def _fetch_url_import_stage(
     return (stage_name, result[0], result[1])
 
 
+def _run_repo_import_network_fetch(
+    stage: Any,
+    verbose: bool = False,
+) -> Tuple[bool, str]:
+    """Network-fetch a repo import stage via ``dvc update --rev <rev_lock>``.
+
+    For repo imports without a locally-accessible cache, use ``dvc update``
+    to re-import from the source repository at the locked revision.  This
+    handles both DVC-tracked and git-tracked source files and avoids touching
+    the current project's remote (which may not hold the imported data and
+    whose auth failures would cause confusing errors).
+
+    If no ``rev_lock`` is recorded in the .dvc file (unusual) the call falls
+    back to plain ``dvc fetch`` so we do not inadvertently update to HEAD.
+
+    Args:
+        stage: DVC Stage object (must be a repo import).
+        verbose: Print progress messages.
+
+    Returns:
+        Tuple of (success, message).
+    """
+    stage_path = Path(stage.path) if hasattr(stage, 'path') else None
+    if not stage_path:
+        return _run_dvc_fetch(stage.addressing, verbose)
+
+    import_info = utils.get_import_info(stage_path)
+    rev_lock = import_info.get('rev') if import_info else None
+
+    if not rev_lock:
+        # No locked revision — fall back to dvc fetch rather than updating HEAD.
+        return _run_dvc_fetch(stage.addressing, verbose)
+
+    cmd = ['dvc', 'update', '--rev', rev_lock, str(stage_path)]
+    if verbose:
+        print(f"  Running: {' '.join(cmd)}")
+
+    try:
+        if verbose:
+            # Let DVC write its own progress to the terminal so the user
+            # can see what is happening (SSH clone, S3 download, etc.)
+            result = subprocess.run(cmd)
+            error_msg = "(see above)" if result.returncode != 0 else ""
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+        if result.returncode == 0:
+            return (True, "Fetched via dvc update (network)")
+        else:
+            return (False, f"dvc update failed: {error_msg}")
+    except (OSError, FileNotFoundError) as e:
+        return (False, f"dvc update failed: {e}")
+
+
 def _run_dvc_fetch(dvc_path: Path, verbose: bool = False) -> Tuple[bool, str]:
     """Run dvc fetch for a specific target.
-    
+
     Args:
         dvc_path: Path to the .dvc file.
         verbose: Print progress messages.
-        
+
     Returns:
         Tuple of (success, message).
     """
     cmd = ['dvc', 'fetch', str(dvc_path)]
     if verbose:
         print(f"  Running: {' '.join(cmd)}")
-    
+
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        if verbose:
+            result = subprocess.run(cmd)
+            error_msg = "(see above)" if result.returncode != 0 else ""
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
         if result.returncode == 0:
             return (True, "Fetched via dvc fetch (network)")
         else:
-            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
             return (False, f"dvc fetch failed: {error_msg}")
     except (OSError, FileNotFoundError) as e:
         return (False, f"dvc fetch failed: {e}")

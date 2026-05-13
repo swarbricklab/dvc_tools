@@ -92,81 +92,13 @@ class TestGetRepoId:
         assert result == "github.com/org/repo"
 
 
-class TestEnsureGitignore:
-    """Tests for ensure_gitignore function."""
-    
-    def test_adds_pattern(self, tmp_path, monkeypatch):
-        """Adds .dt/tmp/ to .gitignore."""
-        monkeypatch.chdir(tmp_path)
-        
-        result = tmp.ensure_gitignore()
-        
-        assert result is True
-        assert (tmp_path / '.gitignore').exists()
-        content = (tmp_path / '.gitignore').read_text()
-        assert '.dt/tmp/' in content
-    
-    def test_returns_false_for_existing_pattern(self, tmp_path, monkeypatch):
-        """Returns False if pattern already exists."""
-        monkeypatch.chdir(tmp_path)
-        
-        # Create .gitignore with pattern already
-        (tmp_path / '.gitignore').write_text('.dt/tmp/\n')
-        
-        result = tmp.ensure_gitignore()
-        
-        assert result is False
-
-
-class TestEnsureDvcignore:
-    """Tests for ensure_dvcignore function."""
-    
-    def test_adds_pattern(self, tmp_path, monkeypatch):
-        """Adds .dt/tmp/ to .dvcignore."""
-        monkeypatch.chdir(tmp_path)
-        
-        result = tmp.ensure_dvcignore()
-        
-        assert result is True
-        assert (tmp_path / '.dvcignore').exists()
-        content = (tmp_path / '.dvcignore').read_text()
-        assert '.dt/tmp/' in content
-    
-    def test_returns_false_for_existing_pattern(self, tmp_path, monkeypatch):
-        """Returns False if pattern already exists."""
-        monkeypatch.chdir(tmp_path)
-        
-        # Create .dvcignore with pattern already
-        (tmp_path / '.dvcignore').write_text('.dt/tmp/\n')
-        
-        result = tmp.ensure_dvcignore()
-        
-        assert result is False
-    
-    def test_appends_to_existing_content(self, tmp_path, monkeypatch):
-        """Appends pattern to existing .dvcignore content."""
-        monkeypatch.chdir(tmp_path)
-        
-        # Create .dvcignore with other content
-        (tmp_path / '.dvcignore').write_text('some/other/pattern\n')
-        
-        result = tmp.ensure_dvcignore()
-        
-        assert result is True
-        content = (tmp_path / '.dvcignore').read_text()
-        assert 'some/other/pattern' in content
-        assert '.dt/tmp/' in content
-
-
 class TestCloneRepo:
     """Tests for clone_repo function."""
     
     def test_creates_full_shallow_clone(self, tmp_path, monkeypatch):
         """Creates full shallow clone with correct git commands."""
         monkeypatch.chdir(tmp_path)
-        (tmp_path / '.gitignore').touch()
-        (tmp_path / '.dvcignore').touch()
-        
+
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stderr = ''

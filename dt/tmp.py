@@ -97,49 +97,6 @@ def get_repo_id(repo_spec: str, owner: Optional[str] = None) -> str:
     return safe.strip('-')
 
 
-def ensure_gitignore() -> bool:
-    """Ensure .dt/tmp is in .gitignore.
-    
-    Creates or updates .gitignore to include .dt/tmp/ pattern.
-    Note: The .dt/.gitignore already ignores /tmp/, but this adds
-    .dt/tmp/ to the root .gitignore for backward compatibility.
-    
-    Returns:
-        True if .gitignore was modified, False if already contains pattern.
-    """
-    return utils.update_gitignore(".dt/tmp/")
-
-
-def ensure_dvcignore() -> bool:
-    """Ensure .dt/tmp is in .dvcignore.
-    
-    Prevents DVC from scanning temp clones (which may contain their own
-    .dvc directories and tracked files).
-    
-    Returns:
-        True if .dvcignore was modified, False if already contains pattern.
-    """
-    dvcignore_path = Path.cwd() / ".dvcignore"
-    pattern = ".dt/tmp/"
-    pattern_normalized = pattern.rstrip('/')
-    
-    # Check if already present
-    if dvcignore_path.exists():
-        content = dvcignore_path.read_text()
-        for line in content.splitlines():
-            line_normalized = line.strip().rstrip('/')
-            if line_normalized == pattern_normalized:
-                return False
-    else:
-        content = ""
-    
-    # Append pattern
-    if content and not content.endswith('\n'):
-        content += '\n'
-    content += f"{pattern}\n"
-    
-    dvcignore_path.write_text(content)
-    return True
 
 
 def clone_repo(
@@ -177,9 +134,8 @@ def clone_repo(
     tmp_dir = get_tmp_dir()
     repo_path = tmp_dir / repo_id
     
-    # Ensure .dt/tmp is gitignored and dvcignored
-    ensure_gitignore()
-    ensure_dvcignore()
+    # Ensure .dt/.gitignore is up to date (covers /tmp/ and other entries)
+    utils.ensure_dt_gitignore()
     
     if repo_path.exists():
         if refresh:

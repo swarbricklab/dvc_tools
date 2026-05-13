@@ -892,35 +892,62 @@ class TestFetch:
         assert 'No local source' in message
 
     def test_import_stage_without_local_cache_uses_network(self, dvc_project):
-        """Import stage without local cache can use --network flag."""
+        """Repo import without local cache uses dvc update --rev via network."""
         from dt import doctor
         project, cache = dvc_project
-        
-        # Mock check_environment to return valid status
+
         mock_env = MagicMock()
         mock_env.in_git_repo = True
         mock_env.require_git_repo.return_value = None
-        
-        # Create a mock stage that is_repo_import
+
         mock_stage = MagicMock()
         mock_stage.is_repo_import = True
         mock_stage.is_import = False
         mock_stage.addressing = 'imported.csv.dvc'
         mock_stage.path = str(project / 'imported.csv.dvc')
         mock_stage.outs = [MagicMock(use_cache=True, hash_info=MagicMock(value='abc123'), changed_cache=MagicMock(return_value=True))]
-        
+
+        with patch.object(doctor, 'check_environment', return_value=mock_env), \
+             patch('dt.fetch.utils.check_dvc'), \
+             patch('dt.fetch.utils.collect_stages', return_value=[mock_stage]), \
+             patch('dt.fetch.utils.get_import_info', return_value={'url': 'git@github.com:org/repo.git', 'rev': 'abc123', 'path': 'data.csv'}), \
+             patch('dt.fetch._run_repo_import_network_fetch') as mock_update:
+
+            mock_update.return_value = (True, 'Fetched via dvc update (network)')
+
+            results = fetch.fetch(targets=['imported.csv.dvc'], network=True)
+
+        assert len(results) == 1
+        assert mock_update.called
+        target, success, message = results[0]
+        assert success is True
+
+    def test_import_stage_without_rev_lock_falls_back_to_dvc_fetch(self, dvc_project):
+        """Repo import without rev_lock in .dvc file falls back to dvc fetch."""
+        from dt import doctor
+        project, cache = dvc_project
+
+        mock_env = MagicMock()
+        mock_env.in_git_repo = True
+        mock_env.require_git_repo.return_value = None
+
+        mock_stage = MagicMock()
+        mock_stage.is_repo_import = True
+        mock_stage.is_import = False
+        mock_stage.addressing = 'imported.csv.dvc'
+        mock_stage.path = str(project / 'imported.csv.dvc')
+        mock_stage.outs = [MagicMock(use_cache=True, hash_info=MagicMock(value='abc123'))]
+
         with patch.object(doctor, 'check_environment', return_value=mock_env), \
              patch('dt.fetch.utils.check_dvc'), \
              patch('dt.fetch.utils.collect_stages', return_value=[mock_stage]), \
              patch('dt.fetch.utils.get_import_info', return_value=None), \
              patch('dt.fetch._run_dvc_fetch') as mock_dvc_fetch:
-            
-            # Simulate successful network fetch
-            mock_dvc_fetch.return_value = (True, 'Fetched via network')
-            
+
+            mock_dvc_fetch.return_value = (True, 'Fetched via dvc fetch (network)')
+
             results = fetch.fetch(targets=['imported.csv.dvc'], network=True)
-        
-        assert len(results) == 1
+
         assert mock_dvc_fetch.called
         target, success, message = results[0]
         assert success is True
@@ -1066,9 +1093,61 @@ class TestRunDvcFetch:
         assert 'Command not found' in message
 
 
+class TestRunRepoImportNetworkFetch:
+    """Tests for _run_repo_import_network_fetch function."""
+
+    def _make_stage(self, tmp_path, dvc_filename='imported.csv.dvc'):
+        stage = MagicMock()
+        stage.addressing = dvc_filename
+        stage.path = str(tmp_path / dvc_filename)
+        stage.is_repo_import = True
+        return stage
+
+    def test_uses_dvc_update_with_rev_lock(self, tmp_path):
+        """Uses dvc update --rev <rev_lock> when rev_lock is present."""
+        stage = self._make_stage(tmp_path)
+        import_info = {'url': 'git@github.com:org/repo.git', 'rev': 'deadbeef', 'path': 'data.csv'}
+
+        with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
+            success, message = fetch._run_repo_import_network_fetch(stage)
+
+        assert success is True
+        assert 'dvc update' in message
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:3] == ['dvc', 'update', '--rev']
+        assert 'deadbeef' in cmd
+
+    def test_falls_back_to_dvc_fetch_when_no_rev_lock(self, tmp_path):
+        """Falls back to _run_dvc_fetch when import info has no rev_lock."""
+        stage = self._make_stage(tmp_path)
+
+        with patch('dt.fetch.utils.get_import_info', return_value=None), \
+             patch('dt.fetch._run_dvc_fetch') as mock_fallback:
+            mock_fallback.return_value = (True, 'Fetched via dvc fetch (network)')
+            success, message = fetch._run_repo_import_network_fetch(stage)
+
+        assert mock_fallback.called
+        assert success is True
+
+    def test_propagates_dvc_update_failure(self, tmp_path):
+        """Failure in dvc update is reported."""
+        stage = self._make_stage(tmp_path)
+        import_info = {'url': 'git@github.com:org/repo.git', 'rev': 'deadbeef', 'path': 'data.csv'}
+
+        with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='Authentication failed')
+            success, message = fetch._run_repo_import_network_fetch(stage)
+
+        assert success is False
+        assert 'Authentication failed' in message
+
+
 class TestFetchUrlImport:
     """Tests for _fetch_url_import function."""
-    
+
     @pytest.fixture
     def dvc_project(self, tmp_path, monkeypatch):
         """Create a minimal DVC project with cache."""
