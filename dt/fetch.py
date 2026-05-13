@@ -17,6 +17,7 @@ This is the "dt" equivalent of `dvc fetch`, but works with local caches
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
@@ -796,6 +797,10 @@ def fetch_from_plan(
     if verbose:
         print(f"\nTotal hashes to process: {len(all_hashes)}")
     
+    # Repo imports whose files weren't found in any local source cache; will
+    # be retried via ``dvc update --rev <rev_lock>`` when --network is set.
+    network_fallback_stages: set = set()
+
     # Fetch from each source
     for source_path, group in plan.sources.items():
         if force:
@@ -840,8 +845,12 @@ def fetch_from_plan(
                     # Check source exists first so we can report why it failed
                     source_file = cache_ops.find_source_file(h, Path(source_path))
                     if source_file is None:
-                        failed += 1
-                        failed_hashes.append((h, "not found in source"))
+                        stage_name = group.get_stage_for_hash(h)
+                        if network and stage_name and stage_name.endswith('.dvc'):
+                            network_fallback_stages.add(stage_name)
+                        else:
+                            failed += 1
+                            failed_hashes.append((h, "not found in source"))
                         continue
                     
                     # Use v3 layout for v3 files, v2 layout for v2 files
@@ -868,8 +877,12 @@ def fetch_from_plan(
             for h in sorted(hashes_to_try):
                 source_file = cache_ops.find_source_file(h, Path(source_path))
                 if source_file is None:
-                    failed += 1
-                    failed_hashes.append((h, "not found in source"))
+                    stage_name = group.get_stage_for_hash(h)
+                    if network and stage_name and stage_name.endswith('.dvc'):
+                        network_fallback_stages.add(stage_name)
+                    else:
+                        failed += 1
+                        failed_hashes.append((h, "not found in source"))
                     continue
                 
                 # Use v3 layout for v3 files, v2 layout for v2 files
@@ -984,6 +997,19 @@ def fetch_from_plan(
         )
         results.extend(recovery_results)
     
+    # Network fallback: repo imports whose files weren't in any local source cache
+    if network_fallback_stages:
+        if verbose:
+            print(f"\nNetwork fallback for {len(network_fallback_stages)} repo import(s) not found in local cache...")
+        for stage_name in sorted(network_fallback_stages):
+            mock_stage = SimpleNamespace(path=stage_name, addressing=stage_name)
+            success, msg = _run_repo_import_network_fetch(mock_stage, verbose)
+            if success:
+                total_fetched += 1
+            else:
+                total_failed += 1
+            results.append((stage_name, success, msg))
+
     # Report v2 files (placed in v2 location)
     if plan.v2_hashes and verbose:
         print(f"\nNote: {len(plan.v2_hashes)} files from v2 format .dvc files placed in legacy cache location.")
