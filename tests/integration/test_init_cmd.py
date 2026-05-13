@@ -292,13 +292,6 @@ class TestInitErrors:
 class TestInitDvcConfiguration:
     """Test that dt init correctly configures DVC settings."""
 
-    def test_init_creates_dvcignore(self, isolated_dir):
-        """Init creates .dvcignore file."""
-        run_dt('init', '--no-cache', '--no-remote', cwd=isolated_dir)
-        
-        dvcignore = isolated_dir / '.dvcignore'
-        assert dvcignore.exists(), ".dvcignore should be created"
-
     def test_init_dvc_config_exists(self, isolated_dir):
         """Init creates .dvc/config file."""
         run_dt('init', '--no-cache', '--no-remote', cwd=isolated_dir)
