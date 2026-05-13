@@ -130,7 +130,7 @@ def init_dvc(repo_path: Path, verbose: bool = True) -> bool:
     
     if verbose:
         print("\nDVC initialized. Commit the changes with:")
-        print('  git add .dvc .dvcignore && git commit -m "dvc: init"')
+        print('  git add .dvc && git commit -m "dvc: init"')
     
     return True
 
