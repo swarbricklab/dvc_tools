@@ -14,11 +14,14 @@ This is the "dt" equivalent of `dvc fetch`, but works with local caches
 (other projects' remotes that are accessible on the same filesystem).
 """
 
+import hashlib
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 
 import click
 
@@ -1003,7 +1006,7 @@ def fetch_from_plan(
             print(f"\nNetwork fallback for {len(network_fallback_stages)} repo import(s) not found in local cache...")
         for stage_name in sorted(network_fallback_stages):
             mock_stage = SimpleNamespace(path=stage_name, addressing=stage_name)
-            success, msg = _run_repo_import_network_fetch(mock_stage, verbose)
+            success, msg = _run_repo_import_network_fetch(mock_stage, verbose, cache_base=cache_base)
             if success:
                 total_fetched += 1
             else:
@@ -1458,25 +1461,34 @@ def _fetch_url_import_stage(
 def _run_repo_import_network_fetch(
     stage: Any,
     verbose: bool = False,
+    cache_base: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    """Network-fetch a repo import stage via ``dvc update --rev <rev_lock>``.
+    """Network-fetch a repo import stage.
 
-    For repo imports without a locally-accessible cache, use ``dvc update``
-    to re-import from the source repository at the locked revision.  This
-    handles both DVC-tracked and git-tracked source files and avoids touching
-    the current project's remote (which may not hold the imported data and
-    whose auth failures would cause confusing errors).
+    Tries to read the file directly from the ``.dt/tmp/clones/`` clone via
+    ``git show <rev_lock>:<path>`` and write it to the DVC cache.  This avoids
+    calling ``dvc update``, which rewrites the ``.dvc`` file as a side-effect
+    and can trigger false "pipeline is stale" failures in CI.
+
+    Falls back to ``dvc update --rev <rev_lock>`` when the file is not
+    git-tracked in the source repo (i.e. it lives in that repo's own DVC
+    remote and therefore isn't accessible via ``git show``).
 
     If no ``rev_lock`` is recorded in the .dvc file (unusual) the call falls
     back to plain ``dvc fetch`` so we do not inadvertently update to HEAD.
 
     Args:
-        stage: DVC Stage object (must be a repo import).
+        stage: DVC Stage object (must be a repo import), or a SimpleNamespace
+            with a ``path`` attribute holding the ``.dvc`` file path string.
         verbose: Print progress messages.
+        cache_base: Optional path to the DVC cache root.  When omitted the
+            primary DVC cache is resolved automatically.
 
     Returns:
         Tuple of (success, message).
     """
+    from . import tmp as tmp_mod
+
     stage_path = Path(stage.path) if hasattr(stage, 'path') else None
     if not stage_path:
         return _run_dvc_fetch(stage.addressing, verbose)
@@ -1488,14 +1500,69 @@ def _run_repo_import_network_fetch(
         # No locked revision — fall back to dvc fetch rather than updating HEAD.
         return _run_dvc_fetch(stage.addressing, verbose)
 
+    url = import_info.get('url') if import_info else None
+    source_path = import_info.get('path') if import_info else None
+
+    # --- Attempt 1: read file from tmp clone via git show (no .dvc side-effects) ---
+    if url and source_path:
+        try:
+            # Read expected md5 from the .dvc file's outs section
+            dvc_data = yaml.safe_load(stage_path.read_text())
+            outs = dvc_data.get('outs', [])
+            expected_md5 = outs[0].get('md5') if outs else None
+
+            if expected_md5:
+                clone_path = tmp_mod.clone_repo(url, refresh=False, verbose=False)
+
+                # Ensure the specific commit is available in the (possibly shallow) clone
+                subprocess.run(
+                    ['git', 'fetch', '--depth', '1', 'origin', rev_lock],
+                    cwd=clone_path,
+                    capture_output=True,
+                )
+
+                if verbose:
+                    print(f"  git show {rev_lock[:8]}:{source_path}")
+
+                show = subprocess.run(
+                    ['git', 'show', f'{rev_lock}:{source_path}'],
+                    cwd=clone_path,
+                    capture_output=True,
+                )
+
+                if show.returncode == 0:
+                    # Verify the content matches the expected hash
+                    actual_md5 = hashlib.md5(show.stdout).hexdigest()
+                    if actual_md5 != expected_md5:
+                        return (False, f"MD5 mismatch: expected {expected_md5}, got {actual_md5}")
+
+                    # Resolve cache base if not provided
+                    _cache_base = cache_base
+                    if not _cache_base:
+                        from dvc.repo import Repo
+                        _repo = Repo()
+                        _cache = _repo.cache.local
+                        _cache_base = str(_cache.path)
+                        if _cache_base.endswith('/files/md5') or _cache_base.endswith('\\files\\md5'):
+                            _cache_base = str(Path(_cache.path).parent.parent)
+
+                    dest = cache_ops.get_cache_file_path(expected_md5, Path(_cache_base), use_v3_layout=True)
+                    if not dest.exists():
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(show.stdout)
+                    return (True, "Fetched via git show (network)")
+                # else: file not in git at this rev — fall through to dvc update
+        except Exception as e:
+            if verbose:
+                print(f"  git show failed ({e}), falling back to dvc update")
+
+    # --- Attempt 2: dvc update (may rewrite the .dvc file) ---
     cmd = ['dvc', 'update', '--rev', rev_lock, str(stage_path)]
     if verbose:
         print(f"  Running: {' '.join(cmd)}")
 
     try:
         if verbose:
-            # Let DVC write its own progress to the terminal so the user
-            # can see what is happening (SSH clone, S3 download, etc.)
             result = subprocess.run(cmd)
             error_msg = "(see above)" if result.returncode != 0 else ""
         else:
