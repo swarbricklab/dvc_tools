@@ -77,6 +77,7 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
 @click.argument('repository', metavar='REPOSITORY')
 @click.argument('path', required=False)
 @click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--username', '-u', default=lambda: cfg.get_value('username'), help='Default SSH username for auth setup (default: username from config)')
 @click.option('--no-init', is_flag=True, help='Skip running dt init after cloning')
 @click.option('--no-submodules', is_flag=True, help='Skip cloning git submodules')
 @click.option('--cache-name', help='Override cache directory name')
@@ -87,7 +88,7 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
 @click.option('--no-hooks', is_flag=True, help='Skip installing git hooks and merge driver')
 @click.option('--rev', default=None, help='Check out a specific revision after cloning')
 @click.option('--overwrite', is_flag=True, help='Remove the target directory if it already exists')
-def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_name, shallow, do_pull, no_auth, no_hooks, rev, overwrite):
+def clone(repository, path, owner, username, no_init, no_submodules, cache_name, remote_name, shallow, do_pull, no_auth, no_hooks, rev, overwrite):
     """Clone an existing DVC project from GitHub.
 
     REPOSITORY can be either:
@@ -114,6 +115,7 @@ def clone(repository, path, owner, no_init, no_submodules, cache_name, remote_na
             repository=repository,
             path=path,
             owner=owner,
+            username=username,
             no_submodules=no_submodules,
             cache_name=cache_name,
             remote_name=remote_name,
