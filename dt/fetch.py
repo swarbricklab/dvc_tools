@@ -715,33 +715,29 @@ def fetch_from_plan(
                     results.append((stage.addressing, False, "No local source (use --network)"))
     
     # Determine destination cache early (needed for index lookups)
-    if verbose:
-        print("\nDetermining destination cache...")
     if destination:
         # Use explicit destination cache
         cache_base = str(destination)
-        if verbose:
-            print(f"  Using explicit destination cache: {cache_base}")
-        
+        print(f"Cache: {cache_base}")
+
         # For explicit destination, create a simple DB to check existing hashes
         dest_db = _create_source_cache_db(destination)
     else:
         # Use DVC's primary cache
         from dvc.repo import Repo
-        
+
         repo = Repo()
         cache = repo.cache.local
         if cache is None:
             raise FetchError("DVC cache not configured.")
-        
+
         # Get cache base path (strip files/md5 suffix if present)
         cache_base = str(cache.path)
         if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
             cache_base = str(Path(cache.path).parent.parent)
-        
-        if verbose:
-            print(f"  Using primary cache: {cache_base}")
-        
+
+        print(f"Cache: {cache_base}")
+
         dest_db = cache
     
     # Open cache index for fast existence checks
