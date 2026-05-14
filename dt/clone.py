@@ -73,6 +73,7 @@ def clone_repository(
     repository: str,
     path: Optional[str] = None,
     owner: Optional[str] = None,
+    username: Optional[str] = None,
     no_submodules: bool = False,
     cache_name: Optional[str] = None,
     remote_name: Optional[str] = None,
@@ -90,6 +91,7 @@ def clone_repository(
         repository: Repository URL or short name
         path: Target directory (defaults to repo name)
         owner: GitHub owner for short names
+        username: Default SSH username passed to auth setup
         no_submodules: Skip cloning submodules
         cache_name: Override cache directory name
         remote_name: Override remote directory name
@@ -235,7 +237,7 @@ def clone_repository(
         original_dir = os.getcwd()
         try:
             os.chdir(target_dir)
-            report = auth_setup_mod.auth_setup(verbose=verbose)
+            report = auth_setup_mod.auth_setup(username=username, verbose=verbose)
         except Exception as exc:
             report = None
             if verbose:
