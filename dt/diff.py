@@ -1165,9 +1165,10 @@ def content_diff(
             )
             if result.returncode != 0:
                 # Distinguish "file wasn't tracked at this rev" from a real error.
-                # Check whether the .dvc file existed in git at that revision.
+                # Use `dvc list` rather than checking for a .dvc file, since the
+                # file may be a pipeline output (dvc.yaml/dvc.lock) with no .dvc file.
                 probe = subprocess.run(
-                    ['git', 'cat-file', '-e', f'{rev}:{path}.dvc'],
+                    ['dvc', 'list', '--rev', rev, '.', path],
                     capture_output=True, cwd=repo_abs,
                 )
                 if probe.returncode != 0:
