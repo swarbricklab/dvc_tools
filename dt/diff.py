@@ -20,6 +20,12 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 from .errors import DiffError
 
 
+class _FileNotInRevisionError(Exception):
+    """Raised internally when a file was not tracked at a given git revision."""
+    def __init__(self, rev: str):
+        self.rev = rev
+
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -1158,13 +1164,25 @@ def content_diff(
                 capture_output=True, text=True, cwd=repo_abs,
             )
             if result.returncode != 0:
+                # Distinguish "file wasn't tracked at this rev" from a real error.
+                # Check whether the .dvc file existed in git at that revision.
+                probe = subprocess.run(
+                    ['git', 'cat-file', '-e', f'{rev}:{path}.dvc'],
+                    capture_output=True, cwd=repo_abs,
+                )
+                if probe.returncode != 0:
+                    raise _FileNotInRevisionError(rev)
                 raise DiffError(
                     f"Failed to get '{path}' at revision '{rev}': "
                     f"{result.stderr.strip() or result.stdout.strip()}"
                 )
 
         # Fetch old version
-        _fetch_revision(old_rev, old_file)
+        try:
+            _fetch_revision(old_rev, old_file)
+        except _FileNotInRevisionError:
+            new_rev_display = new_rev if new_rev else "workspace"
+            return f"Note: '{path}' did not exist at '{old_rev}' (new file as of {new_rev_display})"
 
         # Fetch new version
         if new_rev is None:
