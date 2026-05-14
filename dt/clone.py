@@ -203,14 +203,16 @@ def clone_repository(
             repo_path=target_dir,
             verbose=verbose,
         )
-        if local_path is None and verbose:
-            print("  Falling back to remote.root-based remote init")
         if local_path is None:
-            remote_mod.init_remote(
-                name=remote_name,
-                repo_path=target_dir,
-                verbose=verbose,
-            )
+            remotes = remote_mod.list_remotes(target_dir, project_only=True)
+            if not remotes:
+                if verbose:
+                    print("  Falling back to remote.root-based remote init")
+                remote_mod.init_remote(
+                    name=remote_name,
+                    repo_path=target_dir,
+                    verbose=verbose,
+                )
     except remote_mod.RemoteError as e:
         if verbose:
             print(f"Warning: Remote setup skipped: {e}")
