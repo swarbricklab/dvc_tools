@@ -624,10 +624,18 @@ def create_dvc_file(
     Returns:
         Path to the created .dvc file.
     """
-    content = {}
-    
+    is_import = bool(repo_url and repo_path)
+
+    content: Dict[str, Any] = {}
+
+    # Import .dvc files have a top-level md5 (stage hash) and frozen: true.
+    # Insert a placeholder for md5 so it serialises first; recompute below.
+    if is_import:
+        content['md5'] = ''
+        content['frozen'] = True
+
     # Add deps section for imports (source tracking)
-    if repo_url and repo_path:
+    if is_import:
         dep = {
             'path': repo_path,
             'repo': {
@@ -637,20 +645,24 @@ def create_dvc_file(
         if rev_lock:
             dep['repo']['rev_lock'] = rev_lock
         content['deps'] = [dep]
-    
-    # Build the output entry
-    out = {
+
+    # Build the output entry. Field order matches DVC's own output:
+    # md5, size, nfiles (dirs only), hash, path.
+    out: Dict[str, Any] = {
         'md5': md5,
         'size': size,
-        'hash': 'md5',
-        'path': name,
     }
-    
     if nfiles is not None:
         out['nfiles'] = nfiles
-    
+    out['hash'] = 'md5'
+    out['path'] = name
+
     content['outs'] = [out]
-    
+
+    # Compute the top-level stage md5 to match what DVC would write.
+    if is_import:
+        utils.recompute_dvc_md5(content)
+
     # Determine .dvc filename
     if name.endswith('/'):
         name = name.rstrip('/')
@@ -946,15 +958,23 @@ def import_data(
         if verbose:
             print(f"Populating cache for {dvc_file}...")
         
-        # Populate primary cache with links from source cache
+        # Populate primary cache with links from source cache.
+        # get_cache_dir() returns the .../files/md5 path; strip that suffix
+        # so populate_cache_file (which appends files/md5 for v3 layout)
+        # doesn't double-nest the path.
         primary_cache = utils.get_cache_dir()
         if primary_cache:
+            primary_cache_str = str(primary_cache)
+            if primary_cache_str.endswith(('/files/md5', '\\files\\md5')):
+                primary_cache_root = str(Path(primary_cache_str).parent.parent)
+            else:
+                primary_cache_root = primary_cache_str
             # First, add the .dir file or single file hash to primary cache
             if root_hash:
                 populate_cache_file(
                     md5=root_hash,
                     source_cache=cache_path,
-                    dest_cache=primary_cache,
+                    dest_cache=primary_cache_root,
                     verbose=verbose,
                 )
             
@@ -967,7 +987,7 @@ def import_data(
                     populate_cache_file(
                         md5=file_md5,
                         source_cache=cache_path,
-                        dest_cache=primary_cache,
+                        dest_cache=primary_cache_root,
                         verbose=verbose,
                     )
             
