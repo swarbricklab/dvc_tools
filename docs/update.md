@@ -44,7 +44,6 @@ This means running `dt update` without `--rev` will **not** accidentally update 
 | `--no-download` | Rebuild .dir file only, do not download data. |
 | `--dry-run`, `--status` | Show what would be updated without making changes. Useful for checking import status. |
 | `-v, --verbose` | Show detailed progress. |
-| `--no-index-sync` | Skip automatic index mirror sync. |
 
 ## Use Cases
 

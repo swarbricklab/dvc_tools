@@ -1,92 +1,131 @@
 # dt index
 
-Manage the DVC site cache index mirror for shared lookups.
+Manage the DVC per-repo SQLite index (`core.site_cache_dir`) and its
+optional shared archive mirror.
 
 ## Overview
 
-The site cache index allows DVC to quickly look up files across caches. This command syncs the local index (on `/tmp`) with a shared network mirror so all users benefit from the same index without rebuilding it.
+DVC keeps a per-repo SQLite index (object DB, link tracking, file-state
+cache) under `core.site_cache_dir`. By default DVC places this under
+`/var/tmp/dvc`, which is **local to each compute node**. On HPC clusters
+that means every node has to rebuild the index the first time it touches
+the workspace.
 
-### How it works
+`dt` provides two complementary mechanisms:
 
-1. **Local index**: DVC maintains a site cache index in a temporary location (typically `/tmp/.dvc/...`)
-2. **Mirror**: A shared network location stores the persistent copy
-3. **Sync**: `dt index pull` and `push` use rsync to sync between them
-4. **Auto-sync**: Commands like `dt pull`, `dt fetch`, and `dt add` automatically sync
+1. **Shared `site_cache_dir`** — point DVC's per-repo index at shared
+   storage (e.g. `/scratch/<project>/dvc/site/<repo>`) so every node
+   mounting the same workspace sees the same index live. This is the
+   recommended default and is configured automatically by
+   [`dt init`](init.md) / [`dt clone`](clone.md). See
+   [`dt index set`](#dt-index-set) to configure an existing repo.
+
+2. **Archive mirror** — `dt index push|pull` snapshot the live index to
+   a long-lived archive directory via the SQLite online-backup API and
+   merge entries back in with `INSERT OR IGNORE`. Use this when you
+   want a durable, off-node copy of the index (e.g. for backup, or to
+   seed a new shared `site_cache_dir`). Archiving is **explicit only** —
+   it is never triggered automatically by other `dt` commands.
+
+### How the mirror transport works
+
+Earlier versions of `dt` mirrored the index with rsync (and an
+experimental fsspec/cloud path). That was racy under concurrent writes
+because SQLite database files are not safe to copy byte-for-byte while
+DVC has them open.
+
+The current transport for each SQLite database file in the index is:
+
+1. `sqlite3.Connection.backup()` produces a **consistent snapshot** of
+   the source DB, even while DVC is writing to it.
+2. If no destination DB exists, the snapshot is atomically renamed into
+   place (`os.replace`).
+3. Otherwise the snapshot is `ATTACH`-ed to the destination and each
+   shared user table is merged with `INSERT OR IGNORE`. Tables that
+   only exist in the source are copied across verbatim.
+4. The snapshot file is then unlinked.
+
+This means `dt index push` and `dt index pull` are safe to run while
+DVC operations are in flight, do not require a global lock across
+nodes, and never lose existing rows in the destination.
+
+> **Cloud mirrors are no longer supported.** Use a shared local
+> filesystem (Lustre, NFS, GPFS, etc.) for `index.mirror_root`. The
+> `dvc-tools[gcs]` / `dvc-tools[s3]` extras have been removed.
 
 ## Configuration
 
-Configure the mirror location (typically in system or user config):
-
 ```bash
-# Set mirror root (required) - local path
-dt config set index.mirror_root /g/data/a56/dvc/mirror
+# Shared site_cache_dir root (recommended) — combined with the project name.
+# dt init / dt clone read this to set core.site_cache_dir per repo.
+dt config set site_cache.root /scratch/<project>/dvc/site
 
-# Or use a cloud storage location (GCS or S3)
-dt config set index.mirror_root gs://my-bucket/dvc-index-mirror
-dt config set index.mirror_root s3://my-bucket/dvc-index-mirror
+# Opt out of dt managing core.site_cache_dir entirely
+dt config set site_cache.enabled false
 
-# Optional settings
-dt config set index.lock_timeout 120      # Lock timeout in seconds (default: 120)
-dt config set index.retry_interval 5      # Initial retry interval (default: 5)
-dt config set index.auto_sync true        # Enable auto-sync (default: true)
+# Archive mirror root (only needed if you use dt index push|pull)
+dt config set index.mirror_root /g/data/<project>/dvc/index-archive
+
+# Lock tuning for the archive mirror
+dt config set index.lock_timeout 120      # seconds (default: 120)
+dt config set index.retry_interval 5      # seconds (default: 5)
 ```
 
-### Cloud storage support
+### Lustre / parallel filesystems
 
-The index mirror can be stored on cloud storage (Google Cloud Storage or Amazon S3) instead of a local/network path. This is useful when:
-
-- Your DVC remote is on cloud storage
-- You want to share the index across machines without shared network filesystem
-- You're using ephemeral compute instances
-
-**Requirements:**
-
-Install the appropriate cloud storage backend:
-
-```bash
-# For Google Cloud Storage (gs://)
-pip install dvc-tools[gcs]
-
-# For Amazon S3 (s3://)
-pip install dvc-tools[s3]
-
-# For both
-pip install dvc-tools[cloud]
-```
-
-**Authentication:**
-
-- **GCS**: Uses Application Default Credentials (ADC). Run `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS`.
-- **S3**: Uses standard AWS credentials (environment variables, `~/.aws/credentials`, or IAM roles).
-
-**Notes:**
-
-- Cloud mirrors use fsspec for file transfer instead of rsync
-- Locking is not supported for cloud mirrors (concurrent writes may conflict)
-- Size-based comparison is used to detect changed files (not checksums)
+SQLite's WAL journal mode is incompatible with most parallel file
+systems. `dt` forces `journal_mode=delete` on every DB it opens (live
+and mirror), so a shared `site_cache_dir` on Lustre / GPFS / NFS works
+correctly.
 
 ## Commands
 
-### dt index pull
+### dt index set
 
-Sync the shared index mirror to your local site cache index.
+Configure `core.site_cache_dir` for the current repo (writes
+`.dvc/config.local`). Does **not** copy any existing index — use
+`dt index migrate` for that.
 
 ```bash
-dt index pull           # Pull latest index
-dt index pull -v        # Verbose output (show paths and details)
+dt index set --root /scratch/<project>/dvc/site       # root + project name
+dt index set --path /scratch/<project>/dvc/site/myrepo
+dt index set --root /scratch/<project>/dvc/site --name otherrepo
+```
+
+### dt index migrate
+
+Move `core.site_cache_dir` to a new location, copying the current
+contents first, then switching DVC over. The old location is left
+in place (delete it manually if you wish).
+
+```bash
+dt index migrate --root /scratch/<project>/dvc/site
+dt index migrate --path /scratch/<project>/dvc/site/myrepo
+```
+
+### dt index pull
+
+Snapshot + merge each SQLite DB from the archive mirror into the live
+`site_cache_dir`. New DBs in the mirror are renamed into place; existing
+DBs are merged with `INSERT OR IGNORE`.
+
+```bash
+dt index pull           # Pull latest archive into the live index
+dt index pull -v        # Verbose: show each DB merged
 dt index pull -q        # Quiet (no output)
-dt index pull --dry     # Preview what would sync
+dt index pull --dry     # Show what would be pulled
 ```
 
 ### dt index push
 
-Sync your local site cache index to the shared mirror.
+The mirror counterpart of `dt index pull`: snapshot + merge from the
+live `site_cache_dir` into the archive mirror.
 
 ```bash
-dt index push           # Push index to mirror
-dt index push -v        # Verbose output (show paths and details)
-dt index push -q        # Quiet (no output)
-dt index push --dry     # Preview what would sync
+dt index push           # Push current index to the archive
+dt index push -v        # Verbose: show each DB merged
+dt index push -q        # Quiet
+dt index push --dry     # Show what would be pushed
 ```
 
 ### dt index build
@@ -117,88 +156,67 @@ Use `dt cache validate` separately if you need to verify checksum integrity. The
 
 ### dt index status
 
-Show index configuration and status.
+Show site_cache_dir and mirror configuration.
 
 ```bash
 dt index status
 # Output:
 # Index configuration:
-#   Local:  /tmp/.dvc/site_cache_dir/abc123...
-#   Mirror: /g/data/a56/dvc/mirror/repo/abc123...
+#   site_cache_dir: /scratch/a56/jr9959/dvc/site/my-repo
+#   Local index:    /scratch/a56/jr9959/dvc/site/my-repo/repo/<sha>/...
+#   Mirror:         /g/data/a56/dvc/index-archive/<sha>/...
 #
 # Status:
-#   Local exists:  yes
-#   Mirror exists: yes
-```
-
-## Automatic sync
-
-When `index.auto_sync` is enabled (default), these commands automatically sync the index:
-
-| Command | Before | After |
-|---------|--------|-------|
-| `dt pull` | pull | push |
-| `dt fetch` | pull | push |
-| `dt add` | - | push |
-
-This ensures:
-- Before pulling/fetching, you get the latest index entries from others
-- After modifying the cache, your changes are shared with others
-
-### Disabling auto-sync
-
-For any command, use `--no-index-sync` to skip automatic sync:
-
-```bash
-dt pull --no-index-sync          # Skip index sync
-dt fetch --no-index-sync         # Skip index sync
-dt add --no-index-sync data/     # Skip index sync
-```
-
-To disable auto-sync globally:
-
-```bash
-dt config set index.auto_sync false
+#   Local exists:   yes
+#   Mirror exists:  yes
 ```
 
 ## Locking
 
-The index uses file-based locks to prevent concurrent modifications:
+`dt index push|pull` use file-based locks to serialise archive
+operations across users:
 
-- `local.lock` - Prevents multiple local updates
-- `mirror.lock` - Prevents multiple mirror updates
+- `local.lock` — held during pull while writing into `site_cache_dir`.
+- `mirror.lock` — held during push while writing into the archive.
 
-If a lock is held, commands will wait and retry with exponential backoff up to the configured timeout.
-
-### Stale locks
-
-If a process was interrupted, locks may be left behind. The status command shows lock information:
-
-```bash
-dt index status
-# ...
-# Status:
-#   Mirror locked: yes (by johree, 3600s ago)
-```
-
-To remove a stale lock, delete the lock file manually:
+If a lock is held, commands wait and retry with exponential backoff up
+to `index.lock_timeout`. If a process was interrupted, locks may be
+left behind; `dt index status` shows lock owner and age. Remove a
+stale lock by deleting the lock file manually:
 
 ```bash
-rm /g/data/a56/dvc/mirror/repo/<hash>/mirror.lock
+rm /g/data/<project>/dvc/index-archive/<hash>/mirror.lock
 ```
+
+For the **live** `site_cache_dir` we rely on SQLite's own
+concurrency: snapshots are taken via the online-backup API, so DVC and
+`dt` may both be reading or writing while the snapshot proceeds.
 
 ## Failure handling
 
-Index sync failures are treated as warnings, not errors. Commands will continue even if sync fails, with a warning message.
+`dt index push|pull` treat per-DB failures as warnings — a single
+corrupt or in-use DB does not abort the whole sync. Commands also work
+fine when the mirror is unreachable; you just get a warning and
+nothing is archived/pulled.
 
-This ensures that:
-- Commands work offline or when mirror is unreachable
-- Temporary network issues don't block your work
-- You can always use `--no-index-sync` if needed
+## Migration from the old transport
+
+If you were previously using `index.mirror_root` on cloud storage
+(`gs://` or `s3://`), or relying on the implicit index sync that ran
+inside `dt add`/`dt fetch`/`dt pull`:
+
+- Move your mirror to a shared local filesystem and update
+  `index.mirror_root`.
+- Run `dt index push|pull` explicitly when you want to archive or
+  restore. There is no longer a `--no-index-sync` flag because no
+  command syncs the index implicitly.
+- Consider switching to a shared `site_cache_dir` (`dt index set`) so
+  every node sees the same live index and the archive becomes a
+  pure backup, not the primary sharing mechanism.
 
 ## See also
 
-- [dt pull](pull.md) - Pull DVC-tracked files
-- [dt fetch](fetch.md) - Fetch imports into cache
-- [dt add](add.md) - Add files to DVC tracking
-- [Configuration Options](config_options.md) - Index settings
+- [dt init](init.md) / [dt clone](clone.md) — set `site_cache_dir` at project setup
+- [dt pull](pull.md) — pull DVC-tracked files
+- [dt fetch](fetch.md) — fetch imports into cache
+- [Configuration Options](config_options.md) — `site_cache.*` and `index.*` keys
