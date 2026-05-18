@@ -16,6 +16,8 @@ path is simply ``{root}/{name}`` where ``name`` defaults to the project
 name.
 """
 
+import os
+import stat
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -33,6 +35,77 @@ CONFIG_KEY_ROOT = 'site_cache.root'
 # When set to ``False`` (in any scope) dt init / dt clone skip the step,
 # leaving DVC's built-in default behaviour in place.
 CONFIG_KEY_ENABLED = 'site_cache.enabled'
+
+
+# Directory mode used when dt creates a per-repo site_cache subdirectory:
+# rwxrwsr-x — group-writable with the setgid bit so children inherit the
+# parent's group ownership. The setgid bit propagates only group ownership,
+# not the write bit, so files created inside still rely on a sensible
+# umask (0002) and/or default ACLs on the parent.
+SHARED_DIR_MODE = 0o2775
+
+
+def _has_default_acl(path: Path) -> Optional[bool]:
+    """Return True if ``path`` has a default ACL granting group rwx.
+
+    Returns ``None`` if ``getfacl`` is unavailable or unreadable
+    (so callers can suppress the warning rather than nag spuriously).
+    """
+    try:
+        result = subprocess.run(
+            ['getfacl', '--absolute-names', '--omit-header', '--', str(path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith('default:group::') and 'w' in line.split(':', 2)[2]:
+            return True
+    return False
+
+
+def _check_shared_perms(parent: Path, verbose: bool = True) -> None:
+    """Warn if ``parent`` looks unsuitable for shared use.
+
+    Checks the setgid bit, group-write bit, and (best effort) the
+    presence of a default ACL granting group rwx. All findings are
+    emitted as warnings; nothing is fatal, because solo users may
+    legitimately keep a private site_cache.
+    """
+    if not verbose or not parent.exists():
+        return
+    try:
+        st = parent.stat()
+    except OSError:
+        return
+
+    warnings = []
+    if not (st.st_mode & stat.S_ISGID):
+        warnings.append("missing setgid bit (new subdirs won't inherit the group)")
+    if not (st.st_mode & stat.S_IWGRP):
+        warnings.append("not group-writable")
+    acl_ok = _has_default_acl(parent)
+    if acl_ok is False:
+        warnings.append("no default ACL granting group rwx (new files will follow each user's umask)")
+
+    if not warnings:
+        return
+
+    print(f"warning: {parent} may not be suitable as a shared site_cache root:")
+    for w in warnings:
+        print(f"  - {w}")
+    print("  To enable shared use, run (as the directory owner):")
+    print(f"    chgrp <project-group> {parent}")
+    print(f"    chmod 2775 {parent}")
+    print(f"    setfacl    -m u::rwx,g::rwx,o::rx {parent}")
+    print(f"    setfacl -d -m u::rwx,g::rwx,o::rx {parent}")
+    print("  Each user should also set 'umask 0002' before running dt/dvc.")
+
 
 
 def is_enabled() -> bool:
@@ -133,7 +206,23 @@ def apply_to_repo(
         SiteCacheError: If ``dvc config`` fails.
     """
     site_cache_dir = Path(site_cache_dir).expanduser().resolve()
-    site_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Warn about the parent (= site_cache.root) before we touch anything;
+    # most permission problems originate there.
+    _check_shared_perms(site_cache_dir.parent, verbose=verbose)
+
+    # Create the per-repo dir with group-writable + setgid so peers can
+    # read/write and inherit the parent's group. mkdir's mode is masked
+    # by umask, so chmod explicitly afterwards (only when we created the
+    # dir — leave existing dirs untouched to avoid surprising the user).
+    created = not site_cache_dir.exists()
+    site_cache_dir.mkdir(parents=True, mode=SHARED_DIR_MODE, exist_ok=True)
+    if created:
+        try:
+            os.chmod(site_cache_dir, SHARED_DIR_MODE)
+        except OSError as e:
+            if verbose:
+                print(f"warning: could not chmod {site_cache_dir} to 2775: {e}")
 
     if verbose:
         print(f"Configuring DVC site_cache_dir: {site_cache_dir}")

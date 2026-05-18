@@ -78,6 +78,33 @@ systems. `dt` forces `journal_mode=delete` on every DB it opens (live
 and mirror), so a shared `site_cache_dir` on Lustre / GPFS / NFS works
 correctly.
 
+### Shared filesystem permissions
+
+A shared `site_cache_dir` is read **and written** by every user that
+touches the workspace, so the root directory needs to be group-writable
+with the setgid bit (so per-project subdirs inherit the group) and
+ideally a default ACL (so files DVC creates inside are also
+group-writable regardless of each user's umask).
+
+Set it up once, as the directory owner:
+
+```bash
+SC_ROOT=/scratch/<project>/dvc/site
+mkdir -p $SC_ROOT
+chgrp <project-group> $SC_ROOT
+chmod 2775 $SC_ROOT
+setfacl    -m u::rwx,g::rwx,o::rx $SC_ROOT
+setfacl -d -m u::rwx,g::rwx,o::rx $SC_ROOT
+```
+
+Every user that runs `dt`/`dvc` against the shared cache should also
+have `umask 0002` in effect so newly created SQLite files come out
+group-writable.
+
+`dt` creates per-repo subdirectories with mode `2775` and warns at
+`dt init` / `dt clone` / `dt index set` / `dt index migrate` time if
+the root is missing the setgid bit, group-write, or a default ACL.
+
 ## Commands
 
 ### dt index set
