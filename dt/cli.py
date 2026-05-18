@@ -1859,11 +1859,10 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
               help='Submit job and exit without waiting for completion.')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show detailed progress.')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--worker', is_flag=True, hidden=True,
               help='Internal: run dvc add directly (used by compute node).')
 @click.pass_context
-def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
+def add(ctx, targets, threads, no_wait, verbose, worker):
     """Add files or directories to DVC tracking via compute node.
     
     Submits `dvc add` to a compute node via qxub with parallel checksum
@@ -1915,15 +1914,7 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
             if no_wait and job_ids:
                 click.echo(f"Submitted job: {job_ids[0]}")
                 click.echo(f"Monitor with: qxub monitor {job_ids[0]}")
-            elif not no_wait:
-                # Job completed, sync index to mirror
-                if not no_index_sync and index_mod.is_auto_sync_enabled():
-                    try:
-                        index_mod.push(quiet=not verbose, verbose=verbose)
-                    except Exception as e:
-                        if verbose:
-                            click.echo(f"Warning: index sync failed: {e}")
-                
+
     except add_mod.AddError as e:
         raise click.ClickException(str(e))
 
@@ -1951,11 +1942,10 @@ def data():
               help='Submit job and exit without waiting for completion.')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show detailed progress.')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--worker', is_flag=True, hidden=True,
               help='Internal: run dvc data status directly (used by compute node).')
 @click.pass_context
-def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
+def data_status(ctx, threads, no_wait, verbose, worker):
     """Show changes between the last git commit, DVC files and the workspace.
 
     Wraps ``dvc data status`` with parallel checksum computation and
@@ -1976,27 +1966,11 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
         dvc_args = list(ctx.args) if ctx.args else None
 
         if worker:
-            # Running on compute node — pull index, run status, push index
-            if not no_index_sync and index_mod.is_auto_sync_enabled():
-                try:
-                    index_mod.pull(quiet=not verbose, verbose=verbose)
-                except Exception as e:
-                    if verbose:
-                        click.echo(f"Warning: index pull failed: {e}")
-
             rc = data_status_mod.data_status(
                 threads=threads,
                 dvc_args=dvc_args,
                 verbose=verbose,
             )
-
-            if not no_index_sync and index_mod.is_auto_sync_enabled():
-                try:
-                    index_mod.push(quiet=not verbose, verbose=verbose)
-                except Exception as e:
-                    if verbose:
-                        click.echo(f"Warning: index push failed: {e}")
-
             if rc != 0:
                 raise SystemExit(rc)
         else:
@@ -2005,20 +1979,11 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
                 dvc_args=dvc_args,
                 verbose=verbose,
                 wait=not no_wait,
-                no_index_sync=no_index_sync,
             )
 
             if no_wait and job_id:
                 click.echo(f"Submitted job: {job_id}")
                 click.echo(f"Monitor with: qxub monitor {job_id}")
-            elif not no_wait:
-                # Job completed on compute node — push index from submitter too
-                if not no_index_sync and index_mod.is_auto_sync_enabled():
-                    try:
-                        index_mod.push(quiet=not verbose, verbose=verbose)
-                    except Exception as e:
-                        if verbose:
-                            click.echo(f"Warning: index sync failed: {e}")
 
     except data_status_mod.DataStatusError as e:
         raise click.ClickException(str(e))
@@ -2030,7 +1995,6 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
 ))
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--update', is_flag=True, help='Recover from .dir failures by rebuilding manifests with dt update')
 @click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
 @click.option('--dry', is_flag=True, help='Show stage categorization without fetching (for troubleshooting)')
@@ -2045,7 +2009,7 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
               help='Link type for cache population. If not specified, tries reflink → hardlink → symlink → copy.')
 @click.option('--dir-only', is_flag=True, help='Only fetch .dir manifest files, not the data files they reference.')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imports, urls, regular, source, remote_name, destination, cache_type, dir_only):
+def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, regular, source, remote_name, destination, cache_type, dir_only):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -2130,14 +2094,6 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imp
                 click.echo(f"Remote '{remote_name}' is not locally accessible, will use network fetch")
     
     try:
-        # Sync index from mirror before fetch (if configured)
-        if not dry and not no_index_sync and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.pull(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
-        
         results = fetch_mod.fetch(
             targets=list(targets) if targets else None,
             verbose=verbose,
@@ -2176,13 +2132,6 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imp
             click.echo(f"\nFetch complete with {len(failures)} error(s).")
         else:
             click.echo(f"\n✓ {successes} stages processed")
-            # Sync index to mirror after fetch (if configured)
-            if not no_index_sync and index_mod.is_auto_sync_enabled():
-                try:
-                    index_mod.push(quiet=not verbose, verbose=verbose)
-                except Exception as e:
-                    if verbose:
-                        click.echo(f"Warning: index sync failed: {e}")
         
         if failures and successes == 0:
             raise SystemExit(1)
@@ -2339,8 +2288,7 @@ def mv(src, dst, verbose):
 @click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
 @click.option('--network/--no-network', default=True,
               help='Enable/disable network access for fetching. Default: enabled.')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-def pull(targets, force, dry, verbose, update, network, no_index_sync):
+def pull(targets, force, dry, verbose, update, network):
     """Pull DVC-tracked files (fetch + checkout).
     
     This is the dt equivalent of `dvc pull`. It fetches data to the cache
@@ -2363,14 +2311,6 @@ def pull(targets, force, dry, verbose, update, network, no_index_sync):
         dt pull --no-network       # Only pull data available locally
     """
     try:
-        # Sync index from mirror before pull (if configured)
-        if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.pull(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
-        
         # Convert tuple to list or None
         target_list = list(targets) if targets else None
         
@@ -2386,15 +2326,7 @@ def pull(targets, force, dry, verbose, update, network, no_index_sync):
         
         if not success:
             raise SystemExit(1)
-        
-        # Sync index to mirror after pull (if configured)
-        if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.push(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
-            
+
     except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
     except pull_mod.PullError as e:
@@ -2619,8 +2551,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('--dry-run', '--dry', is_flag=True, help='Show what would be done without making changes')
 @click.option('--status', is_flag=True, help='Show import status summary (implies --dry-run)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose, no_index_sync):
+def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose):
     """Update imported data by rebuilding .dir manifests.
     
     Rebuilds .dir files for repo imports where the directory manifest
@@ -2653,14 +2584,6 @@ def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose, 
         if status:
             dry_run = True
             verbose = False  # Suppress per-file details in status mode
-        
-        # Sync index from mirror before update (if configured)
-        if not no_index_sync and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.pull(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
         
         results = update_mod.update(
             targets=list(targets) if targets else None,
@@ -2731,14 +2654,6 @@ def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose, 
                     any_success = True
                 else:
                     any_failure = True
-        
-        # Sync index to mirror after update (if configured)
-        if any_success and not no_index_sync and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.push(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
         
         if any_failure and not any_success:
             raise SystemExit(1)

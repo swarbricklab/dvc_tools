@@ -269,7 +269,7 @@ def get_retry_interval() -> int:
 
 def is_auto_sync_enabled() -> bool:
     """Check if automatic index sync is enabled."""
-    return cfg.get_value('index.auto_sync', True)
+    return cfg.get_value('index.auto_sync', False)
 
 
 # =============================================================================
