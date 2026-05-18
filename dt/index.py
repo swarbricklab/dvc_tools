@@ -1,21 +1,30 @@
-"""Manage DVC site cache index mirror.
+"""Manage DVC site cache index archive.
 
 The site cache index allows DVC to quickly look up files across multiple
-caches. This module syncs the local index with a shared mirror so all
-users benefit from the same index without rebuilding it.
+caches.  ``dt index push`` and ``dt index pull`` mirror the per-repo
+SQLite databases under DVC's ``core.site_cache_dir`` to/from a shared
+archive directory so the index survives /tmp clearing or moves to a new
+machine.
 
 Key concepts:
-- Local index: DVC's site_cache_dir (usually in /tmp)
-- Mirror: Shared network location for index persistence (local path, gs://, s3://)
-- Locking: File-based locks prevent concurrent modifications
+- Local index:  DVC's site_cache_dir/{repo_hash}/ (SQLite databases)
+- Mirror:      Shared archive directory (local path; per-repo subdir)
+- Transport:   SQLite online backup API + atomic rename, then
+               INSERT OR IGNORE merge per user table.  Safe for concurrent
+               readers/writers.
+- Locking:     File-based locks coordinate competing dt index push runs.
+
+With the shared site_cache_dir model (see dt/site_cache.py) the implicit
+automatic sync is gone; push/pull are now archival operations the user
+runs explicitly.
 """
 
 import os
+import sqlite3
 import subprocess
 import time
-from functools import wraps
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Optional, Tuple
 
 from . import config as cfg
 from .errors import DTError
@@ -37,160 +46,128 @@ class IndexNotConfigured(IndexError):
 
 
 # =============================================================================
-# Cloud/fsspec utilities
+# SQLite backup + merge helpers
 # =============================================================================
 
 
-def _is_cloud_path(path: str) -> bool:
-    """Check if path is a cloud URL (gs://, s3://, etc.)."""
-    return path.startswith(('gs://', 's3://', 'gcs://'))
+def _list_sqlite_dbs(root: Path) -> list[Path]:
+    """Return all SQLite database files under *root* (recursive).
 
-
-def _get_filesystem(path: str):
-    """Get fsspec filesystem for a path.
-    
-    Args:
-        path: Local path or cloud URL (gs://, s3://).
-        
-    Returns:
-        Tuple of (filesystem, path_without_protocol).
-        
-    Raises:
-        IndexError: If required fsspec backend not installed.
+    Skips journal/wal sidecar files; only ``*.db`` (and bare ``cache.db``
+    diskcache files) are returned, sorted for deterministic order.
     """
-    try:
-        import fsspec
-    except ImportError:
-        raise IndexError(
-            "fsspec not installed. Install with: pip install fsspec"
-        )
-    
-    if path.startswith(('gs://', 'gcs://')):
-        try:
-            import gcsfs  # noqa: F401
-        except ImportError:
-            raise IndexError(
-                "gcsfs not installed for GCS access. Install with: pip install gcsfs"
-            )
-    elif path.startswith('s3://'):
-        try:
-            import s3fs  # noqa: F401
-        except ImportError:
-            raise IndexError(
-                "s3fs not installed for S3 access. Install with: pip install s3fs"
-            )
-    
-    fs, fs_path = fsspec.core.url_to_fs(path)
-    return fs, fs_path
+    if not root.is_dir():
+        return []
+    dbs = []
+    for path in root.rglob('*'):
+        if not path.is_file():
+            continue
+        name = path.name
+        if name.endswith(('-journal', '-wal', '-shm', '.tmp')):
+            continue
+        if name.endswith('.db') or name == 'cache.db':
+            dbs.append(path)
+    return sorted(dbs)
 
 
-def _fsspec_sync(
-    src: str,
-    dst: str,
-    verbose: bool = False,
-    dry: bool = False,
-) -> Tuple[int, int]:
-    """Sync files from src to dst using fsspec.
-    
-    Similar to rsync: copies new/changed files based on size comparison.
-    
-    Args:
-        src: Source path (local or cloud URL).
-        dst: Destination path (local or cloud URL).
-        verbose: Print file operations.
-        dry: Show what would be copied without copying.
-        
-    Returns:
-        Tuple of (files_copied, files_skipped).
+def _backup_db(src: Path, dst: Path) -> None:
+    """Online-backup SQLite database *src* into a fresh file at *dst*.
+
+    Uses ``sqlite3.Connection.backup`` which streams pages while holding
+    only short read locks on *src* — safe against concurrent writers.
+    *dst* is overwritten if it exists.
     """
-    src_fs, src_path = _get_filesystem(src)
-    dst_fs, dst_path = _get_filesystem(dst)
-    
-    # Ensure paths don't end with /
-    src_path = src_path.rstrip('/')
-    dst_path = dst_path.rstrip('/')
-    
-    # Get source files
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        dst.unlink()
+    src_conn = sqlite3.connect(f'file:{src}?mode=ro', uri=True, timeout=60)
     try:
-        if not src_fs.exists(src_path):
-            return 0, 0
-        src_files = src_fs.find(src_path)
-    except Exception as e:
+        dst_conn = sqlite3.connect(str(dst), timeout=60)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
+def _user_tables(conn: sqlite3.Connection, schema: str = 'main') -> list[str]:
+    """List non-internal tables in the given attached schema."""
+    cur = conn.execute(
+        f"SELECT name FROM {schema}.sqlite_master "
+        "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def _merge_db(src: Path, dst: Path, verbose: bool = False) -> dict:
+    """Merge SQLite database *src* into *dst* via INSERT OR IGNORE.
+
+    If *dst* does not exist, *src* is atomically renamed into place.
+    Otherwise *src* is attached and each shared user table is merged
+    with ``INSERT OR IGNORE INTO main.<t> SELECT * FROM src.<t>``.
+
+    Returns a dict mapping table name -> rows inserted (or the string
+    ``'all'`` when the destination was created from scratch).
+    """
+    if not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
         if verbose:
-            print(f"  Warning: could not list source: {e}")
-        return 0, 0
-    
-    # Get destination files (for comparison)
-    dst_files_info: Dict[str, int] = {}
+            print(f"    created {dst.name}")
+        return {'__file__': 'all'}
+
+    inserted: dict = {}
+    conn = sqlite3.connect(str(dst), timeout=60)
     try:
-        if dst_fs.exists(dst_path):
-            for f in dst_fs.find(dst_path, detail=True).values():
-                rel = f['name']
-                if rel.startswith(dst_path):
-                    rel = rel[len(dst_path):].lstrip('/')
-                dst_files_info[rel] = f.get('size', 0)
-    except Exception:
-        pass  # Destination may not exist yet
-    
-    copied = 0
-    skipped = 0
-    
-    for src_file in src_files:
-        # Get relative path
-        if src_file.startswith(src_path):
-            rel_path = src_file[len(src_path):].lstrip('/')
-        else:
-            rel_path = src_file
-        
-        dst_file = f"{dst_path}/{rel_path}"
-        
-        # Check if needs copying (size comparison)
+        conn.execute("PRAGMA journal_mode=delete")
+        conn.execute(f"ATTACH DATABASE '{src}' AS src")
         try:
-            src_size = src_fs.size(src_file)
-        except Exception:
-            src_size = None
-        
-        needs_copy = True
-        if rel_path in dst_files_info:
-            if src_size is not None and dst_files_info[rel_path] == src_size:
-                needs_copy = False
-        
-        if not needs_copy:
-            skipped += 1
-            continue
-        
-        if dry:
-            if verbose:
-                print(f"  Would copy: {rel_path}")
-            copied += 1
-            continue
-        
-        # Copy file
-        try:
-            # Ensure parent directory exists
-            dst_parent = '/'.join(dst_file.rsplit('/')[:-1])
-            if dst_parent:
-                dst_fs.makedirs(dst_parent, exist_ok=True)
-            
-            # Copy
-            with src_fs.open(src_file, 'rb') as src_f:
-                with dst_fs.open(dst_file, 'wb') as dst_f:
-                    # Copy in chunks for large files
-                    while True:
-                        chunk = src_f.read(8 * 1024 * 1024)  # 8MB chunks
-                        if not chunk:
-                            break
-                        dst_f.write(chunk)
-            
-            if verbose:
-                print(f"  Copied: {rel_path}")
-            copied += 1
-            
-        except Exception as e:
-            if verbose:
-                print(f"  Error copying {rel_path}: {e}")
-    
-    return copied, skipped
+            dst_tables = set(_user_tables(conn, 'main'))
+            src_tables = set(_user_tables(conn, 'src'))
+            shared = sorted(dst_tables & src_tables)
+            for table in shared:
+                # Quote table name; sqlite identifiers may be anything
+                tq = '"' + table.replace('"', '""') + '"'
+                before = conn.execute(
+                    f"SELECT COUNT(*) FROM main.{tq}"
+                ).fetchone()[0]
+                conn.execute(
+                    f"INSERT OR IGNORE INTO main.{tq} "
+                    f"SELECT * FROM src.{tq}"
+                )
+                after = conn.execute(
+                    f"SELECT COUNT(*) FROM main.{tq}"
+                ).fetchone()[0]
+                inserted[table] = after - before
+            # Tables present in src but not dst — copy whole table
+            only_src = sorted(src_tables - dst_tables)
+            for table in only_src:
+                tq = '"' + table.replace('"', '""') + '"'
+                conn.execute(
+                    f"CREATE TABLE main.{tq} AS SELECT * FROM src.{tq}"
+                )
+                n = conn.execute(
+                    f"SELECT COUNT(*) FROM main.{tq}"
+                ).fetchone()[0]
+                inserted[table] = n
+            conn.commit()
+        finally:
+            conn.execute("DETACH DATABASE src")
+    finally:
+        conn.close()
+
+    # Remove the snapshot — it has been merged in
+    try:
+        src.unlink()
+    except FileNotFoundError:
+        pass
+
+    if verbose:
+        total = sum(v for v in inserted.values() if isinstance(v, int))
+        print(f"    merged {dst.name}: +{total} rows across "
+              f"{len(inserted)} table(s)")
+    return inserted
 
 
 # =============================================================================
@@ -198,24 +175,31 @@ def _fsspec_sync(
 # =============================================================================
 
 
-def get_index_paths() -> Tuple[Path, str]:
-    """Get local index and mirror paths.
-    
+def get_index_paths() -> Tuple[Path, Path]:
+    """Get local index and mirror paths for the current repo.
+
     Returns:
-        Tuple of (local_index_path, mirror_path_or_url)
-        The mirror path may be a local path or a cloud URL (gs://, s3://).
-        
+        Tuple of (local_index_path, mirror_path).  Both are local Paths;
+        cloud URLs (gs://, s3://) are no longer supported — use a shared
+        filesystem (e.g. /scratch) for the archive root.
+
     Raises:
         IndexNotConfigured: If mirror root not configured or not in DVC repo.
     """
     # Get mirror root from config
     mirror_root = cfg.get_value('index.mirror_root')
-    
+
     if not mirror_root:
         raise IndexNotConfigured(
             "Index mirror not configured. Set 'index.mirror_root' in dt config."
         )
-    
+
+    if str(mirror_root).startswith(('gs://', 's3://', 'gcs://')):
+        raise IndexNotConfigured(
+            "Cloud index mirrors are no longer supported; "
+            "use a shared local filesystem path for index.mirror_root."
+        )
+
     # Get local index from dvc doctor
     try:
         result = subprocess.run(
@@ -228,7 +212,7 @@ def get_index_paths() -> Tuple[Path, str]:
         raise IndexNotConfigured("Not in a DVC repository")
     except FileNotFoundError:
         raise IndexNotConfigured("DVC not found")
-    
+
     # Parse site_cache_dir from output
     local_index = None
     for line in result.stdout.splitlines():
@@ -237,23 +221,16 @@ def get_index_paths() -> Tuple[Path, str]:
             if len(parts) >= 2:
                 local_index = Path(parts[-1])
                 break
-    
+
     if not local_index:
         raise IndexNotConfigured(
             "Could not determine site_cache_dir from dvc doctor"
         )
-    
-    # Mirror path is based on the repo hash (last component of local index)
+
+    # Per-repo subdirectory under the archive root, keyed by repo hash
     repo_hash = local_index.name
-    
-    # Handle cloud URLs vs local paths
-    if _is_cloud_path(mirror_root):
-        # Cloud URL: join with /
-        mirror_path = f"{mirror_root.rstrip('/')}/repo/{repo_hash}"
-    else:
-        # Local path: use Path
-        mirror_path = str(Path(mirror_root) / 'repo' / repo_hash)
-    
+    mirror_path = Path(mirror_root) / 'repo' / repo_hash
+
     return local_index, mirror_path
 
 
@@ -269,7 +246,7 @@ def get_retry_interval() -> int:
 
 def is_auto_sync_enabled() -> bool:
     """Check if automatic index sync is enabled."""
-    return cfg.get_value('index.auto_sync', True)
+    return cfg.get_value('index.auto_sync', False)
 
 
 # =============================================================================
@@ -383,15 +360,21 @@ def pull(
     dry: bool = False,
     quiet: bool = False,
 ) -> bool:
-    """Pull index from mirror to local.
-    
+    """Pull index databases from the mirror archive into the local index.
+
+    For every SQLite file in the per-repo mirror directory we take an
+    online-backup snapshot, then merge it into the matching local file
+    with ``INSERT OR IGNORE`` per user table.  Missing local files are
+    populated directly from the snapshot.
+
     Args:
-        verbose: Show detailed rsync output.
-        dry: Show what would be synced without syncing.
+        verbose: Print per-database progress.
+        dry: Show what would be merged without writing.
         quiet: Suppress all output except errors.
-        
+
     Returns:
-        True if successful.
+        True if successful (including the no-op cases where the mirror
+        is missing or empty); False on configuration / lock errors.
     """
     try:
         local_index, mirror_path = get_index_paths()
@@ -399,52 +382,22 @@ def pull(
         if not quiet:
             print(f"Warning: {e}")
         return False
-    
-    is_cloud = _is_cloud_path(mirror_path)
-    
-    # Check mirror exists and has content
-    if is_cloud:
-        # Use fsspec to check cloud path
-        try:
-            fs, fs_path = _get_filesystem(mirror_path)
-            if not fs.exists(fs_path):
-                if verbose and not quiet:
-                    print(f"  Mirror does not exist yet: {mirror_path}")
-                return True
-            files = fs.find(fs_path)
-            if not files:
-                if verbose and not quiet:
-                    print(f"  Mirror is empty: {mirror_path}")
-                return True
-        except IndexError as e:
-            if not quiet:
-                print(f"Warning: {e}")
-            return False
-    else:
-        # Local path check
-        mirror_p = Path(mirror_path)
-        if not mirror_p.exists():
-            if verbose and not quiet:
-                print(f"  Mirror does not exist yet: {mirror_path}")
-            return True
-        
-        if not any(mirror_p.iterdir()):
-            if verbose and not quiet:
-                print(f"  Mirror is empty: {mirror_path}")
-            return True
-    
+
+    mirror_dbs = _list_sqlite_dbs(mirror_path)
+    if not mirror_dbs:
+        if verbose and not quiet:
+            print(f"  Mirror has no databases yet: {mirror_path}")
+        return True
+
     if not quiet:
         if verbose:
-            print(f"Syncing index from mirror...")
+            print("Pulling index from mirror...")
             print(f"  Mirror: {mirror_path}")
             print(f"  Local:  {local_index}")
         else:
-            print(f"Syncing index...")
-    
-    # Create local index directory if needed
+            print("Pulling index...")
+
     local_index.mkdir(parents=True, exist_ok=True)
-    
-    # Acquire lock
     local_lock = local_index / 'local.lock'
     try:
         acquire_lock(local_lock)
@@ -452,55 +405,25 @@ def pull(
         if not quiet:
             print(f"Warning: {e}")
         return False
-    
+
     try:
-        if is_cloud:
-            # Use fsspec for cloud paths
-            copied, skipped = _fsspec_sync(
-                mirror_path,
-                str(local_index),
-                verbose=verbose,
-                dry=dry,
-            )
-            if verbose and not quiet and not dry:
-                print(f"  Index updated from mirror ({copied} copied, {skipped} skipped)")
-            return True
-        else:
-            # Use rsync for local paths (faster)
-            cmd = [
-                'rsync', '-ah',
-                '--perms', '--chmod=ug+rw',
-                '--checksum',
-                '--omit-dir-times',
-            ]
-            
-            if dry:
-                cmd.append('--dry-run')
-                cmd.append('-v')
-            elif verbose:
-                cmd.append('-v')
-            
-            cmd.extend([f"{mirror_path}/", f"{local_index}/"])
-            
+        for src_db in mirror_dbs:
+            rel = src_db.relative_to(mirror_path)
+            dst_db = local_index / rel
             if verbose and not quiet:
-                print(f"  Running: {' '.join(cmd)}")
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=not verbose,
-                text=True,
-            )
-            
-            if result.returncode != 0:
+                print(f"  {rel}")
+            if dry:
+                continue
+            snapshot = dst_db.with_suffix(dst_db.suffix + '.snap.tmp')
+            try:
+                _backup_db(src_db, snapshot)
+                _merge_db(snapshot, dst_db, verbose=verbose and not quiet)
+            except sqlite3.Error as e:
                 if not quiet:
-                    print(f"Warning: rsync failed: {result.stderr}")
-                return False
-            
-            if verbose and not quiet and not dry:
-                print("  Index updated from mirror")
-            
-            return True
-        
+                    print(f"Warning: failed merging {rel}: {e}")
+                if snapshot.exists():
+                    snapshot.unlink()
+        return True
     finally:
         release_lock(local_lock)
 
@@ -510,15 +433,21 @@ def push(
     dry: bool = False,
     quiet: bool = False,
 ) -> bool:
-    """Push index from local to mirror.
-    
+    """Push local index databases to the mirror archive.
+
+    For every SQLite file in the local per-repo index we take an
+    online-backup snapshot into the mirror, then merge it into the
+    matching mirror file with ``INSERT OR IGNORE`` per user table.
+    Missing mirror files are populated directly from the snapshot.
+
     Args:
-        verbose: Show detailed rsync output.
-        dry: Show what would be synced without syncing.
+        verbose: Print per-database progress.
+        dry: Show what would be merged without writing.
         quiet: Suppress all output except errors.
-        
+
     Returns:
-        True if successful.
+        True if successful (including the no-op cases where the local
+        index is missing or empty); False on configuration / lock errors.
     """
     try:
         local_index, mirror_path = get_index_paths()
@@ -526,113 +455,55 @@ def push(
         if not quiet:
             print(f"Warning: {e}")
         return False
-    
-    is_cloud = _is_cloud_path(mirror_path)
-    
-    # Check local index exists and has content
-    if not local_index.exists():
+
+    local_dbs = _list_sqlite_dbs(local_index)
+    if not local_dbs:
         if verbose and not quiet:
-            print(f"  Local index does not exist: {local_index}")
+            print(f"  Local index has no databases yet: {local_index}")
         return True
-    
-    if not any(local_index.iterdir()):
-        if verbose and not quiet:
-            print(f"  Local index is empty: {local_index}")
-        return True
-    
+
     if not quiet:
         if verbose:
-            print(f"Syncing index to mirror...")
+            print("Pushing index to mirror...")
             print(f"  Local:  {local_index}")
             print(f"  Mirror: {mirror_path}")
         else:
-            print(f"Syncing index...")
-    
-    if is_cloud:
-        # Use fsspec for cloud paths - no locking for cloud
-        try:
-            fs, fs_path = _get_filesystem(mirror_path)
-            # Ensure parent directory exists (if applicable)
-            # Cloud storage usually creates "directories" implicitly
-        except IndexError as e:
-            if not quiet:
-                print(f"Warning: {e}")
-            return False
-        
-        try:
-            copied, skipped = _fsspec_sync(
-                str(local_index),
-                mirror_path,
-                verbose=verbose,
-                dry=dry,
-            )
-            if verbose and not quiet and not dry:
-                print(f"  Index pushed to mirror ({copied} copied, {skipped} skipped)")
-            return True
-        except Exception as e:
-            if not quiet:
-                print(f"Warning: fsspec sync failed: {e}")
-            return False
-    else:
-        # Local path - use rsync with locking
-        mirror_p = Path(mirror_path)
-        
-        # Create mirror directory if needed
-        mirror_p.mkdir(parents=True, exist_ok=True)
-        
-        # Set group permissions on mirror
-        try:
-            os.chmod(mirror_p, 0o775)
-        except OSError:
-            pass  # May not own the directory
-        
-        # Acquire lock
-        mirror_lock = mirror_p / 'mirror.lock'
-        try:
-            acquire_lock(mirror_lock)
-        except IndexLockTimeout as e:
-            if not quiet:
-                print(f"Warning: {e}")
-            return False
-        
-        try:
-            # Build rsync command
-            cmd = [
-                'rsync', '-ah',
-                '--perms', '--chmod=ug+rw',
-                '--checksum',
-                '--omit-dir-times',
-            ]
-            
-            if dry:
-                cmd.append('--dry-run')
-                cmd.append('-v')
-            elif verbose:
-                cmd.append('-v')
-            
-            cmd.extend([f"{local_index}/", f"{mirror_path}/"])
-            
+            print("Pushing index...")
+
+    mirror_path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(mirror_path, 0o775)
+    except OSError:
+        pass
+
+    mirror_lock = mirror_path / 'mirror.lock'
+    try:
+        acquire_lock(mirror_lock)
+    except IndexLockTimeout as e:
+        if not quiet:
+            print(f"Warning: {e}")
+        return False
+
+    try:
+        for src_db in local_dbs:
+            rel = src_db.relative_to(local_index)
+            dst_db = mirror_path / rel
             if verbose and not quiet:
-                print(f"  Running: {' '.join(cmd)}")
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=not verbose,
-                text=True,
-            )
-            
-            if result.returncode != 0:
+                print(f"  {rel}")
+            if dry:
+                continue
+            snapshot = dst_db.with_suffix(dst_db.suffix + '.snap.tmp')
+            try:
+                _backup_db(src_db, snapshot)
+                _merge_db(snapshot, dst_db, verbose=verbose and not quiet)
+            except sqlite3.Error as e:
                 if not quiet:
-                    print(f"Warning: rsync failed: {result.stderr}")
-                return False
-            
-            if verbose and not quiet and not dry:
-                print("  Index pushed to mirror")
-            
-            return True
-            
-        finally:
-            release_lock(mirror_lock)
+                    print(f"Warning: failed merging {rel}: {e}")
+                if snapshot.exists():
+                    snapshot.unlink()
+        return True
+    finally:
+        release_lock(mirror_lock)
 
 
 def status(verbose: bool = False) -> dict:
@@ -657,97 +528,26 @@ def status(verbose: bool = False) -> dict:
         result['local_index'] = str(local_index)
         result['mirror_path'] = str(mirror_path)
         result['local_exists'] = local_index.exists()
-        
-        is_cloud = _is_cloud_path(mirror_path)
-        
-        if is_cloud:
-            # Cloud path - check existence with fsspec
-            try:
-                fs, fs_path = _get_filesystem(mirror_path)
-                result['mirror_exists'] = fs.exists(fs_path)
-                # No locking for cloud mirrors
-                result['mirror_locked'] = False
-            except IndexError:
-                result['mirror_exists'] = False
-                result['mirror_locked'] = False
-        else:
-            # Local path
-            mirror_p = Path(mirror_path)
-            result['mirror_exists'] = mirror_p.exists()
-            
-            if mirror_p.exists():
-                mirror_lock = mirror_p / 'mirror.lock'
-                result['mirror_locked'] = mirror_lock.exists()
-                if result['mirror_locked']:
-                    result['mirror_lock_owner'] = get_lock_owner(mirror_lock)
-                    result['mirror_lock_age'] = get_lock_age(mirror_lock)
-        
+        result['mirror_exists'] = mirror_path.exists()
+
+        if mirror_path.exists():
+            mirror_lock = mirror_path / 'mirror.lock'
+            result['mirror_locked'] = mirror_lock.exists()
+            if result['mirror_locked']:
+                result['mirror_lock_owner'] = get_lock_owner(mirror_lock)
+                result['mirror_lock_age'] = get_lock_age(mirror_lock)
+
         if local_index.exists():
             local_lock = local_index / 'local.lock'
             result['local_locked'] = local_lock.exists()
             if result['local_locked']:
                 result['local_lock_owner'] = get_lock_owner(local_lock)
                 result['local_lock_age'] = get_lock_age(local_lock)
-                
+
     except IndexNotConfigured as e:
         result['error'] = str(e)
-    
+
     return result
-
-
-# =============================================================================
-# Decorator for automatic sync
-# =============================================================================
-
-
-def with_index_sync(
-    pull_before: bool = True,
-    push_after: bool = True,
-):
-    """Decorator to add automatic index sync to a function.
-    
-    Args:
-        pull_before: Pull index before function execution.
-        push_after: Push index after function execution.
-        
-    The decorated function can accept these keyword arguments:
-        - no_index_sync: Skip all index sync
-        - verbose: Enable verbose output
-    """
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Check for skip flag
-            no_sync = kwargs.pop('no_index_sync', False)
-            verbose = kwargs.get('verbose', False)
-            
-            # Check if auto sync is enabled in config
-            if no_sync or not is_auto_sync_enabled():
-                return func(*args, **kwargs)
-            
-            # Pull before
-            if pull_before:
-                try:
-                    pull(quiet=not verbose, verbose=verbose)
-                except Exception as e:
-                    if verbose:
-                        print(f"Warning: index pull failed: {e}")
-            
-            # Execute the function
-            result = func(*args, **kwargs)
-            
-            # Push after
-            if push_after:
-                try:
-                    push(quiet=not verbose, verbose=verbose)
-                except Exception as e:
-                    if verbose:
-                        print(f"Warning: index push failed: {e}")
-            
-            return result
-        
-        return wrapper
-    return decorator
 
 
 # =============================================================================

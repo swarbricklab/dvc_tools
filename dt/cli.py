@@ -24,10 +24,12 @@ from . import du as du_mod
 from . import ls as ls_mod
 from . import index as index_mod
 from . import cache_index as cache_index_mod
+from . import site_cache as site_cache_mod
 from . import update as update_mod
 from . import install as install_mod
 from . import status as status_mod
 from . import utils
+from . import dvc_lock
 
 
 @click.group()
@@ -47,11 +49,15 @@ def cli():
 @click.option('--team', help='GitHub team for access (only valid if owner is an org)')
 @click.option('--cache-root', help='Override the cache root directory')
 @click.option('--remote-root', help='Override the remote root directory')
+@click.option('--site-cache-root', help='Override the DVC site_cache_dir root (combined with project name)')
+@click.option('--site-cache-path', help='Override the full DVC site_cache_dir path')
 @click.option('--no-git', is_flag=True, help='Skip git initialization')
 @click.option('--no-dvc', is_flag=True, help='Skip DVC initialization')
 @click.option('--no-cache', is_flag=True, help='Skip cache setup')
 @click.option('--no-remote', is_flag=True, help='Skip remote setup')
-def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, no_remote):
+@click.option('--no-site-cache', is_flag=True, help='Skip core.site_cache_dir setup')
+def init(name, owner, team, cache_root, remote_root, site_cache_root, site_cache_path,
+         no_git, no_dvc, no_cache, no_remote, no_site_cache):
     """Initialize a new DVC project with proper cache and remote setup.
     
     This command creates a complete DVC project with git, DVC, external cache,
@@ -64,10 +70,13 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
             team=team,
             cache_root=cache_root,
             remote_root=remote_root,
+            site_cache_root=site_cache_root,
+            site_cache_path=site_cache_path,
             no_git=no_git,
             no_dvc=no_dvc,
             no_cache=no_cache,
             no_remote=no_remote,
+            no_site_cache=no_site_cache,
         )
     except init_mod.InitError as e:
         raise click.ClickException(str(e))
@@ -82,13 +91,18 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
 @click.option('--no-submodules', is_flag=True, help='Skip cloning git submodules')
 @click.option('--cache-name', help='Override cache directory name')
 @click.option('--remote-name', help='Override remote directory name')
+@click.option('--site-cache-root', help='Override the DVC site_cache_dir root (combined with project name)')
+@click.option('--site-cache-path', help='Override the full DVC site_cache_dir path')
+@click.option('--no-site-cache', is_flag=True, help='Skip core.site_cache_dir setup')
 @click.option('--shallow', is_flag=True, help='Perform a shallow clone')
 @click.option('--pull', 'do_pull', is_flag=True, help='Run dt pull after cloning to fetch data')
 @click.option('--no-auth', is_flag=True, help='Skip running auth setup after cloning')
 @click.option('--no-hooks', is_flag=True, help='Skip installing git hooks and merge driver')
 @click.option('--rev', default=None, help='Check out a specific revision after cloning')
 @click.option('--overwrite', is_flag=True, help='Remove the target directory if it already exists')
-def clone(repository, path, owner, username, no_init, no_submodules, cache_name, remote_name, shallow, do_pull, no_auth, no_hooks, rev, overwrite):
+def clone(repository, path, owner, username, no_init, no_submodules, cache_name, remote_name,
+          site_cache_root, site_cache_path, no_site_cache,
+          shallow, do_pull, no_auth, no_hooks, rev, overwrite):
     """Clone an existing DVC project from GitHub.
 
     REPOSITORY can be either:
@@ -119,6 +133,9 @@ def clone(repository, path, owner, username, no_init, no_submodules, cache_name,
             no_submodules=no_submodules,
             cache_name=cache_name,
             remote_name=remote_name,
+            site_cache_root=site_cache_root,
+            site_cache_path=site_cache_path,
+            no_site_cache=no_site_cache,
             shallow=shallow,
             do_pull=do_pull,
             no_auth=no_auth,
@@ -429,12 +446,13 @@ def cache_validate(targets, fix, verbose, json_output, no_progress):
     import json
     
     try:
-        result = cache_mod.validate_cache(
-            targets=list(targets) if targets else None,
-            fix=fix,
-            verbose=verbose,
-            progress=not no_progress and not json_output,
-        )
+        with dvc_lock.maybe_lock(fix):
+            result = cache_mod.validate_cache(
+                targets=list(targets) if targets else None,
+                fix=fix,
+                verbose=verbose,
+                progress=not no_progress and not json_output,
+            )
     except cache_mod.CacheError as e:
         raise click.ClickException(str(e))
     
@@ -1843,11 +1861,10 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
               help='Submit job and exit without waiting for completion.')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show detailed progress.')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--worker', is_flag=True, hidden=True,
               help='Internal: run dvc add directly (used by compute node).')
 @click.pass_context
-def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
+def add(ctx, targets, threads, no_wait, verbose, worker):
     """Add files or directories to DVC tracking via compute node.
     
     Submits `dvc add` to a compute node via qxub with parallel checksum
@@ -1878,12 +1895,13 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
         
         if worker:
             # Running on compute node - execute dvc add directly
-            success = add_mod.add(
-                targets=list(targets),
-                threads=threads,
-                dvc_args=dvc_args if dvc_args else None,
-                verbose=verbose,
-            )
+            with dvc_lock.repo_lock():
+                success = add_mod.add(
+                    targets=list(targets),
+                    threads=threads,
+                    dvc_args=dvc_args if dvc_args else None,
+                    verbose=verbose,
+                )
             if not success:
                 raise click.ClickException("dvc add failed")
         else:
@@ -1899,15 +1917,7 @@ def add(ctx, targets, threads, no_wait, verbose, no_index_sync, worker):
             if no_wait and job_ids:
                 click.echo(f"Submitted job: {job_ids[0]}")
                 click.echo(f"Monitor with: qxub monitor {job_ids[0]}")
-            elif not no_wait:
-                # Job completed, sync index to mirror
-                if not no_index_sync and index_mod.is_auto_sync_enabled():
-                    try:
-                        index_mod.push(quiet=not verbose, verbose=verbose)
-                    except Exception as e:
-                        if verbose:
-                            click.echo(f"Warning: index sync failed: {e}")
-                
+
     except add_mod.AddError as e:
         raise click.ClickException(str(e))
 
@@ -1935,11 +1945,10 @@ def data():
               help='Submit job and exit without waiting for completion.')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show detailed progress.')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--worker', is_flag=True, hidden=True,
               help='Internal: run dvc data status directly (used by compute node).')
 @click.pass_context
-def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
+def data_status(ctx, threads, no_wait, verbose, worker):
     """Show changes between the last git commit, DVC files and the workspace.
 
     Wraps ``dvc data status`` with parallel checksum computation and
@@ -1960,27 +1969,11 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
         dvc_args = list(ctx.args) if ctx.args else None
 
         if worker:
-            # Running on compute node — pull index, run status, push index
-            if not no_index_sync and index_mod.is_auto_sync_enabled():
-                try:
-                    index_mod.pull(quiet=not verbose, verbose=verbose)
-                except Exception as e:
-                    if verbose:
-                        click.echo(f"Warning: index pull failed: {e}")
-
             rc = data_status_mod.data_status(
                 threads=threads,
                 dvc_args=dvc_args,
                 verbose=verbose,
             )
-
-            if not no_index_sync and index_mod.is_auto_sync_enabled():
-                try:
-                    index_mod.push(quiet=not verbose, verbose=verbose)
-                except Exception as e:
-                    if verbose:
-                        click.echo(f"Warning: index push failed: {e}")
-
             if rc != 0:
                 raise SystemExit(rc)
         else:
@@ -1989,20 +1982,11 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
                 dvc_args=dvc_args,
                 verbose=verbose,
                 wait=not no_wait,
-                no_index_sync=no_index_sync,
             )
 
             if no_wait and job_id:
                 click.echo(f"Submitted job: {job_id}")
                 click.echo(f"Monitor with: qxub monitor {job_id}")
-            elif not no_wait:
-                # Job completed on compute node — push index from submitter too
-                if not no_index_sync and index_mod.is_auto_sync_enabled():
-                    try:
-                        index_mod.push(quiet=not verbose, verbose=verbose)
-                    except Exception as e:
-                        if verbose:
-                            click.echo(f"Warning: index sync failed: {e}")
 
     except data_status_mod.DataStatusError as e:
         raise click.ClickException(str(e))
@@ -2014,7 +1998,6 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
 ))
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
 @click.option('--update', is_flag=True, help='Recover from .dir failures by rebuilding manifests with dt update')
 @click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
 @click.option('--dry', is_flag=True, help='Show stage categorization without fetching (for troubleshooting)')
@@ -2029,7 +2012,7 @@ def data_status(ctx, threads, no_wait, verbose, no_index_sync, worker):
               help='Link type for cache population. If not specified, tries reflink → hardlink → symlink → copy.')
 @click.option('--dir-only', is_flag=True, help='Only fetch .dir manifest files, not the data files they reference.')
 @click.pass_context
-def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imports, urls, regular, source, remote_name, destination, cache_type, dir_only):
+def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, regular, source, remote_name, destination, cache_type, dir_only):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -2114,30 +2097,23 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imp
                 click.echo(f"Remote '{remote_name}' is not locally accessible, will use network fetch")
     
     try:
-        # Sync index from mirror before fetch (if configured)
-        if not dry and not no_index_sync and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.pull(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
-        
-        results = fetch_mod.fetch(
-            targets=list(targets) if targets else None,
-            verbose=verbose,
-            update=update,
-            network=network,
-            dry=dry,
-            force=force,
-            imports=imports,
-            urls=urls,
-            regular=regular,
-            source=source,
-            destination=destination,
-            cache_type=cache_type,
-            dir_only=dir_only,
-            remote_name=remote_name,
-        )
+        with dvc_lock.maybe_lock(not dry):
+            results = fetch_mod.fetch(
+                targets=list(targets) if targets else None,
+                verbose=verbose,
+                update=update,
+                network=network,
+                dry=dry,
+                force=force,
+                imports=imports,
+                urls=urls,
+                regular=regular,
+                source=source,
+                destination=destination,
+                cache_type=cache_type,
+                dir_only=dir_only,
+                remote_name=remote_name,
+            )
         
         # In dry mode, just exit (summary already printed)
         if dry:
@@ -2160,13 +2136,6 @@ def fetch(ctx, targets, verbose, no_index_sync, update, network, dry, force, imp
             click.echo(f"\nFetch complete with {len(failures)} error(s).")
         else:
             click.echo(f"\n✓ {successes} stages processed")
-            # Sync index to mirror after fetch (if configured)
-            if not no_index_sync and index_mod.is_auto_sync_enabled():
-                try:
-                    index_mod.push(quiet=not verbose, verbose=verbose)
-                except Exception as e:
-                    if verbose:
-                        click.echo(f"Warning: index sync failed: {e}")
         
         if failures and successes == 0:
             raise SystemExit(1)
@@ -2323,8 +2292,7 @@ def mv(src, dst, verbose):
 @click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
 @click.option('--network/--no-network', default=True,
               help='Enable/disable network access for fetching. Default: enabled.')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-def pull(targets, force, dry, verbose, update, network, no_index_sync):
+def pull(targets, force, dry, verbose, update, network):
     """Pull DVC-tracked files (fetch + checkout).
     
     This is the dt equivalent of `dvc pull`. It fetches data to the cache
@@ -2347,38 +2315,23 @@ def pull(targets, force, dry, verbose, update, network, no_index_sync):
         dt pull --no-network       # Only pull data available locally
     """
     try:
-        # Sync index from mirror before pull (if configured)
-        if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.pull(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
-        
         # Convert tuple to list or None
         target_list = list(targets) if targets else None
         
         # Call the simplified pull function
-        success, fetched, failed = pull_mod.pull(
-            targets=target_list,
-            verbose=verbose,
-            force=force,
-            update=update,
-            network=network,
-            dry=dry,
-        )
+        with dvc_lock.maybe_lock(not dry):
+            success, fetched, failed = pull_mod.pull(
+                targets=target_list,
+                verbose=verbose,
+                force=force,
+                update=update,
+                network=network,
+                dry=dry,
+            )
         
         if not success:
             raise SystemExit(1)
-        
-        # Sync index to mirror after pull (if configured)
-        if not no_index_sync and not dry and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.push(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
-            
+
     except fetch_mod.FetchError as e:
         raise click.ClickException(str(e))
     except pull_mod.PullError as e:
@@ -2603,8 +2556,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('--dry-run', '--dry', is_flag=True, help='Show what would be done without making changes')
 @click.option('--status', is_flag=True, help='Show import status summary (implies --dry-run)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('--no-index-sync', is_flag=True, help='Skip automatic index mirror sync')
-def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose, no_index_sync):
+def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose):
     """Update imported data by rebuilding .dir manifests.
     
     Rebuilds .dir files for repo imports where the directory manifest
@@ -2638,24 +2590,20 @@ def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose, 
             dry_run = True
             verbose = False  # Suppress per-file details in status mode
         
-        # Sync index from mirror before update (if configured)
-        if not no_index_sync and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.pull(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
-        
-        results = update_mod.update(
-            targets=list(targets) if targets else None,
-            rev=rev,
-            verbose=verbose,
-            no_download=no_download,
-            dry_run=dry_run,
-            rebuild=rebuild,
-            force=force,
-            show_status=status,
-        )
+        # Only lock when actually mutating (force/rebuild upgrades or .dir rewrites).
+        # --dry-run and --status are read-only.
+        _need_lock = (force or rebuild) and not dry_run
+        with dvc_lock.maybe_lock(_need_lock):
+            results = update_mod.update(
+                targets=list(targets) if targets else None,
+                rev=rev,
+                verbose=verbose,
+                no_download=no_download,
+                dry_run=dry_run,
+                rebuild=rebuild,
+                force=force,
+                show_status=status,
+            )
         
         any_success = False
         any_failure = False
@@ -2715,14 +2663,6 @@ def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose, 
                     any_success = True
                 else:
                     any_failure = True
-        
-        # Sync index to mirror after update (if configured)
-        if any_success and not no_index_sync and index_mod.is_auto_sync_enabled():
-            try:
-                index_mod.push(quiet=not verbose, verbose=verbose)
-            except Exception as e:
-                if verbose:
-                    click.echo(f"Warning: index sync failed: {e}")
         
         if any_failure and not any_success:
             raise SystemExit(1)
@@ -3099,8 +3039,22 @@ def index_status(verbose):
     Displays information about the local index and mirror,
     including paths, existence, and lock status.
     """
+    # Show site_cache_dir up front so users see what DVC is actually using.
+    try:
+        current_sc = site_cache_mod.get_current()
+        click.echo("Site cache (core.site_cache_dir):")
+        if current_sc:
+            click.echo(f"  Configured: {current_sc}")
+            click.echo(f"  Exists:     {'yes' if current_sc.exists() else 'no'}")
+        else:
+            click.echo("  Configured: (DVC default — usually /var/tmp/dvc)")
+        click.echo()
+    except site_cache_mod.SiteCacheError as e:
+        click.echo(f"Site cache check failed: {e}")
+        click.echo()
+
     info = index_mod.status(verbose=verbose)
-    
+
     if not info['configured']:
         click.echo("Index mirror not configured")
         if 'error' in info:
@@ -3128,6 +3082,61 @@ def index_status(verbose):
         owner = info.get('mirror_lock_owner', 'unknown')
         age = info.get('mirror_lock_age', 0)
         click.echo(f"  Mirror locked: yes (by {owner}, {age:.0f}s ago)")
+
+
+@index.command('set')
+@click.option('--root', 'site_cache_root', help='site_cache root (combined with project name)')
+@click.option('--path', 'site_cache_path', help='Complete site_cache_dir path override')
+@click.option('--name', help='Project name (defaults to current directory name)')
+def index_set(site_cache_root, site_cache_path, name):
+    """Set core.site_cache_dir for the current repo.
+
+    Writes the resolved path to .dvc/config.local (workspace-local).
+    Does not copy any existing index — use 'dt index migrate' for that.
+
+    \b
+    Examples:
+        dt index set --root /scratch/a56/jr9959/dvc/site
+        dt index set --path /scratch/a56/jr9959/dvc/site/my-repo
+    """
+    try:
+        target = site_cache_mod.init_site_cache(
+            name=name,
+            site_cache_root=site_cache_root,
+            site_cache_path=site_cache_path,
+            verbose=True,
+        )
+        if target is None:
+            click.echo("site_cache is disabled (site_cache.enabled=false)")
+    except site_cache_mod.SiteCacheError as e:
+        raise click.ClickException(str(e))
+
+
+@index.command('migrate')
+@click.option('--root', 'site_cache_root', help='site_cache root (combined with project name)')
+@click.option('--path', 'site_cache_path', help='Complete target site_cache_dir path')
+@click.option('--name', help='Project name (defaults to current directory name)')
+def index_migrate(site_cache_root, site_cache_path, name):
+    """Move core.site_cache_dir to a new location, copying current contents.
+
+    Copies the existing site_cache_dir to the target, then updates
+    .dvc/config.local. The old location is left in place (delete it
+    manually if desired).
+
+    \b
+    Examples:
+        dt index migrate --root /scratch/a56/jr9959/dvc/site
+        dt index migrate --path /scratch/a56/jr9959/dvc/site/my-repo
+    """
+    try:
+        target = site_cache_mod.resolve_path(
+            name=name,
+            site_cache_root=site_cache_root,
+            site_cache_path=site_cache_path,
+        )
+        site_cache_mod.migrate(target=target, verbose=True)
+    except site_cache_mod.SiteCacheError as e:
+        raise click.ClickException(str(e))
 
 
 @index.group('cache')

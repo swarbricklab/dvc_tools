@@ -13,10 +13,11 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `cache.root` | Root directory for [shared external caches](cache.md) | `/g/data/a56/dvc_cache` |
 | `remote.root` | Root directory for [DVC remote storage](remote.md) | `/g/data/a56/dvc_remote` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
-| `index.mirror_root` | Root directory for [index mirror](index.md) | `/g/data/a56/dvc/mirror` |
-| `index.lock_timeout` | Seconds to wait for index lock | `120` |
+| `site_cache.root` | Root directory for shared DVC [`site_cache_dir`](index.md) | `/g/data/a56/dvc/site` |
+| `site_cache.enabled` | Whether `dt init`/`dt clone` configure `core.site_cache_dir` | `true` |
+| `index.mirror_root` | Root directory for the [index archive](index.md) | `/g/data/a56/dvc/index-archive` |
+| `index.lock_timeout` | Seconds to wait for `local.lock` / `mirror.lock` | `120` |
 | `index.retry_interval` | Initial retry interval for locks | `5` |
-| `index.auto_sync` | Enable automatic index sync | `true` |
 | `add.max_threads` | Maximum threads for checksum computation | `192` |
 | `add.mem_per_thread` | GB of RAM per thread for `dt add` | `1` |
 | `qxub.env` | Conda environment for parallel workers | `dt` |
@@ -63,23 +64,37 @@ Hostname used when configuring SSH remotes. This allows DVC to push/pull data fr
 
 ## Index Options
 
-These options configure the [index mirror](index.md) for shared cache lookups.
+These options configure the [index archive](index.md) used by `dt index pull|push` and the shared DVC `site_cache_dir`.
+
+### `site_cache.root`
+
+Root directory for the shared DVC `site_cache_dir`. When set, `dt init` and `dt clone` write `core.site_cache_dir = {site_cache.root}/{project_name}` to `.dvc/config.local`, so every node mounting the workspace shares one live index.
+
+```bash
+dt config set site_cache.root /g/data/<project>/dvc/site
+```
+
+Leave unset to fall back to DVC's per-node default (typically `/var/tmp/dvc`).
+
+### `site_cache.enabled`
+
+**Default:** `true`
+
+Master switch. Set to `false` to make `dt init` and `dt clone` skip `core.site_cache_dir` configuration even when `site_cache.root` is set. Per-invocation `--no-site-cache` always takes precedence.
 
 ### `index.mirror_root`
 
-**Required for index sync**
-
-Root directory for the shared index mirror. The actual mirror path is `{mirror_root}/repo/{repo_hash}/`.
+Root directory for the shared index archive. The actual archive path is `{mirror_root}/{repo_hash}/`. Must be a local or networked filesystem path — `gs://` / `s3://` are not supported.
 
 ```bash
-dt config set index.mirror_root /g/data/a56/dvc/mirror
+dt config set index.mirror_root /g/data/<project>/dvc/index-archive
 ```
 
 ### `index.lock_timeout`
 
 **Default:** `120`
 
-Maximum seconds to wait for an index lock to be released before giving up.
+Maximum seconds to wait for `local.lock` or `mirror.lock` (held during `dt index pull|push`) before giving up.
 
 ```bash
 # Wait up to 5 minutes for locks
@@ -94,20 +109,6 @@ Initial retry interval in seconds when waiting for a lock. Uses exponential back
 
 ```bash
 dt config set index.retry_interval 10
-```
-
-### `index.auto_sync`
-
-**Default:** `true`
-
-Enable automatic index sync during `dt pull`, `dt fetch`, and `dt add`. Set to `false` to disable.
-
-```bash
-# Disable automatic sync globally
-dt config set index.auto_sync false
-
-# Or use --no-index-sync on individual commands
-dt pull --no-index-sync
 ```
 
 ## qxub Options
