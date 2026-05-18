@@ -16,6 +16,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -62,17 +63,13 @@ DEFAULT_HOOKS_CONFIG = {
                     'enabled': True,
                     'mode': 'sync',
                 },
-                'index-sync': {
-                    'enabled': True,
-                    'mode': 'sync',
-                },
             },
         },
         'pre-push': {
             'checks': {
                 'dvc-push': {
                     'enabled': True,
-                    'mode': 'async',
+                    'mode': 'remind',
                 },
             },
         },
@@ -462,7 +459,7 @@ def _run_builtin_check(name: str, hook_name: str, check_cfg: Dict,
         return _run_index_sync(verbose=verbose)
 
     if name == 'dvc-push':
-        return _run_dvc_push(verbose=verbose)
+        return _run_dvc_push(check_cfg, verbose=verbose)
 
     # Unknown built-in — treat as external if it has a command
     return False
@@ -499,23 +496,96 @@ def _run_dvc_checkout(hook_args: List[str], verbose: bool = False) -> bool:
     return True
 
 
-def _run_dvc_push(verbose: bool = False) -> bool:
-    """Run ``dvc push`` for the pre-push hook.
+def _run_dvc_push(check_cfg: Dict, verbose: bool = False) -> bool:
+    """Pre-push hook dispatcher honoring the dvc-push ``mode``.
 
-    Uses the local remote if available (set up by ``dt init`` /
-    ``dt clone`` in ``.dvc/config.local``).  Falls back to the default
-    remote otherwise.
+    Modes:
+        remind  Show unpushed-file summary; never push, never block (default).
+        prompt  Show summary, then ask interactively whether to push.
+        sync    Push inline (blocks the git push until done).
+        async   Push on a compute node (handled by the hook dispatcher; on
+                the worker we treat this the same as ``sync``).
+        off     Do nothing.
     """
+    mode = str(check_cfg.get('mode', 'remind')).lower()
+
+    if mode == 'off':
+        return True
+
+    if mode == 'remind':
+        _show_dvc_push_reminder(verbose=verbose)
+        return True
+
+    if mode == 'prompt':
+        has_outstanding = _show_dvc_push_reminder(verbose=verbose)
+        if has_outstanding and _confirm_push():
+            _do_dvc_push(verbose=verbose)
+        return True
+
+    # 'sync', 'async' (on worker), or any unknown value — actually push.
+    _do_dvc_push(verbose=verbose)
+    return True
+
+
+def _show_dvc_push_reminder(verbose: bool = False) -> bool:
+    """Print a summary of unpushed DVC data. Returns True if any outstanding."""
+    from . import remote as remote_mod
+
+    cmd = ['dvc', 'status', '-c']
+    remotes = remote_mod.list_remotes()
+    local = remote_mod.find_local_remote(remotes)
+    if local:
+        cmd.extend(['-r', local[0]])
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        if verbose:
+            print(f"  dvc-push: status check failed: {e}")
+        return False
+
+    out = (result.stdout or '').strip()
+    if not out or 'up to date' in out.lower() or 'cache and remote' in out.lower() and 'in sync' in out.lower():
+        if verbose:
+            print("  dvc-push: cache and remote in sync")
+        return False
+
+    msg = (
+        "  \u26a0 Unpushed DVC data detected \u2014 run 'dt push' to upload."
+    )
+    if os.isatty(1):
+        msg = f"\033[33m{msg}\033[0m"
+    print(msg, flush=True)
+    if verbose:
+        print(out)
+    return True
+
+
+def _confirm_push() -> bool:
+    """Ask the user whether to push now. Returns False if non-interactive."""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        answer = input("  Push DVC data now? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer in ('y', 'yes')
+
+
+def _do_dvc_push(verbose: bool = False) -> None:
+    """Execute ``dvc push``, preferring a local remote if available."""
     from . import remote as remote_mod
 
     remotes = remote_mod.list_remotes()
     local = remote_mod.find_local_remote(remotes)
 
     if local:
-        remote_name, local_path = local
+        remote_name, _local_path = local
         cmd = ['dvc', 'push', '-r', remote_name]
     else:
-        # No local remote — push to default
         cmd = ['dvc', 'push']
 
     if verbose:
@@ -526,7 +596,6 @@ def _run_dvc_push(verbose: bool = False) -> bool:
         raise HookError(f"dvc push failed:\n{output}")
     if verbose and result.stdout.strip():
         print(f"  dvc-push: {result.stdout.strip()}")
-    return True
 
 
 def _dvc_push_needs_internet() -> bool:

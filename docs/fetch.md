@@ -41,7 +41,6 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | `--imports` | Only fetch repo imports (from `dvc import`) |
 | `--urls` | Only fetch URL imports (from `dvc import-url`) |
 | `--regular` | Only fetch regular stages (non-imports) |
-| `--no-index-sync` | Skip automatic index mirror sync |
 | `--dir-only` | Only fetch `.dir` manifest files, not the data files they reference |
 | `-r, --remote NAME` | Fetch from a named DVC remote (local or network) |
 | `--source PATH` | Explicit source cache path (overrides auto-discovery) |

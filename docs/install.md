@@ -40,8 +40,7 @@ git config so `.dvc` file conflicts are resolved automatically.
 | `pre-commit` | `dvc-status` | sync | Runs `dvc status` to warn about uncommitted DVC changes |
 | `pre-commit` | `large-files` | sync | Rejects staged files larger than `max_size` (default 1 MB) |
 | `post-checkout` | `dvc-checkout` | sync | Runs `dvc checkout` after branch switch (skips file checkouts and rebases) |
-| `post-checkout` | `index-sync` | sync | Pulls then pushes the site cache index |
-| `pre-push` | `dvc-push` | sync | Pushes DVC cache to remotes before git push |
+| `pre-push` | `dvc-push` | remind | Warns about unpushed DVC data without blocking the git push (see [`dvc-push` modes](#dvc-push-modes)) |
 
 All defaults are written to *local* scope (`.dt/config.local.yaml`) so
 they do not get committed to the repository.  Override them from any
@@ -105,10 +104,9 @@ pre-commit:
 
 post-checkout:
   dvc-checkout         sync   (local)
-  index-sync           sync   (local)
 
 pre-push:
-  dvc-push             sync   (local)
+  dvc-push             remind (local)
 ```
 
 ### dt hook run
@@ -245,8 +243,29 @@ hooks:
 | `dvc-status` | pre-commit | Runs `dvc status` via `dt status` |
 | `large-files` | pre-commit | Rejects staged files exceeding `max_size` |
 | `dvc-checkout` | post-checkout | Runs `dvc checkout` (skips file checkouts and rebases) |
-| `index-sync` | post-checkout | Syncs site cache index (pull then push) |
-| `dvc-push` | pre-push | Pushes DVC cache to remotes |
+| `dvc-push` | pre-push | Reminds about / prompts for / performs `dt push` — see [`dvc-push` modes](#dvc-push-modes) |
+
+#### `dvc-push` modes
+
+The `pre-push` `dvc-push` check supports five values for `mode`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `remind` *(default)* | Run a fast `dvc status -c` and print a yellow warning if outstanding DVC data is detected. Never pushes, never blocks the git push. |
+| `prompt` | As `remind`, then interactively ask whether to push. Skipped automatically when stdin is not a TTY (e.g. CI). |
+| `sync` | Push inline (blocks the git push until done). |
+| `async` | Submit `dt push` to a compute node via qxub and return immediately. |
+| `off` | Do nothing. |
+
+Change the mode with:
+
+```bash
+dt config set hooks.pre-push.checks.dvc-push.mode prompt
+```
+
+`remind` is the default because inline pushes from a pre-push hook can
+be very slow on HPC login nodes and surprise users with long blocking
+operations. The reminder is a single fast status check.
 
 ### External checks
 
@@ -319,8 +338,8 @@ hooks:
 | Feature | `dvc install` | `dt install` |
 |---------|---------------|--------------|
 | pre-commit hook | `dvc status` | Configurable checks (dvc-status, large-files, custom) |
-| post-checkout hook | `dvc checkout` | Configurable (dvc-checkout, index-sync, custom) |
-| pre-push hook | `dvc push` | Configurable (dvc-push, custom) |
+| post-checkout hook | `dvc checkout` | Configurable (dvc-checkout, custom) |
+| pre-push hook | `dvc push` | Configurable: `remind` / `prompt` / `sync` / `async` / `off` |
 | Merge driver | ✓ `.dvc` conflict resolution | ✓ Same driver |
 | Large file guard | — | ✓ Built-in `large-files` check |
 | Async dispatch | — | ✓ Offload to compute node via qxub |

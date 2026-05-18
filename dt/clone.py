@@ -13,6 +13,7 @@ from . import config as cfg
 from . import cache as cache_mod
 from . import install as install_mod
 from . import remote as remote_mod
+from . import site_cache as site_cache_mod
 from . import utils
 from .auth import setup as auth_setup_mod
 from .errors import CloneError
@@ -77,6 +78,9 @@ def clone_repository(
     no_submodules: bool = False,
     cache_name: Optional[str] = None,
     remote_name: Optional[str] = None,
+    site_cache_root: Optional[str] = None,
+    site_cache_path: Optional[str] = None,
+    no_site_cache: bool = False,
     shallow: bool = False,
     verbose: bool = True,
     do_pull: bool = False,
@@ -194,6 +198,21 @@ def clone_repository(
     except cache_mod.CacheError as e:
         if verbose:
             print(f"Warning: {e}")
+
+    # Configure DVC site_cache_dir on shared storage so concurrent jobs
+    # on different nodes share the same index.
+    if not no_site_cache:
+        try:
+            site_cache_mod.init_site_cache(
+                name=cache_name,
+                site_cache_root=site_cache_root,
+                site_cache_path=site_cache_path,
+                repo_path=target_dir,
+                verbose=verbose,
+            )
+        except site_cache_mod.SiteCacheError as e:
+            if verbose:
+                print(f"Warning: {e}")
 
     # Set up local remote for HPC shared filesystem access.
     # Prefer deriving the local path from the repo's existing .dvc/config

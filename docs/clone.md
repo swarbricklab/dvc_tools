@@ -23,6 +23,9 @@ dt clone [options] <repository> [path]
 - `--no-submodules`: Skip cloning git submodules
 - `--cache-name <name>`: Override cache directory name (defaults to repository name)
 - `--remote-name <name>`: Override remote directory name (defaults to repository name)
+- `--site-cache-root <path>`: Override the DVC [`site_cache_dir`](index.md) root (combined with project name)
+- `--site-cache-path <path>`: Override the full `core.site_cache_dir` path
+- `--no-site-cache`: Skip `core.site_cache_dir` configuration
 - `--shallow`: Perform a shallow clone (only recent history)
 - `--pull`: Run `dt pull` after cloning to fetch all data files
 - `--no-auth`: Skip running `dt auth setup` after cloning
