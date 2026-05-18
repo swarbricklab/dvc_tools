@@ -29,6 +29,7 @@ from . import update as update_mod
 from . import install as install_mod
 from . import status as status_mod
 from . import utils
+from . import dvc_lock
 
 
 @click.group()
@@ -445,12 +446,13 @@ def cache_validate(targets, fix, verbose, json_output, no_progress):
     import json
     
     try:
-        result = cache_mod.validate_cache(
-            targets=list(targets) if targets else None,
-            fix=fix,
-            verbose=verbose,
-            progress=not no_progress and not json_output,
-        )
+        with dvc_lock.maybe_lock(fix):
+            result = cache_mod.validate_cache(
+                targets=list(targets) if targets else None,
+                fix=fix,
+                verbose=verbose,
+                progress=not no_progress and not json_output,
+            )
     except cache_mod.CacheError as e:
         raise click.ClickException(str(e))
     
@@ -1893,12 +1895,13 @@ def add(ctx, targets, threads, no_wait, verbose, worker):
         
         if worker:
             # Running on compute node - execute dvc add directly
-            success = add_mod.add(
-                targets=list(targets),
-                threads=threads,
-                dvc_args=dvc_args if dvc_args else None,
-                verbose=verbose,
-            )
+            with dvc_lock.repo_lock():
+                success = add_mod.add(
+                    targets=list(targets),
+                    threads=threads,
+                    dvc_args=dvc_args if dvc_args else None,
+                    verbose=verbose,
+                )
             if not success:
                 raise click.ClickException("dvc add failed")
         else:
@@ -2094,22 +2097,23 @@ def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, reg
                 click.echo(f"Remote '{remote_name}' is not locally accessible, will use network fetch")
     
     try:
-        results = fetch_mod.fetch(
-            targets=list(targets) if targets else None,
-            verbose=verbose,
-            update=update,
-            network=network,
-            dry=dry,
-            force=force,
-            imports=imports,
-            urls=urls,
-            regular=regular,
-            source=source,
-            destination=destination,
-            cache_type=cache_type,
-            dir_only=dir_only,
-            remote_name=remote_name,
-        )
+        with dvc_lock.maybe_lock(not dry):
+            results = fetch_mod.fetch(
+                targets=list(targets) if targets else None,
+                verbose=verbose,
+                update=update,
+                network=network,
+                dry=dry,
+                force=force,
+                imports=imports,
+                urls=urls,
+                regular=regular,
+                source=source,
+                destination=destination,
+                cache_type=cache_type,
+                dir_only=dir_only,
+                remote_name=remote_name,
+            )
         
         # In dry mode, just exit (summary already printed)
         if dry:
@@ -2315,14 +2319,15 @@ def pull(targets, force, dry, verbose, update, network):
         target_list = list(targets) if targets else None
         
         # Call the simplified pull function
-        success, fetched, failed = pull_mod.pull(
-            targets=target_list,
-            verbose=verbose,
-            force=force,
-            update=update,
-            network=network,
-            dry=dry,
-        )
+        with dvc_lock.maybe_lock(not dry):
+            success, fetched, failed = pull_mod.pull(
+                targets=target_list,
+                verbose=verbose,
+                force=force,
+                update=update,
+                network=network,
+                dry=dry,
+            )
         
         if not success:
             raise SystemExit(1)
@@ -2585,16 +2590,20 @@ def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose):
             dry_run = True
             verbose = False  # Suppress per-file details in status mode
         
-        results = update_mod.update(
-            targets=list(targets) if targets else None,
-            rev=rev,
-            verbose=verbose,
-            no_download=no_download,
-            dry_run=dry_run,
-            rebuild=rebuild,
-            force=force,
-            show_status=status,
-        )
+        # Only lock when actually mutating (force/rebuild upgrades or .dir rewrites).
+        # --dry-run and --status are read-only.
+        _need_lock = (force or rebuild) and not dry_run
+        with dvc_lock.maybe_lock(_need_lock):
+            results = update_mod.update(
+                targets=list(targets) if targets else None,
+                rev=rev,
+                verbose=verbose,
+                no_download=no_download,
+                dry_run=dry_run,
+                rebuild=rebuild,
+                force=force,
+                show_status=status,
+            )
         
         any_success = False
         any_failure = False
