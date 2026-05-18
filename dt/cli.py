@@ -24,6 +24,7 @@ from . import du as du_mod
 from . import ls as ls_mod
 from . import index as index_mod
 from . import cache_index as cache_index_mod
+from . import site_cache as site_cache_mod
 from . import update as update_mod
 from . import install as install_mod
 from . import status as status_mod
@@ -47,11 +48,15 @@ def cli():
 @click.option('--team', help='GitHub team for access (only valid if owner is an org)')
 @click.option('--cache-root', help='Override the cache root directory')
 @click.option('--remote-root', help='Override the remote root directory')
+@click.option('--site-cache-root', help='Override the DVC site_cache_dir root (combined with project name)')
+@click.option('--site-cache-path', help='Override the full DVC site_cache_dir path')
 @click.option('--no-git', is_flag=True, help='Skip git initialization')
 @click.option('--no-dvc', is_flag=True, help='Skip DVC initialization')
 @click.option('--no-cache', is_flag=True, help='Skip cache setup')
 @click.option('--no-remote', is_flag=True, help='Skip remote setup')
-def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, no_remote):
+@click.option('--no-site-cache', is_flag=True, help='Skip core.site_cache_dir setup')
+def init(name, owner, team, cache_root, remote_root, site_cache_root, site_cache_path,
+         no_git, no_dvc, no_cache, no_remote, no_site_cache):
     """Initialize a new DVC project with proper cache and remote setup.
     
     This command creates a complete DVC project with git, DVC, external cache,
@@ -64,10 +69,13 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
             team=team,
             cache_root=cache_root,
             remote_root=remote_root,
+            site_cache_root=site_cache_root,
+            site_cache_path=site_cache_path,
             no_git=no_git,
             no_dvc=no_dvc,
             no_cache=no_cache,
             no_remote=no_remote,
+            no_site_cache=no_site_cache,
         )
     except init_mod.InitError as e:
         raise click.ClickException(str(e))
@@ -82,13 +90,18 @@ def init(name, owner, team, cache_root, remote_root, no_git, no_dvc, no_cache, n
 @click.option('--no-submodules', is_flag=True, help='Skip cloning git submodules')
 @click.option('--cache-name', help='Override cache directory name')
 @click.option('--remote-name', help='Override remote directory name')
+@click.option('--site-cache-root', help='Override the DVC site_cache_dir root (combined with project name)')
+@click.option('--site-cache-path', help='Override the full DVC site_cache_dir path')
+@click.option('--no-site-cache', is_flag=True, help='Skip core.site_cache_dir setup')
 @click.option('--shallow', is_flag=True, help='Perform a shallow clone')
 @click.option('--pull', 'do_pull', is_flag=True, help='Run dt pull after cloning to fetch data')
 @click.option('--no-auth', is_flag=True, help='Skip running auth setup after cloning')
 @click.option('--no-hooks', is_flag=True, help='Skip installing git hooks and merge driver')
 @click.option('--rev', default=None, help='Check out a specific revision after cloning')
 @click.option('--overwrite', is_flag=True, help='Remove the target directory if it already exists')
-def clone(repository, path, owner, username, no_init, no_submodules, cache_name, remote_name, shallow, do_pull, no_auth, no_hooks, rev, overwrite):
+def clone(repository, path, owner, username, no_init, no_submodules, cache_name, remote_name,
+          site_cache_root, site_cache_path, no_site_cache,
+          shallow, do_pull, no_auth, no_hooks, rev, overwrite):
     """Clone an existing DVC project from GitHub.
 
     REPOSITORY can be either:
@@ -119,6 +132,9 @@ def clone(repository, path, owner, username, no_init, no_submodules, cache_name,
             no_submodules=no_submodules,
             cache_name=cache_name,
             remote_name=remote_name,
+            site_cache_root=site_cache_root,
+            site_cache_path=site_cache_path,
+            no_site_cache=no_site_cache,
             shallow=shallow,
             do_pull=do_pull,
             no_auth=no_auth,
@@ -3099,8 +3115,22 @@ def index_status(verbose):
     Displays information about the local index and mirror,
     including paths, existence, and lock status.
     """
+    # Show site_cache_dir up front so users see what DVC is actually using.
+    try:
+        current_sc = site_cache_mod.get_current()
+        click.echo("Site cache (core.site_cache_dir):")
+        if current_sc:
+            click.echo(f"  Configured: {current_sc}")
+            click.echo(f"  Exists:     {'yes' if current_sc.exists() else 'no'}")
+        else:
+            click.echo("  Configured: (DVC default — usually /var/tmp/dvc)")
+        click.echo()
+    except site_cache_mod.SiteCacheError as e:
+        click.echo(f"Site cache check failed: {e}")
+        click.echo()
+
     info = index_mod.status(verbose=verbose)
-    
+
     if not info['configured']:
         click.echo("Index mirror not configured")
         if 'error' in info:
@@ -3128,6 +3158,61 @@ def index_status(verbose):
         owner = info.get('mirror_lock_owner', 'unknown')
         age = info.get('mirror_lock_age', 0)
         click.echo(f"  Mirror locked: yes (by {owner}, {age:.0f}s ago)")
+
+
+@index.command('set')
+@click.option('--root', 'site_cache_root', help='site_cache root (combined with project name)')
+@click.option('--path', 'site_cache_path', help='Complete site_cache_dir path override')
+@click.option('--name', help='Project name (defaults to current directory name)')
+def index_set(site_cache_root, site_cache_path, name):
+    """Set core.site_cache_dir for the current repo.
+
+    Writes the resolved path to .dvc/config.local (workspace-local).
+    Does not copy any existing index — use 'dt index migrate' for that.
+
+    \b
+    Examples:
+        dt index set --root /scratch/a56/jr9959/dvc/site
+        dt index set --path /scratch/a56/jr9959/dvc/site/my-repo
+    """
+    try:
+        target = site_cache_mod.init_site_cache(
+            name=name,
+            site_cache_root=site_cache_root,
+            site_cache_path=site_cache_path,
+            verbose=True,
+        )
+        if target is None:
+            click.echo("site_cache is disabled (site_cache.enabled=false)")
+    except site_cache_mod.SiteCacheError as e:
+        raise click.ClickException(str(e))
+
+
+@index.command('migrate')
+@click.option('--root', 'site_cache_root', help='site_cache root (combined with project name)')
+@click.option('--path', 'site_cache_path', help='Complete target site_cache_dir path')
+@click.option('--name', help='Project name (defaults to current directory name)')
+def index_migrate(site_cache_root, site_cache_path, name):
+    """Move core.site_cache_dir to a new location, copying current contents.
+
+    Copies the existing site_cache_dir to the target, then updates
+    .dvc/config.local. The old location is left in place (delete it
+    manually if desired).
+
+    \b
+    Examples:
+        dt index migrate --root /scratch/a56/jr9959/dvc/site
+        dt index migrate --path /scratch/a56/jr9959/dvc/site/my-repo
+    """
+    try:
+        target = site_cache_mod.resolve_path(
+            name=name,
+            site_cache_root=site_cache_root,
+            site_cache_path=site_cache_path,
+        )
+        site_cache_mod.migrate(target=target, verbose=True)
+    except site_cache_mod.SiteCacheError as e:
+        raise click.ClickException(str(e))
 
 
 @index.group('cache')

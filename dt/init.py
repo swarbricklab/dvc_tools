@@ -10,6 +10,7 @@ from typing import Optional
 from . import config as cfg
 from . import cache as cache_mod
 from . import remote as remote_mod
+from . import site_cache as site_cache_mod
 from . import utils
 from .errors import InitError
 
@@ -214,10 +215,13 @@ def init_project(
     team: Optional[str] = None,
     cache_root: Optional[str] = None,
     remote_root: Optional[str] = None,
+    site_cache_root: Optional[str] = None,
+    site_cache_path: Optional[str] = None,
     no_git: bool = False,
     no_dvc: bool = False,
     no_cache: bool = False,
     no_remote: bool = False,
+    no_site_cache: bool = False,
     repo_path: Optional[Path] = None,
     verbose: bool = True,
 ) -> dict:
@@ -263,6 +267,7 @@ def init_project(
         'dvc': None,
         'cache': None,
         'remote': None,
+        'site_cache': None,
     }
     
     if verbose:
@@ -279,7 +284,22 @@ def init_project(
     if not no_dvc:
         init_dvc(repo_path, verbose=verbose)
         result['dvc'] = repo_path / '.dvc'
-    
+
+    # Step 2b: DVC site_cache_dir (per-repo shared index location)
+    if not no_dvc and not no_site_cache:
+        try:
+            site_cache_dir = site_cache_mod.init_site_cache(
+                name=project_name,
+                site_cache_root=site_cache_root,
+                site_cache_path=site_cache_path,
+                repo_path=repo_path,
+                verbose=verbose,
+            )
+            result['site_cache'] = site_cache_dir
+        except site_cache_mod.SiteCacheError as e:
+            if verbose:
+                print(f"Warning: {e}")
+
     # Step 3: DVC Tools directory (.dt)
     init_dt_directory(repo_path, verbose=verbose)
     
@@ -329,5 +349,7 @@ def init_project(
             print(f"  Cache: {result['cache']}")
         if result['remote']:
             print(f"  Remote: {result['remote']}")
-    
+        if result['site_cache']:
+            print(f"  Site cache: {result['site_cache']}")
+
     return result

@@ -183,3 +183,8 @@ class AuthError(DTError):
 class UpdateError(DTError):
     """Error during update operations."""
     pass
+
+
+class SiteCacheError(DTError):
+    """Error configuring or applying DVC site_cache_dir."""
+    pass
