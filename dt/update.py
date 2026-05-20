@@ -21,6 +21,7 @@ import yaml
 from dvc.utils.serialize import dump_yaml
 
 from . import diff as diff_mod
+from . import dvc_lock
 from . import find as find_mod
 from . import tmp as tmp_mod
 from . import utils
@@ -407,13 +408,16 @@ def _write_dir_to_cache(
     # Write to v3 cache layout
     dest_file = Path(dest_cache) / 'files' / 'md5' / file_hash[:2] / f"{file_hash[2:]}.dir"
     
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
-        if verbose:
-            print(f"  Created .dir file: {dest_file}")
-    elif verbose:
-        print(f"  .dir file already exists: {dest_file}")
+    # Take the workspace lock around the cache write so a concurrent `dvc`
+    # process cannot observe a half-written .dir manifest.
+    with dvc_lock.repo_lock():
+        if not dest_file.exists():
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            dest_file.write_bytes(manifest_content)
+            if verbose:
+                print(f"  Created .dir file: {dest_file}")
+        elif verbose:
+            print(f"  .dir file already exists: {dest_file}")
     
     return dir_hash, dest_file
 
@@ -505,7 +509,10 @@ def _update_dvc_file(
         
         if modified:
             data = utils.recompute_dvc_md5(data)
-            dump_yaml(dvc_path, data)
+            # Take the workspace lock around the .dvc file rewrite so a
+            # concurrent `dvc` process cannot read a partially-written file.
+            with dvc_lock.repo_lock():
+                dump_yaml(dvc_path, data)
             
             # Auto-stage if core.autostage is enabled
             if utils.is_autostage_enabled():
