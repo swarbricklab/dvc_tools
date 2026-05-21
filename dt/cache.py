@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from dvc.repo import Repo
 
 from . import config as cfg
+from . import dvc_lock
 from . import utils
 from .errors import CacheError
 
@@ -678,53 +679,58 @@ def validate_cache(
     total = len(files_to_check)
     deleted_paths = set()  # Track files deleted during --fix
     
-    for i, (cache_path, file_hash, workspace_path) in enumerate(files_to_check):
-        if progress and not verbose:
-            print(f"\rValidating {i+1}/{total}...", end='', flush=True)
-        
-        # Skip if already deleted (e.g., .dir manifest deleted when fixing child)
-        if str(cache_path) in deleted_paths:
-            continue
-        
-        # Check if file still exists (may have been deleted)
-        if not cache_path.exists():
-            continue
-        
-        try:
-            is_valid, expected, actual = validate_cache_file(cache_path)
+    # Take the workspace lock only when we're going to mutate the cache.
+    # The lock is in-process / cross-process compatible with `dvc`; without
+    # it, a concurrent `dvc` run could observe partially-deleted files.
+    # Validation alone (fix=False) is read-only and does not need the lock.
+    with dvc_lock.maybe_lock(fix):
+        for i, (cache_path, file_hash, workspace_path) in enumerate(files_to_check):
+            if progress and not verbose:
+                print(f"\rValidating {i+1}/{total}...", end='', flush=True)
             
-            if is_valid:
-                valid.append((workspace_path, file_hash))
-                if verbose:
-                    print(f"✓ {workspace_path}")
-            else:
-                corrupted.append((workspace_path, file_hash, expected, actual))
-                if verbose:
-                    print(f"✗ {workspace_path}")
-                    print(f"  Expected: {expected}")
-                    print(f"  Actual:   {actual}")
+            # Skip if already deleted (e.g., .dir manifest deleted when fixing child)
+            if str(cache_path) in deleted_paths:
+                continue
+            
+            # Check if file still exists (may have been deleted)
+            if not cache_path.exists():
+                continue
+            
+            try:
+                is_valid, expected, actual = validate_cache_file(cache_path)
                 
-                if fix:
-                    # Delete the corrupted file
-                    try:
-                        cache_path.unlink()
-                        fixed.append((workspace_path, file_hash))
-                        deleted_paths.add(str(cache_path))
-                        if verbose:
-                            print(f"  Deleted corrupted file")
-                        
-                        # Track parent .dir for informational purposes
-                        clean_hash = file_hash.replace('.dir', '')
-                        parent_dir = get_parent_dir_hash(cache_dir, clean_hash)
-                        if parent_dir and parent_dir not in dir_fixed:
-                            dir_fixed.append(parent_dir)
-                    except OSError as e:
-                        errors.append((str(cache_path), f"Failed to delete: {e}"))
-                        
-        except OSError as e:
-            errors.append((str(cache_path), str(e)))
-            if verbose:
-                print(f"? {workspace_path}: {e}")
+                if is_valid:
+                    valid.append((workspace_path, file_hash))
+                    if verbose:
+                        print(f"✓ {workspace_path}")
+                else:
+                    corrupted.append((workspace_path, file_hash, expected, actual))
+                    if verbose:
+                        print(f"✗ {workspace_path}")
+                        print(f"  Expected: {expected}")
+                        print(f"  Actual:   {actual}")
+                    
+                    if fix:
+                        # Delete the corrupted file
+                        try:
+                            cache_path.unlink()
+                            fixed.append((workspace_path, file_hash))
+                            deleted_paths.add(str(cache_path))
+                            if verbose:
+                                print(f"  Deleted corrupted file")
+                            
+                            # Track parent .dir for informational purposes
+                            clean_hash = file_hash.replace('.dir', '')
+                            parent_dir = get_parent_dir_hash(cache_dir, clean_hash)
+                            if parent_dir and parent_dir not in dir_fixed:
+                                dir_fixed.append(parent_dir)
+                        except OSError as e:
+                            errors.append((str(cache_path), f"Failed to delete: {e}"))
+                            
+            except OSError as e:
+                errors.append((str(cache_path), str(e)))
+                if verbose:
+                    print(f"? {workspace_path}: {e}")
     
     if progress and not verbose:
         print()  # Newline after progress
