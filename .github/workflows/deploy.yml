@@ -198,17 +198,21 @@ jobs:
           GHCR_TOKEN=$(gcloud secrets versions access latest \
             --secret=absconda-github-token \
             --project="$GCP_PROJECT")
+          GHCR_USERNAME=$(gcloud secrets versions access latest \
+            --secret=absconda-github-username \
+            --project="$GCP_PROJECT")
           CRED_FILE=$(mktemp)
           echo "$GHCR_TOKEN" > "$CRED_FILE"
           chmod 600 "$CRED_FILE"
           echo "GHCR_CRED_FILE=$CRED_FILE" >> "$GITHUB_ENV"
+          echo "GHCR_USERNAME=$GHCR_USERNAME" >> "$GITHUB_ENV"
 
       - name: Deploy to NCI
         run: |
           IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
 
           qxub exec -v --mod absconda --mem 4GB --resources jobfs=4GB --internet \
-            --vars SINGULARITY_DOCKER_USERNAME=swarbricklab,SINGULARITY_DOCKER_PASSWORD=$(cat $GHCR_CRED_FILE) \
+            --vars SINGULARITY_DOCKER_USERNAME=${GHCR_USERNAME},SINGULARITY_DOCKER_PASSWORD=$(cat $GHCR_CRED_FILE) \
             -- \
             absconda deploy "$IMAGE_REF" \
               --commands dt,dvc,gh,aws,daff,qxub,qxi,qxtat,qxet,qx \
