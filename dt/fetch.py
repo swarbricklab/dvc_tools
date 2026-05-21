@@ -1454,6 +1454,123 @@ def _fetch_url_import_stage(
     return (stage_name, result[0], result[1])
 
 
+def _resolve_primary_cache_base(cache_base: Optional[str]) -> Optional[str]:
+    """Return the DVC primary cache root, resolving from the active repo if needed."""
+    if cache_base:
+        return cache_base
+    try:
+        from dvc.repo import Repo
+        _repo = Repo()
+        _cache = _repo.cache.local
+        _base = str(_cache.path)
+        if _base.endswith('/files/md5') or _base.endswith('\\files\\md5'):
+            _base = str(Path(_cache.path).parent.parent)
+        return _base
+    except Exception:
+        return None
+
+
+def _stage_outputs_fully_cached(
+    dvc_data: Dict[str, Any],
+    cache_base: str,
+) -> bool:
+    """Check whether every output (and .dir child) for a stage is already cached.
+
+    Used to skip unnecessary network fetches when the data is already present
+    in the primary DVC cache (e.g. because the user previously fetched it but
+    the source repo's local cache is no longer mounted).
+    """
+    outs = dvc_data.get('outs') or []
+    if not outs:
+        return False
+
+    cache_root = Path(cache_base)
+    dest_db = None
+    for out in outs:
+        md5 = out.get('md5')
+        if not md5:
+            return False
+        dest = cache_ops.get_cache_file_path(md5, cache_root, use_v3_layout=True)
+        if not dest.exists():
+            return False
+        if md5.endswith('.dir'):
+            # Expand the .dir manifest and verify every child is present too.
+            if dest_db is None:
+                dest_db = _create_source_cache_db(cache_root)
+                if dest_db is None:
+                    return False
+            try:
+                children = _expand_dir_hash(md5, dest_db)
+            except Exception:
+                return False
+            if not children:
+                # An empty manifest is unusual; treat as not-cached to be safe.
+                return False
+            for child_hash, _child_path in children:
+                child_dest = cache_ops.get_cache_file_path(
+                    child_hash, cache_root, use_v3_layout=True
+                )
+                if not child_dest.exists():
+                    return False
+    return True
+
+
+def _snapshot_repo_rev_keys(dvc_data: Dict[str, Any]) -> List[bool]:
+    """Record which deps[*].repo entries had an explicit ``rev`` key set.
+
+    Returned list is aligned with ``deps``; ``True`` means the dep already
+    pinned ``repo.rev`` before we touched the file, so we must leave it alone.
+    """
+    presence: List[bool] = []
+    for dep in dvc_data.get('deps') or []:
+        repo = dep.get('repo') if isinstance(dep, dict) else None
+        presence.append(bool(repo) and 'rev' in repo)
+    return presence
+
+
+def _strip_added_rev_keys(
+    dvc_path: Path,
+    rev_was_set: List[bool],
+    verbose: bool = False,
+) -> None:
+    """Remove ``repo.rev`` keys that ``dvc update --rev`` added as a side-effect.
+
+    ``dvc update --rev <X>`` pins the revision by writing both ``rev_lock`` and
+    ``rev`` into the .dvc file.  When the original file only had ``rev_lock``
+    (the common case for unpinned imports) the extra ``rev`` field permanently
+    locks the dep to that commit and prevents future updates to HEAD.  Strip
+    those newly-added keys here so the file's ``rev``/no-``rev`` shape is
+    preserved.  The top-level ``md5`` is recomputed afterwards via
+    :func:`utils.recompute_dvc_md5` so the file stays internally consistent.
+    """
+    try:
+        with open(dvc_path) as f:
+            data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return
+
+    deps = data.get('deps') or []
+    modified = False
+    for idx, dep in enumerate(deps):
+        if idx >= len(rev_was_set) or rev_was_set[idx]:
+            continue
+        if not isinstance(dep, dict):
+            continue
+        repo = dep.get('repo')
+        if isinstance(repo, dict) and 'rev' in repo:
+            del repo['rev']
+            modified = True
+            if verbose:
+                print(f"  Stripped spurious repo.rev added by dvc update in {dvc_path}")
+
+    if not modified:
+        return
+
+    data = utils.recompute_dvc_md5(data)
+    from dvc.utils.serialize import dump_yaml
+    dump_yaml(dvc_path, data)
+
+
 def _run_repo_import_network_fetch(
     stage: Any,
     verbose: bool = False,
@@ -1461,14 +1578,22 @@ def _run_repo_import_network_fetch(
 ) -> Tuple[bool, str]:
     """Network-fetch a repo import stage.
 
-    Tries to read the file directly from the ``.dt/tmp/clones/`` clone via
-    ``git show <rev_lock>:<path>`` and write it to the DVC cache.  This avoids
-    calling ``dvc update``, which rewrites the ``.dvc`` file as a side-effect
-    and can trigger false "pipeline is stale" failures in CI.
+    Order of operations:
 
-    Falls back to ``dvc update --rev <rev_lock>`` when the file is not
-    git-tracked in the source repo (i.e. it lives in that repo's own DVC
-    remote and therefore isn't accessible via ``git show``).
+    1. **Cache check** — if every output (and ``.dir`` child) for the stage is
+       already present in the primary DVC cache, return immediately.  This
+       avoids spurious network calls (and the ``.dvc`` rewrites they would
+       trigger) when the data is already on disk, e.g. when the source repo's
+       local cache is no longer mounted but the user fetched the data earlier.
+    2. **git show from tmp clone** — read the file directly from
+       ``.dt/tmp/clones/`` via ``git show <rev_lock>:<path>``.  No side-effects
+       on the ``.dvc`` file.
+    3. **dvc update --rev <rev_lock>** — last-resort fallback for files that
+       live in the source repo's own DVC remote (not git-tracked) and so can't
+       be served via ``git show``.  DVC's ``update --rev`` writes both
+       ``rev_lock`` and ``rev`` into the ``.dvc`` file; any ``rev`` key that
+       wasn't originally present is stripped afterwards so unpinned imports
+       stay unpinned.
 
     If no ``rev_lock`` is recorded in the .dvc file (unusual) the call falls
     back to plain ``dvc fetch`` so we do not inadvertently update to HEAD.
@@ -1499,60 +1624,72 @@ def _run_repo_import_network_fetch(
     url = import_info.get('url') if import_info else None
     source_path = import_info.get('path') if import_info else None
 
+    # Parse the .dvc file once and resolve the destination cache up front so
+    # the cache-presence check and both fetch attempts can share the result.
+    # If the file can't be read here (e.g. unit tests mock import_info but
+    # don't write a real .dvc on disk) we proceed without the pre-checks;
+    # the dvc subprocess below will surface any genuine read errors.
+    try:
+        dvc_data = yaml.safe_load(stage_path.read_text())
+        if not isinstance(dvc_data, dict):
+            dvc_data = {}
+    except (OSError, yaml.YAMLError):
+        dvc_data = {}
+
+    _cache_base = _resolve_primary_cache_base(cache_base)
+
+    # --- Attempt 0: already in destination cache? Skip all network work. ---
+    if dvc_data and _cache_base and _stage_outputs_fully_cached(dvc_data, _cache_base):
+        if verbose:
+            print(f"  {stage_path}: already cached, skipping network fetch")
+        return (True, "Already in cache (skipped network fetch)")
+
+    outs = dvc_data.get('outs', []) if isinstance(dvc_data, dict) else []
+    expected_md5 = outs[0].get('md5') if outs else None
+
     # --- Attempt 1: read file from tmp clone via git show (no .dvc side-effects) ---
-    if url and source_path:
+    if url and source_path and expected_md5 and not expected_md5.endswith('.dir'):
         try:
-            # Read expected md5 from the .dvc file's outs section
-            dvc_data = yaml.safe_load(stage_path.read_text())
-            outs = dvc_data.get('outs', [])
-            expected_md5 = outs[0].get('md5') if outs else None
+            clone_path = tmp_mod.clone_repo(url, refresh=False, verbose=False)
 
-            if expected_md5:
-                clone_path = tmp_mod.clone_repo(url, refresh=False, verbose=False)
+            # Ensure the specific commit is available in the (possibly shallow) clone
+            subprocess.run(
+                ['git', 'fetch', '--depth', '1', 'origin', rev_lock],
+                cwd=clone_path,
+                capture_output=True,
+            )
 
-                # Ensure the specific commit is available in the (possibly shallow) clone
-                subprocess.run(
-                    ['git', 'fetch', '--depth', '1', 'origin', rev_lock],
-                    cwd=clone_path,
-                    capture_output=True,
-                )
+            if verbose:
+                print(f"  git show {rev_lock[:8]}:{source_path}")
 
-                if verbose:
-                    print(f"  git show {rev_lock[:8]}:{source_path}")
+            show = subprocess.run(
+                ['git', 'show', f'{rev_lock}:{source_path}'],
+                cwd=clone_path,
+                capture_output=True,
+            )
 
-                show = subprocess.run(
-                    ['git', 'show', f'{rev_lock}:{source_path}'],
-                    cwd=clone_path,
-                    capture_output=True,
-                )
+            if show.returncode == 0:
+                # Verify the content matches the expected hash
+                actual_md5 = hashlib.md5(show.stdout).hexdigest()
+                if actual_md5 != expected_md5:
+                    return (False, f"MD5 mismatch: expected {expected_md5}, got {actual_md5}")
 
-                if show.returncode == 0:
-                    # Verify the content matches the expected hash
-                    actual_md5 = hashlib.md5(show.stdout).hexdigest()
-                    if actual_md5 != expected_md5:
-                        return (False, f"MD5 mismatch: expected {expected_md5}, got {actual_md5}")
+                if not _cache_base:
+                    return (False, "Could not resolve primary cache location")
 
-                    # Resolve cache base if not provided
-                    _cache_base = cache_base
-                    if not _cache_base:
-                        from dvc.repo import Repo
-                        _repo = Repo()
-                        _cache = _repo.cache.local
-                        _cache_base = str(_cache.path)
-                        if _cache_base.endswith('/files/md5') or _cache_base.endswith('\\files\\md5'):
-                            _cache_base = str(Path(_cache.path).parent.parent)
-
-                    dest = cache_ops.get_cache_file_path(expected_md5, Path(_cache_base), use_v3_layout=True)
-                    if not dest.exists():
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        dest.write_bytes(show.stdout)
-                    return (True, "Fetched via git show (network)")
-                # else: file not in git at this rev — fall through to dvc update
+                dest = cache_ops.get_cache_file_path(expected_md5, Path(_cache_base), use_v3_layout=True)
+                if not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(show.stdout)
+                return (True, "Fetched via git show (network)")
+            # else: file not in git at this rev — fall through to dvc update
         except Exception as e:
             if verbose:
                 print(f"  git show failed ({e}), falling back to dvc update")
 
-    # --- Attempt 2: dvc update (may rewrite the .dvc file) ---
+    # --- Attempt 2: dvc update (rewrites the .dvc file — we patch it back below) ---
+    rev_was_set = _snapshot_repo_rev_keys(dvc_data)
+
     cmd = ['dvc', 'update', '--rev', rev_lock, str(stage_path)]
     if verbose:
         print(f"  Running: {' '.join(cmd)}")
@@ -1565,6 +1702,7 @@ def _run_repo_import_network_fetch(
             result = subprocess.run(cmd, capture_output=True, text=True)
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
         if result.returncode == 0:
+            _strip_added_rev_keys(stage_path, rev_was_set, verbose=verbose)
             return (True, "Fetched via dvc update (network)")
         else:
             return (False, f"dvc update failed: {error_msg}")
