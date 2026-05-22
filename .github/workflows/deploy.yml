@@ -201,29 +201,40 @@ jobs:
           GHCR_USERNAME=$(gcloud secrets versions access latest \
             --secret=absconda-github-username \
             --project="$GCP_PROJECT")
-          CRED_FILE=$(mktemp)
-          echo "$GHCR_TOKEN" > "$CRED_FILE"
+          # Write to $HOME (NCI shared filesystem — visible from PBS compute
+          # nodes as the same user) rather than /tmp (per-host). Avoids passing
+          # the token via qsub args / --vars, where it would show up in qstat -f.
+          CRED_FILE="$HOME/.dt-ci-ghcr-token-${GITHUB_RUN_ID}"
+          umask 077
+          printf '%s' "$GHCR_TOKEN" > "$CRED_FILE"
           chmod 600 "$CRED_FILE"
           echo "GHCR_CRED_FILE=$CRED_FILE" >> "$GITHUB_ENV"
           echo "GHCR_USERNAME=$GHCR_USERNAME" >> "$GITHUB_ENV"
 
-      - name: Refresh Singularity GHCR credentials on NCI
+      - name: Refresh Singularity GHCR credentials on NCI compute node
         run: |
-          cat "$GHCR_CRED_FILE" | singularity remote login \
-            --username "$GHCR_USERNAME" \
-            --password-stdin \
-            docker://ghcr.io
+          # NCI's singularity reads credentials from ~/.singularity/remote.yaml,
+          # not from SINGULARITY_DOCKER_* env vars. Run `singularity remote
+          # login` on a compute node (where absconda deploy will run) so the
+          # config is written to the correct ~/.singularity for that context.
+          # The token is read from a file on shared $HOME — never appears on
+          # the qsub command line.
+          qxub exec -v --mod singularity --mem 1GB --internet \
+            -- \
+            bash -c "cat '$GHCR_CRED_FILE' | singularity remote login --username '$GHCR_USERNAME' --password-stdin docker://ghcr.io"
 
       - name: Deploy to NCI
         run: |
           IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
 
           qxub exec -v --mod absconda --mem 4GB --resources jobfs=4GB --internet \
-            --vars SINGULARITY_DOCKER_USERNAME=${GHCR_USERNAME},SINGULARITY_DOCKER_PASSWORD=$(cat $GHCR_CRED_FILE) \
             -- \
             absconda deploy "$IMAGE_REF" \
               --commands dt,dvc,gh,aws,daff,qxub,qxi,qxtat,qxet,qx \
               --env-dir /opt/conda/envs/dt \
               --shims singularity,pbs
 
+      - name: Remove GHCR token from NCI home
+        if: always()
+        run: |
           rm -f "$GHCR_CRED_FILE"
