@@ -207,6 +207,13 @@ jobs:
           echo "GHCR_CRED_FILE=$CRED_FILE" >> "$GITHUB_ENV"
           echo "GHCR_USERNAME=$GHCR_USERNAME" >> "$GITHUB_ENV"
 
+      - name: Refresh Singularity GHCR credentials on NCI
+        run: |
+          cat "$GHCR_CRED_FILE" | singularity remote login \
+            --username "$GHCR_USERNAME" \
+            --password-stdin \
+            docker://ghcr.io
+
       - name: Deploy to NCI
         run: |
           IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
