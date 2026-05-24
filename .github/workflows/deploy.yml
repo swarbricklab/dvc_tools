@@ -201,27 +201,40 @@ jobs:
           GHCR_USERNAME=$(gcloud secrets versions access latest \
             --secret=absconda-github-username \
             --project="$GCP_PROJECT")
-          # Write to $HOME (NCI shared filesystem — visible from PBS compute
-          # nodes as the same user) rather than /tmp (per-host). Avoids passing
-          # the token via qsub args / --vars, where it would show up in qstat -f.
-          CRED_FILE="$HOME/.dt-ci-ghcr-token-${GITHUB_RUN_ID}"
+          # Runner has no shared filesystem with NCI (qxub SSHes to gadi), so
+          # stage the token locally in RUNNER_TEMP and scp to gadi in the next
+          # step. Filename is namespaced by GITHUB_RUN_ID to avoid collisions.
+          LOCAL_CRED="${RUNNER_TEMP:-/tmp}/dt-ci-ghcr-token-${GITHUB_RUN_ID}"
+          REMOTE_CRED=".dt-ci-ghcr-token-${GITHUB_RUN_ID}"
           umask 077
-          printf '%s' "$GHCR_TOKEN" > "$CRED_FILE"
-          chmod 600 "$CRED_FILE"
-          echo "GHCR_CRED_FILE=$CRED_FILE" >> "$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" > "$LOCAL_CRED"
+          chmod 600 "$LOCAL_CRED"
+          echo "GHCR_LOCAL_CRED=$LOCAL_CRED" >> "$GITHUB_ENV"
+          echo "GHCR_REMOTE_CRED=$REMOTE_CRED" >> "$GITHUB_ENV"
           echo "GHCR_USERNAME=$GHCR_USERNAME" >> "$GITHUB_ENV"
+
+      - name: Stage GHCR token on NCI home
+        run: |
+          # qxub uses the 'gadi' SSH alias from ~/.ssh/config on the runner to
+          # reach NCI. Reuse that alias to scp the credential file into the
+          # remote user's home (shared with PBS compute nodes). The token
+          # never goes through the qsub command line.
+          scp -o StrictHostKeyChecking=accept-new \
+            "$GHCR_LOCAL_CRED" "gadi:$GHCR_REMOTE_CRED"
+          ssh -o StrictHostKeyChecking=accept-new gadi \
+            "chmod 600 '$GHCR_REMOTE_CRED'"
 
       - name: Refresh Singularity GHCR credentials on NCI compute node
         run: |
           # NCI's singularity reads credentials from ~/.singularity/remote.yaml,
           # not from SINGULARITY_DOCKER_* env vars. Run `singularity remote
-          # login` on a compute node (where absconda deploy will run) so the
-          # config is written to the correct ~/.singularity for that context.
-          # The token is read from a file on shared $HOME — never appears on
-          # the qsub command line.
+          # login` on a compute node (where absconda deploy will later run) so
+          # the config is written to the correct ~/.singularity for that
+          # context. The token is read from a file on the remote $HOME — never
+          # appears on the qsub command line.
           qxub exec -v --mod singularity --mem 1GB --internet \
             -- \
-            bash -c "cat '$GHCR_CRED_FILE' | singularity remote login --username '$GHCR_USERNAME' --password-stdin docker://ghcr.io"
+            bash -c "cat \"\$HOME/$GHCR_REMOTE_CRED\" | singularity remote login --username '$GHCR_USERNAME' --password-stdin docker://ghcr.io"
 
       - name: Deploy to NCI
         run: |
@@ -234,7 +247,11 @@ jobs:
               --env-dir /opt/conda/envs/dt \
               --shims singularity,pbs
 
-      - name: Remove GHCR token from NCI home
+      - name: Clean up GHCR token
         if: always()
         run: |
-          rm -f "$GHCR_CRED_FILE"
+          rm -f "$GHCR_LOCAL_CRED" || true
+          if [[ -n "$GHCR_REMOTE_CRED" ]]; then
+            ssh -o StrictHostKeyChecking=accept-new gadi \
+              "rm -f '$GHCR_REMOTE_CRED'" || true
+          fi
