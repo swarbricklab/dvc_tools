@@ -277,10 +277,12 @@ jobs:
           EOF
           chmod 700 "$LOCAL_SCRIPT"
 
-          scp -o StrictHostKeyChecking=accept-new \
-            "$GHCR_LOCAL_CRED" "$LOCAL_SCRIPT" "gadi:~/"
+          scp -v -o StrictHostKeyChecking=accept-new \
+            "$GHCR_LOCAL_CRED" "gadi:$GHCR_REMOTE_CRED"
+          scp -v -o StrictHostKeyChecking=accept-new \
+            "$LOCAL_SCRIPT" "gadi:$REMOTE_SCRIPT"
           ssh -o StrictHostKeyChecking=accept-new gadi \
-            "chmod 600 '$GHCR_REMOTE_CRED' && chmod 700 '$REMOTE_SCRIPT'"
+            "ls -la '$GHCR_REMOTE_CRED' '$REMOTE_SCRIPT' && chmod 600 '$GHCR_REMOTE_CRED' && chmod 700 '$REMOTE_SCRIPT'"
 
           echo "GHCR_REMOTE_SCRIPT=$REMOTE_SCRIPT" >> "$GITHUB_ENV"
           echo "GHCR_LOCAL_SCRIPT=$LOCAL_SCRIPT" >> "$GITHUB_ENV"
