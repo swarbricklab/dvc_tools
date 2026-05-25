@@ -278,7 +278,7 @@ jobs:
           chmod 700 "$LOCAL_SCRIPT"
 
           scp -o StrictHostKeyChecking=accept-new \
-            "$GHCR_LOCAL_CRED" "$LOCAL_SCRIPT" "gadi:"
+            "$GHCR_LOCAL_CRED" "$LOCAL_SCRIPT" "gadi:~/"
           ssh -o StrictHostKeyChecking=accept-new gadi \
             "chmod 600 '$GHCR_REMOTE_CRED' && chmod 700 '$REMOTE_SCRIPT'"
 
