@@ -247,7 +247,9 @@ jobs:
           chmod 600 "$LOCAL_CRED"
           echo "GHCR_LOCAL_CRED=$LOCAL_CRED" >> "$GITHUB_ENV"
           echo "GHCR_REMOTE_CRED=$REMOTE_CRED" >> "$GITHUB_ENV"
-          echo "GHCR_USERNAME=$GHCR_USERNAME" >> "$GITHUB_ENV"      - name: Stage GHCR token and login script on NCI home
+          echo "GHCR_USERNAME=$GHCR_USERNAME" >> "$GITHUB_ENV"
+
+      - name: Stage GHCR token and login script on NCI home
         run: |
           # qxub uses the 'gadi' SSH alias from ~/.ssh/config on the runner to
           # reach NCI. Reuse that alias to scp the credential file and a
