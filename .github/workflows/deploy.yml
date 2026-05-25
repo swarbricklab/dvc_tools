@@ -213,16 +213,41 @@ jobs:
           echo "GHCR_REMOTE_CRED=$REMOTE_CRED" >> "$GITHUB_ENV"
           echo "GHCR_USERNAME=$GHCR_USERNAME" >> "$GITHUB_ENV"
 
-      - name: Stage GHCR token on NCI home
+      - name: Stage GHCR token and login script on NCI home
         run: |
           # qxub uses the 'gadi' SSH alias from ~/.ssh/config on the runner to
-          # reach NCI. Reuse that alias to scp the credential file into the
-          # remote user's home (shared with PBS compute nodes). The token
-          # never goes through the qsub command line.
+          # reach NCI. Reuse that alias to scp the credential file and a
+          # self-contained login script into the remote user's home (shared
+          # with PBS compute nodes). The token never goes through the qsub
+          # command line.
+          #
+          # We build the login script here (with the username and token
+          # filename already baked in) to avoid double-quoting hell when
+          # passing a shell pipeline through `qxub exec -- bash -c "..."`.
+          LOCAL_SCRIPT="${RUNNER_TEMP:-/tmp}/dt-ci-ghcr-login-${GITHUB_RUN_ID}.sh"
+          REMOTE_SCRIPT=".dt-ci-ghcr-login-${GITHUB_RUN_ID}.sh"
+          cat > "$LOCAL_SCRIPT" <<EOF
+          #!/bin/bash
+          set -euo pipefail
+          TOKEN_FILE="\$HOME/${GHCR_REMOTE_CRED}"
+          echo "Token file: \$TOKEN_FILE"
+          ls -la "\$TOKEN_FILE"
+          echo "Token byte count: \$(wc -c < "\$TOKEN_FILE")"
+          singularity remote login \\
+            --username "${GHCR_USERNAME}" \\
+            --password-stdin \\
+            docker://ghcr.io \\
+            < "\$TOKEN_FILE"
+          EOF
+          chmod 700 "$LOCAL_SCRIPT"
+
           scp -o StrictHostKeyChecking=accept-new \
-            "$GHCR_LOCAL_CRED" "gadi:$GHCR_REMOTE_CRED"
+            "$GHCR_LOCAL_CRED" "$LOCAL_SCRIPT" "gadi:"
           ssh -o StrictHostKeyChecking=accept-new gadi \
-            "chmod 600 '$GHCR_REMOTE_CRED'"
+            "chmod 600 '$GHCR_REMOTE_CRED' && chmod 700 '$REMOTE_SCRIPT'"
+
+          echo "GHCR_REMOTE_SCRIPT=$REMOTE_SCRIPT" >> "$GITHUB_ENV"
+          echo "GHCR_LOCAL_SCRIPT=$LOCAL_SCRIPT" >> "$GITHUB_ENV"
 
       - name: Refresh Singularity GHCR credentials on NCI compute node
         run: |
@@ -230,11 +255,11 @@ jobs:
           # not from SINGULARITY_DOCKER_* env vars. Run `singularity remote
           # login` on a compute node (where absconda deploy will later run) so
           # the config is written to the correct ~/.singularity for that
-          # context. The token is read from a file on the remote $HOME — never
-          # appears on the qsub command line.
+          # context. The script is invoked by absolute path under $HOME so
+          # we don't depend on PBS's CWD.
           qxub exec -v --mod singularity --mem 1GB --internet \
             -- \
-            bash -c "cat \"\$HOME/$GHCR_REMOTE_CRED\" | singularity remote login --username '$GHCR_USERNAME' --password-stdin docker://ghcr.io"
+            bash "\$HOME/$GHCR_REMOTE_SCRIPT"
 
       - name: Deploy to NCI
         run: |
@@ -247,11 +272,11 @@ jobs:
               --env-dir /opt/conda/envs/dt \
               --shims singularity,pbs
 
-      - name: Clean up GHCR token
+      - name: Clean up GHCR token and login script
         if: always()
         run: |
-          rm -f "$GHCR_LOCAL_CRED" || true
-          if [[ -n "$GHCR_REMOTE_CRED" ]]; then
+          rm -f "$GHCR_LOCAL_CRED" "$GHCR_LOCAL_SCRIPT" || true
+          if [[ -n "${GHCR_REMOTE_CRED:-}" || -n "${GHCR_REMOTE_SCRIPT:-}" ]]; then
             ssh -o StrictHostKeyChecking=accept-new gadi \
-              "rm -f '$GHCR_REMOTE_CRED'" || true
+              "rm -f '${GHCR_REMOTE_CRED:-}' '${GHCR_REMOTE_SCRIPT:-}'" || true
           fi
