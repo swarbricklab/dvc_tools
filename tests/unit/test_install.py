@@ -538,6 +538,29 @@ class TestDispatchAsyncCheck:
         assert qxub_args is None
 
 
+class TestRunDvcCheckout:
+    """Tests for _run_dvc_checkout fast-path skips."""
+
+    def test_skips_file_checkout(self):
+        with patch('dt.pull.pull') as mock_pull:
+            assert install._run_dvc_checkout(['abc', 'def', '0']) is True
+            mock_pull.assert_not_called()
+
+    def test_skips_when_head_unchanged(self):
+        # git checkout -b <new-branch> fires post-checkout with prev == new.
+        with patch('dt.pull.pull') as mock_pull:
+            assert install._run_dvc_checkout(['abc', 'abc', '1']) is True
+            mock_pull.assert_not_called()
+
+    def test_runs_pull_on_branch_switch(self):
+        with patch('dt.pull.pull') as mock_pull, \
+             patch.object(install.subprocess, 'run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='/tmp/.git\n')
+            with patch.object(install.Path, 'exists', return_value=False):
+                assert install._run_dvc_checkout(['abc', 'def', '1']) is True
+            mock_pull.assert_called_once()
+
+
 class TestDvcPushNeedsInternet:
     """Tests for _dvc_push_needs_internet."""
 
