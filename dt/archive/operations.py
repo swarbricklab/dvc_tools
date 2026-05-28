@@ -23,6 +23,7 @@ Design notes
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -357,6 +358,27 @@ class HashingReader(IO[bytes]):
 # Inner-tar worker (process-pool-safe)
 # --------------------------------------------------------------------------- #
 
+SENTINEL_SUFFIX = '.done.json'
+
+
+def _sentinel_path_for(staging: Path, filename: str) -> Path:
+    """Path of the ``.done.json`` sentinel for a given inner-tar filename."""
+    return staging / f"{filename}{SENTINEL_SUFFIX}"
+
+
+def _load_sentinel(sentinel: Path) -> Optional[Dict]:
+    """Load and shallow-validate a sentinel. Returns None on any problem."""
+    try:
+        with open(sentinel) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    required = {'prefix', 'filename', 'size_bytes', 'sha256', 'n_objects'}
+    if not isinstance(data, dict) or not required.issubset(data):
+        return None
+    return data
+
+
 def build_prefix_tarball(
     remote_dir: str,
     prefix: str,
@@ -370,6 +392,10 @@ def build_prefix_tarball(
     Safe to invoke as a ProcessPoolExecutor task and (in a future
     multi-node mode) as an independent ``qxub monitor`` task.
 
+    Writes ``<prefix>.tar`` atomically (``.tmp`` + rename) and drops a
+    ``<prefix>.tar.done.json`` sentinel beside it so a follow-up run
+    with ``resume=True`` can skip prefixes that completed previously.
+
     Returns a dict compatible with :class:`InnerTar`.
     """
     _validate_compression(compress)
@@ -380,26 +406,48 @@ def build_prefix_tarball(
     ext = _COMPRESSION_EXT[compress]
     filename = f"{prefix}.tar{ext}"
     target = staging / filename
+    target_tmp = staging / f"{filename}.tmp"
+    sentinel = _sentinel_path_for(staging, filename)
 
-    cmd = ['tar', '-C', str(remote), '-cf', str(target)]
+    # Always wipe any leftover from a previous killed attempt at this
+    # prefix — the .done.json sentinel is the source of truth, not the
+    # presence of a .tar file on disk.
+    for p in (target, target_tmp, sentinel):
+        if p.exists():
+            p.unlink()
+
+    cmd = ['tar', '-C', str(remote), '-cf', str(target_tmp)]
     cmd.extend(_COMPRESSION_TAR_FLAGS[compress])
     cmd.extend(['files/md5/' + prefix])
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
+        if target_tmp.exists():
+            target_tmp.unlink()
         raise ArchiveError(
             f"tar failed for prefix {prefix}: {result.stderr.strip() or '(no output)'}"
         )
 
+    # Atomic publish: rename .tmp → final, then write the sentinel.
+    # If we get killed between the two, the next resume will see the
+    # tar without a sentinel and rebuild it (handled in the cleanup
+    # block above on retry).
+    target_tmp.rename(target)
     sha = _sha256_of_file(target)
     size = target.stat().st_size
-    return {
+
+    data = {
         'prefix': prefix,
         'filename': filename,
         'size_bytes': size,
         'sha256': sha,
         'n_objects': n_objects,
     }
+    sentinel_tmp = sentinel.with_suffix(sentinel.suffix + '.tmp')
+    with open(sentinel_tmp, 'w') as f:
+        json.dump(data, f)
+    sentinel_tmp.rename(sentinel)
+    return data
 
 
 # --------------------------------------------------------------------------- #
@@ -450,6 +498,7 @@ def create_archive(
     compress: str = 'none',
     dry_run: bool = False,
     force: bool = False,
+    resume: bool = False,
     keep_staging: bool = False,
     verbose: bool = False,
     backend_override: Optional[ArchiveBackend] = None,
@@ -565,23 +614,76 @@ def create_archive(
 
     # Real run: prepare staging directory.
     if staging.exists():
-        if not force:
+        if force:
+            shutil.rmtree(staging)
+            staging.mkdir(parents=True)
+        elif resume:
+            print(
+                f"Resume: reusing existing staging dir {staging}",
+                flush=True,
+            )
+        else:
             raise ArchiveError(
                 f"Staging directory {staging} already exists. "
-                f"Delete it or rerun with --force."
+                f"Delete it, rerun with --resume to continue a "
+                f"previous attempt, or --force to start over."
             )
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
+    else:
+        staging.mkdir(parents=True)
+        if resume:
+            print(
+                f"Resume: no prior staging dir at {staging}, "
+                f"starting fresh",
+                flush=True,
+            )
+
+    # Scan staging for completed prefixes (sentinels written by a
+    # previous, killed run) so Phase 1 can skip them.
+    resume_done: Dict[str, Dict] = {}
+    if resume:
+        for sentinel in staging.glob(f'*{SENTINEL_SUFFIX}'):
+            data = _load_sentinel(sentinel)
+            if not data:
+                continue
+            tar_file = staging / data['filename']
+            try:
+                actual_size = tar_file.stat().st_size
+            except OSError:
+                continue
+            if actual_size != data['size_bytes']:
+                continue
+            resume_done[data['prefix']] = data
+        if resume_done:
+            print(
+                f"Resume: {len(resume_done)} of {len(prefix_dirs)} "
+                f"prefix(es) already complete; will re-tar the rest.",
+                flush=True,
+            )
 
     inner_tars: Dict[str, InnerTar] = {}
+    success = False
     try:
         # Phase 1: parallel inner tarballs ----------------------------------
+        # Pre-populate inner_tars from any prefixes resume found done.
+        for pname, data in resume_done.items():
+            inner_tars[pname] = InnerTar(
+                filename=data['filename'],
+                size_bytes=data['size_bytes'],
+                sha256=data['sha256'],
+                n_objects=data['n_objects'],
+            )
+        prefix_dirs_todo = [p for p in prefix_dirs if p.name not in resume_done]
+
         print(
-            f"Phase 1/3: building {len(prefix_dirs)} inner tarball(s) "
-            f"with {n_jobs} worker(s); staging at {staging}",
+            f"Phase 1/3: building {len(prefix_dirs_todo)} inner tarball(s) "
+            f"with {n_jobs} worker(s); staging at {staging}"
+            + (
+                f" (skipping {len(resume_done)} already done)"
+                if resume_done else ""
+            ),
             flush=True,
         )
-        if n_jobs == 1 and len(prefix_dirs) > 1:
+        if n_jobs == 1 and len(prefix_dirs_todo) > 1:
             print(
                 "  note: --jobs=1 means prefixes are tarred serially; "
                 "set $PBS_NCPUS (or pass --jobs N) to parallelise.",
@@ -599,9 +701,10 @@ def create_archive(
                     compress,
                     stats[p.name][0],
                 ): p.name
-                for p in prefix_dirs
+                for p in prefix_dirs_todo
             }
-            done = 0
+            done = len(resume_done)
+            total = len(prefix_dirs)
             for fut in as_completed(futures):
                 prefix = futures[fut]
                 try:
@@ -621,15 +724,14 @@ def create_archive(
                 if verbose:
                     elapsed = time.monotonic() - phase1_start
                     print(
-                        f"  [{done:>3}/{len(prefix_dirs)}] {prefix} "
+                        f"  [{done:>3}/{total}] {prefix} "
                         f"({row['n_objects']:>7} obj, {size_str:>10}) "
                         f"  t+{_format_duration(elapsed)}",
                         flush=True,
                     )
                 else:
                     print(
-                        f"  [{done:>3}/{len(prefix_dirs)}] {prefix} "
-                        f"({size_str})",
+                        f"  [{done:>3}/{total}] {prefix} ({size_str})",
                         flush=True,
                     )
 
@@ -712,11 +814,20 @@ def create_archive(
         )
         path_written = save_manifest(manifest, repo_root=repo_root)
         print(f"Phase 3/3: wrote manifest {path_written}", flush=True)
+        success = True
         return CreateResult(manifest=manifest, manifest_path=path_written)
 
     finally:
-        if not keep_staging and staging.exists():
+        if success and not keep_staging and staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+        elif not success and staging.exists():
+            # Leave staging behind so the user can --resume.
+            print(
+                f"  staging dir preserved at {staging} — "
+                f"rerun with --resume to continue.",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 # --------------------------------------------------------------------------- #

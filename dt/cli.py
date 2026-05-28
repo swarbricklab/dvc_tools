@@ -675,11 +675,16 @@ def _resolve_source_remote(source: Optional[str]) -> Path:
 @click.option('--force', is_flag=True,
               help='Overwrite existing manifest / staging, ignore '
                    'low-disk warnings.')
+@click.option('--resume', is_flag=True,
+              help='Resume a previous attempt: reuse the existing '
+                   'staging dir and skip prefixes whose .done.json '
+                   'sentinels are valid.')
 @click.option('--keep-staging', is_flag=True,
               help='Do not delete the staging directory after upload.')
 @click.option('-v', '--verbose', is_flag=True)
 def remote_archive_create(name, source, backend, backend_path, staging_dir,
-                          jobs, compress, dry_run, force, keep_staging, verbose):
+                          jobs, compress, dry_run, force, resume,
+                          keep_staging, verbose):
     """Create a new archive of a DVC remote.
 
     NAME is the identifier for this archive instance (not the DVC remote
@@ -720,6 +725,7 @@ def remote_archive_create(name, source, backend, backend_path, staging_dir,
             compress=compress,
             dry_run=dry_run,
             force=force,
+            resume=resume,
             keep_staging=keep_staging,
             verbose=verbose,
         )

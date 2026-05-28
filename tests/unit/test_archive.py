@@ -329,6 +329,134 @@ class TestCreateEndToEnd:
 
 
 # --------------------------------------------------------------------------- #
+# resume
+# --------------------------------------------------------------------------- #
+
+class TestResume:
+    def _simulate_killed_run(
+        self, remote, staging_dir, name='partial',
+    ):
+        """Build inner tarballs into staging without finishing the upload.
+
+        Returns the staging subdir for *name* with its sentinels intact,
+        as if a previous create_archive call had been killed between
+        Phase 1 and Phase 2.
+        """
+        staging = staging_dir / name
+        staging.mkdir(parents=True)
+        prefix_dirs, stats = ops.scan_files_md5(remote)
+        for p in prefix_dirs:
+            ops.build_prefix_tarball(
+                str(remote), p.name, str(staging),
+                'none', stats[p.name][0],
+            )
+        return staging
+
+    def test_build_writes_sentinel(self, sample_remote, tmp_path):
+        remote, _ = sample_remote
+        staging = tmp_path / 'staging'
+        staging.mkdir()
+        prefix_dirs, stats = ops.scan_files_md5(remote)
+        p = prefix_dirs[0]
+        row = ops.build_prefix_tarball(
+            str(remote), p.name, str(staging), 'none', stats[p.name][0],
+        )
+        sentinel = staging / f"{row['filename']}{ops.SENTINEL_SUFFIX}"
+        assert sentinel.exists()
+        data = ops._load_sentinel(sentinel)
+        assert data['sha256'] == row['sha256']
+        assert data['size_bytes'] == row['size_bytes']
+
+    def test_resume_skips_completed_prefixes(
+        self, sample_remote, project_root, local_backend, staging_dir,
+        capsys,
+    ):
+        remote, _ = sample_remote
+        self._simulate_killed_run(remote, staging_dir, name='r')
+        prefix_dirs, _ = ops.scan_files_md5(remote)
+
+        result = ops.create_archive(
+            name='r',
+            source_remote=remote,
+            backend='local',
+            backend_path='cold/r.tar',
+            jobs=1,
+            resume=True,
+            backend_override=local_backend,
+            repo_root=project_root,
+        )
+
+        # Manifest covers every prefix.
+        assert set(result.manifest.inner_tars) == {p.name for p in prefix_dirs}
+        # Output confirms resume took every sentinel and ran zero workers.
+        out = capsys.readouterr().out
+        assert (
+            f'Resume: {len(prefix_dirs)} of {len(prefix_dirs)} '
+            f"prefix(es) already complete"
+        ) in out
+        assert (
+            f'Phase 1/3: building 0 inner tarball(s)'
+        ) in out
+
+    def test_resume_rebuilds_prefix_when_sentinel_missing(
+        self, sample_remote, project_root, local_backend, staging_dir,
+        capsys,
+    ):
+        remote, _ = sample_remote
+        staging = self._simulate_killed_run(remote, staging_dir, name='r2')
+        sentinels = list(staging.glob(f'*{ops.SENTINEL_SUFFIX}'))
+        assert sentinels
+        target_sentinel = sentinels[0]
+        target_sentinel.unlink()
+        rebuilt_prefix = target_sentinel.name.split('.tar')[0]
+        other_count = len(sentinels) - 1
+
+        ops.create_archive(
+            name='r2',
+            source_remote=remote,
+            backend='local',
+            backend_path='cold/r2.tar',
+            jobs=1,
+            resume=True,
+            backend_override=local_backend,
+            repo_root=project_root,
+        )
+
+        out = capsys.readouterr().out
+        assert 'building 1 inner tarball' in out
+        assert f'skipping {other_count} already done' in out
+        # And the rebuilt prefix name appears in the progress lines.
+        assert rebuilt_prefix in out
+
+    def test_failed_run_preserves_staging(
+        self, sample_remote, project_root, staging_dir,
+    ):
+        remote, _ = sample_remote
+
+        class BoomBackend(LocalDirBackend):
+            name = 'boom'
+            def put_stream(self, *_a, **_k):
+                raise RuntimeError('upload exploded')
+
+        with pytest.raises(Exception):
+            ops.create_archive(
+                name='boom',
+                source_remote=remote,
+                backend='local',
+                backend_path='cold/boom.tar',
+                jobs=1,
+                backend_override=BoomBackend(root=str(project_root / 'cold')),
+                repo_root=project_root,
+            )
+
+        staging = staging_dir / 'boom'
+        # Staging must survive the failure so the user can --resume.
+        assert staging.exists()
+        # And at least one sentinel must be present.
+        assert list(staging.glob(f'*{ops.SENTINEL_SUFFIX}'))
+
+
+# --------------------------------------------------------------------------- #
 # verify
 # --------------------------------------------------------------------------- #
 
