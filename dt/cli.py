@@ -1,5 +1,8 @@
 """Command-line interface for DVC Tools."""
 
+from pathlib import Path
+from typing import Optional
+
 import click
 
 from . import config as cfg
@@ -29,6 +32,9 @@ from . import update as update_mod
 from . import install as install_mod
 from . import status as status_mod
 from . import utils
+from . import archive as archive_mod
+from .archive import operations as archive_ops
+from .archive import backends as archive_backends
 
 
 @click.group()
@@ -604,6 +610,254 @@ def remote_list(repository, owner, show_all):
     for name, url, is_default in remotes:
         default_marker = " (default)" if is_default else ""
         click.echo(f"{name}{default_marker}: {url}")
+
+
+# =============================================================================
+# dt remote archive
+# =============================================================================
+
+@remote.group('archive')
+def remote_archive():
+    """Archive DVC remotes to cold storage (e.g. NCI MDSS).
+
+    Tars the contents of a DVC remote's ``files/md5/`` tree in parallel
+    (one inner tarball per md5 prefix), wraps them in a single outer
+    tar, and ships the result to a pluggable archival backend. A
+    manifest is committed under ``.dvc/archives/`` so verify, restore
+    and prune can work without contacting the backend first.
+
+    \b
+    Typical workflow:
+        dt config set archive.staging_dir /scratch/<proj>/<user>/dt-archive
+        dt remote archive create <name> --source <remote-dir>
+        dt remote archive verify <name>
+        dt remote archive prune  <name>      # only after verify passes
+    """
+    pass
+
+
+def _resolve_source_remote(source: Optional[str]) -> Path:
+    """Resolve --source for archive commands.
+
+    Falls back to ``dt remote`` resolution (config + project name) if
+    not provided.
+    """
+    if source:
+        return Path(source).expanduser().resolve()
+    return remote_mod.resolve_remote_path()
+
+
+@remote_archive.command('create')
+@click.argument('name', required=False)
+@click.option('--source', 'source', default=None,
+              help='Path to the DVC remote to archive '
+                   '(default: project remote from `dt remote init` rules).')
+@click.option('--backend', default='mdss',
+              type=click.Choice(sorted(archive_backends.known_backends()),
+                                case_sensitive=False),
+              help='Archive backend to use (default: mdss).')
+@click.option('--backend-path', default=None,
+              help='Override the path on the backend '
+                   '(default: dt-archive/<remote-name>/<name>.tar).')
+@click.option('--staging-dir', default=None,
+              help='Staging directory for the inner tarballs '
+                   '(default: archive.staging_dir config).')
+@click.option('--jobs', type=int, default=None,
+              help='Number of parallel inner-tar workers '
+                   '(default: min(PBS_NCPUS or nproc, 8)).')
+@click.option('--compress',
+              type=click.Choice(['none', 'gzip', 'zstd']),
+              default='none',
+              help='Compression for inner tarballs (default: none). '
+                   'DVC blobs are usually incompressible.')
+@click.option('--dry-run', is_flag=True,
+              help='Plan and report sizes without creating tarballs.')
+@click.option('--force', is_flag=True,
+              help='Overwrite existing manifest / staging, ignore '
+                   'low-disk warnings.')
+@click.option('--keep-staging', is_flag=True,
+              help='Do not delete the staging directory after upload.')
+@click.option('-v', '--verbose', is_flag=True)
+def remote_archive_create(name, source, backend, backend_path, staging_dir,
+                          jobs, compress, dry_run, force, keep_staging, verbose):
+    """Create a new archive of a DVC remote.
+
+    NAME is the identifier for this archive instance (not the DVC remote
+    name and not the project name). It becomes:
+
+    \b
+      - the manifest filename:   .dvc/archives/<NAME>.yaml
+      - the default tar object:  dt-archive/<remote-dir>/<NAME>.tar
+      - the handle for follow-up:  dt remote archive verify <NAME>
+                                    dt remote archive restore <NAME> --to ...
+                                    dt remote archive prune   <NAME>
+
+    If NAME is omitted, it defaults to ``<remote-dir-name>-<YYYY-MM-DD>``
+    so re-archiving the same remote on different days produces
+    distinguishable archives without you having to think.
+
+    \b
+    Examples:
+        dt remote archive create                       # neochemo-2026-05-28
+        dt remote archive create neochemo-2026-05
+        dt remote archive create snapshot --source /g/data/a56/dvc/other
+    """
+    try:
+        source_remote = _resolve_source_remote(source)
+        if name is None:
+            import datetime as _dt
+            name = f"{source_remote.name}-{_dt.date.today().isoformat()}"
+            click.echo(click.style(
+                f"Using default archive name: {name}", dim=True,
+            ))
+        result = archive_ops.create_archive(
+            name=name,
+            source_remote=source_remote,
+            backend=backend,
+            backend_path=backend_path,
+            staging_dir=staging_dir,
+            jobs=jobs,
+            compress=compress,
+            dry_run=dry_run,
+            force=force,
+            keep_staging=keep_staging,
+            verbose=verbose,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+
+    m = result.manifest
+    if dry_run:
+        click.echo(click.style(
+            f"[dry-run] would write manifest to {result.manifest_path}",
+            dim=True,
+        ))
+        return
+
+    click.echo(click.style(
+        f"✓ Archived '{name}' to {m.backend}:{m.backend_path}",
+        fg='green',
+    ))
+    click.echo(f"  size:     {utils.format_size(m.tarball_size_bytes)}")
+    click.echo(f"  objects:  {m.total_objects}")
+    click.echo(f"  sha256:   {m.tarball_sha256[:16]}…")
+    click.echo(f"  manifest: {result.manifest_path}")
+    click.echo()
+    click.echo(click.style(
+        f"Next: review and commit {result.manifest_path.relative_to(utils.find_project_root())}",
+        dim=True,
+    ))
+
+
+@remote_archive.command('list')
+def remote_archive_list():
+    """List archives recorded under ``.dvc/archives/``."""
+    manifests = archive_ops.list_archives()
+    if not manifests:
+        click.echo("No archives found under .dvc/archives/.")
+        return
+    name_w = max(len(m.archive_name) for m in manifests)
+    name_w = max(name_w, len('NAME'))
+    backend_w = max(len(m.backend) for m in manifests)
+    backend_w = max(backend_w, len('BACKEND'))
+    click.echo(
+        f"{'NAME':<{name_w}}  {'BACKEND':<{backend_w}}  "
+        f"{'SIZE':>10}  CREATED              PATH"
+    )
+    for m in manifests:
+        click.echo(
+            f"{m.archive_name:<{name_w}}  {m.backend:<{backend_w}}  "
+            f"{utils.format_size(m.tarball_size_bytes):>10}  "
+            f"{m.created_at:<20}  {m.backend_path}"
+        )
+
+
+@remote_archive.command('verify')
+@click.argument('name')
+@click.option('--deep', is_flag=True,
+              help='Also enumerate inner tarballs via tar -t (expensive on tape).')
+def remote_archive_verify(name, deep):
+    """Verify an archive against its manifest."""
+    try:
+        result = archive_ops.verify_archive(name, deep=deep)
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+
+    if result.ok:
+        click.echo(click.style(
+            f"✓ Archive '{name}' verified OK on {result.backend}",
+            fg='green',
+        ))
+        click.echo(f"  path: {result.backend_path}")
+        click.echo(f"  size: ok")
+        click.echo(f"  sha256: ok")
+        if result.deep_ok is True:
+            click.echo(f"  deep (tar -t): ok")
+        return
+
+    click.echo(click.style(
+        f"✗ Archive '{name}' did NOT verify on {result.backend}",
+        fg='red',
+    ))
+    for msg in result.messages:
+        click.echo(f"  - {msg}")
+    raise SystemExit(1)
+
+
+@remote_archive.command('restore')
+@click.argument('name')
+@click.option('--to', 'to_path', type=click.Path(),
+              required=True,
+              help='Destination directory for restored content.')
+@click.option('--object', 'object_hash', default=None,
+              help='Restore a single md5 object.')
+@click.option('--prefix', default=None,
+              help='Restore all objects under a single md5 prefix (e.g. "ab").')
+@click.option('-v', '--verbose', is_flag=True)
+def remote_archive_restore(name, to_path, object_hash, prefix, verbose):
+    """Restore content from an archive.
+
+    Without --object or --prefix, performs a full restore (downloads
+    the outer tar and extracts everything into --to).
+    """
+    try:
+        written = archive_ops.restore_archive(
+            name=name,
+            to_path=Path(to_path),
+            object_hash=object_hash,
+            prefix=prefix,
+            verbose=verbose,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+    click.echo(click.style(
+        f"✓ Restored {len(written)} path(s) from '{name}'",
+        fg='green',
+    ))
+    for p in written[:20]:
+        click.echo(f"  {p}")
+    if len(written) > 20:
+        click.echo(f"  ... and {len(written) - 20} more")
+
+
+@remote_archive.command('prune')
+@click.argument('name')
+@click.option('--yes', is_flag=True,
+              help='Skip the interactive confirmation prompt.')
+@click.option('--force', is_flag=True,
+              help='Allow pruning when extras outside files/md5/ exist '
+                   '(NEVER bypasses verify).')
+def remote_archive_prune(name, yes, force):
+    """Delete the on-disk DVC remote after verifying its archive."""
+    try:
+        result = archive_ops.prune_archive(name, yes=yes, force=force)
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+    click.echo(click.style(
+        f"✓ Pruned {result.deleted_path} "
+        f"({utils.format_size(result.bytes_freed)} freed)",
+        fg='green',
+    ))
 
 
 @cli.command()

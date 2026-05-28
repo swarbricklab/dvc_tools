@@ -224,8 +224,13 @@ Manage remote storage.
 |------------|-------------|
 | `dt remote init` | Set up remote storage with SSH and local access methods |
 | `dt remote list [repo]` | List DVC remotes (optionally from a remote repository) |
+| `dt remote archive create <name>` | Archive a remote to cold storage (e.g. NCI MDSS) |
+| `dt remote archive list` | List archives recorded under `.dvc/archives/` |
+| `dt remote archive verify <name>` | Verify an archive against its manifest |
+| `dt remote archive restore <name>` | Restore content from an archive (full / prefix / single object) |
+| `dt remote archive prune <name>` | Delete the on-disk remote once its archive is verified |
 
-[Full documentation →](remote.md)
+[Full documentation →](remote.md) · [Archive reference →](archive.md)
 
 ---
 

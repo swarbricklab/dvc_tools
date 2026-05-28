@@ -94,10 +94,25 @@ local      /g/data/a56/dvc/neochemo [local]
 
 The `[local]` marker indicates paths accessible on the local filesystem.
 
+## dt remote archive
+
+Archive a DVC remote to cold storage (e.g. NCI MDSS), verify it,
+restore from it, and prune the on-disk copy once verified. See
+[archive.md](archive.md) for the full reference.
+
+```bash
+dt remote archive create  <name>   # tar in parallel + ship to backend
+dt remote archive list             # list archives recorded in .dvc/archives/
+dt remote archive verify  <name>   # size + sha256 against manifest
+dt remote archive restore <name>   # full / per-prefix / single-object restore
+dt remote archive prune   <name>   # delete on-disk remote after verify
+```
+
 ## Related Commands
 
 - [`dt init`](init.md) - Initialize projects with remote setup
 - [`dt cache init`](cache.md#init) - Set up local cache
 - [`dt fetch`](fetch.md) - Fetch imports from local caches
 - [`dt config`](config.md) - Configure remote settings
+- [`dt remote archive`](archive.md) - Archive a remote to cold storage
 - [`dt tmp`](tmp.md) - Manage temporary repository clones
