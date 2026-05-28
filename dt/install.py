@@ -468,15 +468,21 @@ def _run_builtin_check(name: str, hook_name: str, check_cfg: Dict,
 def _run_dvc_checkout(hook_args: List[str], verbose: bool = False) -> bool:
     """Run DVC checkout for post-checkout hook.
 
-    Skips during rebase/merge.  Only runs on branch switch (flag == 1).
+    Skips during rebase/merge.  Only runs on branch switch (flag == 1)
+    where HEAD actually moved — ``git checkout -b`` fires the hook with
+    prev-HEAD == new-HEAD and nothing for DVC to do.
     """
     # post-checkout args: <prev-HEAD> <new-HEAD> <flag>
     # flag=1 means branch checkout, flag=0 means file checkout
     if len(hook_args) >= 3:
-        flag = hook_args[2]
+        prev_head, new_head, flag = hook_args[0], hook_args[1], hook_args[2]
         if flag == '0':
             if verbose:
                 print("  dvc-checkout: file checkout, skipping")
+            return True
+        if prev_head == new_head:
+            if verbose:
+                print("  dvc-checkout: HEAD unchanged (e.g. branch create), skipping")
             return True
 
     # Skip during rebase
