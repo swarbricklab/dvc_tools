@@ -35,6 +35,7 @@ from . import utils
 from . import archive as archive_mod
 from .archive import operations as archive_ops
 from .archive import backends as archive_backends
+from .archive import registry as archive_registry
 
 
 @click.group()
@@ -1007,6 +1008,88 @@ def remote_archive_restore(name, to_path, object_hash, prefix, verbose):
         click.echo(f"  {p}")
     if len(written) > 20:
         click.echo(f"  ... and {len(written) - 20} more")
+
+
+# --- registry -------------------------------------------------------------- #
+
+@remote_archive.group('registry')
+def remote_archive_registry():
+    """Central register of archives across all projects.
+
+    A registry directory configured by ``archive.registry_path`` collects
+    one YAML per archive (per project) so you can query "what archives
+    exist?" without scanning every repo. Per-project manifests under
+    ``.dvc/archives/`` remain the source of truth.
+    """
+    pass
+
+
+@remote_archive_registry.command('list')
+def remote_archive_registry_list():
+    """List every archive recorded in the central register."""
+    base = archive_registry.registry_path()
+    if base is None:
+        raise click.ClickException(
+            "archive.registry_path is not configured.\n"
+            "  dt config set archive.registry_path "
+            "/g/data/<proj>/dt-archives/registry"
+        )
+    entries = archive_registry.list_entries()
+    if not entries:
+        click.echo(f"No entries under {base}")
+        return
+
+    proj_w = max(len(e.project_name) for e in entries)
+    proj_w = max(proj_w, len('PROJECT'))
+    name_w = max(len(e.archive_name) for e in entries)
+    name_w = max(name_w, len('ARCHIVE'))
+    backend_w = max(len(e.backend) for e in entries)
+    backend_w = max(backend_w, len('BACKEND'))
+
+    header = (
+        f"{'PROJECT':<{proj_w}}  {'ARCHIVE':<{name_w}}  "
+        f"{'BACKEND':<{backend_w}}  {'SIZE':>10}  "
+        f"CREATED              STATUS"
+    )
+    click.echo(header)
+    for e in entries:
+        status_bits = []
+        if e.status.verified_ok is True:
+            status_bits.append('verified')
+        elif e.status.verified_ok is False:
+            status_bits.append('verify-failed')
+        if e.status.pruned_at:
+            status_bits.append('pruned')
+        status = ' '.join(status_bits) or '-'
+        click.echo(
+            f"{e.project_name:<{proj_w}}  {e.archive_name:<{name_w}}  "
+            f"{e.backend:<{backend_w}}  "
+            f"{utils.format_size(e.total_size_bytes):>10}  "
+            f"{e.created_at:<20}  {status}"
+        )
+
+
+@remote_archive_registry.command('sync')
+@click.option('--root', 'roots', multiple=True, type=click.Path(),
+              required=True,
+              help='Project root to scan (may be repeated). Each root\'s '
+                   '.dvc/archives/*.yaml manifests are read and the '
+                   'register is updated to match.')
+def remote_archive_registry_sync(roots):
+    """Rebuild register entries from the manifests under listed roots."""
+    base = archive_registry.registry_path()
+    if base is None:
+        raise click.ClickException(
+            "archive.registry_path is not configured."
+        )
+    paths = [Path(r) for r in roots]
+    stats = archive_registry.sync_from_roots(paths)
+    click.echo(click.style(
+        f"✓ Synced register at {base}: "
+        f"{stats['written']} entry(s) written, "
+        f"{stats['skipped_roots']} root(s) skipped (no archives)",
+        fg='green',
+    ))
 
 
 # --- internal worker for --via-qxub stage --------------------------------- #

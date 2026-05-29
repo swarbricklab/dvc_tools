@@ -163,6 +163,21 @@ Modes:
 - (neither) — full restore. Fetches every inner tar in turn and
   extracts each into `--to`.
 
+### `dt remote archive registry list`
+
+List every archive recorded in the central register
+(``archive.registry_path``). Each row shows project, archive name,
+backend, size, creation timestamp, and lifecycle status
+(verified / pruned).
+
+If the register is unconfigured, this prints a hint and exits non-zero.
+
+### `dt remote archive registry sync --root <PATH> [--root <PATH>...]`
+
+Rebuild register entries from the manifests under each listed root.
+Useful when bootstrapping the register across an existing fleet of
+projects, or after manual edits / deletes in the register dir.
+
 ### `dt remote archive prune <name>`
 
 Refuses to run unless:
@@ -272,6 +287,28 @@ also uploaded to the backend as `<NAME>.manifest.yaml` — both the
 completion sentinel and a belt-and-braces restore key if the project
 repo is ever lost.
 
+## Central register
+
+For team-shared visibility into "what archives exist across all our
+projects", point a shared directory at the register:
+
+```bash
+dt config set archive.registry_path /g/data/<proj>/dt-archives/registry
+```
+
+After that, every successful `create` / `deposit` writes a YAML entry
+to that directory; `verify` and `prune` update the entry's lifecycle
+status. Per-project manifests under `.dvc/archives/` remain the
+canonical source of truth — the register is a derived index.
+
+```bash
+dt remote archive registry list                  # browse all archives
+dt remote archive registry sync --root /scratch/<proj>/myproject \
+                                --root /scratch/<proj>/other     # bootstrap
+```
+
+If `archive.registry_path` is unset, register hooks are silent no-ops.
+
 ## Configuration
 
 | Key | Default | What it sets |
@@ -281,6 +318,7 @@ repo is ever lost.
 | `archive.stage_jobs` | `min(PBS_NCPUS or nproc, 8)` | Parallel workers for `stage`. |
 | `archive.deposit_jobs` | `4` | Parallel workers for `deposit`. MDSS-politeness ceiling. |
 | `archive.compress` | `zstd` | Default compression for inner tars. |
+| `archive.registry_path` | — (off) | Central register directory (team-shared OK). |
 
 Set via `dt config set archive.X Y` at any scope.
 

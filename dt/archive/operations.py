@@ -79,6 +79,7 @@ from .manifest import (
     save_manifest,
     sidecar_name,
 )
+from . import registry as _registry
 
 
 # --------------------------------------------------------------------------- #
@@ -1140,6 +1141,14 @@ def deposit_archive(
             f"({utils.format_size(int(rate))}/s overall)",
             flush=True,
         )
+
+        # Record in the central register if configured. Best-effort —
+        # never let a register write failure surface as an archive
+        # failure since the canonical record is the per-project manifest.
+        registered = _registry.record_created(manifest, repo_root)
+        if registered is not None and verbose:
+            print(f"Deposit: recorded in {registered}", flush=True)
+
         success = True
         return CreateResult(
             manifest=manifest,
@@ -1299,7 +1308,7 @@ def verify_archive(
     if deep:
         deep_ok = _deep_verify(manifest, be, messages)
 
-    return VerifyResult(
+    result = VerifyResult(
         archive_name=name,
         backend=manifest.backend,
         backend_dir=bdir,
@@ -1308,6 +1317,9 @@ def verify_archive(
         deep_ok=deep_ok,
         messages=messages,
     )
+    repo = repo_root or utils.find_project_root()
+    _registry.record_verified(name, repo, result.ok, now_iso())
+    return result
 
 
 def _deep_verify(manifest: ArchiveManifest, be: ArchiveBackend,
@@ -1564,6 +1576,8 @@ def prune_archive(
     bytes_freed = sum(b for _, b in stats.values())
 
     shutil.rmtree(files_md5)
+    repo = repo_root or utils.find_project_root()
+    _registry.record_pruned(name, repo, now_iso())
     return PruneResult(
         archive_name=name,
         deleted_path=files_md5,

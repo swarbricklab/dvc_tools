@@ -16,6 +16,7 @@ import pytest
 from dt.archive import operations as ops
 from dt.archive import manifest as manifest_mod
 from dt.archive import backends as backends_mod
+from dt.archive import registry as registry_mod
 from dt.archive.backends import LocalDirBackend, MdssBackend
 from dt.errors import ArchiveError
 
@@ -741,6 +742,150 @@ class TestPrune:
             )
         # files/md5 must still be there.
         assert (remote / 'files' / 'md5').exists()
+
+
+# --------------------------------------------------------------------------- #
+# registry
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def registry_dir(tmp_path, monkeypatch):
+    """Configure archive.registry_path to a tmp dir.
+
+    Chained with staging_dir's get_value patch so both keys resolve.
+    """
+    reg = tmp_path / 'registry'
+
+    def fake_get_value(key, default=None):
+        if key == 'archive.registry_path':
+            return str(reg)
+        if key == 'archive.staging_dir':
+            existing = monkeypatch._marker_for_staging
+            return str(existing) if existing is not None else default
+        return default
+
+    # Hold the staging_dir-fixture path for the lambda above.
+    monkeypatch._marker_for_staging = None
+    monkeypatch.setattr(
+        'dt.archive.operations.cfg.get_value', fake_get_value,
+    )
+    monkeypatch.setattr(
+        'dt.archive.registry.cfg.get_value', fake_get_value,
+    )
+    return reg
+
+
+class TestRegistry:
+    def test_disabled_when_unconfigured(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            'dt.archive.registry.cfg.get_value',
+            lambda key, default=None: default,
+        )
+        assert registry_mod.registry_path() is None
+        assert registry_mod.list_entries() == []
+        # Hooks return None silently — they must never raise.
+        m = manifest_mod.ArchiveManifest(
+            archive_name='x', source_remote='/x', backend='local',
+            backend_dir='x/', total_objects=0, total_bytes=0,
+            inner_tars={}, compression='none',
+        )
+        assert registry_mod.record_created(m, tmp_path) is None
+        assert registry_mod.record_verified('x', tmp_path, True, 'now') is None
+        assert registry_mod.record_pruned('x', tmp_path, 'now') is None
+
+    def test_record_created_writes_entry(self, tmp_path, monkeypatch):
+        reg = tmp_path / 'registry'
+        monkeypatch.setattr(
+            'dt.archive.registry.cfg.get_value',
+            lambda key, default=None: str(reg) if key == 'archive.registry_path' else default,
+        )
+        repo = tmp_path / 'myproject'
+        repo.mkdir()
+        m = manifest_mod.ArchiveManifest(
+            archive_name='demo', source_remote='/x', backend='mdss',
+            backend_dir='cold/demo/', total_objects=10, total_bytes=1234,
+            compression='zstd',
+            inner_tars={
+                '00': manifest_mod.InnerTar(
+                    filename='00.tar.zst', size_bytes=100, sha256='aa' * 32,
+                    n_objects=3,
+                ),
+            },
+            created_at='2026-05-29T00:00:00+00:00',
+            created_by='alice',
+        )
+        path = registry_mod.record_created(m, repo)
+        assert path is not None and path.exists()
+
+        slug = registry_mod.project_slug(repo)
+        assert path.name == f"{slug}__demo.yaml"
+        entries = registry_mod.list_entries()
+        assert len(entries) == 1
+        assert entries[0].archive_name == 'demo'
+        assert entries[0].project_name == 'myproject'
+        assert entries[0].backend == 'mdss'
+        assert entries[0].total_size_bytes == 100
+        assert entries[0].compression == 'zstd'
+
+    def test_record_verified_updates_status(self, tmp_path, monkeypatch):
+        reg = tmp_path / 'registry'
+        monkeypatch.setattr(
+            'dt.archive.registry.cfg.get_value',
+            lambda key, default=None: str(reg) if key == 'archive.registry_path' else default,
+        )
+        repo = tmp_path / 'p'
+        repo.mkdir()
+        m = manifest_mod.ArchiveManifest(
+            archive_name='v', source_remote='/x', backend='local',
+            backend_dir='v/', total_objects=0, total_bytes=0,
+            inner_tars={}, compression='none',
+        )
+        registry_mod.record_created(m, repo)
+        registry_mod.record_verified('v', repo, True, '2026-05-30T12:00:00+00:00')
+
+        slug = registry_mod.project_slug(repo)
+        entry = registry_mod.read_entry(slug, 'v')
+        assert entry is not None
+        assert entry.status.verified_ok is True
+        assert entry.status.verified_at == '2026-05-30T12:00:00+00:00'
+
+    def test_sync_from_roots_rebuilds(self, sample_remote, project_root,
+                                     local_backend, staging_dir,
+                                     tmp_path, monkeypatch):
+        # Layer the registry key on top of the staging fixture's patch.
+        # staging_dir already patched dt.archive.operations.cfg.get_value to
+        # return the staging path for 'archive.staging_dir'. Wrap it.
+        reg = tmp_path / 'registry'
+        existing = ops.cfg.get_value
+
+        def both(key, default=None):
+            if key == 'archive.registry_path':
+                return str(reg)
+            return existing(key, default)
+
+        monkeypatch.setattr(
+            'dt.archive.operations.cfg.get_value', both,
+        )
+        monkeypatch.setattr(
+            'dt.archive.registry.cfg.get_value', both,
+        )
+
+        remote, _ = sample_remote
+        ops.create_archive(
+            name='synced', source_remote=remote, backend='local',
+            backend_dir='cold/synced/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        # Wipe the register; sync should rebuild from the manifest.
+        for p in reg.glob('*.yaml'):
+            p.unlink()
+        assert registry_mod.list_entries() == []
+
+        stats = registry_mod.sync_from_roots([project_root])
+        assert stats['written'] == 1
+        rebuilt = registry_mod.list_entries()
+        assert len(rebuilt) == 1
+        assert rebuilt[0].archive_name == 'synced'
 
 
 # --------------------------------------------------------------------------- #
