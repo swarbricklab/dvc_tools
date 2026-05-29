@@ -97,16 +97,13 @@ class TestManifestRoundTrip:
             archive_name='demo',
             source_remote='/some/remote',
             backend='local',
-            backend_path='cold/demo.tar',
-            tarball_filename='demo.tar',
-            tarball_size_bytes=12345,
-            tarball_sha256='deadbeef' * 8,
+            backend_dir='cold/demo/',
             total_objects=42,
             total_bytes=99999,
-            compression='none',
+            compression='zstd',
             inner_tars={
                 '00': manifest_mod.InnerTar(
-                    filename='00.tar', size_bytes=100, sha256='aa' * 32,
+                    filename='00.tar.zst', size_bytes=100, sha256='aa' * 32,
                     n_objects=3,
                 ),
             },
@@ -125,18 +122,21 @@ class TestManifestRoundTrip:
         loaded = manifest_mod.load_manifest('demo', repo_root=tmp_path)
 
         assert loaded.archive_name == 'demo'
-        assert loaded.tarball_sha256 == m.tarball_sha256
+        assert loaded.backend_dir == 'cold/demo/'
+        assert loaded.inner_tars['00'].sha256 == 'aa' * 32
         assert loaded.inner_tars['00'].n_objects == 3
+        assert loaded.compression == 'zstd'
         assert loaded.extras_at_archive_time[0].path == 'README.txt'
+        assert loaded.layout == manifest_mod.LAYOUT_FOLDER_PER_PREFIX
 
     def test_rejects_future_version(self, tmp_path):
         path = manifest_mod.archives_dir(tmp_path)
         path.mkdir(parents=True)
         (path / 'future.yaml').write_text(
             "version: 99\narchive_name: future\nsource_remote: /x\n"
-            "backend: local\nbackend_path: x\n"
+            "backend: local\nbackend_dir: x/\n"
         )
-        with pytest.raises(ArchiveError, match='Unsupported manifest version'):
+        with pytest.raises(ArchiveError, match='newer than this dt'):
             manifest_mod.load_manifest('future', repo_root=tmp_path)
 
 
@@ -225,7 +225,7 @@ class TestCreateEndToEnd:
             name='demo',
             source_remote=remote,
             backend='local',
-            backend_path='cold/demo.tar',
+            backend_dir='cold/demo/',
             jobs=2,
             compress='none',
             verbose=False,
@@ -233,21 +233,29 @@ class TestCreateEndToEnd:
             repo_root=project_root,
         )
 
-        # Backend has the outer tar.
-        outer = Path(local_backend.root) / 'cold/demo.tar'
-        assert outer.exists()
+        backend_root = Path(local_backend.root)
+        # Each inner tar lands at <backend_dir>/<filename>.
+        for prefix, inner in result.manifest.inner_tars.items():
+            assert (backend_root / 'cold/demo' / inner.filename).exists()
+        # Manifest sidecar marks completion.
+        sidecar = backend_root / 'cold/demo' / manifest_mod.sidecar_name('demo')
+        assert sidecar.exists()
 
         # Manifest is reachable via load_manifest.
         loaded = manifest_mod.load_manifest('demo', repo_root=project_root)
-        assert loaded.tarball_sha256 == result.manifest.tarball_sha256
+        assert loaded.backend_dir == 'cold/demo/'
         assert loaded.total_objects == len(payloads)
 
-        # sha256 recorded matches the file we shipped.
-        h = hashlib.sha256()
-        with open(outer, 'rb') as f:
-            for chunk in iter(lambda: f.read(1 << 16), b''):
-                h.update(chunk)
-        assert h.hexdigest() == loaded.tarball_sha256
+        # Per-inner sha256 in the manifest matches the file actually on
+        # the backend.
+        for prefix, inner in loaded.inner_tars.items():
+            local = backend_root / 'cold/demo' / inner.filename
+            h = hashlib.sha256()
+            with open(local, 'rb') as f:
+                for chunk in iter(lambda: f.read(1 << 16), b''):
+                    h.update(chunk)
+            assert h.hexdigest() == inner.sha256
+            assert local.stat().st_size == inner.size_bytes
 
         # Inner tar entries: one per populated prefix.
         prefix_dirs, _ = ops.scan_files_md5(remote)
@@ -268,14 +276,13 @@ class TestCreateEndToEnd:
             name='dry',
             source_remote=remote,
             backend='local',
-            backend_path='cold/dry.tar',
+            backend_dir='cold/dry/',
             jobs=2,
             dry_run=True,
             backend_override=local_backend,
             repo_root=project_root,
         )
-        outer = Path(local_backend.root) / 'cold/dry.tar'
-        assert not outer.exists()
+        assert not (Path(local_backend.root) / 'cold/dry').exists()
         assert not manifest_mod.manifest_path('dry', repo_root=project_root).exists()
 
     def test_create_refuses_to_overwrite_existing_manifest(
@@ -286,7 +293,7 @@ class TestCreateEndToEnd:
             name='dup',
             source_remote=remote,
             backend='local',
-            backend_path='cold/dup.tar',
+            backend_dir='cold/dup/',
             jobs=1,
             backend_override=local_backend,
             repo_root=project_root,
@@ -296,7 +303,7 @@ class TestCreateEndToEnd:
                 name='dup',
                 source_remote=remote,
                 backend='local',
-                backend_path='cold/dup.tar',
+                backend_dir='cold/dup/',
                 jobs=1,
                 backend_override=local_backend,
                 repo_root=project_root,
@@ -318,7 +325,7 @@ class TestCreateEndToEnd:
             name='zstd-demo',
             source_remote=remote,
             backend='local',
-            backend_path='cold/zstd-demo.tar',
+            backend_dir='cold/zstd-demo/',
             compress='zstd',
             jobs=1,
             backend_override=local_backend,
@@ -379,7 +386,7 @@ class TestResume:
             name='r',
             source_remote=remote,
             backend='local',
-            backend_path='cold/r.tar',
+            backend_dir='cold/r/',
             jobs=1,
             resume=True,
             backend_override=local_backend,
@@ -392,11 +399,9 @@ class TestResume:
         out = capsys.readouterr().out
         assert (
             f'Resume: {len(prefix_dirs)} of {len(prefix_dirs)} '
-            f"prefix(es) already complete"
+            f"prefix(es) already staged"
         ) in out
-        assert (
-            f'Phase 1/3: building 0 inner tarball(s)'
-        ) in out
+        assert 'Stage: building 0 inner tarball(s)' in out
 
     def test_resume_rebuilds_prefix_when_sentinel_missing(
         self, sample_remote, project_root, local_backend, staging_dir,
@@ -415,7 +420,7 @@ class TestResume:
             name='r2',
             source_remote=remote,
             backend='local',
-            backend_path='cold/r2.tar',
+            backend_dir='cold/r2/',
             jobs=1,
             resume=True,
             backend_override=local_backend,
@@ -428,6 +433,47 @@ class TestResume:
         # And the rebuilt prefix name appears in the progress lines.
         assert rebuilt_prefix in out
 
+    def test_deposit_resume_skips_already_uploaded(
+        self, sample_remote, project_root, local_backend, staging_dir,
+        capsys,
+    ):
+        remote, _ = sample_remote
+        # First run uploads everything; --keep-staging leaves sentinels behind.
+        ops.create_archive(
+            name='dr', source_remote=remote, backend='local',
+            backend_dir='cold/dr/', jobs=1, keep_staging=True,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        staging = staging_dir / 'dr'
+        deposited = list(staging.glob(f'*{ops.DEPOSITED_SENTINEL_SUFFIX}'))
+        assert deposited, "first run should have produced deposit sentinels"
+        n = len(deposited)
+        capsys.readouterr()  # drain
+
+        # Spy on the backend to confirm no upload happens on resume.
+        calls = []
+
+        class CountingBackend(LocalDirBackend):
+            name = 'counting'
+
+            def put_file(self, local_path, remote_path):  # type: ignore[override]
+                calls.append(remote_path)
+                return super().put_file(local_path, remote_path)
+
+        ops.deposit_archive(
+            name='dr', resume=True,
+            backend_override=CountingBackend(root=str(local_backend.root)),
+            repo_root=project_root,
+        )
+
+        # All inner tars skipped — only the sidecar should be re-uploaded.
+        uploaded_inner = [c for c in calls if not c.endswith('.manifest.yaml')]
+        assert uploaded_inner == [], (
+            f"Resume should not have re-uploaded inner tars: {uploaded_inner}"
+        )
+        out = capsys.readouterr().out
+        assert f"Resume: {n} of {n} file(s) already deposited" in out
+
     def test_failed_run_preserves_staging(
         self, sample_remote, project_root, staging_dir,
     ):
@@ -435,7 +481,7 @@ class TestResume:
 
         class BoomBackend(LocalDirBackend):
             name = 'boom'
-            def put_stream(self, *_a, **_k):
+            def put_file(self, *_a, **_k):
                 raise RuntimeError('upload exploded')
 
         with pytest.raises(Exception):
@@ -443,7 +489,7 @@ class TestResume:
                 name='boom',
                 source_remote=remote,
                 backend='local',
-                backend_path='cold/boom.tar',
+                backend_dir='cold/boom/',
                 jobs=1,
                 backend_override=BoomBackend(root=str(project_root / 'cold')),
                 repo_root=project_root,
@@ -452,7 +498,7 @@ class TestResume:
         staging = staging_dir / 'boom'
         # Staging must survive the failure so the user can --resume.
         assert staging.exists()
-        # And at least one sentinel must be present.
+        # And at least one stage-phase sentinel must be present.
         assert list(staging.glob(f'*{ops.SENTINEL_SUFFIX}'))
 
 
@@ -466,30 +512,34 @@ class TestVerify:
         remote, _ = sample_remote
         ops.create_archive(
             name='vdemo', source_remote=remote, backend='local',
-            backend_path='cold/v.tar', jobs=1,
+            backend_dir='cold/v/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
         res = ops.verify_archive('vdemo', backend_override=local_backend,
                                  repo_root=project_root)
         assert res.ok is True
-        assert res.size_ok is True
-        assert res.sha256_ok is True
+        assert res.sidecar_ok is True
+        assert res.files_ok is True
 
     def test_verify_detects_size_mismatch(self, sample_remote, project_root,
                                            local_backend, staging_dir):
         remote, _ = sample_remote
         ops.create_archive(
             name='size', source_remote=remote, backend='local',
-            backend_path='cold/size.tar', jobs=1,
+            backend_dir='cold/size/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
-        outer = Path(local_backend.root) / 'cold/size.tar'
-        with open(outer, 'ab') as f:
-            f.write(b'!!!')  # corrupt by appending
+        # Corrupt one inner tar on the backend by appending bytes.
+        manifest = manifest_mod.load_manifest('size', repo_root=project_root)
+        first_inner = next(iter(manifest.inner_tars.values()))
+        target = Path(local_backend.root) / 'cold/size' / first_inner.filename
+        with open(target, 'ab') as f:
+            f.write(b'!!!')
         res = ops.verify_archive('size', backend_override=local_backend,
                                  repo_root=project_root)
         assert res.ok is False
-        assert res.size_ok is False
+        assert res.files_ok is False
+        assert any('size mismatch' in m for m in res.messages)
 
     def test_verify_detects_missing_backend_object(self, sample_remote,
                                                     project_root, local_backend,
@@ -497,22 +547,39 @@ class TestVerify:
         remote, _ = sample_remote
         ops.create_archive(
             name='miss', source_remote=remote, backend='local',
-            backend_path='cold/miss.tar', jobs=1,
+            backend_dir='cold/miss/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
-        outer = Path(local_backend.root) / 'cold/miss.tar'
-        outer.unlink()
+        manifest = manifest_mod.load_manifest('miss', repo_root=project_root)
+        first_inner = next(iter(manifest.inner_tars.values()))
+        target = Path(local_backend.root) / 'cold/miss' / first_inner.filename
+        target.unlink()
         res = ops.verify_archive('miss', backend_override=local_backend,
                                  repo_root=project_root)
         assert res.ok is False
         assert any('missing' in m for m in res.messages)
+
+    def test_verify_detects_missing_sidecar(self, sample_remote, project_root,
+                                             local_backend, staging_dir):
+        remote, _ = sample_remote
+        ops.create_archive(
+            name='ms', source_remote=remote, backend='local',
+            backend_dir='cold/ms/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        sidecar = Path(local_backend.root) / 'cold/ms' / manifest_mod.sidecar_name('ms')
+        sidecar.unlink()
+        res = ops.verify_archive('ms', backend_override=local_backend,
+                                 repo_root=project_root)
+        assert res.ok is False
+        assert res.sidecar_ok is False
 
     def test_verify_deep_passes(self, sample_remote, project_root,
                                 local_backend, staging_dir):
         remote, _ = sample_remote
         ops.create_archive(
             name='deep', source_remote=remote, backend='local',
-            backend_path='cold/deep.tar', jobs=1,
+            backend_dir='cold/deep/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
         res = ops.verify_archive('deep', deep=True,
@@ -532,7 +599,7 @@ class TestRestore:
         remote, payloads = sample_remote
         ops.create_archive(
             name='r', source_remote=remote, backend='local',
-            backend_path='cold/r.tar', jobs=1,
+            backend_dir='cold/r/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
         dest = tmp_path / 'restored'
@@ -550,7 +617,7 @@ class TestRestore:
         remote, payloads = sample_remote
         ops.create_archive(
             name='one', source_remote=remote, backend='local',
-            backend_path='cold/one.tar', jobs=1,
+            backend_dir='cold/one/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
         target_payload = payloads[1]
@@ -568,7 +635,7 @@ class TestRestore:
         remote, payloads = sample_remote
         ops.create_archive(
             name='pre', source_remote=remote, backend='local',
-            backend_path='cold/pre.tar', jobs=1,
+            backend_dir='cold/pre/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
         # Pick the prefix of the first payload.
@@ -594,7 +661,7 @@ class TestPrune:
         remote, _ = sample_remote
         ops.create_archive(
             name='pr1', source_remote=remote, backend='local',
-            backend_path='cold/pr1.tar', jobs=1,
+            backend_dir='cold/pr1/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
         with pytest.raises(ArchiveError, match='Refusing to prune'):
@@ -608,7 +675,7 @@ class TestPrune:
         remote, _ = sample_remote
         ops.create_archive(
             name='pr2', source_remote=remote, backend='local',
-            backend_path='cold/pr2.tar', jobs=1,
+            backend_dir='cold/pr2/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
         # Remove the extras.
@@ -627,7 +694,7 @@ class TestPrune:
         remote, _ = sample_remote
         ops.create_archive(
             name='pr3', source_remote=remote, backend='local',
-            backend_path='cold/pr3.tar', jobs=1,
+            backend_dir='cold/pr3/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
         result = ops.prune_archive('pr3', yes=True, force=True,
@@ -640,12 +707,12 @@ class TestPrune:
         remote, _ = sample_remote
         ops.create_archive(
             name='pr4', source_remote=remote, backend='local',
-            backend_path='cold/pr4.tar', jobs=1,
+            backend_dir='cold/pr4/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
-        # Corrupt the backend object.
-        outer = Path(local_backend.root) / 'cold/pr4.tar'
-        outer.write_bytes(b'corrupted')
+        # Delete the sidecar so verify refuses (acts as the completion sentinel).
+        sidecar = Path(local_backend.root) / 'cold/pr4' / manifest_mod.sidecar_name('pr4')
+        sidecar.unlink()
 
         with pytest.raises(ArchiveError, match='did not verify'):
             ops.prune_archive(

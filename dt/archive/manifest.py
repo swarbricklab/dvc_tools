@@ -5,9 +5,9 @@ records everything we need to verify and restore an archive without
 contacting the storage backend. Each manifest describes one archived
 DVC remote.
 
-Schema version 1::
+Schema version 2 (folder-per-prefix layout)::
 
-    version: 1
+    version: 2
     archive_name: neochemo-2026-05
     source_remote: /g/data/a56/dvc/neochemo
     created_at: 2026-05-28T12:34:56+00:00
@@ -15,19 +15,15 @@ Schema version 1::
     git_ref: <sha>
     dt_version: 0.6.0
     backend: mdss
-    backend_path: jr9959/archive/neochemo/neochemo-2026-05.tar
-    tarball:
-      filename: neochemo-2026-05.tar
-      size_bytes: 1234567890
-      sha256: abc...               # outer (un-streamed) tar sha256
-      layout: nested-prefix        # vs future 'flat'
+    backend_dir: jr9959/archive/neochemo/neochemo-2026-05/
+    layout: folder-per-prefix
     contents:
       total_objects: 42137
       total_bytes: 1234500000
-      compression: none            # none | gzip | zstd
+      compression: zstd            # none | gzip | zstd
       inner_tars:
         "00":
-          filename: 00.tar
+          filename: 00.tar.zst
           size_bytes: ...
           sha256: ...
           n_objects: ...
@@ -35,6 +31,9 @@ Schema version 1::
         ...
     extras_at_archive_time:        # informational only
       - {path: "some_file", size: 412}
+
+Schema version 1 (outer-tar layout) is no longer produced by ``dt``,
+but ``from_dict`` accepts it for forward-compat reads.
 """
 
 from __future__ import annotations
@@ -50,9 +49,13 @@ from .. import utils
 from ..errors import ArchiveError
 
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 ARCHIVE_DIR_NAME = 'archives'
-LAYOUT_NESTED_PREFIX = 'nested-prefix'
+LAYOUT_FOLDER_PER_PREFIX = 'folder-per-prefix'
+
+# Filename of the sidecar manifest uploaded to the backend last as the
+# completion sentinel. Lives at ``<backend_dir>/<archive_name>.manifest.yaml``.
+SIDECAR_SUFFIX = '.manifest.yaml'
 
 
 def archives_dir(repo_root: Optional[Path] = None) -> Path:
@@ -70,9 +73,14 @@ def manifest_path(name: str, repo_root: Optional[Path] = None) -> Path:
     return archives_dir(repo_root) / f'{name}.yaml'
 
 
+def sidecar_name(archive_name: str) -> str:
+    """Filename of the manifest sidecar uploaded to the backend."""
+    return f'{archive_name}{SIDECAR_SUFFIX}'
+
+
 @dataclass
 class InnerTar:
-    """One per-prefix inner tarball inside the outer tar."""
+    """One per-prefix inner tarball uploaded to the backend folder."""
     filename: str
     size_bytes: int
     sha256: str
@@ -93,18 +101,13 @@ class ArchiveManifest:
     archive_name: str
     source_remote: str
     backend: str
-    backend_path: str
-
-    # Tarball metadata
-    tarball_filename: str
-    tarball_size_bytes: int
-    tarball_sha256: str
-    layout: str = LAYOUT_NESTED_PREFIX
+    backend_dir: str
+    layout: str = LAYOUT_FOLDER_PER_PREFIX
 
     # Contents
     total_objects: int = 0
     total_bytes: int = 0
-    compression: str = 'none'
+    compression: str = 'zstd'
     inner_tars: Dict[str, InnerTar] = field(default_factory=dict)
     extras_at_archive_time: List[ExtraFile] = field(default_factory=list)
 
@@ -130,13 +133,8 @@ class ArchiveManifest:
             'git_ref': self.git_ref,
             'dt_version': self.dt_version,
             'backend': self.backend,
-            'backend_path': self.backend_path,
-            'tarball': {
-                'filename': self.tarball_filename,
-                'size_bytes': self.tarball_size_bytes,
-                'sha256': self.tarball_sha256,
-                'layout': self.layout,
-            },
+            'backend_dir': self.backend_dir,
+            'layout': self.layout,
             'contents': {
                 'total_objects': self.total_objects,
                 'total_bytes': self.total_bytes,
@@ -152,29 +150,38 @@ class ArchiveManifest:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ArchiveManifest':
         version = data.get('version', 1)
-        if version != MANIFEST_VERSION:
-            raise ArchiveError(
-                f"Unsupported manifest version: {version} "
-                f"(this dt understands version {MANIFEST_VERSION})"
-            )
-
-        tarball = data.get('tarball', {}) or {}
         contents = data.get('contents', {}) or {}
         inner_raw = contents.get('inner_tars', {}) or {}
         extras_raw = data.get('extras_at_archive_time', []) or []
+
+        if version == 1:
+            # v1 carried the folder location under 'backend_path' as a
+            # single .tar file. Accept it on read so old manifests still
+            # load, but tell the caller the layout has changed by leaving
+            # backend_dir empty — they can't restore v1 archives with v2
+            # code anyway; verify/restore will refuse.
+            backend_dir = ''
+            tarball = data.get('tarball', {}) or {}
+            layout_str = tarball.get('layout', LAYOUT_FOLDER_PER_PREFIX)
+        else:
+            backend_dir = data.get('backend_dir', '')
+            layout_str = data.get('layout', LAYOUT_FOLDER_PER_PREFIX)
+
+        if version > MANIFEST_VERSION:
+            raise ArchiveError(
+                f"Manifest version {version} is newer than this dt "
+                f"understands (max {MANIFEST_VERSION})."
+            )
 
         return cls(
             archive_name=data['archive_name'],
             source_remote=data['source_remote'],
             backend=data['backend'],
-            backend_path=data['backend_path'],
-            tarball_filename=tarball.get('filename', ''),
-            tarball_size_bytes=int(tarball.get('size_bytes', 0)),
-            tarball_sha256=tarball.get('sha256', ''),
-            layout=tarball.get('layout', LAYOUT_NESTED_PREFIX),
+            backend_dir=backend_dir,
+            layout=layout_str,
             total_objects=int(contents.get('total_objects', 0)),
             total_bytes=int(contents.get('total_bytes', 0)),
-            compression=contents.get('compression', 'none'),
+            compression=contents.get('compression', 'zstd'),
             inner_tars={
                 prefix: InnerTar(
                     filename=row['filename'],

@@ -1,6 +1,6 @@
 """Archive backends.
 
-A backend is a tiny abstraction over "ship a tarball to cold storage and
+A backend is a tiny abstraction over "ship a file to cold storage and
 ask about it later". Each backend implements the same protocol so the
 rest of ``dt.archive`` doesn't care whether the target is MDSS, a local
 cold-storage directory, S3 Glacier, rclone, etc.
@@ -8,8 +8,15 @@ cold-storage directory, S3 Glacier, rclone, etc.
 The first PR ships:
 
 - ``MdssBackend``: NCI tape via the ``mdss`` CLI.
-- ``LocalDirBackend``: copies tarballs to a local directory. Used for
+- ``LocalDirBackend``: copies files to a local directory. Used for
   tests and as a fallback when developing on non-NCI machines.
+
+The archive layout is *folder-per-archive*: every inner tarball is
+uploaded as its own object inside a directory on the backend, plus a
+manifest sidecar uploaded last as a completion sentinel. That replaces
+the older single-outer-tar design — partial uploads survive walltime
+boundaries, multiple uploads can run in parallel, and MDSS gets
+medium-sized files instead of one multi-TB monolith.
 
 To add a backend, subclass :class:`ArchiveBackend` and call
 :func:`register_backend`.
@@ -21,7 +28,7 @@ import hashlib
 import shutil
 import subprocess
 from pathlib import Path
-from typing import IO, Dict, Optional, Protocol
+from typing import Dict, List, Protocol
 
 from ..errors import ArchiveError
 
@@ -35,30 +42,15 @@ class ArchiveBackend(Protocol):
 
     name: str
 
-    def put_stream(self, stream: IO[bytes], remote_path: str) -> None:
-        """Upload ``stream`` to ``remote_path``.
-
-        Implementations must consume the entire stream and raise
-        :class:`ArchiveError` on any failure.
-        """
-        ...
-
     def put_file(self, local_path: Path, remote_path: str) -> None:
-        """Upload an on-disk file at ``local_path`` to ``remote_path``."""
+        """Upload an on-disk file at ``local_path`` to ``remote_path``.
+
+        Implementations must raise :class:`ArchiveError` on failure.
+        """
         ...
 
     def get_file(self, remote_path: str, local_path: Path) -> None:
         """Download ``remote_path`` to ``local_path``."""
-        ...
-
-    def get_stream(self, remote_path: str) -> subprocess.Popen:
-        """Open a streaming read of ``remote_path``.
-
-        Returns a Popen whose ``stdout`` yields the file contents. The
-        caller is responsible for ``.wait()``-ing the process. Used by
-        single-object restore so we don't have to spool the entire
-        tarball to disk first.
-        """
         ...
 
     def exists(self, remote_path: str) -> bool:
@@ -67,6 +59,10 @@ class ArchiveBackend(Protocol):
 
     def stat(self, remote_path: str) -> Dict[str, int]:
         """Return at least ``{'size_bytes': int}`` for ``remote_path``."""
+        ...
+
+    def list_dir(self, remote_dir: str) -> List[str]:
+        """List filenames (not full paths) at ``remote_dir``."""
         ...
 
 
@@ -152,33 +148,6 @@ class MdssBackend:
 
     # -- protocol -------------------------------------------------------- #
 
-    def put_stream(self, stream: IO[bytes], remote_path: str) -> None:
-        # `mdss put -` reads from stdin and writes to remote_path.
-        self._ensure_parent_dir(remote_path)
-        try:
-            proc = subprocess.Popen(
-                [self._bin, 'put', '-', remote_path],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except FileNotFoundError as e:
-            raise ArchiveError(
-                f"mdss command not found ({self._bin})."
-            ) from e
-
-        try:
-            shutil.copyfileobj(stream, proc.stdin)
-        finally:
-            if proc.stdin:
-                proc.stdin.close()
-        _, stderr = proc.communicate()
-        if proc.returncode != 0:
-            raise ArchiveError(
-                f"mdss put (stream) -> {remote_path} failed: "
-                f"{stderr.decode('utf-8', 'replace').strip() or '(no output)'}"
-            )
-
     def put_file(self, local_path: Path, remote_path: str) -> None:
         self._ensure_parent_dir(remote_path)
         result = self._run(['put', str(local_path), remote_path])
@@ -188,18 +157,6 @@ class MdssBackend:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         result = self._run(['get', remote_path, str(local_path)])
         self._ensure(result, f"get {remote_path} -> {local_path}")
-
-    def get_stream(self, remote_path: str) -> subprocess.Popen:
-        try:
-            return subprocess.Popen(
-                [self._bin, 'get', remote_path, '-'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except FileNotFoundError as e:
-            raise ArchiveError(
-                f"mdss command not found ({self._bin})."
-            ) from e
 
     def exists(self, remote_path: str) -> bool:
         result = self._run(['ls', remote_path])
@@ -224,6 +181,19 @@ class MdssBackend:
                 f"Could not parse size from mdss ls -l output: {parts!r}"
             ) from e
         return {'size_bytes': size}
+
+    def list_dir(self, remote_dir: str) -> List[str]:
+        result = self._run(['ls', remote_dir])
+        if result.returncode != 0:
+            return []
+        names = []
+        for line in (result.stdout or '').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # mdss ls returns one filename per line — strip any trailing /
+            names.append(line.rstrip('/').split('/')[-1])
+        return names
 
     # -- internals ------------------------------------------------------- #
 
@@ -268,12 +238,6 @@ class LocalDirBackend:
         # escape via leading slashes.
         return self.root / remote_path.lstrip('/')
 
-    def put_stream(self, stream: IO[bytes], remote_path: str) -> None:
-        target = self._resolve(remote_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, 'wb') as f:
-            shutil.copyfileobj(stream, f)
-
     def put_file(self, local_path: Path, remote_path: str) -> None:
         target = self._resolve(remote_path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -286,14 +250,6 @@ class LocalDirBackend:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, local_path)
 
-    def get_stream(self, remote_path: str) -> subprocess.Popen:
-        source = self._resolve(remote_path)
-        if not source.exists():
-            raise ArchiveError(f"Not found in local backend: {remote_path}")
-        # `cat` gives us a Popen with .stdout for streaming reads, matching
-        # what `mdss get <path> -` returns.
-        return subprocess.Popen(['cat', str(source)], stdout=subprocess.PIPE)
-
     def exists(self, remote_path: str) -> bool:
         return self._resolve(remote_path).exists()
 
@@ -302,6 +258,12 @@ class LocalDirBackend:
         if not p.exists():
             raise ArchiveError(f"Not found in local backend: {remote_path}")
         return {'size_bytes': p.stat().st_size}
+
+    def list_dir(self, remote_dir: str) -> List[str]:
+        p = self._resolve(remote_dir)
+        if not p.is_dir():
+            return []
+        return sorted(child.name for child in p.iterdir() if child.is_file())
 
 
 # --------------------------------------------------------------------------- #
@@ -313,34 +275,16 @@ register_backend('local', LocalDirBackend)
 
 
 # --------------------------------------------------------------------------- #
-# Convenience hashing helper used by callers verifying remote tarballs
+# Convenience hashing helper used by verify/restore
 # --------------------------------------------------------------------------- #
 
-def sha256_of_remote(backend: ArchiveBackend, remote_path: str,
-                     chunk_size: int = 8 * 1024 * 1024) -> str:
-    """Stream a remote tarball through sha256 without spooling to disk."""
+def sha256_of_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
+    """sha256 of an on-disk file."""
     h = hashlib.sha256()
-    proc = backend.get_stream(remote_path)
-    try:
-        assert proc.stdout is not None
+    with open(path, 'rb') as f:
         while True:
-            chunk = proc.stdout.read(chunk_size)
+            chunk = f.read(chunk_size)
             if not chunk:
                 break
             h.update(chunk)
-    finally:
-        if proc.stdout:
-            proc.stdout.close()
-        rc = proc.wait()
-    if rc != 0:
-        stderr = ''
-        if proc.stderr is not None:
-            try:
-                stderr = proc.stderr.read().decode('utf-8', 'replace')
-            except Exception:
-                stderr = ''
-        raise ArchiveError(
-            f"Streaming read of {remote_path} failed (exit {rc}): "
-            f"{stderr.strip() or '(no output)'}"
-        )
     return h.hexdigest()

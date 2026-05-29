@@ -647,6 +647,14 @@ def _resolve_source_remote(source: Optional[str]) -> Path:
     return remote_mod.resolve_remote_path()
 
 
+def _default_name(source_remote: Path) -> str:
+    """``<remote-dir-name>-<YYYY-MM-DD>`` default for archive name."""
+    import datetime as _dt
+    return f"{source_remote.name}-{_dt.date.today().isoformat()}"
+
+
+# --- create ---------------------------------------------------------------- #
+
 @remote_archive.command('create')
 @click.argument('name', required=False)
 @click.option('--source', 'source', default=None,
@@ -656,62 +664,64 @@ def _resolve_source_remote(source: Optional[str]) -> Path:
               type=click.Choice(sorted(archive_backends.known_backends()),
                                 case_sensitive=False),
               help='Archive backend to use (default: mdss).')
-@click.option('--backend-path', default=None,
-              help='Override the path on the backend '
-                   '(default: dt-archive/<remote-name>/<name>.tar).')
+@click.option('--backend-dir', 'backend_dir', default=None,
+              help='Override the directory on the backend '
+                   '(default: <archive.backend_root>/<remote-name>/<name>/).')
+@click.option('--backend-path', 'backend_path', default=None, hidden=True,
+              help='Deprecated alias for --backend-dir.')
 @click.option('--staging-dir', default=None,
               help='Staging directory for the inner tarballs '
                    '(default: archive.staging_dir config).')
 @click.option('--jobs', type=int, default=None,
-              help='Number of parallel inner-tar workers '
-                   '(default: min(PBS_NCPUS or nproc, 8)).')
+              help='Parallel inner-tar workers for the stage phase '
+                   '(default: archive.stage_jobs or min(PBS_NCPUS, 8)).')
+@click.option('--deposit-jobs', type=int, default=None,
+              help='Parallel upload workers for the deposit phase '
+                   '(default: archive.deposit_jobs, capped for MDSS politeness).')
 @click.option('--compress',
               type=click.Choice(['none', 'gzip', 'zstd']),
-              default='none',
-              help='Compression for inner tarballs (default: none). '
-                   'DVC blobs are usually incompressible.')
+              default=None,
+              help='Compression for inner tarballs '
+                   '(default: archive.compress or zstd).')
 @click.option('--dry-run', is_flag=True,
               help='Plan and report sizes without creating tarballs.')
 @click.option('--force', is_flag=True,
               help='Overwrite existing manifest / staging, ignore '
                    'low-disk warnings.')
 @click.option('--resume', is_flag=True,
-              help='Resume a previous attempt: reuse the existing '
-                   'staging dir and skip prefixes whose .done.json '
-                   'sentinels are valid.')
+              help='Resume a previous attempt: reuse staging and skip '
+                   'prefixes whose .done.json sentinels are valid, plus '
+                   'files whose .deposited.json sentinels are valid.')
 @click.option('--keep-staging', is_flag=True,
               help='Do not delete the staging directory after upload.')
 @click.option('-v', '--verbose', is_flag=True)
-def remote_archive_create(name, source, backend, backend_path, staging_dir,
-                          jobs, compress, dry_run, force, resume,
-                          keep_staging, verbose):
-    """Create a new archive of a DVC remote.
+def remote_archive_create(name, source, backend, backend_dir, backend_path,
+                          staging_dir, jobs, deposit_jobs, compress, dry_run,
+                          force, resume, keep_staging, verbose):
+    """Create a new archive of a DVC remote (stage + deposit).
 
-    NAME is the identifier for this archive instance (not the DVC remote
-    name and not the project name). It becomes:
+    NAME is the identifier for this archive instance. It becomes:
 
     \b
       - the manifest filename:   .dvc/archives/<NAME>.yaml
-      - the default tar object:  dt-archive/<remote-dir>/<NAME>.tar
+      - the default backend dir: <archive.backend_root>/<remote-dir>/<NAME>/
       - the handle for follow-up:  dt remote archive verify <NAME>
                                     dt remote archive restore <NAME> --to ...
                                     dt remote archive prune   <NAME>
 
-    If NAME is omitted, it defaults to ``<remote-dir-name>-<YYYY-MM-DD>``
-    so re-archiving the same remote on different days produces
-    distinguishable archives without you having to think.
+    If NAME is omitted, it defaults to ``<remote-dir-name>-<YYYY-MM-DD>``.
+
+    For multi-TB archives where stage and deposit need different
+    walltimes / nodes, run them as separate commands instead:
 
     \b
-    Examples:
-        dt remote archive create                       # neochemo-2026-05-28
-        dt remote archive create neochemo-2026-05
-        dt remote archive create snapshot --source /g/data/a56/dvc/other
+        dt remote archive stage   <NAME>   # on compute node (parallel CPUs)
+        dt remote archive deposit <NAME>   # on data mover (mdss access)
     """
     try:
         source_remote = _resolve_source_remote(source)
         if name is None:
-            import datetime as _dt
-            name = f"{source_remote.name}-{_dt.date.today().isoformat()}"
+            name = _default_name(source_remote)
             click.echo(click.style(
                 f"Using default archive name: {name}", dim=True,
             ))
@@ -719,9 +729,11 @@ def remote_archive_create(name, source, backend, backend_path, staging_dir,
             name=name,
             source_remote=source_remote,
             backend=backend,
+            backend_dir=backend_dir,
             backend_path=backend_path,
             staging_dir=staging_dir,
             jobs=jobs,
+            deposit_jobs=deposit_jobs,
             compress=compress,
             dry_run=dry_run,
             force=force,
@@ -740,20 +752,155 @@ def remote_archive_create(name, source, backend, backend_path, staging_dir,
         ))
         return
 
+    total_size = sum(i.size_bytes for i in m.inner_tars.values())
     click.echo(click.style(
-        f"✓ Archived '{name}' to {m.backend}:{m.backend_path}",
+        f"✓ Archived '{name}' to {m.backend}:{m.backend_dir}",
         fg='green',
     ))
-    click.echo(f"  size:     {utils.format_size(m.tarball_size_bytes)}")
-    click.echo(f"  objects:  {m.total_objects}")
-    click.echo(f"  sha256:   {m.tarball_sha256[:16]}…")
-    click.echo(f"  manifest: {result.manifest_path}")
+    click.echo(f"  size:      {utils.format_size(total_size)} "
+               f"({len(m.inner_tars)} inner tar(s), {m.compression})")
+    click.echo(f"  objects:   {m.total_objects}")
+    click.echo(f"  manifest:  {result.manifest_path}")
     click.echo()
     click.echo(click.style(
         f"Next: review and commit {result.manifest_path.relative_to(utils.find_project_root())}",
         dim=True,
     ))
 
+
+# --- stage ----------------------------------------------------------------- #
+
+@remote_archive.command('stage')
+@click.argument('name', required=False)
+@click.option('--source', 'source', default=None,
+              help='Path to the DVC remote to archive '
+                   '(default: project remote from `dt remote init` rules).')
+@click.option('--backend', default='mdss',
+              type=click.Choice(sorted(archive_backends.known_backends()),
+                                case_sensitive=False),
+              help='Backend to record in the manifest '
+                   '(default: mdss). No backend interaction happens during stage.')
+@click.option('--backend-dir', 'backend_dir', default=None,
+              help='Backend directory to record in the manifest.')
+@click.option('--staging-dir', default=None,
+              help='Staging directory for the inner tarballs '
+                   '(default: archive.staging_dir config).')
+@click.option('--jobs', type=int, default=None,
+              help='Parallel inner-tar workers '
+                   '(default: archive.stage_jobs or min(PBS_NCPUS, 8)).')
+@click.option('--compress',
+              type=click.Choice(['none', 'gzip', 'zstd']),
+              default=None,
+              help='Compression (default: archive.compress or zstd).')
+@click.option('--dry-run', is_flag=True,
+              help='Plan and report sizes without creating tarballs.')
+@click.option('--force', is_flag=True,
+              help='Overwrite existing manifest / staging.')
+@click.option('--resume', is_flag=True,
+              help='Resume a previous attempt; skip prefixes whose '
+                   '.done.json sentinels are valid.')
+@click.option('-v', '--verbose', is_flag=True)
+def remote_archive_stage(name, source, backend, backend_dir, staging_dir,
+                         jobs, compress, dry_run, force, resume, verbose):
+    """Build inner tarballs in a staging dir; no backend interaction.
+
+    Use this on a compute node with many CPUs. When stage finishes,
+    run ``dt remote archive deposit <NAME>`` on a data mover to ship
+    the staged tars to the backend.
+    """
+    try:
+        source_remote = _resolve_source_remote(source)
+        if name is None:
+            name = _default_name(source_remote)
+            click.echo(click.style(
+                f"Using default archive name: {name}", dim=True,
+            ))
+        result = archive_ops.stage_archive(
+            name=name,
+            source_remote=source_remote,
+            backend=backend,
+            backend_dir=backend_dir,
+            staging_dir=staging_dir,
+            jobs=jobs,
+            compress=compress,
+            dry_run=dry_run,
+            force=force,
+            resume=resume,
+            verbose=verbose,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+
+    if dry_run:
+        click.echo(click.style(
+            f"[dry-run] would write manifest to {result.manifest_path}",
+            dim=True,
+        ))
+        return
+
+    m = result.manifest
+    total_size = sum(i.size_bytes for i in m.inner_tars.values())
+    click.echo(click.style(
+        f"✓ Staged '{name}' ({len(m.inner_tars)} inner tar(s), "
+        f"{utils.format_size(total_size)})",
+        fg='green',
+    ))
+    click.echo(f"  manifest:  {result.manifest_path}")
+    click.echo(f"  backend:   {m.backend}:{m.backend_dir}")
+    click.echo()
+    click.echo(click.style(
+        f"Next: dt remote archive deposit {name}",
+        dim=True,
+    ))
+
+
+# --- deposit --------------------------------------------------------------- #
+
+@remote_archive.command('deposit')
+@click.argument('name')
+@click.option('--staging-dir', default=None,
+              help='Staging directory (default: archive.staging_dir config).')
+@click.option('--jobs', type=int, default=None,
+              help='Parallel upload workers '
+                   '(default: archive.deposit_jobs, capped for MDSS politeness).')
+@click.option('--dry-run', is_flag=True,
+              help='Report what would be uploaded without contacting the backend.')
+@click.option('--resume', is_flag=True,
+              help='Skip files whose .deposited.json sentinels are valid.')
+@click.option('--keep-staging', is_flag=True,
+              help='Do not delete the staging directory after upload.')
+@click.option('-v', '--verbose', is_flag=True)
+def remote_archive_deposit(name, staging_dir, jobs, dry_run, resume,
+                           keep_staging, verbose):
+    """Upload staged inner tarballs to the backend; runs on a data mover."""
+    try:
+        result = archive_ops.deposit_archive(
+            name=name,
+            staging_dir=staging_dir,
+            jobs=jobs,
+            dry_run=dry_run,
+            resume=resume,
+            keep_staging=keep_staging,
+            verbose=verbose,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+
+    if dry_run:
+        return
+
+    m = result.manifest
+    total_size = sum(i.size_bytes for i in m.inner_tars.values())
+    click.echo(click.style(
+        f"✓ Deposited '{name}' to {m.backend}:{m.backend_dir}",
+        fg='green',
+    ))
+    click.echo(f"  size:      {utils.format_size(total_size)} "
+               f"({len(m.inner_tars)} inner tar(s), {m.compression})")
+    click.echo(f"  manifest:  {result.manifest_path}")
+
+
+# --- list ------------------------------------------------------------------ #
 
 @remote_archive.command('list')
 def remote_archive_list():
@@ -768,20 +915,24 @@ def remote_archive_list():
     backend_w = max(backend_w, len('BACKEND'))
     click.echo(
         f"{'NAME':<{name_w}}  {'BACKEND':<{backend_w}}  "
-        f"{'SIZE':>10}  CREATED              PATH"
+        f"{'SIZE':>10}  CREATED              BACKEND_DIR"
     )
     for m in manifests:
+        total_size = sum(i.size_bytes for i in m.inner_tars.values())
         click.echo(
             f"{m.archive_name:<{name_w}}  {m.backend:<{backend_w}}  "
-            f"{utils.format_size(m.tarball_size_bytes):>10}  "
-            f"{m.created_at:<20}  {m.backend_path}"
+            f"{utils.format_size(total_size):>10}  "
+            f"{m.created_at:<20}  {m.backend_dir}"
         )
 
+
+# --- verify ---------------------------------------------------------------- #
 
 @remote_archive.command('verify')
 @click.argument('name')
 @click.option('--deep', is_flag=True,
-              help='Also enumerate inner tarballs via tar -t (expensive on tape).')
+              help='Download each inner tar and recompute its sha256 '
+                   '(expensive on tape).')
 def remote_archive_verify(name, deep):
     """Verify an archive against its manifest."""
     try:
@@ -794,11 +945,11 @@ def remote_archive_verify(name, deep):
             f"✓ Archive '{name}' verified OK on {result.backend}",
             fg='green',
         ))
-        click.echo(f"  path: {result.backend_path}")
-        click.echo(f"  size: ok")
-        click.echo(f"  sha256: ok")
+        click.echo(f"  backend_dir: {result.backend_dir}")
+        click.echo(f"  sidecar:     ok")
+        click.echo(f"  files:       ok")
         if result.deep_ok is True:
-            click.echo(f"  deep (tar -t): ok")
+            click.echo(f"  deep sha256: ok")
         return
 
     click.echo(click.style(
@@ -809,6 +960,8 @@ def remote_archive_verify(name, deep):
         click.echo(f"  - {msg}")
     raise SystemExit(1)
 
+
+# --- restore --------------------------------------------------------------- #
 
 @remote_archive.command('restore')
 @click.argument('name')
@@ -824,7 +977,7 @@ def remote_archive_restore(name, to_path, object_hash, prefix, verbose):
     """Restore content from an archive.
 
     Without --object or --prefix, performs a full restore (downloads
-    the outer tar and extracts everything into --to).
+    every inner tar and extracts into --to).
     """
     try:
         written = archive_ops.restore_archive(
@@ -845,6 +998,8 @@ def remote_archive_restore(name, to_path, object_hash, prefix, verbose):
     if len(written) > 20:
         click.echo(f"  ... and {len(written) - 20} more")
 
+
+# --- prune ----------------------------------------------------------------- #
 
 @remote_archive.command('prune')
 @click.argument('name')
