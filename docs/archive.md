@@ -319,8 +319,17 @@ If `archive.registry_path` is unset, register hooks are silent no-ops.
 | `archive.deposit_jobs` | `4` | Parallel workers for `deposit`. MDSS-politeness ceiling. |
 | `archive.compress` | `zstd` | Default compression for inner tars. |
 | `archive.registry_path` | — (off) | Central register directory (team-shared OK). |
+| `archive.qxub_queue` | `normal` (fallback `qxub.queue`) | PBS queue for `--via-qxub` stage workers. *Not* `copyq` — workers need CPU. |
+| `archive.qxub_walltime` | `04:00:00` | Per-prefix worker walltime. One inner tar fits well inside this. |
+| `archive.qxub_mem` | `4GB` | Per-prefix worker memory. |
+| `archive.qxub_env` | `dt` | Conda env name for `--via-qxub` workers. |
 
 Set via `dt config set archive.X Y` at any scope.
+
+The `archive.qxub_*` keys fall back to the generic `qxub.*` keys if
+unset, so an existing qxub config still works — but the *defaults*
+differ: the generic default is `copyq` (right for `dt push` / `mdss`
+work), the archive-specific default is `normal` (right for tar work).
 
 ## Related commands
 

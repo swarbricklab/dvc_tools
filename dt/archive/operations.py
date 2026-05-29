@@ -503,6 +503,43 @@ def build_prefix_from_config(staging_dir: Path, prefix: str) -> Dict:
     )
 
 
+def _archive_qxub_config() -> Dict[str, str]:
+    """Resolve qxub settings for archive stage workers.
+
+    Each worker is a single-CPU job that tars one md5 prefix on a
+    compute node. The right queue is *not* copyq (the default for the
+    generic `qxub.*` keys) — copyq is a data-mover queue with no
+    compute parallelism. Falls back to the generic `qxub.*` keys when
+    archive-specific keys are unset, so users with an existing qxub
+    config can still override per-call.
+    """
+    return {
+        'env':      str(cfg.get_value('archive.qxub_env')
+                        or cfg.get_value('qxub.env', 'dt')),
+        'queue':    str(cfg.get_value('archive.qxub_queue')
+                        or cfg.get_value('qxub.queue', 'normal')),
+        'walltime': str(cfg.get_value('archive.qxub_walltime')
+                        or cfg.get_value('qxub.walltime', '04:00:00')),
+        'mem':      str(cfg.get_value('archive.qxub_mem')
+                        or cfg.get_value('qxub.mem', '4GB')),
+    }
+
+
+def _build_archive_qxub_command(job_name: str, worker_cmd: List[str]) -> List[str]:
+    """Build a qxub exec command using archive-specific defaults."""
+    config = _archive_qxub_config()
+    return [
+        'qxub', 'exec', '--terse',
+        '--env', config['env'],
+        '--queue', config['queue'],
+        '--time', config['walltime'],
+        '--mem', config['mem'],
+        '-N', job_name,
+        '--',
+        *worker_cmd,
+    ]
+
+
 def _submit_prefix_jobs(
     archive_name: str,
     staging: Path,
@@ -520,7 +557,7 @@ def _submit_prefix_jobs(
             '--staging-dir', str(staging.parent),
         ]
         job_name = f'dt-stage-{archive_name}-{prefix}'
-        cmd = hpc.build_qxub_command(job_name, worker_cmd)
+        cmd = _build_archive_qxub_command(job_name, worker_cmd)
         if verbose:
             print(f"  submit {prefix}: {' '.join(cmd)}")
         try:
