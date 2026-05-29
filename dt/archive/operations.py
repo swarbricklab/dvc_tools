@@ -193,6 +193,22 @@ def default_deposit_jobs() -> int:
     return 4
 
 
+def default_scan_jobs() -> int:
+    """Default thread-pool size for the preflight remote scan.
+
+    Reads ``archive.scan_jobs`` config, else ``32``. The scan is
+    metadata-bound (``stat()`` per object on Lustre), not CPU-bound,
+    so threads work and a higher fan-out than ``stage_jobs`` is fine.
+    """
+    configured = cfg.get_value('archive.scan_jobs')
+    if configured:
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            pass
+    return 32
+
+
 def default_compression() -> str:
     """Default compression for inner tarballs.
 
@@ -248,8 +264,29 @@ def _dt_version() -> str:
 # Helpers: remote scanning
 # --------------------------------------------------------------------------- #
 
+def _scan_one_prefix(p: Path) -> Tuple[str, int, int]:
+    """Worker for :func:`scan_files_md5`. Returns (prefix, n_objects, bytes)."""
+    n = 0
+    size_sum = 0
+    # os.scandir avoids the iterdir → Path → stat round-trip.
+    try:
+        with os.scandir(p) as it:
+            for entry in it:
+                if entry.is_file(follow_symlinks=False):
+                    n += 1
+                    try:
+                        size_sum += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+    except OSError:
+        pass
+    return p.name, n, size_sum
+
+
 def scan_files_md5(
-    remote_dir: Path, progress: bool = False,
+    remote_dir: Path,
+    progress: bool = False,
+    jobs: Optional[int] = None,
 ) -> Tuple[List[Path], Dict[str, Tuple[int, int]]]:
     """Walk ``<remote_dir>/files/md5/`` and return per-prefix stats.
 
@@ -258,9 +295,12 @@ def scan_files_md5(
     the resulting tarball layout is identical regardless of which
     prefixes happened to have data.
 
-    When ``progress`` is True, emits per-prefix progress lines to
-    stderr — useful on real remotes with many objects where each
-    prefix scan can take seconds to minutes.
+    The 256 prefix scans run in a ``ThreadPoolExecutor`` because each
+    is metadata-bound (``stat()`` per object on Lustre). The pool size
+    defaults to ``archive.scan_jobs`` (32 when unset).
+
+    When ``progress`` is True, emits per-completion progress lines to
+    stderr. Order is non-deterministic across threads.
     """
     files_md5 = remote_dir / 'files' / 'md5'
     if not files_md5.is_dir():
@@ -269,8 +309,13 @@ def scan_files_md5(
             f"Is {remote_dir} actually a DVC remote?"
         )
 
+    n_jobs = jobs if jobs and jobs > 0 else default_scan_jobs()
+
     if progress:
-        print(f"Scanning {files_md5} ...", file=sys.stderr, flush=True)
+        print(
+            f"Scanning {files_md5} with {n_jobs} worker(s) ...",
+            file=sys.stderr, flush=True,
+        )
 
     prefix_dirs: List[Path] = sorted(
         p for p in files_md5.iterdir() if p.is_dir()
@@ -279,25 +324,26 @@ def scan_files_md5(
     total = len(prefix_dirs)
     cumulative_objects = 0
     cumulative_bytes = 0
-    for idx, p in enumerate(prefix_dirs, start=1):
-        n = 0
-        size_sum = 0
-        for entry in p.iterdir():
-            if entry.is_file():
-                n += 1
-                size_sum += entry.stat().st_size
-        stats[p.name] = (n, size_sum)
-        cumulative_objects += n
-        cumulative_bytes += size_sum
-        if progress:
-            print(
-                f"  [{idx:>3}/{total}] {p.name}: {n:>9} object(s), "
-                f"{utils.format_size(size_sum):>10}  "
-                f"(running total: {cumulative_objects:>9} obj, "
-                f"{utils.format_size(cumulative_bytes):>10})",
-                file=sys.stderr,
-                flush=True,
-            )
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=n_jobs) as pool:
+        futures = {pool.submit(_scan_one_prefix, p): p for p in prefix_dirs}
+        for fut in as_completed(futures):
+            name, n, size_sum = fut.result()
+            stats[name] = (n, size_sum)
+            cumulative_objects += n
+            cumulative_bytes += size_sum
+            done += 1
+            if progress:
+                print(
+                    f"  [{done:>3}/{total}] {name}: {n:>9} object(s), "
+                    f"{utils.format_size(size_sum):>10}  "
+                    f"(running total: {cumulative_objects:>9} obj, "
+                    f"{utils.format_size(cumulative_bytes):>10})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
     return prefix_dirs, stats
 
 
