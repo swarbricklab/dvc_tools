@@ -692,12 +692,14 @@ def _default_name(source_remote: Path) -> str:
               help='Resume a previous attempt: reuse staging and skip '
                    'prefixes whose .done.json sentinels are valid, plus '
                    'files whose .deposited.json sentinels are valid.')
+@click.option('--via-qxub', is_flag=True,
+              help='Dispatch the stage phase as one qxub job per prefix.')
 @click.option('--keep-staging', is_flag=True,
               help='Do not delete the staging directory after upload.')
 @click.option('-v', '--verbose', is_flag=True)
 def remote_archive_create(name, source, backend, backend_dir, backend_path,
                           staging_dir, jobs, deposit_jobs, compress, dry_run,
-                          force, resume, keep_staging, verbose):
+                          force, resume, via_qxub, keep_staging, verbose):
     """Create a new archive of a DVC remote (stage + deposit).
 
     NAME is the identifier for this archive instance. It becomes:
@@ -738,6 +740,7 @@ def remote_archive_create(name, source, backend, backend_dir, backend_path,
             dry_run=dry_run,
             force=force,
             resume=resume,
+            via_qxub=via_qxub,
             keep_staging=keep_staging,
             verbose=verbose,
         )
@@ -799,9 +802,15 @@ def remote_archive_create(name, source, backend, backend_dir, backend_path,
 @click.option('--resume', is_flag=True,
               help='Resume a previous attempt; skip prefixes whose '
                    '.done.json sentinels are valid.')
+@click.option('--via-qxub', is_flag=True,
+              help='Dispatch one qxub job per prefix instead of running '
+                   'inline. Each job is a single-CPU build of one inner '
+                   'tar; useful when the source remote is too large to '
+                   'tar within a single node\'s walltime.')
 @click.option('-v', '--verbose', is_flag=True)
 def remote_archive_stage(name, source, backend, backend_dir, staging_dir,
-                         jobs, compress, dry_run, force, resume, verbose):
+                         jobs, compress, dry_run, force, resume, via_qxub,
+                         verbose):
     """Build inner tarballs in a staging dir; no backend interaction.
 
     Use this on a compute node with many CPUs. When stage finishes,
@@ -826,6 +835,7 @@ def remote_archive_stage(name, source, backend, backend_dir, staging_dir,
             dry_run=dry_run,
             force=force,
             resume=resume,
+            via_qxub=via_qxub,
             verbose=verbose,
         )
     except errors.ArchiveError as e:
@@ -997,6 +1007,27 @@ def remote_archive_restore(name, to_path, object_hash, prefix, verbose):
         click.echo(f"  {p}")
     if len(written) > 20:
         click.echo(f"  ... and {len(written) - 20} more")
+
+
+# --- internal worker for --via-qxub stage --------------------------------- #
+
+@remote_archive.command('_build-prefix', hidden=True)
+@click.argument('name')
+@click.argument('prefix')
+@click.option('--staging-dir', default=None,
+              help='Staging directory (default: archive.staging_dir config).')
+def remote_archive_build_prefix(name, prefix, staging_dir):
+    """Internal worker: build one inner tarball for one md5 prefix.
+
+    Invoked by `dt remote archive stage --via-qxub` on a compute node.
+    Reads the job config from ``<staging>/<name>/.stage-args.json`` and
+    calls :func:`build_prefix_from_config`.
+    """
+    try:
+        staging_root = archive_ops.resolve_staging_dir(staging_dir)
+        archive_ops.build_prefix_from_config(staging_root / name, prefix)
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
 
 
 # --- prune ----------------------------------------------------------------- #

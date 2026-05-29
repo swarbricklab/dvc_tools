@@ -101,6 +101,22 @@ sentinel alongside its tarball. A re-run with `--resume` skips
 prefixes whose sentinels are still valid (size matches), so walltime
 hits don't lose Phase 1 work.
 
+For sources too large to tar within a single node's walltime,
+`--via-qxub` dispatches one qxub job per md5 prefix instead of
+running inline:
+
+```bash
+dt remote archive stage neochemo-2026-05 --via-qxub
+```
+
+Each worker is a single-CPU job invoking `dt remote archive
+_build-prefix <NAME> <PREFIX>` on a compute node; the orchestrator
+waits via `qxub monitor`, then assembles the manifest from the
+sentinels every worker leaves in staging. The 256 prefixes give you
+natural multi-node parallelism, bounded only by your PBS queue's
+concurrency limit. qxub config (queue, walltime, mem) is read from
+`qxub.*` keys — see [config.md](config.md).
+
 ### `dt remote archive deposit <NAME>`
 
 Read `.dvc/archives/<NAME>.yaml`, upload every inner tar in the

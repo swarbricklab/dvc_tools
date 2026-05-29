@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .. import config as cfg
+from .. import hpc
 from .. import utils
 from ..errors import ArchiveError
 from . import backends as _backends
@@ -447,6 +448,97 @@ def _write_sentinel(sentinel: Path, data: Dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# qxub orchestration for stage
+# --------------------------------------------------------------------------- #
+
+QXUB_JOB_CONFIG_FILENAME = '.stage-args.json'
+
+
+def _save_qxub_job_config(
+    staging: Path,
+    source_remote: Path,
+    compress: str,
+    stats: Dict[str, Tuple[int, int]],
+) -> Path:
+    """Write a small per-archive job config to staging so qxub workers
+    can read everything they need from a single file. Avoids enormous
+    command lines and re-derives nothing in the worker.
+    """
+    config_path = staging / QXUB_JOB_CONFIG_FILENAME
+    config_path.write_text(json.dumps({
+        'source_remote': str(source_remote),
+        'compress': compress,
+        'n_objects_by_prefix': {p: n for p, (n, _) in stats.items()},
+    }))
+    return config_path
+
+
+def _load_qxub_job_config(staging: Path) -> Dict:
+    config_path = staging / QXUB_JOB_CONFIG_FILENAME
+    if not config_path.is_file():
+        raise ArchiveError(
+            f"qxub worker config not found at {config_path}. "
+            f"Was this prefix dispatched by `dt remote archive stage --via-qxub`?"
+        )
+    return json.loads(config_path.read_text())
+
+
+def build_prefix_from_config(staging_dir: Path, prefix: str) -> Dict:
+    """Worker entry point: read the saved job config, build one prefix.
+
+    Invoked on a compute node by the qxub-dispatched worker subcommand
+    ``dt remote archive _build-prefix``. Calls :func:`build_prefix_tarball`
+    after looking up the source remote / compression / n_objects from
+    the staging-dir job config.
+    """
+    cfg_data = _load_qxub_job_config(staging_dir)
+    n_objects = int(cfg_data['n_objects_by_prefix'].get(prefix, 0))
+    return build_prefix_tarball(
+        cfg_data['source_remote'],
+        prefix,
+        str(staging_dir),
+        cfg_data['compress'],
+        n_objects,
+    )
+
+
+def _submit_prefix_jobs(
+    archive_name: str,
+    staging: Path,
+    prefix_names: List[str],
+    verbose: bool,
+) -> List[str]:
+    """Submit one qxub job per prefix; return the job IDs."""
+    hpc.require_qxub()
+    job_ids: List[str] = []
+    repo_root = Path.cwd()
+    for prefix in prefix_names:
+        worker_cmd = [
+            'dt', 'remote', 'archive', '_build-prefix',
+            archive_name, prefix,
+            '--staging-dir', str(staging.parent),
+        ]
+        job_name = f'dt-stage-{archive_name}-{prefix}'
+        cmd = hpc.build_qxub_command(job_name, worker_cmd)
+        if verbose:
+            print(f"  submit {prefix}: {' '.join(cmd)}")
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, cwd=repo_root,
+            )
+        except FileNotFoundError as e:
+            raise ArchiveError(f"qxub not found: {e}") from e
+        if result.returncode != 0:
+            raise ArchiveError(
+                f"qxub submit failed for prefix {prefix}: "
+                f"{(result.stderr or '').strip() or '(no output)'}"
+            )
+        job_id = result.stdout.strip().split('\n')[0]
+        job_ids.append(job_id)
+    return job_ids
+
+
+# --------------------------------------------------------------------------- #
 # Phase 1 worker: build one inner tarball
 # --------------------------------------------------------------------------- #
 
@@ -567,6 +659,7 @@ def stage_archive(
     dry_run: bool = False,
     force: bool = False,
     resume: bool = False,
+    via_qxub: bool = False,
     verbose: bool = False,
     repo_root: Optional[Path] = None,
 ) -> CreateResult:
@@ -717,72 +810,136 @@ def stage_archive(
             )
         prefix_dirs_todo = [p for p in prefix_dirs if p.name not in resume_done]
 
-        print(
-            f"Stage: building {len(prefix_dirs_todo)} inner tarball(s) "
-            f"with {n_jobs} worker(s); staging at {staging}"
-            + (
-                f" (skipping {len(resume_done)} already done)"
-                if resume_done else ""
-            ),
-            flush=True,
-        )
-        if n_jobs == 1 and len(prefix_dirs_todo) > 1:
+        if via_qxub:
+            # Multi-node dispatch: one qxub job per prefix. The orchestrator
+            # waits via `qxub monitor`, then assembles the manifest from the
+            # sentinels each worker leaves behind.
             print(
-                "  note: --jobs=1 means prefixes are tarred serially; "
-                "set $PBS_NCPUS (or pass --jobs N) to parallelise.",
+                f"Stage (qxub): dispatching {len(prefix_dirs_todo)} "
+                f"prefix job(s)"
+                + (
+                    f" (skipping {len(resume_done)} already done)"
+                    if resume_done else ""
+                ),
                 flush=True,
             )
-        phase1_start = time.monotonic()
+            _save_qxub_job_config(staging, source_remote, compress, stats)
+            phase1_start = time.monotonic()
 
-        with ProcessPoolExecutor(max_workers=n_jobs) as pool:
-            futures = {
-                pool.submit(
-                    build_prefix_tarball,
-                    str(source_remote),
-                    p.name,
-                    str(staging),
-                    compress,
-                    stats[p.name][0],
-                ): p.name
-                for p in prefix_dirs_todo
-            }
-            done = len(resume_done)
-            total = len(prefix_dirs)
-            for fut in as_completed(futures):
-                prefix = futures[fut]
-                try:
-                    row = fut.result()
-                except Exception as e:
-                    raise ArchiveError(
-                        f"Worker for prefix {prefix} failed: {e}"
-                    ) from e
-                inner_tars[row['prefix']] = InnerTar(
-                    filename=row['filename'],
-                    size_bytes=row['size_bytes'],
-                    sha256=row['sha256'],
-                    n_objects=row['n_objects'],
+            if prefix_dirs_todo:
+                job_ids = _submit_prefix_jobs(
+                    name, staging, [p.name for p in prefix_dirs_todo],
+                    verbose=verbose,
                 )
-                done += 1
-                size_str = utils.format_size(row['size_bytes'])
-                if verbose:
-                    elapsed = time.monotonic() - phase1_start
-                    print(
-                        f"  [{done:>3}/{total}] {prefix} "
-                        f"({row['n_objects']:>7} obj, {size_str:>10}) "
-                        f"  t+{_format_duration(elapsed)}",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"  [{done:>3}/{total}] {prefix} ({size_str})",
-                        flush=True,
-                    )
+                print(
+                    f"  monitoring {len(job_ids)} qxub job(s) ...",
+                    flush=True,
+                )
+                all_ok = hpc.monitor_jobs(job_ids, verbose=verbose)
+            else:
+                all_ok = True
 
-        phase1_elapsed = time.monotonic() - phase1_start
-        print(
-            f"Stage: done in {_format_duration(phase1_elapsed)}",
-            flush=True,
-        )
+            # Collect sentinels for every prefix expected.
+            missing: List[str] = []
+            for p in prefix_dirs_todo:
+                sentinel = _sentinel_path_for(
+                    staging, '', STAGED_SENTINEL_SUFFIX,
+                )
+                # The sentinel filename depends on compression extension —
+                # search by glob since we know the prefix.
+                ext = _COMPRESSION_EXT[compress]
+                expected = staging / f"{p.name}.tar{ext}{STAGED_SENTINEL_SUFFIX}"
+                data = _load_sentinel(expected) if expected.exists() else None
+                if not data:
+                    missing.append(p.name)
+                    continue
+                inner_tars[p.name] = InnerTar(
+                    filename=data['filename'],
+                    size_bytes=data['size_bytes'],
+                    sha256=data['sha256'],
+                    n_objects=data['n_objects'],
+                )
+
+            if missing or not all_ok:
+                raise ArchiveError(
+                    f"qxub stage failed: {len(missing)} prefix(es) "
+                    f"missing sentinels after qxub monitor: "
+                    f"{', '.join(missing[:10])}"
+                    + (' ...' if len(missing) > 10 else '')
+                )
+
+            phase1_elapsed = time.monotonic() - phase1_start
+            print(
+                f"Stage (qxub): done in {_format_duration(phase1_elapsed)}",
+                flush=True,
+            )
+        else:
+            print(
+                f"Stage: building {len(prefix_dirs_todo)} inner tarball(s) "
+                f"with {n_jobs} worker(s); staging at {staging}"
+                + (
+                    f" (skipping {len(resume_done)} already done)"
+                    if resume_done else ""
+                ),
+                flush=True,
+            )
+            if n_jobs == 1 and len(prefix_dirs_todo) > 1:
+                print(
+                    "  note: --jobs=1 means prefixes are tarred serially; "
+                    "set $PBS_NCPUS (or pass --jobs N) to parallelise.",
+                    flush=True,
+                )
+            phase1_start = time.monotonic()
+
+            with ProcessPoolExecutor(max_workers=n_jobs) as pool:
+                futures = {
+                    pool.submit(
+                        build_prefix_tarball,
+                        str(source_remote),
+                        p.name,
+                        str(staging),
+                        compress,
+                        stats[p.name][0],
+                    ): p.name
+                    for p in prefix_dirs_todo
+                }
+                done = len(resume_done)
+                total = len(prefix_dirs)
+                for fut in as_completed(futures):
+                    prefix = futures[fut]
+                    try:
+                        row = fut.result()
+                    except Exception as e:
+                        raise ArchiveError(
+                            f"Worker for prefix {prefix} failed: {e}"
+                        ) from e
+                    inner_tars[row['prefix']] = InnerTar(
+                        filename=row['filename'],
+                        size_bytes=row['size_bytes'],
+                        sha256=row['sha256'],
+                        n_objects=row['n_objects'],
+                    )
+                    done += 1
+                    size_str = utils.format_size(row['size_bytes'])
+                    if verbose:
+                        elapsed = time.monotonic() - phase1_start
+                        print(
+                            f"  [{done:>3}/{total}] {prefix} "
+                            f"({row['n_objects']:>7} obj, {size_str:>10}) "
+                            f"  t+{_format_duration(elapsed)}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"  [{done:>3}/{total}] {prefix} ({size_str})",
+                            flush=True,
+                        )
+
+            phase1_elapsed = time.monotonic() - phase1_start
+            print(
+                f"Stage: done in {_format_duration(phase1_elapsed)}",
+                flush=True,
+            )
 
         manifest = ArchiveManifest(
             archive_name=name,
@@ -1019,6 +1176,7 @@ def create_archive(
     dry_run: bool = False,
     force: bool = False,
     resume: bool = False,
+    via_qxub: bool = False,
     keep_staging: bool = False,
     verbose: bool = False,
     backend_override: Optional[ArchiveBackend] = None,
@@ -1048,6 +1206,7 @@ def create_archive(
         dry_run=dry_run,
         force=force,
         resume=resume,
+        via_qxub=via_qxub,
         verbose=verbose,
         repo_root=repo_root,
     )

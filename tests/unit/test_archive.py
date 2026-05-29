@@ -474,6 +474,26 @@ class TestResume:
         out = capsys.readouterr().out
         assert f"Resume: {n} of {n} file(s) already deposited" in out
 
+    def test_qxub_worker_builds_from_config(
+        self, sample_remote, tmp_path,
+    ):
+        remote, _ = sample_remote
+        staging = tmp_path / 'staging' / 'qx'
+        staging.mkdir(parents=True)
+        prefix_dirs, stats = ops.scan_files_md5(remote)
+        ops._save_qxub_job_config(staging, remote, 'none', stats)
+
+        # Worker entry point: should produce the same sentinel as a
+        # direct build_prefix_tarball call.
+        p = prefix_dirs[0]
+        row = ops.build_prefix_from_config(staging, p.name)
+        sentinel = staging / f"{row['filename']}{ops.SENTINEL_SUFFIX}"
+        assert sentinel.exists()
+        data = ops._load_sentinel(sentinel)
+        assert data['sha256'] == row['sha256']
+        assert data['size_bytes'] == row['size_bytes']
+        assert data['n_objects'] == stats[p.name][0]
+
     def test_failed_run_preserves_staging(
         self, sample_remote, project_root, staging_dir,
     ):
