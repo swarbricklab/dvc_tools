@@ -549,6 +549,29 @@ def build_prefix_from_config(staging_dir: Path, prefix: str) -> Dict:
     )
 
 
+def _normalize_walltime(value: str) -> str:
+    """Accept ``HH:MM:SS`` or a bare-integer count of seconds.
+
+    PBS on some Gadi configurations is happy with seconds, on others
+    misreads a bare integer (treating it as minutes or worse), so we
+    always send ``HH:MM:SS``. Strings already containing ``:`` are
+    passed through unchanged.
+    """
+    s = str(value).strip()
+    if not s or ':' in s:
+        return s
+    try:
+        seconds = int(s)
+    except ValueError:
+        return s  # let qxub / qsub complain about whatever this is
+    if seconds < 0:
+        return s
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def _archive_qxub_config() -> Dict[str, str]:
     """Resolve qxub settings for archive stage workers.
 
@@ -559,13 +582,16 @@ def _archive_qxub_config() -> Dict[str, str]:
     archive-specific keys are unset, so users with an existing qxub
     config can still override per-call.
     """
+    walltime_raw = (
+        cfg.get_value('archive.qxub_walltime')
+        or cfg.get_value('qxub.walltime', '04:00:00')
+    )
     return {
         'env':      str(cfg.get_value('archive.qxub_env')
                         or cfg.get_value('qxub.env', 'dt')),
         'queue':    str(cfg.get_value('archive.qxub_queue')
                         or cfg.get_value('qxub.queue', 'normal')),
-        'walltime': str(cfg.get_value('archive.qxub_walltime')
-                        or cfg.get_value('qxub.walltime', '04:00:00')),
+        'walltime': _normalize_walltime(walltime_raw),
         'mem':      str(cfg.get_value('archive.qxub_mem')
                         or cfg.get_value('qxub.mem', '4GB')),
     }
