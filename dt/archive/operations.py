@@ -592,7 +592,13 @@ def _submit_prefix_jobs(
     prefix_names: List[str],
     verbose: bool,
 ) -> List[str]:
-    """Submit one qxub job per prefix; return the job IDs."""
+    """Submit one qxub job per prefix; return the job IDs.
+
+    On a per-prefix failure, raise :class:`ArchiveError` with the full
+    submission command + qxub stdout + stderr + exit code so the user
+    can reproduce manually. Some qxub builds print diagnostic info to
+    stdout rather than stderr, so we surface both.
+    """
     hpc.require_qxub()
     job_ids: List[str] = []
     repo_root = Path.cwd()
@@ -613,11 +619,27 @@ def _submit_prefix_jobs(
         except FileNotFoundError as e:
             raise ArchiveError(f"qxub not found: {e}") from e
         if result.returncode != 0:
+            stdout = (result.stdout or '').strip()
+            stderr = (result.stderr or '').strip()
+            detail = (
+                stderr or stdout or '(qxub printed nothing to stdout or stderr)'
+            )
             raise ArchiveError(
-                f"qxub submit failed for prefix {prefix}: "
-                f"{(result.stderr or '').strip() or '(no output)'}"
+                f"qxub submit failed for prefix {prefix} (exit "
+                f"{result.returncode}):\n"
+                f"  command:  {' '.join(cmd)}\n"
+                f"  stdout:   {stdout or '(empty)'}\n"
+                f"  stderr:   {stderr or '(empty)'}\n"
+                f"detail: {detail}"
             )
         job_id = result.stdout.strip().split('\n')[0]
+        if not job_id:
+            raise ArchiveError(
+                f"qxub submit for prefix {prefix} returned 0 but no job ID:\n"
+                f"  command:  {' '.join(cmd)}\n"
+                f"  stdout:   {(result.stdout or '').strip() or '(empty)'}\n"
+                f"  stderr:   {(result.stderr or '').strip() or '(empty)'}"
+            )
         job_ids.append(job_id)
     return job_ids
 
