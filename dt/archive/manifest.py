@@ -20,7 +20,7 @@ Schema version 2 (folder-per-prefix layout)::
     contents:
       total_objects: 42137
       total_bytes: 1234500000
-      compression: zstd            # none | gzip | zstd
+      compression: none            # none | gzip | zstd  (default: none)
       inner_tars:
         "00":
           filename: 00.tar.zst

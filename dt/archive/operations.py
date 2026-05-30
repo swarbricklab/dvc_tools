@@ -212,15 +212,16 @@ def default_scan_jobs() -> int:
 def default_compression() -> str:
     """Default compression for inner tarballs.
 
-    Reads ``archive.compress`` config, else ``'zstd'``. DVC blobs are
-    typically already-compressed scientific data, but per-prefix tar
-    headers + occasional plaintext can still squeeze a few percent off,
-    and zstd is fast enough that the cost is negligible.
+    Reads ``archive.compress`` config, else ``'none'``. DVC blobs are
+    almost always already-compressed scientific data (h5ad, parquet,
+    image binaries) and observed savings are ~5–10% — not worth the
+    hours of CPU time on a single-core stage worker. Set to ``gzip``
+    or ``zstd`` per-archive if your data is genuinely compressible.
     """
     configured = cfg.get_value('archive.compress')
     if configured and str(configured) in _COMPRESSION_TAR_FLAGS:
         return str(configured)
-    return 'zstd'
+    return 'none'
 
 
 def default_backend_root() -> str:

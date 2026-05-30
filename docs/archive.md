@@ -77,7 +77,7 @@ If `NAME` is omitted, it defaults to `<remote-dir-name>-<YYYY-MM-DD>`.
 | `--staging-dir` | `archive.staging_dir` config | Where the inner tarballs land. |
 | `--jobs` | `archive.stage_jobs` or `min(PBS_NCPUS, 8)` | Parallel inner-tar workers (stage phase). |
 | `--deposit-jobs` | `archive.deposit_jobs` (default `4`) | Parallel upload workers (deposit phase, capped for MDSS politeness). |
-| `--compress` | `archive.compress` or `zstd` | `none`, `gzip`, or `zstd`. |
+| `--compress` | `archive.compress` or `none` | `none`, `gzip`, or `zstd`. |
 | `--dry-run` | — | Plan and report sizes without uploading. |
 | `--force` | — | Overwrite existing manifest/staging, ignore low-disk warnings. |
 | `--resume` | — | Reuse staging, skipping prefixes/files with valid sentinels. |
@@ -317,7 +317,7 @@ If `archive.registry_path` is unset, register hooks are silent no-ops.
 | `archive.backend_root` | `dt-archive` | Base path on the backend. |
 | `archive.stage_jobs` | `min(PBS_NCPUS or nproc, 8)` | Parallel workers for `stage`. |
 | `archive.deposit_jobs` | `4` | Parallel workers for `deposit`. MDSS-politeness ceiling. |
-| `archive.compress` | `zstd` | Default compression for inner tars. |
+| `archive.compress` | `none` | Default compression for inner tars. DVC blobs are usually already-compressed; gzip saves ~10% at hours of CPU cost. Set to `zstd` for genuinely compressible data. |
 | `archive.registry_path` | — (off) | Central register directory (team-shared OK). |
 | `archive.qxub_queue` | `normal` (fallback `qxub.queue`) | PBS queue for `--via-qxub` stage workers. *Not* `copyq` — workers need CPU. |
 | `archive.qxub_walltime` | `04:00:00` | Per-prefix worker walltime. One inner tar fits well inside this. |
