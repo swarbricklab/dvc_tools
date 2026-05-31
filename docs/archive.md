@@ -32,6 +32,35 @@ dt remote archive verify neochemo-2026-05
 dt remote archive prune  neochemo-2026-05
 ```
 
+## Where to run each subcommand
+
+Most subcommands need MDSS access, which on NCI Gadi means running
+inside a `copyq` PBS job with `massdata/<proj>` mounted. A couple are
+purely local. Quick reference:
+
+| Subcommand | Queue | `-l storage=` includes | Notes |
+| --- | --- | --- | --- |
+| `create` | `copyq` ⚠️ | `gdata/<proj>+scratch/<proj>+massdata/<proj>` (+ source-remote flag) | Combines stage + deposit; OK for small archives, but limits stage to data-mover CPUs |
+| `stage` | any compute (`normal`, `normalbw`, …) | `gdata/<proj>+scratch/<proj>` (+ source-remote flag) | No MDSS; pure tar/IO |
+| `stage --via-qxub` | the orchestrator can run anywhere with `qxub`; per-prefix workers go to `archive.qxub_queue` (default `normal`) | per-worker: `gdata/<proj>+scratch/<proj>` (+ source-remote flag) | Each prefix is its own qsub job |
+| `deposit` | `copyq` | `gdata/<proj>+scratch/<proj>+massdata/<proj>` | Only data movers can talk to MDSS |
+| `verify` | `copyq` | `gdata/<proj>+massdata/<proj>` (+ `scratch/<proj>` for `--deep`) | Sidecar + per-file `stat`; `--deep` downloads every inner tar |
+| `restore` | `copyq` | `gdata/<proj>+massdata/<proj>` (+ destination flag for `--to`) | Reads from MDSS |
+| `prune` | `copyq` | `gdata/<proj>+massdata/<proj>` (+ source-remote flag) | Re-verifies first (so needs MDSS), then deletes the on-disk source |
+| `destroy` | `copyq` | `gdata/<proj>+massdata/<proj>` | Deletes inner tars + sidecar from MDSS |
+| `list` | login node | — | Reads local `.dt/archives/` (and `.dvc/archives/` for legacy) |
+| `registry list` / `registry sync` | login node | path holding the register dir | Reads YAML files |
+
+Notes:
+
+- `gdata/<proj>` is in nearly every row because the conda env that
+  provides `dt` typically lives under `/g/data/<proj>/conda/`. If your
+  install lives elsewhere, swap accordingly.
+- "source-remote flag" means the storage flag for wherever the DVC
+  remote sits (usually `gdata/<proj>`).
+- The orchestrator side of `stage --via-qxub` only submits + monitors
+  jobs, so it can run on a login node — `qxub` does the rest.
+
 ## Source DVC layouts
 
 `dt remote archive` auto-detects which DVC layout your remote uses and
@@ -76,6 +105,9 @@ directly instead of streaming the whole archive past it.
 
 ### `dt remote archive create [NAME]`
 
+> **Runs on:** `copyq` (data mover) with `gdata/<proj>+scratch/<proj>+massdata/<proj>` and the source-remote storage flag.
+> Combines `stage` + `deposit` in one process — fine for archives that fit in a single walltime, but stage workers are limited to data-mover CPUs.
+
 Convenience: stage + deposit inline. Suitable for small archives that
 finish in one walltime. For multi-TB archives, prefer
 `stage` + `deposit` as two separate jobs.
@@ -113,6 +145,9 @@ later, the extras must be resolved (deleted, moved, or accepted with
 
 ### `dt remote archive stage [NAME]`
 
+> **Runs on:** any compute queue (`normal`, `normalbw`, …) with `gdata/<proj>+scratch/<proj>` and the source-remote storage flag.
+> No MDSS involvement — workers just `tar` files. With `--via-qxub`, the orchestrator can run anywhere `qxub` is available (login node fine); each per-prefix worker job goes to `archive.qxub_queue` (default `normal`).
+
 Build the inner tarballs in `<staging-dir>/<NAME>/` and write the
 manifest locally. No backend interaction happens. Run this on a
 compute node with many CPUs.
@@ -140,6 +175,9 @@ concurrency limit. qxub config (queue, walltime, mem) is read from
 
 ### `dt remote archive deposit <NAME>`
 
+> **Runs on:** `copyq` (data mover) with `gdata/<proj>+scratch/<proj>+massdata/<proj>`.
+> The only subcommand that *must* be on `copyq` for write access to MDSS.
+
 Read `.dt/archives/<NAME>.yaml`, upload every inner tar in the
 manifest to `<backend-dir>/<filename>`, then upload a copy of the
 manifest to `<backend-dir>/<NAME>.manifest.yaml` last (the
@@ -159,10 +197,14 @@ are present, so a killed `deposit` only re-uploads the in-flight ones.
 
 ### `dt remote archive list`
 
+> **Runs on:** login node. No queue, no storage flags. Reads `.dt/archives/` (falling back to legacy `.dvc/archives/`).
+
 Print every archive recorded under `.dt/archives/`. Does not contact
 the backend.
 
 ### `dt remote archive verify <name>`
+
+> **Runs on:** `copyq` with `gdata/<proj>+massdata/<proj>`. Add `scratch/<proj>` if you use `--deep` so it can stage downloaded tars there.
 
 Default ("quick"):
 
@@ -175,6 +217,8 @@ Default ("quick"):
 recomputes its sha256. Expensive on tape.
 
 ### `dt remote archive restore <name> --to <path>`
+
+> **Runs on:** `copyq` with `gdata/<proj>+massdata/<proj>` and the storage flag for wherever `--to` lives (`scratch/<proj>` or `gdata/<proj>`).
 
 Modes:
 
@@ -196,6 +240,8 @@ that one prefix.
 
 ### `dt remote archive registry list`
 
+> **Runs on:** login node. No queue. Reads `.yaml` files from `archive.registry_path`.
+
 List every archive recorded in the central register
 (``archive.registry_path``). Each row shows project, archive name,
 backend, size, creation timestamp, and lifecycle status
@@ -205,11 +251,15 @@ If the register is unconfigured, this prints a hint and exits non-zero.
 
 ### `dt remote archive registry sync --root <PATH> [--root <PATH>...]`
 
+> **Runs on:** login node. No queue, no MDSS. Walks each `<root>/.dt/archives/` (and legacy `<root>/.dvc/archives/`) and writes entries to the register dir.
+
 Rebuild register entries from the manifests under each listed root.
 Useful when bootstrapping the register across an existing fleet of
 projects, or after manual edits / deletes in the register dir.
 
 ### `dt remote archive destroy <name>`
+
+> **Runs on:** `copyq` with `gdata/<proj>+massdata/<proj>`. No source-remote flag needed — `destroy` never touches the source.
 
 Delete the **archive copy** from the backend. Does NOT touch the source
 remote — that's what `prune` is for.
@@ -229,6 +279,9 @@ than falsely complete with missing inner tars.
 | `--keep-manifest` | Wipe the backend copy but keep `.dt/archives/<name>.yaml` and the registry entry. Use this when you want to retry deposit (e.g. after destroying a partial upload). |
 
 ### `dt remote archive prune <name>`
+
+> **Runs on:** `copyq` with `gdata/<proj>+massdata/<proj>` and the source-remote storage flag.
+> Re-verifies the archive on MDSS before deleting anything; needs MDSS read access and write access to wherever the source DVC remote lives.
 
 Refuses to run unless:
 
@@ -304,6 +357,36 @@ dt remote archive deposit neochemo-2026-05 \
 
 If `deposit` runs out of walltime, rerun with `--resume` — only the
 in-flight uploads have to repeat.
+
+MDSS-side jobs (`verify`, `restore`, `destroy`, `prune`) all share the
+same general shape — `copyq`, `gdata/<proj>+massdata/<proj>`, optional
+extra storage flag for the data they touch:
+
+```bash
+#!/bin/bash
+#PBS -P a56
+#PBS -q copyq
+#PBS -l ncpus=1
+#PBS -l mem=4GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=gdata/a56+massdata/a56   # + scratch/a56 for restore --to / verify --deep
+                                          # + gdata/<other> for the source remote (prune only)
+
+cd /path/to/repo
+dt remote archive verify  neochemo-2026-05
+# or restore: dt remote archive restore neochemo-2026-05 --to /scratch/a56/$USER/restored
+# or destroy: dt remote archive destroy neochemo-2026-05 --yes
+# or prune:   dt remote archive prune   neochemo-2026-05 --yes
+```
+
+Or wrap any of them in a one-liner via `qxub`:
+
+```bash
+qxub exec --env dt --queue copyq --time 01:00:00 --mem 4GB \
+    --storage 'gdata/a56+massdata/a56' \
+    -N dt-verify-neochemo \
+    -- dt remote archive verify neochemo-2026-05
+```
 
 ## Backends
 
