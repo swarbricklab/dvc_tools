@@ -640,11 +640,26 @@ def remote_archive():
 def _resolve_source_remote(source: Optional[str]) -> Path:
     """Resolve --source for archive commands.
 
-    Falls back to ``dt remote`` resolution (config + project name) if
-    not provided.
+    Resolution order:
+      1. ``--source <PATH>`` if given.
+      2. The first locally-accessible remote in ``.dvc/config`` (same
+         logic ``dt fetch`` uses).
+      3. ``remote.root / project_name`` as a final fallback for
+         ``dt remote init``-style conventions.
     """
     if source:
         return Path(source).expanduser().resolve()
+    # Prefer the project's actually-configured remotes (matches dt fetch).
+    try:
+        remotes = remote_mod.list_remotes()
+    except Exception:
+        remotes = []
+    if remotes:
+        found = remote_mod.find_local_remote(remotes, check_exists=True)
+        if found is not None:
+            _, local_path = found
+            return Path(local_path).resolve()
+    # Last resort: convention-based path (remote.root + project name).
     return remote_mod.resolve_remote_path()
 
 

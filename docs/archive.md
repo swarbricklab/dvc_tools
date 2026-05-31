@@ -90,7 +90,7 @@ If `NAME` is omitted, it defaults to `<remote-dir-name>-<YYYY-MM-DD>`.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `--source` | project remote | Override the DVC remote path to archive. |
+| `--source` | first local-accessible remote in `.dvc/config` (same as `dt fetch`); falls back to `remote.root/<project>` | The DVC remote path to archive. |
 | `--backend` | `mdss` | Backend name (`mdss`, `local`). |
 | `--backend-dir` | `<archive.backend_root>/<remote-name>/<NAME>/` | Folder path on the backend. |
 | `--staging-dir` | `archive.staging_dir` config | Where the inner tarballs land. |
