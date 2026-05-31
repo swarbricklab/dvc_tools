@@ -224,8 +224,18 @@ Manage remote storage.
 |------------|-------------|
 | `dt remote init` | Set up remote storage with SSH and local access methods |
 | `dt remote list [repo]` | List DVC remotes (optionally from a remote repository) |
+| `dt remote archive create <name>` | Archive a remote (stage + deposit in one go) |
+| `dt remote archive stage <name>` | Build inner tarballs in staging (compute-node phase) |
+| `dt remote archive deposit <name>` | Upload staged tarballs to backend (data-mover phase) |
+| `dt remote archive list` | List archives recorded under `.dt/archives/` |
+| `dt remote archive verify <name>` | Verify an archive against its manifest |
+| `dt remote archive restore <name>` | Restore content from an archive (full / prefix / single object) |
+| `dt remote archive prune <name>` | Delete the on-disk remote once its archive is verified |
+| `dt remote archive destroy <name>` | Delete an archive copy from the backend (does NOT touch source) |
+| `dt remote archive registry list` | List archives across all projects (central register) |
+| `dt remote archive registry sync` | Refresh the central register from project manifests |
 
-[Full documentation →](remote.md)
+[Full documentation →](remote.md) · [Archive reference →](archive.md)
 
 ---
 

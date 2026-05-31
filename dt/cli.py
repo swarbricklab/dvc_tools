@@ -1,5 +1,8 @@
 """Command-line interface for DVC Tools."""
 
+from pathlib import Path
+from typing import Optional
+
 import click
 
 from . import config as cfg
@@ -29,6 +32,10 @@ from . import update as update_mod
 from . import install as install_mod
 from . import status as status_mod
 from . import utils
+from . import archive as archive_mod
+from .archive import operations as archive_ops
+from .archive import backends as archive_backends
+from .archive import registry as archive_registry
 
 
 @click.group()
@@ -604,6 +611,598 @@ def remote_list(repository, owner, show_all):
     for name, url, is_default in remotes:
         default_marker = " (default)" if is_default else ""
         click.echo(f"{name}{default_marker}: {url}")
+
+
+# =============================================================================
+# dt remote archive
+# =============================================================================
+
+@remote.group('archive')
+def remote_archive():
+    """Archive DVC remotes to cold storage (e.g. NCI MDSS).
+
+    Tars the contents of a DVC remote's ``files/md5/`` tree in parallel
+    (one inner tarball per md5 prefix), wraps them in a single outer
+    tar, and ships the result to a pluggable archival backend. A
+    manifest is committed under ``.dvc/archives/`` so verify, restore
+    and prune can work without contacting the backend first.
+
+    \b
+    Typical workflow:
+        dt config set archive.staging_dir /scratch/<proj>/<user>/dt-archive
+        dt remote archive create <name> --source <remote-dir>
+        dt remote archive verify <name>
+        dt remote archive prune  <name>      # only after verify passes
+    """
+    pass
+
+
+def _resolve_source_remote(source: Optional[str]) -> Path:
+    """Resolve --source for archive commands.
+
+    Resolution order:
+      1. ``--source <PATH>`` if given.
+      2. The first locally-accessible remote in ``.dvc/config`` (same
+         logic ``dt fetch`` uses).
+      3. ``remote.root / project_name`` as a final fallback for
+         ``dt remote init``-style conventions.
+    """
+    if source:
+        return Path(source).expanduser().resolve()
+    # Prefer the project's actually-configured remotes (matches dt fetch).
+    try:
+        remotes = remote_mod.list_remotes()
+    except Exception:
+        remotes = []
+    if remotes:
+        found = remote_mod.find_local_remote(remotes, check_exists=True)
+        if found is not None:
+            _, local_path = found
+            return Path(local_path).resolve()
+    # Last resort: convention-based path (remote.root + project name).
+    return remote_mod.resolve_remote_path()
+
+
+def _default_name(source_remote: Path) -> str:
+    """``<remote-dir-name>-<YYYY-MM-DD>`` default for archive name."""
+    import datetime as _dt
+    return f"{source_remote.name}-{_dt.date.today().isoformat()}"
+
+
+# --- create ---------------------------------------------------------------- #
+
+@remote_archive.command('create')
+@click.argument('name', required=False)
+@click.option('--source', 'source', default=None,
+              help='Path to the DVC remote to archive '
+                   '(default: project remote from `dt remote init` rules).')
+@click.option('--backend', default='mdss',
+              type=click.Choice(sorted(archive_backends.known_backends()),
+                                case_sensitive=False),
+              help='Archive backend to use (default: mdss).')
+@click.option('--backend-dir', 'backend_dir', default=None,
+              help='Override the directory on the backend '
+                   '(default: <archive.backend_root>/<remote-name>/<name>/).')
+@click.option('--backend-path', 'backend_path', default=None, hidden=True,
+              help='Deprecated alias for --backend-dir.')
+@click.option('--staging-dir', default=None,
+              help='Staging directory for the inner tarballs '
+                   '(default: archive.staging_dir config).')
+@click.option('--jobs', type=int, default=None,
+              help='Parallel inner-tar workers for the stage phase '
+                   '(default: archive.stage_jobs or min(PBS_NCPUS, 8)).')
+@click.option('--deposit-jobs', type=int, default=None,
+              help='Parallel upload workers for the deposit phase '
+                   '(default: archive.deposit_jobs, capped for MDSS politeness).')
+@click.option('--compress',
+              type=click.Choice(['none', 'gzip', 'zstd']),
+              default=None,
+              help='Compression for inner tarballs '
+                   '(default: archive.compress or zstd).')
+@click.option('--source-layout',
+              type=click.Choice(['auto', 'dvc-v2', 'dvc-v3', 'dvc-mixed']),
+              default='auto',
+              help='Source DVC layout. "auto" inspects the remote; '
+                   'override only if detection picks the wrong thing.')
+@click.option('--dry-run', is_flag=True,
+              help='Plan and report sizes without creating tarballs.')
+@click.option('--force', is_flag=True,
+              help='Overwrite existing manifest / staging, ignore '
+                   'low-disk warnings.')
+@click.option('--resume', is_flag=True,
+              help='Resume a previous attempt: reuse staging and skip '
+                   'prefixes whose .done.json sentinels are valid, plus '
+                   'files whose .deposited.json sentinels are valid.')
+@click.option('--via-qxub', is_flag=True,
+              help='Dispatch the stage phase as one qxub job per prefix.')
+@click.option('--url', 'git_url', default=None,
+              help='Git URL to record in the manifest '
+                   '(default: project repo origin).')
+@click.option('--keep-staging', is_flag=True,
+              help='Do not delete the staging directory after upload.')
+@click.option('-v', '--verbose', is_flag=True)
+def remote_archive_create(name, source, backend, backend_dir, backend_path,
+                          staging_dir, jobs, deposit_jobs, compress,
+                          source_layout, dry_run, force, resume, via_qxub,
+                          git_url, keep_staging, verbose):
+    """Create a new archive of a DVC remote (stage + deposit).
+
+    NAME is the identifier for this archive instance. It becomes:
+
+    \b
+      - the manifest filename:   .dvc/archives/<NAME>.yaml
+      - the default backend dir: <archive.backend_root>/<remote-dir>/<NAME>/
+      - the handle for follow-up:  dt remote archive verify <NAME>
+                                    dt remote archive restore <NAME> --to ...
+                                    dt remote archive prune   <NAME>
+
+    If NAME is omitted, it defaults to ``<remote-dir-name>-<YYYY-MM-DD>``.
+
+    For multi-TB archives where stage and deposit need different
+    walltimes / nodes, run them as separate commands instead:
+
+    \b
+        dt remote archive stage   <NAME>   # on compute node (parallel CPUs)
+        dt remote archive deposit <NAME>   # on data mover (mdss access)
+    """
+    try:
+        source_remote = _resolve_source_remote(source)
+        if name is None:
+            name = _default_name(source_remote)
+            click.echo(click.style(
+                f"Using default archive name: {name}", dim=True,
+            ))
+        result = archive_ops.create_archive(
+            name=name,
+            source_remote=source_remote,
+            backend=backend,
+            backend_dir=backend_dir,
+            backend_path=backend_path,
+            staging_dir=staging_dir,
+            jobs=jobs,
+            deposit_jobs=deposit_jobs,
+            compress=compress,
+            source_layout=None if source_layout == 'auto' else source_layout,
+            dry_run=dry_run,
+            force=force,
+            resume=resume,
+            via_qxub=via_qxub,
+            git_url=git_url,
+            keep_staging=keep_staging,
+            verbose=verbose,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+
+    m = result.manifest
+    if dry_run:
+        click.echo(click.style(
+            f"[dry-run] would write manifest to {result.manifest_path}",
+            dim=True,
+        ))
+        return
+
+    total_size = sum(i.size_bytes for i in m.inner_tars.values())
+    click.echo(click.style(
+        f"✓ Archived '{name}' to {m.backend}:{m.backend_dir}",
+        fg='green',
+    ))
+    click.echo(f"  size:      {utils.format_size(total_size)} "
+               f"({len(m.inner_tars)} inner tar(s), {m.compression})")
+    click.echo(f"  objects:   {m.total_objects}")
+    click.echo(f"  manifest:  {result.manifest_path}")
+    click.echo()
+    click.echo(click.style(
+        f"Next: review and commit {result.manifest_path.relative_to(utils.find_project_root())}",
+        dim=True,
+    ))
+
+
+# --- stage ----------------------------------------------------------------- #
+
+@remote_archive.command('stage')
+@click.argument('name', required=False)
+@click.option('--source', 'source', default=None,
+              help='Path to the DVC remote to archive '
+                   '(default: project remote from `dt remote init` rules).')
+@click.option('--backend', default='mdss',
+              type=click.Choice(sorted(archive_backends.known_backends()),
+                                case_sensitive=False),
+              help='Backend to record in the manifest '
+                   '(default: mdss). No backend interaction happens during stage.')
+@click.option('--backend-dir', 'backend_dir', default=None,
+              help='Backend directory to record in the manifest.')
+@click.option('--staging-dir', default=None,
+              help='Staging directory for the inner tarballs '
+                   '(default: archive.staging_dir config).')
+@click.option('--jobs', type=int, default=None,
+              help='Parallel inner-tar workers '
+                   '(default: archive.stage_jobs or min(PBS_NCPUS, 8)).')
+@click.option('--compress',
+              type=click.Choice(['none', 'gzip', 'zstd']),
+              default=None,
+              help='Compression (default: archive.compress or zstd).')
+@click.option('--source-layout',
+              type=click.Choice(['auto', 'dvc-v2', 'dvc-v3', 'dvc-mixed']),
+              default='auto',
+              help='Source DVC layout. "auto" inspects the remote; '
+                   'override only if detection picks the wrong thing.')
+@click.option('--dry-run', is_flag=True,
+              help='Plan and report sizes without creating tarballs.')
+@click.option('--force', is_flag=True,
+              help='Overwrite existing manifest / staging.')
+@click.option('--resume', is_flag=True,
+              help='Resume a previous attempt; skip prefixes whose '
+                   '.done.json sentinels are valid.')
+@click.option('--via-qxub', is_flag=True,
+              help='Dispatch one qxub job per prefix instead of running '
+                   'inline. Each job is a single-CPU build of one inner '
+                   'tar; useful when the source remote is too large to '
+                   'tar within a single node\'s walltime.')
+@click.option('--url', 'git_url', default=None,
+              help='Git URL to record in the manifest '
+                   '(default: project repo origin).')
+@click.option('-v', '--verbose', is_flag=True)
+def remote_archive_stage(name, source, backend, backend_dir, staging_dir,
+                         jobs, compress, source_layout, dry_run, force,
+                         resume, via_qxub, git_url, verbose):
+    """Build inner tarballs in a staging dir; no backend interaction.
+
+    Use this on a compute node with many CPUs. When stage finishes,
+    run ``dt remote archive deposit <NAME>`` on a data mover to ship
+    the staged tars to the backend.
+    """
+    try:
+        source_remote = _resolve_source_remote(source)
+        if name is None:
+            name = _default_name(source_remote)
+            click.echo(click.style(
+                f"Using default archive name: {name}", dim=True,
+            ))
+        result = archive_ops.stage_archive(
+            name=name,
+            source_remote=source_remote,
+            backend=backend,
+            backend_dir=backend_dir,
+            staging_dir=staging_dir,
+            jobs=jobs,
+            compress=compress,
+            source_layout=None if source_layout == 'auto' else source_layout,
+            dry_run=dry_run,
+            force=force,
+            resume=resume,
+            via_qxub=via_qxub,
+            git_url=git_url,
+            verbose=verbose,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+
+    if dry_run:
+        click.echo(click.style(
+            f"[dry-run] would write manifest to {result.manifest_path}",
+            dim=True,
+        ))
+        return
+
+    m = result.manifest
+    total_size = sum(i.size_bytes for i in m.inner_tars.values())
+    click.echo(click.style(
+        f"✓ Staged '{name}' ({len(m.inner_tars)} inner tar(s), "
+        f"{utils.format_size(total_size)})",
+        fg='green',
+    ))
+    click.echo(f"  manifest:  {result.manifest_path}")
+    click.echo(f"  backend:   {m.backend}:{m.backend_dir}")
+    click.echo()
+    click.echo(click.style(
+        f"Next: dt remote archive deposit {name}",
+        dim=True,
+    ))
+
+
+# --- deposit --------------------------------------------------------------- #
+
+@remote_archive.command('deposit')
+@click.argument('name')
+@click.option('--staging-dir', default=None,
+              help='Staging directory (default: archive.staging_dir config).')
+@click.option('--jobs', type=int, default=None,
+              help='Parallel upload workers '
+                   '(default: archive.deposit_jobs, capped for MDSS politeness).')
+@click.option('--dry-run', is_flag=True,
+              help='Report what would be uploaded without contacting the backend.')
+@click.option('--resume', is_flag=True,
+              help='Skip files whose .deposited.json sentinels are valid.')
+@click.option('--keep-staging', is_flag=True,
+              help='Do not delete the staging directory after upload.')
+@click.option('-v', '--verbose', is_flag=True)
+def remote_archive_deposit(name, staging_dir, jobs, dry_run, resume,
+                           keep_staging, verbose):
+    """Upload staged inner tarballs to the backend; runs on a data mover."""
+    try:
+        result = archive_ops.deposit_archive(
+            name=name,
+            staging_dir=staging_dir,
+            jobs=jobs,
+            dry_run=dry_run,
+            resume=resume,
+            keep_staging=keep_staging,
+            verbose=verbose,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+
+    if dry_run:
+        return
+
+    m = result.manifest
+    total_size = sum(i.size_bytes for i in m.inner_tars.values())
+    click.echo(click.style(
+        f"✓ Deposited '{name}' to {m.backend}:{m.backend_dir}",
+        fg='green',
+    ))
+    click.echo(f"  size:      {utils.format_size(total_size)} "
+               f"({len(m.inner_tars)} inner tar(s), {m.compression})")
+    click.echo(f"  manifest:  {result.manifest_path}")
+
+
+# --- list ------------------------------------------------------------------ #
+
+@remote_archive.command('list')
+def remote_archive_list():
+    """List archives recorded under ``.dvc/archives/``."""
+    manifests = archive_ops.list_archives()
+    if not manifests:
+        click.echo("No archives found under .dvc/archives/.")
+        return
+    name_w = max(len(m.archive_name) for m in manifests)
+    name_w = max(name_w, len('NAME'))
+    backend_w = max(len(m.backend) for m in manifests)
+    backend_w = max(backend_w, len('BACKEND'))
+    click.echo(
+        f"{'NAME':<{name_w}}  {'BACKEND':<{backend_w}}  "
+        f"{'SIZE':>10}  CREATED              BACKEND_DIR"
+    )
+    for m in manifests:
+        total_size = sum(i.size_bytes for i in m.inner_tars.values())
+        click.echo(
+            f"{m.archive_name:<{name_w}}  {m.backend:<{backend_w}}  "
+            f"{utils.format_size(total_size):>10}  "
+            f"{m.created_at:<20}  {m.backend_dir}"
+        )
+
+
+# --- verify ---------------------------------------------------------------- #
+
+@remote_archive.command('verify')
+@click.argument('name')
+@click.option('--deep', is_flag=True,
+              help='Download each inner tar and recompute its sha256 '
+                   '(expensive on tape).')
+def remote_archive_verify(name, deep):
+    """Verify an archive against its manifest."""
+    try:
+        result = archive_ops.verify_archive(name, deep=deep)
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+
+    if result.ok:
+        click.echo(click.style(
+            f"✓ Archive '{name}' verified OK on {result.backend}",
+            fg='green',
+        ))
+        click.echo(f"  backend_dir: {result.backend_dir}")
+        click.echo(f"  sidecar:     ok")
+        click.echo(f"  files:       ok")
+        if result.deep_ok is True:
+            click.echo(f"  deep sha256: ok")
+        return
+
+    click.echo(click.style(
+        f"✗ Archive '{name}' did NOT verify on {result.backend}",
+        fg='red',
+    ))
+    for msg in result.messages:
+        click.echo(f"  - {msg}")
+    raise SystemExit(1)
+
+
+# --- restore --------------------------------------------------------------- #
+
+@remote_archive.command('restore')
+@click.argument('name')
+@click.option('--to', 'to_path', type=click.Path(),
+              required=True,
+              help='Destination directory for restored content.')
+@click.option('--object', 'object_hash', default=None,
+              help='Restore a single md5 object.')
+@click.option('--prefix', default=None,
+              help='Restore all objects under a single md5 prefix (e.g. "ab").')
+@click.option('-v', '--verbose', is_flag=True)
+def remote_archive_restore(name, to_path, object_hash, prefix, verbose):
+    """Restore content from an archive.
+
+    Without --object or --prefix, performs a full restore (downloads
+    every inner tar and extracts into --to).
+    """
+    try:
+        written = archive_ops.restore_archive(
+            name=name,
+            to_path=Path(to_path),
+            object_hash=object_hash,
+            prefix=prefix,
+            verbose=verbose,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+    click.echo(click.style(
+        f"✓ Restored {len(written)} path(s) from '{name}'",
+        fg='green',
+    ))
+    for p in written[:20]:
+        click.echo(f"  {p}")
+    if len(written) > 20:
+        click.echo(f"  ... and {len(written) - 20} more")
+
+
+# --- registry -------------------------------------------------------------- #
+
+@remote_archive.group('registry')
+def remote_archive_registry():
+    """Central register of archives across all projects.
+
+    A registry directory configured by ``archive.registry_path`` collects
+    one YAML per archive (per project) so you can query "what archives
+    exist?" without scanning every repo. Per-project manifests under
+    ``.dvc/archives/`` remain the source of truth.
+    """
+    pass
+
+
+@remote_archive_registry.command('list')
+def remote_archive_registry_list():
+    """List every archive recorded in the central register."""
+    base = archive_registry.registry_path()
+    if base is None:
+        raise click.ClickException(
+            "archive.registry_path is not configured.\n"
+            "  dt config set archive.registry_path "
+            "/g/data/<proj>/dt-archives/registry"
+        )
+    entries = archive_registry.list_entries()
+    if not entries:
+        click.echo(f"No entries under {base}")
+        return
+
+    proj_w = max(len(e.project_name) for e in entries)
+    proj_w = max(proj_w, len('PROJECT'))
+    name_w = max(len(e.archive_name) for e in entries)
+    name_w = max(name_w, len('ARCHIVE'))
+    backend_w = max(len(e.backend) for e in entries)
+    backend_w = max(backend_w, len('BACKEND'))
+
+    header = (
+        f"{'PROJECT':<{proj_w}}  {'ARCHIVE':<{name_w}}  "
+        f"{'BACKEND':<{backend_w}}  {'SIZE':>10}  "
+        f"CREATED              STATUS"
+    )
+    click.echo(header)
+    for e in entries:
+        status_bits = []
+        if e.status.verified_ok is True:
+            status_bits.append('verified')
+        elif e.status.verified_ok is False:
+            status_bits.append('verify-failed')
+        if e.status.pruned_at:
+            status_bits.append('pruned')
+        status = ' '.join(status_bits) or '-'
+        click.echo(
+            f"{e.project_name:<{proj_w}}  {e.archive_name:<{name_w}}  "
+            f"{e.backend:<{backend_w}}  "
+            f"{utils.format_size(e.total_size_bytes):>10}  "
+            f"{e.created_at:<20}  {status}"
+        )
+
+
+@remote_archive_registry.command('sync')
+@click.option('--root', 'roots', multiple=True, type=click.Path(),
+              required=True,
+              help='Project root to scan (may be repeated). Each root\'s '
+                   '.dvc/archives/*.yaml manifests are read and the '
+                   'register is updated to match.')
+def remote_archive_registry_sync(roots):
+    """Rebuild register entries from the manifests under listed roots."""
+    base = archive_registry.registry_path()
+    if base is None:
+        raise click.ClickException(
+            "archive.registry_path is not configured."
+        )
+    paths = [Path(r) for r in roots]
+    stats = archive_registry.sync_from_roots(paths)
+    click.echo(click.style(
+        f"✓ Synced register at {base}: "
+        f"{stats['written']} entry(s) written, "
+        f"{stats['skipped_roots']} root(s) skipped (no archives)",
+        fg='green',
+    ))
+
+
+# --- internal worker for --via-qxub stage --------------------------------- #
+
+@remote_archive.command('_build-prefix', hidden=True)
+@click.argument('name')
+@click.argument('prefix')
+@click.option('--staging-dir', default=None,
+              help='Staging directory (default: archive.staging_dir config).')
+def remote_archive_build_prefix(name, prefix, staging_dir):
+    """Internal worker: build one inner tarball for one md5 prefix.
+
+    Invoked by `dt remote archive stage --via-qxub` on a compute node.
+    Reads the job config from ``<staging>/<name>/.stage-args.json`` and
+    calls :func:`build_prefix_from_config`.
+    """
+    try:
+        staging_root = archive_ops.resolve_staging_dir(staging_dir)
+        archive_ops.build_prefix_from_config(staging_root / name, prefix)
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+
+
+# --- prune ----------------------------------------------------------------- #
+
+@remote_archive.command('prune')
+@click.argument('name')
+@click.option('--yes', is_flag=True,
+              help='Skip the interactive confirmation prompt.')
+@click.option('--force', is_flag=True,
+              help='Allow pruning when extras outside files/md5/ exist '
+                   '(NEVER bypasses verify).')
+def remote_archive_prune(name, yes, force):
+    """Delete the on-disk DVC remote after verifying its archive."""
+    try:
+        result = archive_ops.prune_archive(name, yes=yes, force=force)
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+    click.echo(click.style(
+        f"✓ Pruned {result.deleted_path} "
+        f"({utils.format_size(result.bytes_freed)} freed)",
+        fg='green',
+    ))
+
+
+# --- destroy --------------------------------------------------------------- #
+
+@remote_archive.command('destroy')
+@click.argument('name')
+@click.option('--yes', is_flag=True,
+              help='Skip the interactive confirmation prompt.')
+@click.option('--keep-manifest', is_flag=True,
+              help='Wipe the backend copy but keep the local manifest '
+                   'and registry entry. Useful for retrying deposit.')
+def remote_archive_destroy(name, yes, keep_manifest):
+    """Delete an archive copy from the backend (does NOT touch source).
+
+    Use this when an archive was created in error (wrong source, empty
+    content, mistaken name) and you want to obliterate the backend
+    copy. The source DVC remote is never touched — that's what
+    ``prune`` is for.
+    """
+    try:
+        result = archive_ops.destroy_archive(
+            name, yes=yes, keep_manifest=keep_manifest,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+    click.echo(click.style(
+        f"✓ Destroyed archive '{name}' from {result.backend}:{result.backend_dir} "
+        f"({result.files_deleted} file(s), {utils.format_size(result.bytes_freed)})",
+        fg='green',
+    ))
+    if not result.manifest_deleted and not keep_manifest:
+        click.echo(click.style(
+            f"  note: local manifest not found (already deleted?)", dim=True,
+        ))
 
 
 @cli.command()
