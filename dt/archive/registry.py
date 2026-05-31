@@ -308,10 +308,11 @@ def record_pruned(
 def sync_from_roots(roots: List[Path]) -> Dict[str, int]:
     """Rebuild register entries from every manifest under each root.
 
-    Walks ``<root>/.dvc/archives/*.yaml`` for each root, reading the
-    manifest and overwriting the corresponding register entry. Useful
-    for bootstrapping the register across an existing fleet of projects
-    or recovering after manual deletes.
+    Walks ``<root>/.dt/archives/*.yaml`` (and legacy
+    ``<root>/.dvc/archives/*.yaml``) for each root, reading the manifest
+    and overwriting the corresponding register entry. Useful for
+    bootstrapping the register across an existing fleet of projects or
+    recovering after manual deletes.
 
     Returns a small stats dict for the caller to surface.
     """
@@ -319,7 +320,11 @@ def sync_from_roots(roots: List[Path]) -> Dict[str, int]:
     skipped = 0
     for root in roots:
         root = Path(root).expanduser().resolve()
-        if not (root / '.dvc' / 'archives').is_dir():
+        has_archives = (
+            (root / '.dt' / 'archives').is_dir()
+            or (root / '.dvc' / 'archives').is_dir()
+        )
+        if not has_archives:
             skipped += 1
             continue
         try:

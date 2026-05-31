@@ -9,7 +9,7 @@ verified.
 A DVC remote on `/g/data` or similar that is no longer being actively
 touched is a candidate for archival. `dt remote archive` tars its
 contents in parallel, ships each inner tar to a pluggable backend (MDSS
-by default), and writes a manifest under `.dvc/archives/` so verify and
+by default), and writes a manifest under `.dt/archives/` so verify and
 restore can work without contacting the backend.
 
 ## Quick start
@@ -63,7 +63,7 @@ finish in one walltime. For multi-TB archives, prefer
 
 **What is `NAME`?** An identifier you choose for *this particular archive
 instance* — not the DVC remote name, not the project name. It becomes
-the manifest filename (`.dvc/archives/<NAME>.yaml`), part of the
+the manifest filename (`.dt/archives/<NAME>.yaml`), part of the
 default backend folder (`<archive.backend_root>/<remote-dir>/<NAME>/`),
 and the handle you pass to `verify`, `restore`, and `prune` later.
 
@@ -119,7 +119,7 @@ concurrency limit. qxub config (queue, walltime, mem) is read from
 
 ### `dt remote archive deposit <NAME>`
 
-Read `.dvc/archives/<NAME>.yaml`, upload every inner tar in the
+Read `.dt/archives/<NAME>.yaml`, upload every inner tar in the
 manifest to `<backend-dir>/<filename>`, then upload a copy of the
 manifest to `<backend-dir>/<NAME>.manifest.yaml` last (the
 completion sentinel). Run this on a data mover.
@@ -138,7 +138,7 @@ are present, so a killed `deposit` only re-uploads the in-flight ones.
 
 ### `dt remote archive list`
 
-Print every archive recorded under `.dvc/archives/`. Does not contact
+Print every archive recorded under `.dt/archives/`. Does not contact
 the backend.
 
 ### `dt remote archive verify <name>`
@@ -195,7 +195,7 @@ than falsely complete with missing inner tars.
 | Option | What it does |
 | --- | --- |
 | `--yes` | Skip the interactive confirmation prompt. |
-| `--keep-manifest` | Wipe the backend copy but keep `.dvc/archives/<name>.yaml` and the registry entry. Use this when you want to retry deposit (e.g. after destroying a partial upload). |
+| `--keep-manifest` | Wipe the backend copy but keep `.dt/archives/<name>.yaml` and the registry entry. Use this when you want to retry deposit (e.g. after destroying a partial upload). |
 
 ### `dt remote archive prune <name>`
 
@@ -290,7 +290,7 @@ Adding a backend means subclassing the `ArchiveBackend` protocol in
 
 ## Manifest
 
-`.dvc/archives/<name>.yaml` is a small YAML document (schema version 2)
+`.dt/archives/<name>.yaml` is a small YAML document (schema version 2)
 recording:
 
 - `backend_dir` — folder path on the backend.
@@ -317,7 +317,7 @@ dt config set archive.registry_path /g/data/<proj>/dt-archives/registry
 
 After that, every successful `create` / `deposit` writes a YAML entry
 to that directory; `verify` and `prune` update the entry's lifecycle
-status. Per-project manifests under `.dvc/archives/` remain the
+status. Per-project manifests under `.dt/archives/` remain the
 canonical source of truth — the register is a derived index.
 
 ```bash

@@ -61,16 +61,39 @@ SIDECAR_SUFFIX = '.manifest.yaml'
 def archives_dir(repo_root: Optional[Path] = None) -> Path:
     """Path to the directory holding committed archive manifests.
 
-    ``.dvc/archives/`` sits alongside ``.dvc/config`` so manifests are
-    versioned with the project.
+    ``.dt/archives/`` sits alongside ``.dt/config.yaml`` so manifests
+    are versioned with the project but kept out of the DVC config
+    namespace.
+    """
+    root = repo_root or utils.find_project_root()
+    return root / '.dt' / ARCHIVE_DIR_NAME
+
+
+def archives_dir_legacy(repo_root: Optional[Path] = None) -> Path:
+    """Old location for archive manifests under ``.dvc/archives/``.
+
+    Reads still fall back to this path for backwards compatibility
+    with archives created before the move; writes always go to
+    :func:`archives_dir`.
     """
     root = repo_root or utils.find_project_root()
     return root / '.dvc' / ARCHIVE_DIR_NAME
 
 
 def manifest_path(name: str, repo_root: Optional[Path] = None) -> Path:
-    """Resolve the on-disk manifest path for an archive name."""
-    return archives_dir(repo_root) / f'{name}.yaml'
+    """Resolve the on-disk manifest path for an archive name.
+
+    For reads, falls back to the legacy ``.dvc/archives/`` location if
+    a manifest exists there but not under ``.dt/archives/``. New writes
+    always target ``.dt/archives/``.
+    """
+    new_path = archives_dir(repo_root) / f'{name}.yaml'
+    if new_path.exists():
+        return new_path
+    legacy_path = archives_dir_legacy(repo_root) / f'{name}.yaml'
+    if legacy_path.exists():
+        return legacy_path
+    return new_path  # default for writes / not-found errors
 
 
 def sidecar_name(archive_name: str) -> str:
@@ -239,17 +262,21 @@ def load_manifest(name: str, repo_root: Optional[Path] = None) -> ArchiveManifes
 
 
 def list_manifests(repo_root: Optional[Path] = None) -> List[ArchiveManifest]:
-    """Return all manifests in ``.dvc/archives/`` sorted by archive name."""
-    d = archives_dir(repo_root)
-    if not d.exists():
-        return []
-    manifests = []
-    for p in sorted(d.glob('*.yaml')):
-        try:
-            with open(p) as f:
-                data = yaml.safe_load(f) or {}
-            manifests.append(ArchiveManifest.from_dict(data))
-        except (ArchiveError, KeyError, ValueError, yaml.YAMLError):
-            # Skip unparseable manifests; surfacing them is for `verify`.
+    """Return all manifests in ``.dt/archives/`` (and legacy
+    ``.dvc/archives/``) sorted by archive name.
+
+    A manifest present in both locations: ``.dt/archives/`` wins.
+    """
+    seen: Dict[str, ArchiveManifest] = {}
+    for d in (archives_dir(repo_root), archives_dir_legacy(repo_root)):
+        if not d.exists():
             continue
-    return manifests
+        for p in sorted(d.glob('*.yaml')):
+            try:
+                with open(p) as f:
+                    data = yaml.safe_load(f) or {}
+                manifest = ArchiveManifest.from_dict(data)
+            except (ArchiveError, KeyError, ValueError, yaml.YAMLError):
+                continue
+            seen.setdefault(manifest.archive_name, manifest)
+    return [m for _, m in sorted(seen.items())]

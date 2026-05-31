@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from dt.archive import operations as ops
 from dt.archive import manifest as manifest_mod
@@ -63,10 +64,10 @@ def sample_remote(tmp_path):
 
 @pytest.fixture
 def project_root(tmp_path, monkeypatch):
-    """A temp repo root with .dvc/ so find_project_root() resolves here."""
+    """A temp repo root with .dvc/ and .dt/ so find_project_root() resolves here."""
     root = tmp_path / 'repo'
     (root / '.dvc').mkdir(parents=True)
-    (root / '.dt').mkdir()
+    (root / '.dt' / 'archives').mkdir(parents=True)
     monkeypatch.chdir(root)
     return root
 
@@ -129,6 +130,54 @@ class TestManifestRoundTrip:
         assert loaded.compression == 'zstd'
         assert loaded.extras_at_archive_time[0].path == 'README.txt'
         assert loaded.layout == manifest_mod.LAYOUT_FOLDER_PER_PREFIX
+
+    def test_writes_to_dt_archives_not_dvc_archives(self, tmp_path):
+        # save_manifest must target .dt/archives/, not the legacy path.
+        m = manifest_mod.ArchiveManifest(
+            archive_name='loc', source_remote='/x', backend='local',
+            backend_dir='loc/', total_objects=0, total_bytes=0,
+            inner_tars={}, compression='none',
+        )
+        path = manifest_mod.save_manifest(m, repo_root=tmp_path)
+        assert path == tmp_path / '.dt' / 'archives' / 'loc.yaml'
+        assert path.exists()
+        assert not (tmp_path / '.dvc' / 'archives' / 'loc.yaml').exists()
+
+    def test_load_falls_back_to_legacy_dvc_archives(self, tmp_path):
+        # Pre-existing manifest under .dvc/archives/ must still load.
+        legacy = tmp_path / '.dvc' / 'archives'
+        legacy.mkdir(parents=True)
+        m = manifest_mod.ArchiveManifest(
+            archive_name='leg', source_remote='/x', backend='local',
+            backend_dir='leg/', total_objects=0, total_bytes=0,
+            inner_tars={}, compression='none',
+        )
+        with open(legacy / 'leg.yaml', 'w') as f:
+            yaml.safe_dump(m.to_dict(), f)
+
+        loaded = manifest_mod.load_manifest('leg', repo_root=tmp_path)
+        assert loaded.archive_name == 'leg'
+
+    def test_dt_archives_wins_over_legacy_on_conflict(self, tmp_path):
+        new = tmp_path / '.dt' / 'archives'; new.mkdir(parents=True)
+        legacy = tmp_path / '.dvc' / 'archives'; legacy.mkdir(parents=True)
+        m_new = manifest_mod.ArchiveManifest(
+            archive_name='c', source_remote='/x', backend='local',
+            backend_dir='new/', total_objects=0, total_bytes=0,
+            inner_tars={}, compression='none',
+        )
+        m_old = manifest_mod.ArchiveManifest(
+            archive_name='c', source_remote='/x', backend='local',
+            backend_dir='old/', total_objects=0, total_bytes=0,
+            inner_tars={}, compression='none',
+        )
+        with open(new / 'c.yaml', 'w') as f:
+            yaml.safe_dump(m_new.to_dict(), f)
+        with open(legacy / 'c.yaml', 'w') as f:
+            yaml.safe_dump(m_old.to_dict(), f)
+
+        loaded = manifest_mod.load_manifest('c', repo_root=tmp_path)
+        assert loaded.backend_dir == 'new/'
 
     def test_rejects_future_version(self, tmp_path):
         path = manifest_mod.archives_dir(tmp_path)

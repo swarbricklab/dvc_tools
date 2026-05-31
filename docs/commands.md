@@ -227,7 +227,7 @@ Manage remote storage.
 | `dt remote archive create <name>` | Archive a remote (stage + deposit in one go) |
 | `dt remote archive stage <name>` | Build inner tarballs in staging (compute-node phase) |
 | `dt remote archive deposit <name>` | Upload staged tarballs to backend (data-mover phase) |
-| `dt remote archive list` | List archives recorded under `.dvc/archives/` |
+| `dt remote archive list` | List archives recorded under `.dt/archives/` |
 | `dt remote archive verify <name>` | Verify an archive against its manifest |
 | `dt remote archive restore <name>` | Restore content from an archive (full / prefix / single object) |
 | `dt remote archive prune <name>` | Delete the on-disk remote once its archive is verified |
