@@ -32,6 +32,25 @@ dt remote archive verify neochemo-2026-05
 dt remote archive prune  neochemo-2026-05
 ```
 
+## Source DVC layouts
+
+`dt remote archive` auto-detects which DVC layout your remote uses and
+records it in the manifest under `source_layout`:
+
+| Layout | Recognised by | Manifest keys |
+| --- | --- | --- |
+| `dvc-v3` | `<remote>/files/md5/<XX>/<hash>` | bare `00` … `ff` |
+| `dvc-v2` | `<remote>/<XX>/<hash>` (no `files/md5/` wrapper) | bare `00` … `ff` |
+| `dvc-mixed` | Both v2 and v3 trees co-exist in the same remote | `v3-XX` and `v2-XX` |
+
+Mixed remotes happen when a v2 client and a v3 client both pushed
+blobs to the same DVC remote at different times. `archive` keeps the
+two halves in separate inner tarballs (`v3-00.tar`, `v2-00.tar`, …)
+and restores each tree back to its original on-disk location.
+
+Override the detection with `--source-layout dvc-v2 / dvc-v3 /
+dvc-mixed`; rarely needed in practice.
+
 ## Archive layout
 
 For an archive named `<NAME>`, the backend is a **folder** holding one
@@ -78,6 +97,7 @@ If `NAME` is omitted, it defaults to `<remote-dir-name>-<YYYY-MM-DD>`.
 | `--jobs` | `archive.stage_jobs` or `min(PBS_NCPUS, 8)` | Parallel inner-tar workers (stage phase). |
 | `--deposit-jobs` | `archive.deposit_jobs` (default `4`) | Parallel upload workers (deposit phase, capped for MDSS politeness). |
 | `--compress` | `archive.compress` or `none` | `none`, `gzip`, or `zstd`. |
+| `--source-layout` | `auto` | `auto` / `dvc-v2` / `dvc-v3` / `dvc-mixed`. Default inspects the remote. |
 | `--url` | `git remote get-url origin` of the project | Git URL to record in the manifest. |
 | `--dry-run` | — | Plan and report sizes without uploading. |
 | `--force` | — | Overwrite existing manifest/staging, ignore low-disk warnings. |

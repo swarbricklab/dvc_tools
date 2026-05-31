@@ -684,6 +684,11 @@ def _default_name(source_remote: Path) -> str:
               default=None,
               help='Compression for inner tarballs '
                    '(default: archive.compress or zstd).')
+@click.option('--source-layout',
+              type=click.Choice(['auto', 'dvc-v2', 'dvc-v3', 'dvc-mixed']),
+              default='auto',
+              help='Source DVC layout. "auto" inspects the remote; '
+                   'override only if detection picks the wrong thing.')
 @click.option('--dry-run', is_flag=True,
               help='Plan and report sizes without creating tarballs.')
 @click.option('--force', is_flag=True,
@@ -702,9 +707,9 @@ def _default_name(source_remote: Path) -> str:
               help='Do not delete the staging directory after upload.')
 @click.option('-v', '--verbose', is_flag=True)
 def remote_archive_create(name, source, backend, backend_dir, backend_path,
-                          staging_dir, jobs, deposit_jobs, compress, dry_run,
-                          force, resume, via_qxub, git_url, keep_staging,
-                          verbose):
+                          staging_dir, jobs, deposit_jobs, compress,
+                          source_layout, dry_run, force, resume, via_qxub,
+                          git_url, keep_staging, verbose):
     """Create a new archive of a DVC remote (stage + deposit).
 
     NAME is the identifier for this archive instance. It becomes:
@@ -742,6 +747,7 @@ def remote_archive_create(name, source, backend, backend_dir, backend_path,
             jobs=jobs,
             deposit_jobs=deposit_jobs,
             compress=compress,
+            source_layout=None if source_layout == 'auto' else source_layout,
             dry_run=dry_run,
             force=force,
             resume=resume,
@@ -801,6 +807,11 @@ def remote_archive_create(name, source, backend, backend_dir, backend_path,
               type=click.Choice(['none', 'gzip', 'zstd']),
               default=None,
               help='Compression (default: archive.compress or zstd).')
+@click.option('--source-layout',
+              type=click.Choice(['auto', 'dvc-v2', 'dvc-v3', 'dvc-mixed']),
+              default='auto',
+              help='Source DVC layout. "auto" inspects the remote; '
+                   'override only if detection picks the wrong thing.')
 @click.option('--dry-run', is_flag=True,
               help='Plan and report sizes without creating tarballs.')
 @click.option('--force', is_flag=True,
@@ -818,8 +829,8 @@ def remote_archive_create(name, source, backend, backend_dir, backend_path,
                    '(default: project repo origin).')
 @click.option('-v', '--verbose', is_flag=True)
 def remote_archive_stage(name, source, backend, backend_dir, staging_dir,
-                         jobs, compress, dry_run, force, resume, via_qxub,
-                         git_url, verbose):
+                         jobs, compress, source_layout, dry_run, force,
+                         resume, via_qxub, git_url, verbose):
     """Build inner tarballs in a staging dir; no backend interaction.
 
     Use this on a compute node with many CPUs. When stage finishes,
@@ -841,6 +852,7 @@ def remote_archive_stage(name, source, backend, backend_dir, staging_dir,
             staging_dir=staging_dir,
             jobs=jobs,
             compress=compress,
+            source_layout=None if source_layout == 'auto' else source_layout,
             dry_run=dry_run,
             force=force,
             resume=resume,

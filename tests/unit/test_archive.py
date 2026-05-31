@@ -317,7 +317,7 @@ class TestCreateEndToEnd:
 
         # Warning was printed to stderr about extras.
         captured = capsys.readouterr()
-        assert 'outside files/md5' in captured.err
+        assert 'outside the DVC blob layout' in captured.err
 
     def test_create_dry_run_does_not_write(self, sample_remote, project_root,
                                             local_backend, staging_dir):
@@ -436,6 +436,121 @@ class TestCreateEndToEnd:
         )
         for prefix, inner in result.manifest.inner_tars.items():
             assert inner.filename.endswith('.tar.zst')
+
+
+# --------------------------------------------------------------------------- #
+# layout detection + v2 / mixed support
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def v2_remote(tmp_path):
+    """A DVC v2 layout — prefix dirs directly under the remote root."""
+    remote = tmp_path / 'v2-remote'
+    payloads = [b'alpha', b'beta', b'gamma']
+    for p in payloads:
+        h = hashlib.md5(p).hexdigest()
+        prefix_dir = remote / h[:2]
+        prefix_dir.mkdir(parents=True, exist_ok=True)
+        (prefix_dir / h[2:]).write_bytes(p)
+    (remote / 'README').write_text('v2 remote\n')
+    return remote, payloads
+
+
+@pytest.fixture
+def mixed_remote(tmp_path):
+    """Both v2 and v3 layouts populated in the same remote dir."""
+    remote = tmp_path / 'mixed-remote'
+
+    v3_payloads = [b'v3-one', b'v3-two']
+    v2_payloads = [b'v2-one', b'v2-two']
+    for p in v3_payloads:
+        h = hashlib.md5(p).hexdigest()
+        (remote / 'files' / 'md5' / h[:2]).mkdir(parents=True, exist_ok=True)
+        (remote / 'files' / 'md5' / h[:2] / h[2:]).write_bytes(p)
+    for p in v2_payloads:
+        h = hashlib.md5(p).hexdigest()
+        (remote / h[:2]).mkdir(parents=True, exist_ok=True)
+        (remote / h[:2] / h[2:]).write_bytes(p)
+    (remote / 'README').write_text('mixed\n')
+    return remote, v3_payloads + v2_payloads, v3_payloads, v2_payloads
+
+
+class TestLayoutDetection:
+    def test_detects_v3(self, sample_remote):
+        remote, _ = sample_remote
+        assert ops.detect_source_layout(remote) == ops.LAYOUT_DVC_V3
+
+    def test_detects_v2(self, v2_remote):
+        remote, _ = v2_remote
+        assert ops.detect_source_layout(remote) == ops.LAYOUT_DVC_V2
+
+    def test_detects_mixed(self, mixed_remote):
+        remote, *_ = mixed_remote
+        assert ops.detect_source_layout(remote) == ops.LAYOUT_DVC_MIXED
+
+    def test_raises_when_no_layout(self, tmp_path):
+        empty = tmp_path / 'empty'
+        empty.mkdir()
+        with pytest.raises(ArchiveError, match='No DVC blob layout'):
+            ops.detect_source_layout(empty)
+
+
+class TestCreateV2Layout:
+    def test_v2_round_trip(self, v2_remote, project_root, local_backend,
+                           staging_dir, tmp_path):
+        remote, payloads = v2_remote
+        result = ops.create_archive(
+            name='v2demo', source_remote=remote, backend='local',
+            backend_dir='cold/v2demo/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        assert result.manifest.source_layout == ops.LAYOUT_DVC_V2
+        # Tar filenames mirror the bare prefix (no v2- / v3- prefix in
+        # pure layouts).
+        prefixes = {hashlib.md5(p).hexdigest()[:2] for p in payloads}
+        assert set(result.manifest.inner_tars) == prefixes
+
+        # Full restore brings back the v2 paths (no files/md5/ wrapper).
+        dest = tmp_path / 'restored-v2'
+        ops.restore_archive(
+            'v2demo', to_path=dest,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        for p in payloads:
+            h = hashlib.md5(p).hexdigest()
+            assert (dest / h[:2] / h[2:]).read_bytes() == p
+
+
+class TestCreateMixedLayout:
+    def test_mixed_round_trip(self, mixed_remote, project_root, local_backend,
+                              staging_dir, tmp_path):
+        remote, _all, v3_payloads, v2_payloads = mixed_remote
+        result = ops.create_archive(
+            name='mixed', source_remote=remote, backend='local',
+            backend_dir='cold/mixed/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        assert result.manifest.source_layout == ops.LAYOUT_DVC_MIXED
+        # Mixed-mode keys are namespaced.
+        keys = set(result.manifest.inner_tars)
+        assert any(k.startswith('v3-') for k in keys)
+        assert any(k.startswith('v2-') for k in keys)
+        # Filenames mirror the namespaced key.
+        for k, inner in result.manifest.inner_tars.items():
+            assert inner.filename.startswith(k + '.tar')
+
+        # Full restore reproduces both layouts side by side.
+        dest = tmp_path / 'restored-mixed'
+        ops.restore_archive(
+            'mixed', to_path=dest,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        for p in v3_payloads:
+            h = hashlib.md5(p).hexdigest()
+            assert (dest / 'files' / 'md5' / h[:2] / h[2:]).read_bytes() == p
+        for p in v2_payloads:
+            h = hashlib.md5(p).hexdigest()
+            assert (dest / h[:2] / h[2:]).read_bytes() == p
 
 
 # --------------------------------------------------------------------------- #
@@ -584,7 +699,7 @@ class TestResume:
         staging = tmp_path / 'staging' / 'qx'
         staging.mkdir(parents=True)
         prefix_dirs, stats = ops.scan_files_md5(remote)
-        ops._save_qxub_job_config(staging, remote, 'none', stats)
+        ops._save_qxub_job_config(staging, remote, 'none', stats, ops.LAYOUT_DVC_V3)
 
         # Worker entry point: should produce the same sentinel as a
         # direct build_prefix_tarball call.

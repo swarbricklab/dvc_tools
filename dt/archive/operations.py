@@ -70,7 +70,11 @@ from .manifest import (
     ArchiveManifest,
     ExtraFile,
     InnerTar,
+    LAYOUT_DVC_MIXED,
+    LAYOUT_DVC_V2,
+    LAYOUT_DVC_V3,
     LAYOUT_FOLDER_PER_PREFIX,
+    SUPPORTED_SOURCE_LAYOUTS,
     archives_dir,
     list_manifests,
     load_manifest,
@@ -289,11 +293,116 @@ def _dt_version() -> str:
 # Helpers: remote scanning
 # --------------------------------------------------------------------------- #
 
-def _scan_one_prefix(p: Path) -> Tuple[str, int, int]:
-    """Worker for :func:`scan_files_md5`. Returns (prefix, n_objects, bytes)."""
+def _is_hex_prefix(name: str) -> bool:
+    """``True`` for a 2-char lowercase hex string like ``'00'`` or ``'ff'``."""
+    return len(name) == 2 and all(c in '0123456789abcdef' for c in name)
+
+
+def detect_source_layout(remote_dir: Path) -> str:
+    """Infer the DVC layout in ``remote_dir``.
+
+    Returns one of :data:`LAYOUT_DVC_V3`, :data:`LAYOUT_DVC_V2`,
+    :data:`LAYOUT_DVC_MIXED`. Raises :class:`ArchiveError` if no DVC
+    layout is detected.
+    """
+    files_md5 = remote_dir / 'files' / 'md5'
+    has_v3 = False
+    if files_md5.is_dir():
+        try:
+            for p in files_md5.iterdir():
+                if p.is_dir() and _is_hex_prefix(p.name):
+                    has_v3 = True
+                    break
+        except OSError:
+            pass
+    has_v2 = False
+    try:
+        for p in remote_dir.iterdir():
+            if p.is_dir() and _is_hex_prefix(p.name):
+                has_v2 = True
+                break
+    except OSError:
+        pass
+    if has_v2 and has_v3:
+        return LAYOUT_DVC_MIXED
+    if has_v3:
+        return LAYOUT_DVC_V3
+    if has_v2:
+        return LAYOUT_DVC_V2
+    raise ArchiveError(
+        f"No DVC blob layout detected in {remote_dir}. "
+        f"Expected either files/md5/<prefix>/ (v3) or <prefix>/ at "
+        f"the top level (v2)."
+    )
+
+
+def _enumerate_prefix_dirs(
+    remote_dir: Path, layout: str,
+) -> List[Tuple[str, Path]]:
+    """Return ``[(manifest_key, dir_path), ...]`` for the given layout.
+
+    Pure layouts use bare 2-char hex keys (``'00'`` … ``'ff'``); mixed
+    uses prefixed keys (``'v3-00'``, ``'v2-00'``) to disambiguate.
+    """
+    if layout == LAYOUT_DVC_V3:
+        base = remote_dir / 'files' / 'md5'
+        if not base.is_dir():
+            raise ArchiveError(
+                f"No files/md5 directory found at {base}. "
+                f"Is {remote_dir} actually a DVC v3 remote?"
+            )
+        return [
+            (p.name, p) for p in sorted(base.iterdir())
+            if p.is_dir() and _is_hex_prefix(p.name)
+        ]
+    if layout == LAYOUT_DVC_V2:
+        return [
+            (p.name, p) for p in sorted(remote_dir.iterdir())
+            if p.is_dir() and _is_hex_prefix(p.name)
+        ]
+    if layout == LAYOUT_DVC_MIXED:
+        entries: List[Tuple[str, Path]] = []
+        v3_base = remote_dir / 'files' / 'md5'
+        if v3_base.is_dir():
+            for p in sorted(v3_base.iterdir()):
+                if p.is_dir() and _is_hex_prefix(p.name):
+                    entries.append((f'v3-{p.name}', p))
+        for p in sorted(remote_dir.iterdir()):
+            if p.is_dir() and _is_hex_prefix(p.name):
+                entries.append((f'v2-{p.name}', p))
+        return entries
+    raise ArchiveError(
+        f"Unknown source layout {layout!r}. "
+        f"Expected one of {SUPPORTED_SOURCE_LAYOUTS}."
+    )
+
+
+def _key_to_paths(key: str, layout: str) -> Tuple[str, str]:
+    """Translate a manifest ``key`` into ``(tar_member_path, base_filename)``.
+
+    ``tar_member_path`` is the relative path inside ``remote_dir`` that
+    the worker tars; ``base_filename`` is the inner-tar basename (without
+    a compression extension).
+    """
+    if layout == LAYOUT_DVC_V3:
+        return f'files/md5/{key}', key
+    if layout == LAYOUT_DVC_V2:
+        return key, key
+    if layout == LAYOUT_DVC_MIXED:
+        if key.startswith('v3-'):
+            return f'files/md5/{key[3:]}', key
+        if key.startswith('v2-'):
+            return key[3:], key
+        raise ArchiveError(
+            f"Mixed-layout key must start with 'v2-' or 'v3-': {key!r}"
+        )
+    raise ArchiveError(f"Unknown source layout {layout!r}")
+
+
+def _scan_one_prefix(p: Path) -> Tuple[int, int]:
+    """Worker for :func:`scan_prefixes`. Returns ``(n_objects, bytes)``."""
     n = 0
     size_sum = 0
-    # os.scandir avoids the iterdir → Path → stat round-trip.
     try:
         with os.scandir(p) as it:
             for entry in it:
@@ -305,63 +414,50 @@ def _scan_one_prefix(p: Path) -> Tuple[str, int, int]:
                         continue
     except OSError:
         pass
-    return p.name, n, size_sum
+    return n, size_sum
 
 
-def scan_files_md5(
+def scan_prefixes(
     remote_dir: Path,
+    layout: str,
     progress: bool = False,
     jobs: Optional[int] = None,
-) -> Tuple[List[Path], Dict[str, Tuple[int, int]]]:
-    """Walk ``<remote_dir>/files/md5/`` and return per-prefix stats.
+) -> Tuple[List[str], Dict[str, Tuple[int, int]]]:
+    """Walk per-layout prefix dirs in parallel.
 
-    Returns ``(prefix_dirs, stats)`` where ``stats[prefix] = (n_objects,
-    total_bytes)``. Empty prefix dirs are included with zero counts so
-    the resulting tarball layout is identical regardless of which
-    prefixes happened to have data.
-
-    The 256 prefix scans run in a ``ThreadPoolExecutor`` because each
-    is metadata-bound (``stat()`` per object on Lustre). The pool size
-    defaults to ``archive.scan_jobs`` (32 when unset).
-
-    When ``progress`` is True, emits per-completion progress lines to
-    stderr. Order is non-deterministic across threads.
+    Returns ``(keys, stats)`` where ``keys`` is the ordered list of
+    manifest keys (e.g. ``['00', '01', ...]`` for pure layouts or
+    ``['v3-00', ..., 'v2-00', ...]`` for mixed), and
+    ``stats[key] = (n_objects, total_bytes)``.
     """
-    files_md5 = remote_dir / 'files' / 'md5'
-    if not files_md5.is_dir():
-        raise ArchiveError(
-            f"No files/md5 directory found at {files_md5}.\n"
-            f"Is {remote_dir} actually a DVC remote?"
-        )
-
+    entries = _enumerate_prefix_dirs(remote_dir, layout)
     n_jobs = jobs if jobs and jobs > 0 else default_scan_jobs()
 
     if progress:
         print(
-            f"Scanning {files_md5} with {n_jobs} worker(s) ...",
+            f"Scanning {remote_dir} ({layout}) with {n_jobs} worker(s) ...",
             file=sys.stderr, flush=True,
         )
 
-    prefix_dirs: List[Path] = sorted(
-        p for p in files_md5.iterdir() if p.is_dir()
-    )
+    keys = [k for k, _ in entries]
     stats: Dict[str, Tuple[int, int]] = {}
-    total = len(prefix_dirs)
+    total = len(entries)
     cumulative_objects = 0
     cumulative_bytes = 0
     done = 0
 
     with ThreadPoolExecutor(max_workers=n_jobs) as pool:
-        futures = {pool.submit(_scan_one_prefix, p): p for p in prefix_dirs}
+        futures = {pool.submit(_scan_one_prefix, p): key for key, p in entries}
         for fut in as_completed(futures):
-            name, n, size_sum = fut.result()
-            stats[name] = (n, size_sum)
+            key = futures[fut]
+            n, size_sum = fut.result()
+            stats[key] = (n, size_sum)
             cumulative_objects += n
             cumulative_bytes += size_sum
             done += 1
             if progress:
                 print(
-                    f"  [{done:>3}/{total}] {name}: {n:>9} object(s), "
+                    f"  [{done:>3}/{total}] {key}: {n:>9} object(s), "
                     f"{utils.format_size(size_sum):>10}  "
                     f"(running total: {cumulative_objects:>9} obj, "
                     f"{utils.format_size(cumulative_bytes):>10})",
@@ -369,22 +465,42 @@ def scan_files_md5(
                     flush=True,
                 )
 
+    return keys, stats
+
+
+def scan_files_md5(
+    remote_dir: Path,
+    progress: bool = False,
+    jobs: Optional[int] = None,
+) -> Tuple[List[Path], Dict[str, Tuple[int, int]]]:
+    """DVC v3 prefix scan — back-compat shim returning Path objects.
+
+    New code should call :func:`scan_prefixes` with an explicit layout.
+    Kept for callers that still expect ``List[Path]`` and the
+    ``files/md5`` layout (existing tests + a couple of internal call
+    sites).
+    """
+    entries = _enumerate_prefix_dirs(remote_dir, LAYOUT_DVC_V3)
+    prefix_dirs = [p for _, p in entries]
+    _, stats = scan_prefixes(remote_dir, LAYOUT_DVC_V3, progress=progress, jobs=jobs)
     return prefix_dirs, stats
 
 
 def scan_extras(
-    remote_dir: Path, progress: bool = False,
+    remote_dir: Path,
+    layout: str = LAYOUT_DVC_V3,
+    progress: bool = False,
 ) -> List[ExtraFile]:
-    """Find files in ``remote_dir`` outside ``files/md5/``.
+    """Find files in ``remote_dir`` outside the DVC blob layout.
 
-    Walks the whole remote dir but prunes descent into ``files/md5/``
-    so the 256 prefix subdirs (potentially containing millions of
-    blobs) don't get scanned. Returns files only — empty dirs are
-    ignored.
+    For DVC v3 prunes descent into ``files/md5/``; for DVC v2 prunes
+    descent into top-level 2-char hex prefix dirs; for mixed, both.
+    Returns files only — empty dirs are ignored.
     """
     if progress:
         print(
-            f"Scanning {remote_dir} for files outside files/md5/ ...",
+            f"Scanning {remote_dir} ({layout}) for files outside "
+            f"the DVC blob layout ...",
             file=sys.stderr, flush=True,
         )
     extras: List[ExtraFile] = []
@@ -394,8 +510,11 @@ def scan_extras(
             rel = root_path.relative_to(remote_dir)
         except ValueError:
             continue
-        # Prune the walk so we don't descend into files/md5/
-        if rel == Path('files'):
+        # Prune the walk so we don't descend into archived prefix dirs.
+        if rel == Path('.'):
+            if layout in (LAYOUT_DVC_V2, LAYOUT_DVC_MIXED):
+                dirs[:] = [d for d in dirs if not _is_hex_prefix(d)]
+        elif rel == Path('files') and layout in (LAYOUT_DVC_V3, LAYOUT_DVC_MIXED):
             dirs[:] = [d for d in dirs if d != 'md5']
         for fname in files:
             fp = root_path / fname
@@ -407,7 +526,7 @@ def scan_extras(
             extras.append(ExtraFile(path=str(rel_file), size=size))
     if progress:
         print(
-            f"  found {len(extras)} extra file(s) outside files/md5/",
+            f"  found {len(extras)} extra file(s)",
             file=sys.stderr, flush=True,
         )
     return extras
@@ -531,6 +650,7 @@ def _save_qxub_job_config(
     source_remote: Path,
     compress: str,
     stats: Dict[str, Tuple[int, int]],
+    layout: str,
 ) -> Path:
     """Write a small per-archive job config to staging so qxub workers
     can read everything they need from a single file. Avoids enormous
@@ -540,6 +660,7 @@ def _save_qxub_job_config(
     config_path.write_text(json.dumps({
         'source_remote': str(source_remote),
         'compress': compress,
+        'layout': layout,
         'n_objects_by_prefix': {p: n for p, (n, _) in stats.items()},
     }))
     return config_path
@@ -560,8 +681,8 @@ def build_prefix_from_config(staging_dir: Path, prefix: str) -> Dict:
 
     Invoked on a compute node by the qxub-dispatched worker subcommand
     ``dt remote archive _build-prefix``. Calls :func:`build_prefix_tarball`
-    after looking up the source remote / compression / n_objects from
-    the staging-dir job config.
+    after looking up the source remote / compression / layout /
+    n_objects from the staging-dir job config.
     """
     cfg_data = _load_qxub_job_config(staging_dir)
     n_objects = int(cfg_data['n_objects_by_prefix'].get(prefix, 0))
@@ -571,6 +692,7 @@ def build_prefix_from_config(staging_dir: Path, prefix: str) -> Dict:
         str(staging_dir),
         cfg_data['compress'],
         n_objects,
+        cfg_data.get('layout', LAYOUT_DVC_V3),
     )
 
 
@@ -701,19 +823,24 @@ def _submit_prefix_jobs(
 
 def build_prefix_tarball(
     remote_dir: str,
-    prefix: str,
+    prefix_key: str,
     staging_dir: str,
     compress: str,
     n_objects: int,
+    layout: str = LAYOUT_DVC_V3,
 ) -> Dict:
-    """Create one inner tarball for ``files/md5/<prefix>/``.
+    """Create one inner tarball for a single prefix in the source remote.
 
-    Pure function: takes only picklable inputs and returns a dict.
-    Safe to invoke as a ProcessPoolExecutor task and (in a future
-    multi-node mode) as an independent qsub job.
+    Pure function: takes only picklable inputs and returns a dict. Safe
+    to invoke as a ProcessPoolExecutor task and as an independent qsub
+    job dispatched by ``--via-qxub``.
 
-    Writes ``<prefix>.tar[.ext]`` atomically (``.tmp`` + rename) and
-    drops a ``<prefix>.tar[.ext].done.json`` sentinel beside it.
+    ``prefix_key`` is the manifest key — bare 2-char hex for pure
+    layouts (``'00'`` … ``'ff'``) or prefixed (``'v3-00'`` / ``'v2-00'``)
+    for mixed remotes. ``layout`` selects the source-side path mapping.
+
+    Writes ``<key>.tar[.ext]`` atomically (``.tmp`` + rename) and drops
+    a ``<key>.tar[.ext].done.json`` sentinel beside it.
 
     Returns a dict compatible with :class:`InnerTar`.
     """
@@ -722,8 +849,9 @@ def build_prefix_tarball(
     staging = Path(staging_dir)
     staging.mkdir(parents=True, exist_ok=True)
 
+    member_path, base = _key_to_paths(prefix_key, layout)
     ext = _COMPRESSION_EXT[compress]
-    filename = f"{prefix}.tar{ext}"
+    filename = f"{base}.tar{ext}"
     target = staging / filename
     target_tmp = staging / f"{filename}.tmp"
     sentinel = _sentinel_path_for(staging, filename, STAGED_SENTINEL_SUFFIX)
@@ -737,14 +865,14 @@ def build_prefix_tarball(
 
     cmd = ['tar', '-C', str(remote), '-cf', str(target_tmp)]
     cmd.extend(_COMPRESSION_TAR_FLAGS[compress])
-    cmd.extend(['files/md5/' + prefix])
+    cmd.append(member_path)
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         if target_tmp.exists():
             target_tmp.unlink()
         raise ArchiveError(
-            f"tar failed for prefix {prefix}: {result.stderr.strip() or '(no output)'}"
+            f"tar failed for prefix {prefix_key}: {result.stderr.strip() or '(no output)'}"
         )
 
     # Atomic publish: rename .tmp → final, then write the sentinel.
@@ -753,7 +881,7 @@ def build_prefix_tarball(
     size = target.stat().st_size
 
     data = {
-        'prefix': prefix,
+        'prefix': prefix_key,
         'filename': filename,
         'size_bytes': size,
         'sha256': sha,
@@ -813,6 +941,7 @@ def stage_archive(
     staging_dir: Optional[str] = None,
     jobs: Optional[int] = None,
     compress: Optional[str] = None,
+    source_layout: Optional[str] = None,
     dry_run: bool = False,
     force: bool = False,
     resume: bool = False,
@@ -826,10 +955,12 @@ def stage_archive(
     Does not contact the backend. Safe to run on any compute node with
     parallel CPUs — the data-mover-only step is :func:`deposit_archive`.
 
-    On success the manifest exists at ``.dvc/archives/<name>.yaml`` with
-    ``backend_dir`` recorded (so deposit knows where to put files), and
-    every prefix has a valid ``<prefix>.tar[.ext].done.json`` sentinel in
-    the staging dir.
+    On success the manifest exists at ``.dt/archives/<name>.yaml`` with
+    ``backend_dir`` and ``source_layout`` recorded, and every prefix has
+    a valid ``<key>.tar[.ext].done.json`` sentinel in the staging dir.
+
+    ``source_layout`` is auto-detected from the remote when ``None``;
+    pass ``'dvc-v2'``, ``'dvc-v3'``, or ``'dvc-mixed'`` to override.
     """
     repo_root = repo_root or utils.find_project_root()
     source_remote = source_remote.expanduser().resolve()
@@ -840,6 +971,18 @@ def stage_archive(
     _validate_compression(compress)
     compress = _resolve_compression(compress)
 
+    if source_layout is None:
+        source_layout = detect_source_layout(source_remote)
+        print(
+            f"Detected source layout: {source_layout}",
+            file=sys.stderr, flush=True,
+        )
+    elif source_layout not in SUPPORTED_SOURCE_LAYOUTS:
+        raise ArchiveError(
+            f"Unsupported source layout {source_layout!r}. "
+            f"Expected one of {SUPPORTED_SOURCE_LAYOUTS}."
+        )
+
     target_manifest = manifest_path(name, repo_root=repo_root)
     if target_manifest.exists() and not (force or resume):
         raise ArchiveError(
@@ -847,15 +990,17 @@ def stage_archive(
             f"Choose a different name, or rerun with --force / --resume."
         )
 
-    prefix_dirs, stats = scan_files_md5(source_remote, progress=True)
-    extras = scan_extras(source_remote, progress=True)
+    prefix_keys, stats = scan_prefixes(
+        source_remote, source_layout, progress=True,
+    )
+    extras = scan_extras(source_remote, source_layout, progress=True)
     total_objects = sum(n for n, _ in stats.values())
     total_bytes = sum(b for _, b in stats.values())
 
     if extras:
         print(
             f"warning: {len(extras)} file(s) in {source_remote} are outside "
-            f"files/md5/ and will NOT be archived:",
+            f"the DVC blob layout and will NOT be archived:",
             file=sys.stderr,
         )
         for e in extras[:20]:
@@ -882,22 +1027,24 @@ def stage_archive(
     n_jobs = jobs if jobs and jobs > 0 else default_stage_jobs()
 
     if dry_run:
-        print(f"[dry-run] would stage: {source_remote}")
-        print(f"[dry-run] prefixes:     {len(prefix_dirs)}")
-        print(f"[dry-run] objects:      {total_objects}")
-        print(f"[dry-run] total size:   {utils.format_size(total_bytes)}")
-        print(f"[dry-run] compression:  {compress}")
-        print(f"[dry-run] jobs:         {n_jobs}")
-        print(f"[dry-run] staging:      {staging}")
-        print(f"[dry-run] backend:      {backend}")
-        print(f"[dry-run] backend dir:  {bdir}")
-        print(f"[dry-run] manifest:     {target_manifest}")
+        print(f"[dry-run] would stage:   {source_remote}")
+        print(f"[dry-run] source layout: {source_layout}")
+        print(f"[dry-run] prefixes:      {len(prefix_keys)}")
+        print(f"[dry-run] objects:       {total_objects}")
+        print(f"[dry-run] total size:    {utils.format_size(total_bytes)}")
+        print(f"[dry-run] compression:   {compress}")
+        print(f"[dry-run] jobs:          {n_jobs}")
+        print(f"[dry-run] staging:       {staging}")
+        print(f"[dry-run] backend:       {backend}")
+        print(f"[dry-run] backend dir:   {bdir}")
+        print(f"[dry-run] manifest:      {target_manifest}")
         manifest = ArchiveManifest(
             archive_name=name,
             source_remote=str(source_remote),
             backend=backend,
             backend_dir=bdir,
             layout=LAYOUT_FOLDER_PER_PREFIX,
+            source_layout=source_layout,
             total_objects=total_objects,
             total_bytes=total_bytes,
             compression=compress,
@@ -952,7 +1099,7 @@ def stage_archive(
             resume_done[data['prefix']] = data
         if resume_done:
             print(
-                f"Resume: {len(resume_done)} of {len(prefix_dirs)} "
+                f"Resume: {len(resume_done)} of {len(prefix_keys)} "
                 f"prefix(es) already staged; will re-tar the rest.",
                 flush=True,
             )
@@ -967,14 +1114,14 @@ def stage_archive(
                 sha256=data['sha256'],
                 n_objects=data['n_objects'],
             )
-        prefix_dirs_todo = [p for p in prefix_dirs if p.name not in resume_done]
+        keys_todo = [k for k in prefix_keys if k not in resume_done]
 
         if via_qxub:
             # Multi-node dispatch: one qxub job per prefix. The orchestrator
             # waits via `qxub monitor`, then assembles the manifest from the
             # sentinels each worker leaves behind.
             print(
-                f"Stage (qxub): dispatching {len(prefix_dirs_todo)} "
+                f"Stage (qxub): dispatching {len(keys_todo)} "
                 f"prefix job(s)"
                 + (
                     f" (skipping {len(resume_done)} already done)"
@@ -982,13 +1129,14 @@ def stage_archive(
                 ),
                 flush=True,
             )
-            _save_qxub_job_config(staging, source_remote, compress, stats)
+            _save_qxub_job_config(
+                staging, source_remote, compress, stats, source_layout,
+            )
             phase1_start = time.monotonic()
 
-            if prefix_dirs_todo:
+            if keys_todo:
                 job_ids = _submit_prefix_jobs(
-                    name, staging, [p.name for p in prefix_dirs_todo],
-                    verbose=verbose,
+                    name, staging, keys_todo, verbose=verbose,
                 )
                 print(
                     f"  monitoring {len(job_ids)} qxub job(s) ...",
@@ -998,21 +1146,17 @@ def stage_archive(
             else:
                 all_ok = True
 
-            # Collect sentinels for every prefix expected.
+            # Collect sentinels for every key expected.
             missing: List[str] = []
-            for p in prefix_dirs_todo:
-                sentinel = _sentinel_path_for(
-                    staging, '', STAGED_SENTINEL_SUFFIX,
-                )
-                # The sentinel filename depends on compression extension —
-                # search by glob since we know the prefix.
-                ext = _COMPRESSION_EXT[compress]
-                expected = staging / f"{p.name}.tar{ext}{STAGED_SENTINEL_SUFFIX}"
+            ext = _COMPRESSION_EXT[compress]
+            for key in keys_todo:
+                _member, base = _key_to_paths(key, source_layout)
+                expected = staging / f"{base}.tar{ext}{STAGED_SENTINEL_SUFFIX}"
                 data = _load_sentinel(expected) if expected.exists() else None
                 if not data:
-                    missing.append(p.name)
+                    missing.append(key)
                     continue
-                inner_tars[p.name] = InnerTar(
+                inner_tars[key] = InnerTar(
                     filename=data['filename'],
                     size_bytes=data['size_bytes'],
                     sha256=data['sha256'],
@@ -1034,7 +1178,7 @@ def stage_archive(
             )
         else:
             print(
-                f"Stage: building {len(prefix_dirs_todo)} inner tarball(s) "
+                f"Stage: building {len(keys_todo)} inner tarball(s) "
                 f"with {n_jobs} worker(s); staging at {staging}"
                 + (
                     f" (skipping {len(resume_done)} already done)"
@@ -1042,7 +1186,7 @@ def stage_archive(
                 ),
                 flush=True,
             )
-            if n_jobs == 1 and len(prefix_dirs_todo) > 1:
+            if n_jobs == 1 and len(keys_todo) > 1:
                 print(
                     "  note: --jobs=1 means prefixes are tarred serially; "
                     "set $PBS_NCPUS (or pass --jobs N) to parallelise.",
@@ -1055,22 +1199,23 @@ def stage_archive(
                     pool.submit(
                         build_prefix_tarball,
                         str(source_remote),
-                        p.name,
+                        key,
                         str(staging),
                         compress,
-                        stats[p.name][0],
-                    ): p.name
-                    for p in prefix_dirs_todo
+                        stats[key][0],
+                        source_layout,
+                    ): key
+                    for key in keys_todo
                 }
                 done = len(resume_done)
-                total = len(prefix_dirs)
+                total = len(prefix_keys)
                 for fut in as_completed(futures):
-                    prefix = futures[fut]
+                    key = futures[fut]
                     try:
                         row = fut.result()
                     except Exception as e:
                         raise ArchiveError(
-                            f"Worker for prefix {prefix} failed: {e}"
+                            f"Worker for prefix {key} failed: {e}"
                         ) from e
                     inner_tars[row['prefix']] = InnerTar(
                         filename=row['filename'],
@@ -1083,14 +1228,14 @@ def stage_archive(
                     if verbose:
                         elapsed = time.monotonic() - phase1_start
                         print(
-                            f"  [{done:>3}/{total}] {prefix} "
+                            f"  [{done:>3}/{total}] {key} "
                             f"({row['n_objects']:>7} obj, {size_str:>10}) "
                             f"  t+{_format_duration(elapsed)}",
                             flush=True,
                         )
                     else:
                         print(
-                            f"  [{done:>3}/{total}] {prefix} ({size_str})",
+                            f"  [{done:>3}/{total}] {key} ({size_str})",
                             flush=True,
                         )
 
@@ -1106,6 +1251,7 @@ def stage_archive(
             backend=backend,
             backend_dir=bdir,
             layout=LAYOUT_FOLDER_PER_PREFIX,
+            source_layout=source_layout,
             total_objects=total_objects,
             total_bytes=total_bytes,
             compression=compress,
@@ -1341,6 +1487,7 @@ def create_archive(
     jobs: Optional[int] = None,
     deposit_jobs: Optional[int] = None,
     compress: Optional[str] = None,
+    source_layout: Optional[str] = None,
     dry_run: bool = False,
     force: bool = False,
     resume: bool = False,
@@ -1372,6 +1519,7 @@ def create_archive(
         staging_dir=staging_dir,
         jobs=jobs,
         compress=compress,
+        source_layout=source_layout,
         dry_run=dry_run,
         force=force,
         resume=resume,
@@ -1680,12 +1828,23 @@ def prune_archive(
     """
     manifest = load_manifest(name, repo_root=repo_root)
     source_remote = Path(manifest.source_remote)
-    files_md5 = source_remote / 'files' / 'md5'
+    layout = manifest.source_layout or LAYOUT_DVC_V3
 
-    if not files_md5.is_dir():
+    # Identify what to delete based on the source layout.
+    prune_targets: List[Path] = []
+    if layout in (LAYOUT_DVC_V3, LAYOUT_DVC_MIXED):
+        files_md5 = source_remote / 'files' / 'md5'
+        if files_md5.is_dir():
+            prune_targets.append(files_md5)
+    if layout in (LAYOUT_DVC_V2, LAYOUT_DVC_MIXED):
+        for p in source_remote.iterdir() if source_remote.is_dir() else []:
+            if p.is_dir() and _is_hex_prefix(p.name):
+                prune_targets.append(p)
+
+    if not prune_targets:
         raise ArchiveError(
-            f"Nothing to prune: {files_md5} doesn't exist "
-            f"(already pruned?)"
+            f"Nothing to prune: no DVC blob directories present under "
+            f"{source_remote} (already pruned?)"
         )
 
     vres = verify_archive(
@@ -1700,7 +1859,7 @@ def prune_archive(
             f"Refusing to prune: archive '{name}' did not verify.\n  {details}"
         )
 
-    extras = scan_extras(source_remote)
+    extras = scan_extras(source_remote, layout)
     if extras and not force:
         listing = '\n  '.join(
             f"{e.path}  ({utils.format_size(e.size)})" for e in extras[:20]
@@ -1711,15 +1870,17 @@ def prune_archive(
         )
         raise ArchiveError(
             f"Refusing to prune: {len(extras)} file(s) under {source_remote} "
-            f"are outside files/md5/ and NOT covered by archive '{name}'.\n"
+            f"are outside the DVC blob layout and NOT covered by archive "
+            f"'{name}'.\n"
             f"  {listing}{more}\n"
             f"Resolve those files (delete, move, or rerun create with "
             f"--include-extras when implemented), or rerun prune with --force."
         )
 
     if not yes:
+        targets_str = '\n  '.join(str(t) for t in prune_targets)
         prompt = (
-            f"This will permanently delete {files_md5}\n"
+            f"This will permanently delete:\n  {targets_str}\n"
             f"(verified against archive '{name}' on backend "
             f"'{manifest.backend}'). Type 'yes' to continue: "
         )
@@ -1733,15 +1894,16 @@ def prune_archive(
         if response.strip().lower() != 'yes':
             raise ArchiveError("Aborted by user.")
 
-    _, stats = scan_files_md5(source_remote)
+    _, stats = scan_prefixes(source_remote, layout)
     bytes_freed = sum(b for _, b in stats.values())
 
-    shutil.rmtree(files_md5)
+    for target in prune_targets:
+        shutil.rmtree(target)
     repo = repo_root or utils.find_project_root()
     _registry.record_pruned(name, repo, now_iso())
     return PruneResult(
         archive_name=name,
-        deleted_path=files_md5,
+        deleted_path=prune_targets[0] if len(prune_targets) == 1 else source_remote,
         bytes_freed=bytes_freed,
     )
 

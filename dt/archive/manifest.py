@@ -53,6 +53,15 @@ MANIFEST_VERSION = 2
 ARCHIVE_DIR_NAME = 'archives'
 LAYOUT_FOLDER_PER_PREFIX = 'folder-per-prefix'
 
+# Source-side DVC layouts:
+# - dvc-v3: blobs at <remote>/files/md5/<prefix>/<hash>
+# - dvc-v2: blobs at <remote>/<prefix>/<hash>
+# - dvc-mixed: both co-exist (e.g., a remote written by both v2 and v3 clients).
+LAYOUT_DVC_V3 = 'dvc-v3'
+LAYOUT_DVC_V2 = 'dvc-v2'
+LAYOUT_DVC_MIXED = 'dvc-mixed'
+SUPPORTED_SOURCE_LAYOUTS = (LAYOUT_DVC_V3, LAYOUT_DVC_V2, LAYOUT_DVC_MIXED)
+
 # Filename of the sidecar manifest uploaded to the backend last as the
 # completion sentinel. Lives at ``<backend_dir>/<archive_name>.manifest.yaml``.
 SIDECAR_SUFFIX = '.manifest.yaml'
@@ -126,6 +135,7 @@ class ArchiveManifest:
     backend: str
     backend_dir: str
     layout: str = LAYOUT_FOLDER_PER_PREFIX
+    source_layout: str = LAYOUT_DVC_V3
 
     # Contents
     total_objects: int = 0
@@ -160,6 +170,7 @@ class ArchiveManifest:
             'backend': self.backend,
             'backend_dir': self.backend_dir,
             'layout': self.layout,
+            'source_layout': self.source_layout,
             'contents': {
                 'total_objects': self.total_objects,
                 'total_bytes': self.total_bytes,
@@ -204,6 +215,7 @@ class ArchiveManifest:
             backend=data['backend'],
             backend_dir=backend_dir,
             layout=layout_str,
+            source_layout=data.get('source_layout', LAYOUT_DVC_V3),
             total_objects=int(contents.get('total_objects', 0)),
             total_bytes=int(contents.get('total_bytes', 0)),
             compression=contents.get('compression', 'zstd'),
