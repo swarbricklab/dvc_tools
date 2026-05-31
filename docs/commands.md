@@ -231,6 +231,7 @@ Manage remote storage.
 | `dt remote archive verify <name>` | Verify an archive against its manifest |
 | `dt remote archive restore <name>` | Restore content from an archive (full / prefix / single object) |
 | `dt remote archive prune <name>` | Delete the on-disk remote once its archive is verified |
+| `dt remote archive destroy <name>` | Delete an archive copy from the backend (does NOT touch source) |
 | `dt remote archive registry list` | List archives across all projects (central register) |
 | `dt remote archive registry sync` | Refresh the central register from project manifests |
 

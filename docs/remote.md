@@ -108,6 +108,7 @@ dt remote archive list             # list archives recorded in .dvc/archives/
 dt remote archive verify  <name>   # sidecar + per-file existence/size
 dt remote archive restore <name>   # full / per-prefix / single-object restore
 dt remote archive prune   <name>   # delete on-disk remote after verify
+dt remote archive destroy <name>   # delete an archive copy from the backend (does NOT touch source)
 ```
 
 ## Related Commands

@@ -53,6 +53,10 @@ class ArchiveBackend(Protocol):
         """Download ``remote_path`` to ``local_path``."""
         ...
 
+    def delete_file(self, remote_path: str) -> None:
+        """Delete ``remote_path``. Idempotent — missing is OK."""
+        ...
+
     def exists(self, remote_path: str) -> bool:
         """Whether ``remote_path`` exists on the backend."""
         ...
@@ -63,6 +67,11 @@ class ArchiveBackend(Protocol):
 
     def list_dir(self, remote_dir: str) -> List[str]:
         """List filenames (not full paths) at ``remote_dir``."""
+        ...
+
+    def rmdir(self, remote_dir: str) -> None:
+        """Remove an empty directory. Best-effort: silently no-op if
+        missing or non-empty."""
         ...
 
 
@@ -158,6 +167,15 @@ class MdssBackend:
         result = self._run(['get', remote_path, str(local_path)])
         self._ensure(result, f"get {remote_path} -> {local_path}")
 
+    def delete_file(self, remote_path: str) -> None:
+        result = self._run(['rm', remote_path])
+        if result.returncode != 0:
+            err = (result.stderr or '').lower() + (result.stdout or '').lower()
+            # Treat "missing" as success — destroy is idempotent.
+            if 'no such' in err or 'does not exist' in err or 'not found' in err:
+                return
+            self._ensure(result, f"rm {remote_path}")
+
     def exists(self, remote_path: str) -> bool:
         result = self._run(['ls', remote_path])
         return result.returncode == 0
@@ -194,6 +212,18 @@ class MdssBackend:
             # mdss ls returns one filename per line — strip any trailing /
             names.append(line.rstrip('/').split('/')[-1])
         return names
+
+    def rmdir(self, remote_dir: str) -> None:
+        result = self._run(['rmdir', remote_dir])
+        if result.returncode != 0:
+            err = (result.stderr or '').lower() + (result.stdout or '').lower()
+            # Best-effort: silently no-op when missing or non-empty.
+            if any(s in err for s in
+                   ('no such', 'does not exist', 'not found',
+                    'not empty', 'directory not empty')):
+                return
+            # Anything else is genuinely surprising — surface it.
+            self._ensure(result, f"rmdir {remote_dir}")
 
     # -- internals ------------------------------------------------------- #
 
@@ -250,6 +280,11 @@ class LocalDirBackend:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, local_path)
 
+    def delete_file(self, remote_path: str) -> None:
+        p = self._resolve(remote_path)
+        if p.is_file():
+            p.unlink()
+
     def exists(self, remote_path: str) -> bool:
         return self._resolve(remote_path).exists()
 
@@ -264,6 +299,14 @@ class LocalDirBackend:
         if not p.is_dir():
             return []
         return sorted(child.name for child in p.iterdir() if child.is_file())
+
+    def rmdir(self, remote_dir: str) -> None:
+        p = self._resolve(remote_dir)
+        if p.is_dir():
+            try:
+                p.rmdir()  # only succeeds when empty
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #

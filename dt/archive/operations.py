@@ -118,6 +118,16 @@ class PruneResult:
     bytes_freed: int
 
 
+@dataclass
+class DestroyResult:
+    archive_name: str
+    backend: str
+    backend_dir: str
+    files_deleted: int
+    bytes_freed: int
+    manifest_deleted: bool
+
+
 # --------------------------------------------------------------------------- #
 # Sentinel filenames
 # --------------------------------------------------------------------------- #
@@ -1714,4 +1724,119 @@ def prune_archive(
         archive_name=name,
         deleted_path=files_md5,
         bytes_freed=bytes_freed,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# destroy
+# --------------------------------------------------------------------------- #
+
+def destroy_archive(
+    name: str,
+    *,
+    yes: bool = False,
+    keep_manifest: bool = False,
+    backend_override: Optional[ArchiveBackend] = None,
+    repo_root: Optional[Path] = None,
+    confirm_callback=None,
+) -> DestroyResult:
+    """Delete the archive copy from the backend.
+
+    Use this to roll back an archive you didn't actually want (wrong
+    source, empty content, mistaken name). Unlike :func:`prune_archive`,
+    destroy *never* touches the source remote — only the archive copy
+    on the backend, the local manifest, and the central register entry.
+
+    Deletes happen sidecar-first so that an interrupted destroy leaves
+    the archive marked incomplete on the backend (no sidecar present),
+    not falsely complete with missing inner tars.
+
+    Args:
+        name: Archive name.
+        yes: Skip the interactive confirmation prompt.
+        keep_manifest: Don't delete ``.dvc/archives/<name>.yaml`` or
+            the registry entry — useful if you want to retry deposit
+            after wiping the backend copy.
+        backend_override: Inject a backend (used by tests).
+        repo_root: Override project root.
+        confirm_callback: Callable for non-interactive confirmation.
+    """
+    repo_root = repo_root or utils.find_project_root()
+    manifest = load_manifest(name, repo_root=repo_root)
+    be = backend_override if backend_override is not None else get_backend(manifest.backend)
+    bdir = manifest.backend_dir.rstrip('/') + '/'
+
+    sidecar = bdir + sidecar_name(name)
+    inner_paths = [bdir + inner.filename for inner in manifest.inner_tars.values()]
+    expected_bytes = sum(i.size_bytes for i in manifest.inner_tars.values())
+
+    if not yes:
+        prompt = (
+            f"This will permanently delete the archive copy on the backend:\n"
+            f"  {manifest.backend}:{bdir}\n"
+            f"  - 1 manifest sidecar ({sidecar_name(name)})\n"
+            f"  - {len(inner_paths)} inner tar(s) "
+            f"(~{utils.format_size(expected_bytes)})\n"
+            + (
+                ""
+                if keep_manifest
+                else f"  - 1 local manifest (.dvc/archives/{name}.yaml)\n"
+                     f"  - 1 central register entry (if configured)\n"
+            )
+            + "\n"
+            f"The SOURCE remote ({manifest.source_remote}) is NOT touched.\n"
+            f"Type 'yes' to continue: "
+        )
+        if confirm_callback is None:
+            try:
+                response = input(prompt)
+            except EOFError:
+                response = ''
+        else:
+            response = confirm_callback(prompt)
+        if response.strip().lower() != 'yes':
+            raise ArchiveError("Aborted by user.")
+
+    # Sidecar first: a partial destroy then leaves the archive
+    # indistinguishable from one whose deposit never finished.
+    files_deleted = 0
+    print(f"Deleting sidecar {sidecar}", flush=True)
+    try:
+        be.delete_file(sidecar)
+        files_deleted += 1
+    except ArchiveError as e:
+        print(f"  warning: {e}", file=sys.stderr, flush=True)
+
+    for path in inner_paths:
+        print(f"Deleting {path}", flush=True)
+        try:
+            be.delete_file(path)
+            files_deleted += 1
+        except ArchiveError as e:
+            print(f"  warning: {e}", file=sys.stderr, flush=True)
+
+    # Best-effort: drop the now-empty backend directory.
+    try:
+        be.rmdir(bdir.rstrip('/'))
+    except (ArchiveError, AttributeError):
+        pass
+
+    manifest_deleted = False
+    if not keep_manifest:
+        local_manifest_path = manifest_path(name, repo_root=repo_root)
+        if local_manifest_path.exists():
+            local_manifest_path.unlink()
+            manifest_deleted = True
+            print(f"Deleted local manifest {local_manifest_path}", flush=True)
+        slug = _registry.project_slug(repo_root)
+        if _registry.delete_entry(slug, name):
+            print(f"Removed registry entry for {name}", flush=True)
+
+    return DestroyResult(
+        archive_name=name,
+        backend=manifest.backend,
+        backend_dir=bdir,
+        files_deleted=files_deleted,
+        bytes_freed=expected_bytes,
+        manifest_deleted=manifest_deleted,
     )

@@ -178,6 +178,25 @@ Rebuild register entries from the manifests under each listed root.
 Useful when bootstrapping the register across an existing fleet of
 projects, or after manual edits / deletes in the register dir.
 
+### `dt remote archive destroy <name>`
+
+Delete the **archive copy** from the backend. Does NOT touch the source
+remote — that's what `prune` is for.
+
+Use this when:
+- You archived the wrong directory.
+- You archived an empty / meaningless tree (e.g. a missing `files/md5/`).
+- You want to retry a deposit cleanly from scratch.
+
+Deletes happen sidecar-first, so an interrupted destroy leaves the
+archive marked incomplete on the backend (no sidecar present) rather
+than falsely complete with missing inner tars.
+
+| Option | What it does |
+| --- | --- |
+| `--yes` | Skip the interactive confirmation prompt. |
+| `--keep-manifest` | Wipe the backend copy but keep `.dvc/archives/<name>.yaml` and the registry entry. Use this when you want to retry deposit (e.g. after destroying a partial upload). |
+
 ### `dt remote archive prune <name>`
 
 Refuses to run unless:

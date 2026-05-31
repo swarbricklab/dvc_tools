@@ -1135,6 +1135,40 @@ def remote_archive_prune(name, yes, force):
     ))
 
 
+# --- destroy --------------------------------------------------------------- #
+
+@remote_archive.command('destroy')
+@click.argument('name')
+@click.option('--yes', is_flag=True,
+              help='Skip the interactive confirmation prompt.')
+@click.option('--keep-manifest', is_flag=True,
+              help='Wipe the backend copy but keep the local manifest '
+                   'and registry entry. Useful for retrying deposit.')
+def remote_archive_destroy(name, yes, keep_manifest):
+    """Delete an archive copy from the backend (does NOT touch source).
+
+    Use this when an archive was created in error (wrong source, empty
+    content, mistaken name) and you want to obliterate the backend
+    copy. The source DVC remote is never touched — that's what
+    ``prune`` is for.
+    """
+    try:
+        result = archive_ops.destroy_archive(
+            name, yes=yes, keep_manifest=keep_manifest,
+        )
+    except errors.ArchiveError as e:
+        raise click.ClickException(str(e))
+    click.echo(click.style(
+        f"✓ Destroyed archive '{name}' from {result.backend}:{result.backend_dir} "
+        f"({result.files_deleted} file(s), {utils.format_size(result.bytes_freed)})",
+        fg='green',
+    ))
+    if not result.manifest_deleted and not keep_manifest:
+        click.echo(click.style(
+            f"  note: local manifest not found (already deleted?)", dim=True,
+        ))
+
+
 @cli.command()
 @click.argument('paths', nargs=-1, type=click.Path())
 @click.option('--old', 'old_rev', default='HEAD',

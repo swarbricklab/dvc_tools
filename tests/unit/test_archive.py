@@ -745,6 +745,98 @@ class TestPrune:
 
 
 # --------------------------------------------------------------------------- #
+# destroy
+# --------------------------------------------------------------------------- #
+
+class TestDestroy:
+    def test_destroy_removes_backend_files_and_local_manifest(
+        self, sample_remote, project_root, local_backend, staging_dir,
+    ):
+        remote, _ = sample_remote
+        ops.create_archive(
+            name='gone', source_remote=remote, backend='local',
+            backend_dir='cold/gone/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        backend_root = Path(local_backend.root)
+        # Sanity: backend has the archive + sidecar.
+        assert (backend_root / 'cold/gone' / manifest_mod.sidecar_name('gone')).exists()
+        assert any((backend_root / 'cold/gone').glob('*.tar'))
+        assert manifest_mod.manifest_path('gone', repo_root=project_root).exists()
+
+        result = ops.destroy_archive(
+            'gone', yes=True,
+            backend_override=local_backend, repo_root=project_root,
+        )
+
+        # Backend is empty (or directory gone).
+        assert not (backend_root / 'cold/gone' / manifest_mod.sidecar_name('gone')).exists()
+        assert list((backend_root / 'cold/gone').glob('*.tar')) == []
+        # Local manifest cleared.
+        assert not manifest_mod.manifest_path('gone', repo_root=project_root).exists()
+        # Source remote untouched.
+        assert (remote / 'files' / 'md5').is_dir()
+        # Result fields populated.
+        assert result.files_deleted >= 2  # sidecar + at least one inner
+        assert result.manifest_deleted is True
+
+    def test_destroy_keep_manifest(
+        self, sample_remote, project_root, local_backend, staging_dir,
+    ):
+        remote, _ = sample_remote
+        ops.create_archive(
+            name='retry', source_remote=remote, backend='local',
+            backend_dir='cold/retry/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        ops.destroy_archive(
+            'retry', yes=True, keep_manifest=True,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        # Backend wiped …
+        assert list((Path(local_backend.root) / 'cold/retry').glob('*')) == []
+        # … but local manifest survives so the user can retry deposit.
+        assert manifest_mod.manifest_path('retry', repo_root=project_root).exists()
+
+    def test_destroy_does_not_touch_source(
+        self, sample_remote, project_root, local_backend, staging_dir,
+    ):
+        remote, payloads = sample_remote
+        ops.create_archive(
+            name='src', source_remote=remote, backend='local',
+            backend_dir='cold/src/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        ops.destroy_archive(
+            'src', yes=True,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        # Every original payload still readable on the source remote.
+        for p in payloads:
+            h = hashlib.md5(p).hexdigest()
+            assert (remote / 'files' / 'md5' / h[:2] / h[2:]).read_bytes() == p
+
+    def test_destroy_idempotent_on_already_gone_files(
+        self, sample_remote, project_root, local_backend, staging_dir,
+    ):
+        remote, _ = sample_remote
+        ops.create_archive(
+            name='twice', source_remote=remote, backend='local',
+            backend_dir='cold/twice/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        # Manually pre-remove some backend files; destroy should still succeed.
+        backend_dir = Path(local_backend.root) / 'cold/twice'
+        for tar in list(backend_dir.glob('*.tar'))[:2]:
+            tar.unlink()
+        # Should not raise.
+        ops.destroy_archive(
+            'twice', yes=True, keep_manifest=True,
+            backend_override=local_backend, repo_root=project_root,
+        )
+
+
+# --------------------------------------------------------------------------- #
 # registry
 # --------------------------------------------------------------------------- #
 
