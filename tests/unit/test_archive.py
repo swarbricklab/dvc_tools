@@ -359,6 +359,59 @@ class TestCreateEndToEnd:
                 repo_root=project_root,
             )
 
+    def test_create_records_git_url_from_repo_origin(
+        self, sample_remote, project_root, local_backend, staging_dir,
+    ):
+        # Initialise a real git repo with an origin URL set.
+        subprocess.run(['git', 'init', '-q'], cwd=project_root, check=True)
+        subprocess.run(
+            ['git', 'remote', 'add', 'origin',
+             'git@github.com:example/proj.git'],
+            cwd=project_root, check=True,
+        )
+        # Need at least one commit so git rev-parse HEAD works.
+        (project_root / 'placeholder').write_text('hi')
+        subprocess.run(['git', 'config', 'user.email', 'a@b.c'], cwd=project_root, check=True)
+        subprocess.run(['git', 'config', 'user.name', 't'], cwd=project_root, check=True)
+        subprocess.run(['git', 'add', 'placeholder'], cwd=project_root, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'init'], cwd=project_root, check=True)
+
+        remote, _ = sample_remote
+        ops.create_archive(
+            name='gu', source_remote=remote, backend='local',
+            backend_dir='cold/gu/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        loaded = manifest_mod.load_manifest('gu', repo_root=project_root)
+        assert loaded.git_url == 'git@github.com:example/proj.git'
+        assert loaded.git_ref  # populated from real git
+
+    def test_create_url_override_wins_over_repo_origin(
+        self, sample_remote, project_root, local_backend, staging_dir,
+    ):
+        remote, _ = sample_remote
+        ops.create_archive(
+            name='gu2', source_remote=remote, backend='local',
+            backend_dir='cold/gu2/', jobs=1,
+            git_url='https://example.com/explicit',
+            backend_override=local_backend, repo_root=project_root,
+        )
+        loaded = manifest_mod.load_manifest('gu2', repo_root=project_root)
+        assert loaded.git_url == 'https://example.com/explicit'
+
+    def test_create_url_empty_when_not_a_repo(
+        self, sample_remote, project_root, local_backend, staging_dir,
+    ):
+        # project_root has no git repo, no --url override → empty string.
+        remote, _ = sample_remote
+        ops.create_archive(
+            name='gu3', source_remote=remote, backend='local',
+            backend_dir='cold/gu3/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        loaded = manifest_mod.load_manifest('gu3', repo_root=project_root)
+        assert loaded.git_url == ''
+
     def test_create_with_zstd_compression(self, sample_remote, project_root,
                                           local_backend, staging_dir):
         if shutil.which('zstd') is None:

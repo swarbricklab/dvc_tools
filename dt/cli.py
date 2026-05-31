@@ -695,12 +695,16 @@ def _default_name(source_remote: Path) -> str:
                    'files whose .deposited.json sentinels are valid.')
 @click.option('--via-qxub', is_flag=True,
               help='Dispatch the stage phase as one qxub job per prefix.')
+@click.option('--url', 'git_url', default=None,
+              help='Git URL to record in the manifest '
+                   '(default: project repo origin).')
 @click.option('--keep-staging', is_flag=True,
               help='Do not delete the staging directory after upload.')
 @click.option('-v', '--verbose', is_flag=True)
 def remote_archive_create(name, source, backend, backend_dir, backend_path,
                           staging_dir, jobs, deposit_jobs, compress, dry_run,
-                          force, resume, via_qxub, keep_staging, verbose):
+                          force, resume, via_qxub, git_url, keep_staging,
+                          verbose):
     """Create a new archive of a DVC remote (stage + deposit).
 
     NAME is the identifier for this archive instance. It becomes:
@@ -742,6 +746,7 @@ def remote_archive_create(name, source, backend, backend_dir, backend_path,
             force=force,
             resume=resume,
             via_qxub=via_qxub,
+            git_url=git_url,
             keep_staging=keep_staging,
             verbose=verbose,
         )
@@ -808,10 +813,13 @@ def remote_archive_create(name, source, backend, backend_dir, backend_path,
                    'inline. Each job is a single-CPU build of one inner '
                    'tar; useful when the source remote is too large to '
                    'tar within a single node\'s walltime.')
+@click.option('--url', 'git_url', default=None,
+              help='Git URL to record in the manifest '
+                   '(default: project repo origin).')
 @click.option('-v', '--verbose', is_flag=True)
 def remote_archive_stage(name, source, backend, backend_dir, staging_dir,
                          jobs, compress, dry_run, force, resume, via_qxub,
-                         verbose):
+                         git_url, verbose):
     """Build inner tarballs in a staging dir; no backend interaction.
 
     Use this on a compute node with many CPUs. When stage finishes,
@@ -837,6 +845,7 @@ def remote_archive_stage(name, source, backend, backend_dir, staging_dir,
             force=force,
             resume=resume,
             via_qxub=via_qxub,
+            git_url=git_url,
             verbose=verbose,
         )
     except errors.ArchiveError as e:

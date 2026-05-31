@@ -78,6 +78,7 @@ If `NAME` is omitted, it defaults to `<remote-dir-name>-<YYYY-MM-DD>`.
 | `--jobs` | `archive.stage_jobs` or `min(PBS_NCPUS, 8)` | Parallel inner-tar workers (stage phase). |
 | `--deposit-jobs` | `archive.deposit_jobs` (default `4`) | Parallel upload workers (deposit phase, capped for MDSS politeness). |
 | `--compress` | `archive.compress` or `none` | `none`, `gzip`, or `zstd`. |
+| `--url` | `git remote get-url origin` of the project | Git URL to record in the manifest. |
 | `--dry-run` | — | Plan and report sizes without uploading. |
 | `--force` | — | Overwrite existing manifest/staging, ignore low-disk warnings. |
 | `--resume` | — | Reuse staging, skipping prefixes/files with valid sentinels. |
@@ -297,7 +298,7 @@ recording:
 - `layout: folder-per-prefix` — one inner tar per md5 prefix.
 - `contents.inner_tars` — one row per inner tar with filename, size,
   sha256 and object count.
-- Provenance: git ref, dt version, who created it, when.
+- Provenance: git ref + git url, dt version, who created it, when.
 - The list of extras present at archive time (informational).
 
 Commit it alongside the rest of the project so `list`, `verify`, and

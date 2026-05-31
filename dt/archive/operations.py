@@ -266,6 +266,20 @@ def _git_ref(repo_root: Path) -> str:
         return ''
 
 
+def _git_url(repo_root: Path) -> str:
+    """Return the project's ``origin`` git URL, or empty string."""
+    try:
+        out = subprocess.check_output(
+            ['git', 'remote', 'get-url', 'origin'],
+            cwd=repo_root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return out.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return ''
+
+
 def _dt_version() -> str:
     from .. import __version__
     return __version__
@@ -803,6 +817,7 @@ def stage_archive(
     force: bool = False,
     resume: bool = False,
     via_qxub: bool = False,
+    git_url: Optional[str] = None,
     verbose: bool = False,
     repo_root: Optional[Path] = None,
 ) -> CreateResult:
@@ -891,6 +906,7 @@ def stage_archive(
             created_at=now_iso(),
             created_by=_current_user(),
             git_ref=_git_ref(repo_root),
+            git_url=git_url if git_url is not None else _git_url(repo_root),
             dt_version=_dt_version(),
         )
         return CreateResult(manifest=manifest, manifest_path=target_manifest)
@@ -1098,6 +1114,7 @@ def stage_archive(
             created_at=now_iso(),
             created_by=_current_user(),
             git_ref=_git_ref(repo_root),
+            git_url=git_url if git_url is not None else _git_url(repo_root),
             dt_version=_dt_version(),
         )
         path_written = save_manifest(manifest, repo_root=repo_root)
@@ -1328,6 +1345,7 @@ def create_archive(
     force: bool = False,
     resume: bool = False,
     via_qxub: bool = False,
+    git_url: Optional[str] = None,
     keep_staging: bool = False,
     verbose: bool = False,
     backend_override: Optional[ArchiveBackend] = None,
@@ -1358,6 +1376,7 @@ def create_archive(
         force=force,
         resume=resume,
         via_qxub=via_qxub,
+        git_url=git_url,
         verbose=verbose,
         repo_root=repo_root,
     )
