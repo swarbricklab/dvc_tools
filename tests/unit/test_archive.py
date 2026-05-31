@@ -553,6 +553,101 @@ class TestCreateMixedLayout:
             assert (dest / h[:2] / h[2:]).read_bytes() == p
 
 
+class TestMixedRestoreErgonomics:
+    """Mixed-aware restore: --prefix XX expands to both v2-XX and v3-XX,
+    --object <hash> tries both candidate inner tars."""
+
+    @pytest.fixture
+    def collision_remote(self, tmp_path):
+        """Mixed remote where one md5 prefix has BOTH a v2 blob and a
+        v3 blob, so restoring --prefix XX must pull both halves."""
+        remote = tmp_path / 'collide'
+        v3 = b'data only in v3'
+        v2 = b'data only in v2'
+        h3 = hashlib.md5(v3).hexdigest()
+        h2 = hashlib.md5(v2).hexdigest()
+        # Force the two payloads to land in the same 2-char prefix dir.
+        # The synthetic data above happens to differ in their hashes,
+        # so we just take whichever prefix the v3 hash falls in and
+        # synthesise a v2 file whose hash starts with the same 2 chars.
+        prefix = h3[:2]
+        (remote / 'files' / 'md5' / prefix).mkdir(parents=True)
+        (remote / 'files' / 'md5' / prefix / h3[2:]).write_bytes(v3)
+        (remote / prefix).mkdir(parents=True)
+        # use a synthetic v2-only object name in the same prefix dir
+        (remote / prefix / 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').write_bytes(v2)
+        return remote, prefix, v3, h3, v2
+
+    def _archive(self, remote, project_root, local_backend, name):
+        return ops.create_archive(
+            name=name, source_remote=remote, backend='local',
+            backend_dir=f'cold/{name}/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+
+    def test_prefix_XX_expands_to_both_halves_in_mixed(
+        self, collision_remote, project_root, local_backend, staging_dir,
+        tmp_path,
+    ):
+        remote, prefix, v3_blob, v3_hash, v2_blob = collision_remote
+        self._archive(remote, project_root, local_backend, 'mx1')
+
+        dest = tmp_path / 'r-mx1'
+        ops.restore_archive(
+            'mx1', to_path=dest, prefix=prefix,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        # Both v3 and v2 content land in their original tree shapes.
+        assert (dest / 'files' / 'md5' / prefix / v3_hash[2:]).read_bytes() == v3_blob
+        assert (dest / prefix / 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').read_bytes() == v2_blob
+
+    def test_explicit_namespaced_prefix_still_works(
+        self, collision_remote, project_root, local_backend, staging_dir,
+        tmp_path,
+    ):
+        remote, prefix, v3_blob, v3_hash, v2_blob = collision_remote
+        self._archive(remote, project_root, local_backend, 'mx2')
+
+        dest = tmp_path / 'r-mx2'
+        ops.restore_archive(
+            'mx2', to_path=dest, prefix=f'v3-{prefix}',
+            backend_override=local_backend, repo_root=project_root,
+        )
+        # Only the v3 half should be restored.
+        assert (dest / 'files' / 'md5' / prefix / v3_hash[2:]).read_bytes() == v3_blob
+        assert not (dest / prefix).exists()
+
+    def test_object_restore_tries_both_candidates(
+        self, mixed_remote, project_root, local_backend, staging_dir,
+        tmp_path,
+    ):
+        remote, _all, v3_payloads, v2_payloads = mixed_remote
+        self._archive(remote, project_root, local_backend, 'obj')
+
+        # Pick a v2-only payload — restore-by-object should find it
+        # despite the v3 candidate inner tar not containing it.
+        target = v2_payloads[0]
+        target_hash = hashlib.md5(target).hexdigest()
+        dest = tmp_path / 'r-obj-v2'
+        written = ops.restore_archive(
+            'obj', to_path=dest, object_hash=target_hash,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        assert len(written) == 1
+        assert written[0].read_bytes() == target
+
+        # And a v3-only payload.
+        target = v3_payloads[0]
+        target_hash = hashlib.md5(target).hexdigest()
+        dest = tmp_path / 'r-obj-v3'
+        written = ops.restore_archive(
+            'obj', to_path=dest, object_hash=target_hash,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        assert len(written) == 1
+        assert written[0].read_bytes() == target
+
+
 # --------------------------------------------------------------------------- #
 # resume
 # --------------------------------------------------------------------------- #

@@ -184,6 +184,16 @@ Modes:
 - (neither) — full restore. Fetches every inner tar in turn and
   extracts each into `--to`.
 
+**Mixed-layout convenience.** When the archive's `source_layout` is
+`dvc-mixed`, `--prefix XX` (bare hex) restores **both** halves
+(`v3-XX` and `v2-XX` if both exist) — you don't need to specify the
+namespace. Use the namespaced form (`--prefix v3-XX` or `--prefix
+v2-XX`) to restore only one half explicitly. Likewise `--object
+<hash>` tries the v3 candidate first, then the v2 candidate, and
+returns whichever inner tar actually contains the object. Pure
+layouts (v2 or v3 only) are unaffected — `--prefix XX` means just
+that one prefix.
+
 ### `dt remote archive registry list`
 
 List every archive recorded in the central register

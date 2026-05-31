@@ -1721,6 +1721,56 @@ def _inner_tar(manifest: ArchiveManifest, prefix: str) -> InnerTar:
     return inner
 
 
+def _resolve_prefix_keys(
+    manifest: ArchiveManifest, prefix: str,
+) -> List[str]:
+    """Map a user-given ``--prefix`` to one-or-more manifest keys.
+
+    Lookup order:
+      1. Exact match in ``manifest.inner_tars`` — handles both bare
+         hex (``'00'``) in pure layouts and namespaced keys
+         (``'v3-00'``, ``'v2-00'``) explicitly given in mixed mode.
+      2. Mixed-layout convenience: a bare hex prefix expands to
+         ``['v3-XX', 'v2-XX']`` (whichever keys actually exist),
+         so ``--prefix 00`` restores both halves without the user
+         needing to know the namespace.
+
+    Raises :class:`ArchiveError` if nothing matches.
+    """
+    if prefix in manifest.inner_tars:
+        return [prefix]
+    if (manifest.source_layout == LAYOUT_DVC_MIXED
+            and _is_hex_prefix(prefix.lower())):
+        candidates = [f'v3-{prefix}', f'v2-{prefix}']
+        matches = [k for k in candidates if k in manifest.inner_tars]
+        if matches:
+            return matches
+    raise ArchiveError(
+        f"Archive '{manifest.archive_name}' has no record of prefix "
+        f"{prefix!r}. Known keys (first 10): "
+        f"{sorted(manifest.inner_tars)[:10]}"
+        + ("..." if len(manifest.inner_tars) > 10 else "")
+    )
+
+
+def _entry_path_for_object(
+    object_hash: str, source_layout: str, key: str,
+) -> str:
+    """Return the tar member path for a single object in a given key."""
+    if source_layout == LAYOUT_DVC_V3:
+        return f"files/md5/{object_hash[:2]}/{object_hash[2:]}"
+    if source_layout == LAYOUT_DVC_V2:
+        return f"{object_hash[:2]}/{object_hash[2:]}"
+    if source_layout == LAYOUT_DVC_MIXED:
+        if key.startswith('v3-'):
+            return f"files/md5/{object_hash[:2]}/{object_hash[2:]}"
+        if key.startswith('v2-'):
+            return f"{object_hash[:2]}/{object_hash[2:]}"
+    raise ArchiveError(
+        f"Cannot resolve tar entry path for layout={source_layout!r}, key={key!r}"
+    )
+
+
 def _tar_decompress_flag(compression: str) -> List[str]:
     if compression == 'gzip':
         return ['-z']
@@ -1763,45 +1813,70 @@ def _restore_full(manifest: ArchiveManifest, be: ArchiveBackend,
 
 def _restore_prefix(manifest: ArchiveManifest, be: ArchiveBackend,
                     to_path: Path, prefix: str, *, verbose: bool) -> List[Path]:
-    inner = _inner_tar(manifest, prefix)
+    keys = _resolve_prefix_keys(manifest, prefix)
     bdir = manifest.backend_dir.rstrip('/') + '/'
-    remote_path = bdir + inner.filename
+    written: List[Path] = []
     import tempfile
     with tempfile.TemporaryDirectory(prefix='dt-restore-') as tmpdir:
-        local = Path(tmpdir) / inner.filename
-        if verbose:
-            print(f"  fetching {remote_path}")
-        be.get_file(remote_path, local)
-        if verbose:
-            print(f"  extracting {inner.filename}")
-        _extract_inner(local, to_path, manifest.compression)
-    return [to_path / 'files' / 'md5' / prefix]
+        tmp = Path(tmpdir)
+        for key in keys:
+            inner = manifest.inner_tars[key]
+            remote_path = bdir + inner.filename
+            local = tmp / inner.filename
+            if verbose:
+                print(f"  fetching {remote_path}")
+            be.get_file(remote_path, local)
+            if verbose:
+                print(f"  extracting {inner.filename}")
+            _extract_inner(local, to_path, manifest.compression)
+            local.unlink(missing_ok=True)
+            # Restored path depends on this key's layout.
+            if (manifest.source_layout == LAYOUT_DVC_MIXED
+                    and key.startswith('v2-')) \
+                    or manifest.source_layout == LAYOUT_DVC_V2:
+                bare = key[3:] if key.startswith('v2-') else key
+                written.append(to_path / bare)
+            else:
+                bare = key[3:] if key.startswith('v3-') else key
+                written.append(to_path / 'files' / 'md5' / bare)
+    return written
 
 
 def _restore_single_object(manifest: ArchiveManifest, be: ArchiveBackend,
                            to_path: Path, prefix: str, object_hash: str,
                            *, verbose: bool) -> List[Path]:
-    inner = _inner_tar(manifest, prefix)
+    keys = _resolve_prefix_keys(manifest, prefix)
     bdir = manifest.backend_dir.rstrip('/') + '/'
-    remote_path = bdir + inner.filename
-    entry = f"files/md5/{prefix}/{object_hash[2:]}"
     import tempfile
-    with tempfile.TemporaryDirectory(prefix='dt-restore-') as tmpdir:
-        local = Path(tmpdir) / inner.filename
-        if verbose:
-            print(f"  fetching {remote_path}")
-        be.get_file(remote_path, local)
-        if verbose:
-            print(f"  extracting {entry}")
-        _extract_inner(local, to_path, manifest.compression, members=[entry])
 
-    written_path = to_path / entry
-    if not written_path.exists():
-        raise ArchiveError(
-            f"Object {object_hash} was not produced by tar extraction "
-            f"(expected at {written_path}). Is the hash correct?"
-        )
-    return [written_path]
+    last_error: Optional[Exception] = None
+    for key in keys:
+        inner = manifest.inner_tars[key]
+        remote_path = bdir + inner.filename
+        entry = _entry_path_for_object(object_hash, manifest.source_layout, key)
+        with tempfile.TemporaryDirectory(prefix='dt-restore-') as tmpdir:
+            local = Path(tmpdir) / inner.filename
+            if verbose:
+                print(f"  fetching {remote_path}")
+            be.get_file(remote_path, local)
+            if verbose:
+                print(f"  extracting {entry}")
+            try:
+                _extract_inner(
+                    local, to_path, manifest.compression, members=[entry],
+                )
+            except ArchiveError as e:
+                last_error = e
+                continue
+        written_path = to_path / entry
+        if written_path.exists():
+            return [written_path]
+
+    raise ArchiveError(
+        f"Object {object_hash} not found in any candidate inner tar "
+        f"({', '.join(keys)})"
+        + (f": {last_error}" if last_error else "")
+    )
 
 
 # --------------------------------------------------------------------------- #
