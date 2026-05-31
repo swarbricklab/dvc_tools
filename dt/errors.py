@@ -175,6 +175,11 @@ class DataStatusError(DTError):
     pass
 
 
+class ArchiveError(DTError):
+    """Error during remote archive operations."""
+    pass
+
+
 class AuthError(DTError):
     """Error during auth operations."""
     pass

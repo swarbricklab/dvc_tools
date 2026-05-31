@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dvc-tools"
-version = "0.5.24"
+version = "0.6.0"
 description = "Convenient tools for working with DVC in HPC environments"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -77,7 +77,7 @@ dt = "dt.cli:cli"
 #   anndata = "dvc_tools_anndata:AnndataHandler"
 
 [tool.setuptools]
-packages = ["dt", "dt.auth", "dt.secrets"]
+packages = ["dt", "dt.archive", "dt.auth", "dt.secrets"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
