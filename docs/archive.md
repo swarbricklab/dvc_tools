@@ -216,9 +216,22 @@ Default ("quick"):
 `--deep` additionally downloads every inner tar to a temp file and
 recomputes its sha256. Expensive on tape.
 
-### `dt remote archive restore <name> --to <path>`
+### `dt remote archive restore <name> [--to <path>]`
 
-> **Runs on:** `copyq` with `gdata/<proj>+massdata/<proj>` and the storage flag for wherever `--to` lives (`scratch/<proj>` or `gdata/<proj>`).
+> **Runs on:** `copyq` with `gdata/<proj>+massdata/<proj>` and the storage flag for wherever the destination lives (the source remote by default, or `--to` if given).
+
+`--to` is **optional**. If omitted, restore puts the data back at
+`manifest.source_remote` — i.e. wherever it was archived from. The
+typical post-prune workflow is just:
+
+```bash
+dt remote archive restore <name>
+```
+
+…and the source remote pops back into existence. A full restore also
+clears the `ARCHIVED.yaml` signpost since the data is no longer
+archived. Partial restores (`--prefix` / `--object`) leave the
+signpost in place because most of the data is still on the backend.
 
 Modes:
 
@@ -282,6 +295,12 @@ than falsely complete with missing inner tars.
 
 > **Runs on:** `copyq` with `gdata/<proj>+massdata/<proj>` and the source-remote storage flag.
 > Re-verifies the archive on MDSS before deleting anything; needs MDSS read access and write access to wherever the source DVC remote lives.
+
+After successful verify, `prune` drops an
+[`ARCHIVED.yaml` signpost](#signposts) at the root of the source
+remote *before* deleting the blob data, so anyone arriving later via
+`ls` / `dt fetch` / `dt pull` / `dt status` / `dt doctor` sees a clear
+explanation of where the data went and how to bring it back.
 
 Refuses to run unless:
 
@@ -419,6 +438,50 @@ Commit it alongside the rest of the project so `list`, `verify`, and
 also uploaded to the backend as `<NAME>.manifest.yaml` — both the
 completion sentinel and a belt-and-braces restore key if the project
 repo is ever lost.
+
+## Signposts
+
+After `prune` deletes the on-disk blob data, it leaves an
+`ARCHIVED.yaml` file at the root of the source remote directory. This
+is the "signpost" — a small subset of the manifest that:
+
+- **Explains to humans** (top-of-file comment block) what happened
+  and how to restore.
+- **Lets dt commands detect** an archived remote by the
+  `dt_archive_signpost: 1` marker key and route the user to
+  `dt remote archive restore` rather than failing with a "no such
+  blob" error.
+
+```yaml
+# This DVC remote was archived to cold storage by `dt remote archive prune`.
+# ... full comment block ...
+dt_archive_signpost: 1
+archive_name: neochemo-2026-05
+backend: mdss
+backend_dir: dt-archive/neochemo/neochemo-2026-05/
+source_layout: dvc-v3
+source_remote: /g/data/<proj>/dvc/neochemo
+git_url: git@github.com:<org>/<repo>.git
+git_ref: <sha>
+manifest_in_repo: .dt/archives/neochemo-2026-05.yaml
+pruned_at: 2026-05-30T12:34:56+00:00
+pruned_by: <user>
+```
+
+Commands that notice the signpost:
+
+| Command | Behaviour when signpost present |
+| --- | --- |
+| `dt fetch` | **Refuses** with a friendly error explaining how to restore. |
+| `dt pull` | **Refuses** with the same message — keeps `dvc pull` from timing out against an empty remote. |
+| `dt status` | Prints the signpost message before delegating to `dvc status`, but doesn't refuse. |
+| `dt doctor` | Reports an `archived_remotes` check failure with a suggested `dt remote archive restore` command. |
+| `dt remote archive restore` | **Removes** the signpost on full restore (since the data is back). Partial restores leave it. |
+
+The signpost is the *only* on-disk artefact of an archived remote
+besides the in-repo manifest at `.dt/archives/`. Removing it manually
+(or via full restore) re-enables `dvc fetch` / `dvc pull` against
+that remote.
 
 ## Central register
 

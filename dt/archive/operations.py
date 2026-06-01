@@ -84,6 +84,7 @@ from .manifest import (
     sidecar_name,
 )
 from . import registry as _registry
+from . import signpost as _signpost
 
 
 # --------------------------------------------------------------------------- #
@@ -1672,7 +1673,7 @@ def _deep_verify(manifest: ArchiveManifest, be: ArchiveBackend,
 
 def restore_archive(
     name: str,
-    to_path: Path,
+    to_path: Optional[Path] = None,
     *,
     object_hash: Optional[str] = None,
     prefix: Optional[str] = None,
@@ -1687,6 +1688,11 @@ def restore_archive(
     - ``prefix`` set: extract all objects in that prefix.
     - neither set: full restore (downloads every inner tar and extracts).
 
+    If ``to_path`` is not given, defaults to the manifest's recorded
+    ``source_remote`` — i.e. restores the data back to the directory it
+    came from. Useful after :func:`prune_archive` left an
+    ``ARCHIVED.yaml`` signpost there.
+
     Returns a list of paths written under ``to_path``.
     """
     if object_hash and prefix:
@@ -1699,6 +1705,20 @@ def restore_archive(
             f"this dt cannot restore it."
         )
     be = backend_override or get_backend(manifest.backend)
+
+    if to_path is None:
+        if not manifest.source_remote:
+            raise ArchiveError(
+                f"Archive '{name}' has no source_remote recorded — "
+                f"pass --to <path> explicitly."
+            )
+        to_path = Path(manifest.source_remote)
+        if verbose:
+            print(
+                f"  no --to given; restoring to manifest.source_remote: "
+                f"{to_path}",
+                flush=True,
+            )
     to_path = to_path.expanduser().resolve()
     to_path.mkdir(parents=True, exist_ok=True)
 
@@ -1709,7 +1729,22 @@ def restore_archive(
         )
     if prefix:
         return _restore_prefix(manifest, be, to_path, prefix, verbose=verbose)
-    return _restore_full(manifest, be, to_path, verbose=verbose)
+
+    written = _restore_full(manifest, be, to_path, verbose=verbose)
+
+    # The data is back — the "this remote is archived" signpost at the
+    # restore root is no longer accurate, so clear it. Partial restores
+    # leave it alone (the archive is still the canonical copy of
+    # everything the user didn't ask for).
+    stale_signpost = to_path / _signpost.SIGNPOST_FILENAME
+    if stale_signpost.is_file():
+        try:
+            stale_signpost.unlink()
+            if verbose:
+                print(f"  removed stale signpost {stale_signpost}", flush=True)
+        except OSError:
+            pass
+    return written
 
 
 def _inner_tar(manifest: ArchiveManifest, prefix: str) -> InnerTar:
@@ -1971,6 +2006,15 @@ def prune_archive(
 
     _, stats = scan_prefixes(source_remote, layout)
     bytes_freed = sum(b for _, b in stats.values())
+
+    # Drop the signpost BEFORE rmtree so anyone who lists the remote
+    # mid-delete sees the explanation rather than an empty-ish dir.
+    signpost_path = _signpost.write_signpost(
+        source_remote, manifest,
+        pruned_by=_current_user(),
+        pruned_at=now_iso(),
+    )
+    print(f"Wrote signpost {signpost_path}", flush=True)
 
     for target in prune_targets:
         shutil.rmtree(target)
