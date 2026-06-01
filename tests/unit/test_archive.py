@@ -18,6 +18,7 @@ from dt.archive import operations as ops
 from dt.archive import manifest as manifest_mod
 from dt.archive import backends as backends_mod
 from dt.archive import registry as registry_mod
+from dt.archive import signpost as signpost_mod
 from dt.archive.backends import LocalDirBackend, MdssBackend
 from dt.errors import ArchiveError
 
@@ -1383,3 +1384,112 @@ class TestMdssBackend:
         calls = recorded['calls']
         assert any('put' in c for c in calls)
         assert any('mkdir' in c for c in calls)
+
+
+# --------------------------------------------------------------------------- #
+# signpost (ARCHIVED.yaml)
+# --------------------------------------------------------------------------- #
+
+class TestSignpost:
+    def _archive_and_prune(
+        self, sample_remote, project_root, local_backend, name,
+    ):
+        remote, _ = sample_remote
+        # Strip extras so prune doesn't refuse.
+        for extra in ('README.txt', 'config'):
+            p = remote / extra
+            if p.exists():
+                p.unlink()
+        ops.create_archive(
+            name=name, source_remote=remote, backend='local',
+            backend_dir=f'cold/{name}/', jobs=1,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        ops.prune_archive(
+            name, yes=True,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        return remote
+
+    def test_prune_drops_signpost(
+        self, sample_remote, project_root, local_backend, staging_dir,
+    ):
+        remote = self._archive_and_prune(
+            sample_remote, project_root, local_backend, 'sp1',
+        )
+        sp_path = remote / signpost_mod.SIGNPOST_FILENAME
+        assert sp_path.is_file()
+
+        sp = signpost_mod.detect(remote)
+        assert sp is not None
+        assert sp.archive_name == 'sp1'
+        assert sp.backend == 'local'
+        assert sp.source_layout == ops.LAYOUT_DVC_V3
+        assert sp.pruned_at  # non-empty timestamp
+        assert sp.pruned_by  # populated from getpass.getuser()
+
+        # The signpost yaml has a human-readable comment header.
+        body = sp_path.read_text()
+        assert body.lstrip().startswith('#')
+        assert 'dt remote archive restore' in body
+        assert 'dt_archive_signpost: 1' in body
+
+    def test_detect_returns_none_when_absent(self, tmp_path):
+        assert signpost_mod.detect(tmp_path) is None
+        # Even when the file exists but lacks the marker key.
+        (tmp_path / signpost_mod.SIGNPOST_FILENAME).write_text(
+            "not_a_signpost: true\n",
+        )
+        assert signpost_mod.detect(tmp_path) is None
+
+    def test_format_message_includes_restore_command(self, tmp_path):
+        sp = signpost_mod.ArchiveSignpost(
+            archive_name='foo', backend='mdss',
+            backend_dir='cold/foo/', source_layout='dvc-v3',
+            source_remote='/g/data/x/foo', git_url='', git_ref='',
+            manifest_in_repo='.dt/archives/foo.yaml',
+            pruned_at='2026-06-01T00:00:00+00:00', pruned_by='alice',
+            path=tmp_path / 'ARCHIVED.yaml',
+        )
+        msg = signpost_mod.format_message(sp)
+        assert 'dt remote archive restore foo' in msg
+        assert 'mdss:cold/foo/' in msg
+        assert '2026-06-01' in msg
+
+    def test_restore_defaults_to_source_remote(
+        self, sample_remote, project_root, local_backend, staging_dir,
+    ):
+        remote = self._archive_and_prune(
+            sample_remote, project_root, local_backend, 'sp2',
+        )
+        # The remote dir exists but contains only the signpost; data is gone.
+        assert not (remote / 'files' / 'md5').exists()
+
+        # Restore with no --to: defaults to manifest.source_remote.
+        written = ops.restore_archive(
+            'sp2',
+            backend_override=local_backend, repo_root=project_root,
+        )
+        # Data lands back in the source remote, signpost gets cleared.
+        assert (remote / 'files' / 'md5').is_dir()
+        assert not (remote / signpost_mod.SIGNPOST_FILENAME).exists()
+        assert written  # at least one prefix dir reported
+
+    def test_partial_restore_leaves_signpost(
+        self, sample_remote, project_root, local_backend, staging_dir,
+        tmp_path,
+    ):
+        remote = self._archive_and_prune(
+            sample_remote, project_root, local_backend, 'sp3',
+        )
+        # Pick any one prefix to restore.
+        manifest = manifest_mod.load_manifest('sp3', repo_root=project_root)
+        any_prefix = next(iter(manifest.inner_tars))
+
+        ops.restore_archive(
+            'sp3', prefix=any_prefix,
+            backend_override=local_backend, repo_root=project_root,
+        )
+        # Partial restore: signpost is still accurate ("most data still
+        # archived"), so it must not be removed.
+        assert (remote / signpost_mod.SIGNPOST_FILENAME).is_file()
