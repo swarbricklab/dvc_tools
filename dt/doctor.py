@@ -254,13 +254,13 @@ def check_cache_root() -> DiagnosticResult:
 def check_remote_root() -> DiagnosticResult:
     """Check if remote root is configured and accessible."""
     remote_root = cfg.get_value('remote.root')
-    
+
     if not remote_root:
         return DiagnosticResult(
             "remote_root", False, "Remote root not configured",
             "Run: dt config set remote.root /path/to/remote"
         )
-    
+
     remote_path = Path(remote_root)
     if remote_path.exists():
         if os.access(remote_path, os.W_OK):
@@ -275,6 +275,33 @@ def check_remote_root() -> DiagnosticResult:
             "remote_root", False, f"Remote root does not exist ({remote_root})",
             "Create the directory or update the configuration"
         )
+
+
+def check_archived_remotes() -> DiagnosticResult:
+    """Notice if any configured DVC remote has been archived (has an
+    ``ARCHIVED.yaml`` signpost). Reported as a failure so it stands
+    out, since data won't be fetchable until restored."""
+    try:
+        from .archive import signpost as _signpost
+        signposts = _signpost.detect_in_configured_remotes()
+    except Exception:
+        return DiagnosticResult(
+            "archived_remotes", True,
+            "Archived-remote check skipped (signpost module unavailable)",
+        )
+    if not signposts:
+        return DiagnosticResult(
+            "archived_remotes", True, "No archived remotes detected",
+        )
+    names = ', '.join(s.archive_name for s in signposts)
+    suggestion = '; '.join(
+        f"dt remote archive restore {s.archive_name}" for s in signposts
+    )
+    return DiagnosticResult(
+        "archived_remotes", False,
+        f"Configured remote(s) have been archived: {names}",
+        f"To restore: {suggestion}",
+    )
 
 
 # =============================================================================
@@ -561,6 +588,7 @@ def run_diagnostics(verbose: bool = False) -> list[DiagnosticResult]:
     # Configuration checks
     results.append(check_cache_root())
     results.append(check_remote_root())
+    results.append(check_archived_remotes())
     
     # Repository context checks
     results.append(check_git_repo())

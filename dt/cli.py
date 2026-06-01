@@ -1013,8 +1013,9 @@ def remote_archive_verify(name, deep):
 @remote_archive.command('restore')
 @click.argument('name')
 @click.option('--to', 'to_path', type=click.Path(),
-              required=True,
-              help='Destination directory for restored content.')
+              default=None,
+              help='Destination directory (default: manifest.source_remote, '
+                   'i.e. put it back where it came from).')
 @click.option('--object', 'object_hash', default=None,
               help='Restore a single md5 object.')
 @click.option('--prefix', default=None,
@@ -1023,13 +1024,14 @@ def remote_archive_verify(name, deep):
 def remote_archive_restore(name, to_path, object_hash, prefix, verbose):
     """Restore content from an archive.
 
-    Without --object or --prefix, performs a full restore (downloads
-    every inner tar and extracts into --to).
+    Without --object or --prefix, performs a full restore. Without
+    --to, restores to the manifest's source_remote path (i.e. puts the
+    data back where it came from before pruning).
     """
     try:
         written = archive_ops.restore_archive(
             name=name,
-            to_path=Path(to_path),
+            to_path=Path(to_path) if to_path else None,
             object_hash=object_hash,
             prefix=prefix,
             verbose=verbose,

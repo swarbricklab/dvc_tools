@@ -1114,7 +1114,19 @@ def fetch(
         utils.check_dvc()
     except utils.DependencyError as e:
         raise FetchError(str(e))
-    
+
+    # Refuse if a configured remote has been archived (ARCHIVED.yaml
+    # signpost present). dvc fetch would otherwise sit waiting for
+    # blobs that no longer exist on the remote.
+    from .archive import signpost as _signpost
+    signposts = _signpost.detect_in_configured_remotes()
+    if signposts:
+        body = '\n\n'.join(_signpost.format_message(s) for s in signposts)
+        raise FetchError(
+            f"Refusing to fetch: one or more configured remotes are "
+            f"archived.\n\n{body}"
+        )
+
     # Collect stages using DVC's internal index
     try:
         stages = utils.collect_stages(targets=targets, verbose=verbose)

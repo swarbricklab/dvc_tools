@@ -44,6 +44,17 @@ def status(
         if verbose:
             print(f"Warning: index sync failed: {e}")
 
+    # Annotate (but don't refuse) if a configured remote is archived.
+    try:
+        from .archive import signpost as _signpost
+        signposts = _signpost.detect_in_configured_remotes()
+    except Exception:
+        signposts = []
+    if signposts:
+        print()
+        for sp in signposts:
+            print(_signpost.format_message(sp))
+
     # Run dvc status
     cmd = ['dvc', 'status']
     if targets:

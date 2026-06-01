@@ -160,7 +160,19 @@ def pull(
         utils.check_dvc()
     except utils.DependencyError as e:
         raise PullError(str(e))
-    
+
+    # Refuse if a configured remote has been archived (ARCHIVED.yaml
+    # signpost present). dvc pull would otherwise sit waiting for
+    # blobs that no longer exist on the remote.
+    from .archive import signpost as _signpost
+    signposts = _signpost.detect_in_configured_remotes()
+    if signposts:
+        body = '\n\n'.join(_signpost.format_message(s) for s in signposts)
+        raise PullError(
+            f"Refusing to pull: one or more configured remotes are "
+            f"archived.\n\n{body}"
+        )
+
     # If force mode, delete .dir manifests first
     if force:
         if verbose:
