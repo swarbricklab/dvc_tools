@@ -556,4 +556,88 @@ class TestEnsureDtGitignore:
         assert result.exists()
 
 
+class TestParseRemoteRef:
+    """Tests for parse_remote_ref."""
+
+    def _remotes(self, *names):
+        return MagicMock(returncode=0, stdout="\n".join(names) + "\n", stderr="")
+
+    def test_returns_none_for_non_slash_refs(self):
+        with patch("subprocess.run", return_value=self._remotes("origin")):
+            assert utils.parse_remote_ref("HEAD") is None
+            assert utils.parse_remote_ref("main") is None
+            assert utils.parse_remote_ref("v1.0") is None
+
+    def test_returns_none_for_empty(self):
+        assert utils.parse_remote_ref("") is None
+
+    def test_parses_remote_branch(self):
+        with patch("subprocess.run", return_value=self._remotes("origin")):
+            assert utils.parse_remote_ref("origin/main") == ("origin", "main")
+
+    def test_returns_none_for_unknown_remote(self):
+        with patch("subprocess.run", return_value=self._remotes("origin")):
+            # 'upstream' isn't a configured remote
+            assert utils.parse_remote_ref("upstream/main") is None
+
+    def test_handles_branch_with_slashes(self):
+        with patch("subprocess.run", return_value=self._remotes("origin")):
+            assert utils.parse_remote_ref("origin/feat/x") == ("origin", "feat/x")
+
+    def test_prefers_longest_remote_match(self):
+        # Both 'org' and 'org/sub' exist as remotes; the longer wins.
+        with patch("subprocess.run", return_value=self._remotes("org", "org/sub")):
+            assert utils.parse_remote_ref("org/sub/main") == ("org/sub", "main")
+
+
+class TestCheckRemoteRefFreshness:
+    """Tests for check_remote_ref_freshness."""
+
+    def test_returns_none_for_non_remote_ref(self):
+        with patch.object(utils, "parse_remote_ref", return_value=None):
+            assert utils.check_remote_ref_freshness("HEAD") is None
+
+    def test_fresh_when_local_matches_remote(self):
+        calls = [
+            MagicMock(returncode=0, stdout="abc123\trefs/heads/main\n", stderr=""),
+            MagicMock(returncode=0, stdout="abc123\n", stderr=""),
+        ]
+        with patch.object(utils, "parse_remote_ref", return_value=("origin", "main")):
+            with patch("subprocess.run", side_effect=calls):
+                info = utils.check_remote_ref_freshness("origin/main")
+        assert info["stale"] is False
+        assert info["remote"] == "origin"
+        assert info["branch"] == "main"
+
+    def test_stale_when_local_differs(self):
+        calls = [
+            MagicMock(returncode=0, stdout="newsha\trefs/heads/main\n", stderr=""),
+            MagicMock(returncode=0, stdout="oldsha\n", stderr=""),
+        ]
+        with patch.object(utils, "parse_remote_ref", return_value=("origin", "main")):
+            with patch("subprocess.run", side_effect=calls):
+                info = utils.check_remote_ref_freshness("origin/main")
+        assert info["stale"] is True
+        assert info["local"] == "oldsha"
+        assert info["remote_sha"] == "newsha"
+
+    def test_stale_when_ref_never_fetched(self):
+        calls = [
+            MagicMock(returncode=0, stdout="newsha\trefs/heads/main\n", stderr=""),
+            MagicMock(returncode=1, stdout="", stderr=""),  # rev-parse fails
+        ]
+        with patch.object(utils, "parse_remote_ref", return_value=("origin", "main")):
+            with patch("subprocess.run", side_effect=calls):
+                info = utils.check_remote_ref_freshness("origin/main")
+        assert info["stale"] is True
+        assert info["local"] is None
+
+    def test_returns_none_when_remote_unreachable(self):
+        # ls-remote fails (offline / unreachable) -> can't determine freshness
+        calls = [MagicMock(returncode=128, stdout="", stderr="fatal")]
+        with patch.object(utils, "parse_remote_ref", return_value=("origin", "main")):
+            with patch("subprocess.run", side_effect=calls):
+                assert utils.check_remote_ref_freshness("origin/main") is None
+
+
 # Run with: pytest tests/test_utils.py -v

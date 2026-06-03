@@ -8,6 +8,7 @@ Provides a plugin architecture for format-specific content diffing (CSV, etc.)
 with graceful fallback for unsupported formats.
 """
 
+import filecmp
 import json
 import subprocess
 import tempfile
@@ -918,21 +919,25 @@ def list_handlers() -> List[Dict[str, Any]]:
 def _summarise_daff_json(json_str: str) -> str:
     """Parse daff JSON output and return a one-line count summary.
 
-    daff rows use the following first-column markers:
-      '!'  – column-header row (skip)
-      '@@' – context ellipsis    (skip)
-      '+'  – added row
-      '-'  – deleted row
-      '->' – modified row
+    daff's JSON output is an object of the form ``{"sheet": [[marker, ...], ...]}``
+    where each row's first cell is a marker:
+      '@@'        – column-header row (skip)
+      ''          – unchanged row     (skip)
+      '+++' / '+' – added row
+      '---' / '-' – deleted row
+      '->'        – modified row
     """
     try:
         data = json.loads(json_str)
+        # Newer daff wraps rows in {"sheet": [...]}; older versions emit a
+        # bare list of rows. Handle both.
+        rows = data.get("sheet", []) if isinstance(data, dict) else data
         added = deleted = modified = 0
-        for row in data:
+        for row in rows:
             if not row:
                 continue
             marker = str(row[0])
-            if marker == '+':
+            if marker in ('+', '+++'):
                 added += 1
             elif marker in ('-', '---'):
                 deleted += 1
@@ -950,8 +955,38 @@ def _summarise_daff_json(json_str: str) -> str:
 class CSVHandler(DiffHandler):
     """Handler for CSV/TSV files using daff."""
 
-    extensions = ['.csv', '.tsv', '.txt']
+    extensions = ['.csv', '.tsv', '.tab', '.txt']
     format_name = "CSV/TSV"
+
+    @staticmethod
+    def _input_format(path: Path) -> Optional[str]:
+        """Determine the daff ``--input-format`` for *path*.
+
+        daff's own format detection is driven by the file extension and
+        silently mis-parses tab-separated data that doesn't end in ``.tsv``
+        (e.g. ``.txt``), collapsing every row into a single column. We pin the
+        format explicitly so TSV files diff correctly regardless of daff's
+        guess.
+
+        Returns ``'csv'``/``'tsv'`` for known extensions, sniffs the header
+        line for ambiguous ones (``.txt``), or ``None`` to let daff decide.
+        """
+        suffix = path.suffix.lower()
+        if suffix == '.csv':
+            return 'csv'
+        if suffix in ('.tsv', '.tab'):
+            return 'tsv'
+        # Ambiguous extension (e.g. .txt): sniff the header line.
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+                first = fh.readline()
+        except OSError:
+            return None
+        if first.count('\t') > first.count(','):
+            return 'tsv'
+        if ',' in first:
+            return 'csv'
+        return None
 
     def diff(
         self,
@@ -974,23 +1009,39 @@ class CSVHandler(DiffHandler):
                 "See: https://github.com/paulfitz/daff"
             )
 
+        in_fmt = self._input_format(old_path)
+
+        def _base_cmd() -> List[str]:
+            cmd = ["daff"]
+            if in_fmt:
+                # daff parses flags as space-separated tokens; the "=" form
+                # ("--input-format=tsv") is treated as a filename.
+                cmd += ["--input-format", in_fmt]
+            return cmd
+
         # summary: parse JSON counts, no cell-level output
         if detail_level == "summary":
-            cmd = ["daff", "--output-format=json", str(old_path), str(new_path)]
+            cmd = _base_cmd() + [
+                "--output-format", "json", str(old_path), str(new_path),
+            ]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0 and result.stderr:
                 raise DiffError(f"daff failed: {result.stderr}")
             return _summarise_daff_json(result.stdout)
 
         # normal / granular: full diff
-        cmd = ["daff"]
+        cmd = _base_cmd()
 
         if detail_level == "granular":
             cmd.append("--all")  # show all rows, not just changed + context
 
         if output_format == "json":
-            cmd.append("--output-format=json")
-        # terminal/md/html use default (csv) output from daff
+            cmd += ["--output-format", "json"]
+        elif output_format == "html":
+            # _render_html() feeds the diff back to `daff render`, which reads
+            # CSV, so force CSV output regardless of the input format.
+            cmd += ["--output-format", "csv"]
+        # terminal/md use daff's default output (matches the input format)
 
         cmd.extend([str(old_path), str(new_path)])
 
@@ -1136,6 +1187,8 @@ def content_diff(
             raise DiffError(f"'{path}' not found in workspace")
         if not new_file.exists():
             raise DiffError(f"'{compare_path}' not found in workspace")
+        if filecmp.cmp(old_file, new_file, shallow=False):
+            return f"No changes detected: '{path}' and '{compare_path}' are identical."
         return handler.diff(old_file, new_file, output_format, detail_level)
 
     # -------------------------------------------------------------------------
@@ -1192,8 +1245,16 @@ def content_diff(
             if not workspace_path.exists():
                 raise DiffError(f"'{path}' not found in workspace")
             new_file = workspace_path
+            new_desc = "the workspace"
         else:
             _fetch_revision(new_rev, new_file)
+            new_desc = new_rev
+
+        if filecmp.cmp(old_file, new_file, shallow=False):
+            return (
+                f"No changes detected: '{path}' is identical between "
+                f"{old_rev} and {new_desc}."
+            )
 
         return handler.diff(old_file, new_file, output_format, detail_level)
 
