@@ -613,6 +613,61 @@ def remote_list(repository, owner, show_all):
         click.echo(f"{name}{default_marker}: {url}")
 
 
+@remote.command('status')
+@click.argument('remote_name', required=False)
+@click.option('--all', 'show_all', is_flag=True,
+              help='Report on every configured remote, not just the default')
+@click.option('--size', '--deep', 'deep', is_flag=True,
+              help='Walk the blob tree to count objects and disk usage '
+                   '(slow on large remotes; local remotes only)')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+def remote_status(remote_name, show_all, deep, json_output):
+    """Report on the status of configured DVC remotes.
+
+    Shows where each remote lives (local filesystem, another host, or
+    cloud), whether it is accessible and group-writable, its DVC layout
+    (v2 / v3 / mixed), and whether it has been archived to cold storage.
+
+    By default only the default remote is reported. Use a REMOTE_NAME to
+    target one remote, or --all to report on every configured remote.
+    Pass --size/--deep to also count objects and disk usage (this walks
+    the blob tree and can be slow).
+
+    \b
+    Examples:
+        dt remote status                  # Default remote, fast probe
+        dt remote status --all            # Every configured remote
+        dt remote status myremote --size  # One remote, with counts
+        dt remote status --json           # Machine-readable output
+    """
+    remotes = remote_mod.list_remotes(project_only=False)
+    if not remotes:
+        click.echo("No remotes configured.")
+        return
+
+    if remote_name:
+        selected = [r for r in remotes if r[0] == remote_name]
+        if not selected:
+            raise click.ClickException(f"No remote named '{remote_name}'")
+    elif show_all:
+        selected = remotes
+    else:
+        selected = [r for r in remotes if r[2]]  # is_default
+        if not selected:
+            # No default configured — fall back to reporting all.
+            selected = remotes
+
+    statuses = [
+        remote_mod.gather_remote_status(r, deep=deep) for r in selected
+    ]
+
+    if json_output:
+        import json
+        click.echo(json.dumps(statuses, indent=2))
+    else:
+        click.echo(remote_mod.format_remote_status(statuses))
+
+
 # =============================================================================
 # dt remote archive
 # =============================================================================
