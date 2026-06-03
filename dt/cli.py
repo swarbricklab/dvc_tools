@@ -1207,6 +1207,47 @@ def remote_archive_destroy(name, yes, keep_manifest):
         ))
 
 
+def _ensure_remote_ref_fresh(rev):
+    """Warn when a remote-tracking revision (e.g. origin/main) is stale and
+    offer to ``git fetch`` it.
+
+    Messaging goes to stderr so it never pollutes diff output that may be
+    piped (``-o json``/``md``/``csv``). When stdin isn't a TTY (CI, pipes) we
+    only warn rather than prompt.
+    """
+    if not rev:
+        return
+    info = utils.check_remote_ref_freshness(rev)
+    if not info or not info['stale']:
+        return
+
+    remote, branch = info['remote'], info['branch']
+    if info['local'] is None:
+        detail = "not present locally (never fetched)"
+    else:
+        detail = (f"behind {remote} "
+                  f"(local {info['local'][:8]} → remote {info['remote_sha'][:8]})")
+    click.echo(click.style(f"⚠ '{rev}' is {detail}.", fg='yellow'), err=True)
+
+    import sys
+    import subprocess
+    if sys.stdin.isatty():
+        if click.confirm(f"  Run 'git fetch {remote} {branch}' now?",
+                         default=True, err=True):
+            click.echo(f"  Fetching {remote}/{branch}…", err=True)
+            result = subprocess.run(
+                ['git', 'fetch', remote, branch],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise click.ClickException(
+                    f"git fetch failed: {result.stderr.strip()}"
+                )
+            click.echo(click.style("  ✓ Updated.", fg='green'), err=True)
+    else:
+        click.echo(f"  Run 'git fetch {remote} {branch}' to update.", err=True)
+
+
 @cli.command()
 @click.argument('paths', nargs=-1, type=click.Path())
 @click.option('--old', 'old_rev', default='HEAD',
@@ -1290,7 +1331,13 @@ def diff(paths, old_rev, new_rev, content, level, output_format, verbose, list_h
             reqs = ', '.join(h['requires']) if h['requires'] else '—'
             click.echo(f"  {h['name']:<20} extensions: {exts:<30} requires: {reqs}")
         return
-    
+
+    # Remote-tracking revisions (e.g. origin/main) can be stale locally, which
+    # silently produces a diff against an out-of-date target. Check and offer
+    # to refresh before doing any work.
+    _ensure_remote_ref_fresh(old_rev)
+    _ensure_remote_ref_fresh(new_rev)
+
     if content:
         if len(paths) not in (1, 2):
             raise click.ClickException(

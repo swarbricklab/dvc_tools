@@ -9,7 +9,7 @@ import shutil
 import socket
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dvc.repo import Repo
 from dvc_data.hashfile.hash import file_md5 as _dvc_file_md5
@@ -976,6 +976,80 @@ def get_hash_at_rev(path: str, rev: str, repo: Optional[Any] = None) -> Optional
         dvc_logger.setLevel(old_level)
     
     return None
+
+
+def parse_remote_ref(rev: str) -> Optional[Tuple[str, str]]:
+    """If *rev* names a remote-tracking ref, return ``(remote, branch)``.
+
+    A remote-tracking ref has the form ``<remote>/<branch>`` where ``<remote>``
+    is a configured git remote (e.g. ``origin/main``). Returns ``None`` for
+    anything that isn't a remote ref (``HEAD``, tags, bare SHAs, local
+    branches) or if git is unavailable.
+    """
+    if not rev or '/' not in rev:
+        return None
+    try:
+        result = subprocess.run(
+            ['git', 'remote'], capture_output=True, text=True,
+        )
+    except (OSError, FileNotFoundError):
+        return None
+    if result.returncode != 0:
+        return None
+    remotes = set(result.stdout.split())
+    # Prefer the longest matching remote name; remote names can't contain '/'
+    # but branch names can, so a longer prefix is the more specific match.
+    for remote in sorted(remotes, key=len, reverse=True):
+        prefix = remote + '/'
+        if rev.startswith(prefix):
+            branch = rev[len(prefix):]
+            if branch:
+                return remote, branch
+    return None
+
+
+def check_remote_ref_freshness(rev: str) -> Optional[Dict[str, Any]]:
+    """Check whether a remote-tracking ref is up to date with its remote.
+
+    Performs a lightweight ``git ls-remote`` (no object download) to read the
+    remote branch tip and compares it to the local copy of the ref.
+
+    Returns ``None`` if *rev* is not a remote-tracking ref or freshness cannot
+    be determined (e.g. offline, remote unreachable). Otherwise returns::
+
+        {'remote': 'origin', 'branch': 'main',
+         'local': <sha or None>, 'remote_sha': <sha>, 'stale': <bool>}
+    """
+    parsed = parse_remote_ref(rev)
+    if parsed is None:
+        return None
+    remote, branch = parsed
+
+    try:
+        ls = subprocess.run(
+            ['git', 'ls-remote', '--heads', remote, branch],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if ls.returncode != 0 or not ls.stdout.strip():
+        # Remote unreachable, or branch not found on the remote — can't tell.
+        return None
+    remote_sha = ls.stdout.split()[0]
+
+    local = subprocess.run(
+        ['git', 'rev-parse', '--verify', '--quiet', rev],
+        capture_output=True, text=True,
+    )
+    local_sha = local.stdout.strip() if local.returncode == 0 else None
+
+    return {
+        'remote': remote,
+        'branch': branch,
+        'local': local_sha or None,
+        'remote_sha': remote_sha,
+        'stale': local_sha != remote_sha,
+    }
 
 
 def get_candidate_commits(
