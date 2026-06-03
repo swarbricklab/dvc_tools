@@ -621,6 +621,259 @@ def find_local_remote_from_repo(
     return find_local_remote(remotes, check_exists=check_exists)
 
 
+def _friendly_layout(layout: str) -> str:
+    """Map an internal layout constant to a short label for display."""
+    return {
+        'dvc-v3': 'v3',
+        'dvc-v2': 'v2',
+        'dvc-mixed': 'mixed',
+    }.get(layout, layout)
+
+
+def classify_location(url: str) -> dict:
+    """Classify a remote URL by where it lives.
+
+    Returns a dict with keys:
+      - kind: 'local-path' | 'ssh' | 'cloud'
+      - host: the SSH host (None for local paths / cloud)
+      - path: the filesystem path (None for cloud)
+      - scheme: the URL scheme for cloud remotes (e.g. 's3'), else None
+      - is_local: True if the path is accessible on this host's filesystem
+    """
+    # Cloud / object-store schemes (s3://, gs://, azure://, https://, ...).
+    # Detect these up front: ``parse_remote_url`` would otherwise treat the
+    # scheme as an SCP-style host (e.g. 's3' from 's3://bucket/key').
+    if '://' in url:
+        scheme = url.split('://', 1)[0].lower()
+        if scheme not in ('ssh', 'file'):
+            return {
+                'kind': 'cloud', 'host': None, 'path': None,
+                'scheme': scheme, 'is_local': False,
+            }
+
+    host, path = parse_remote_url(url)
+
+    if path is None:
+        # Cloud storage (s3://, gs://, https://, ...) — not a filesystem path.
+        return {
+            'kind': 'cloud', 'host': None, 'path': None,
+            'scheme': host, 'is_local': False,
+        }
+
+    if host is None:
+        # Bare local path or file:// URL.
+        return {
+            'kind': 'local-path', 'host': None, 'path': path,
+            'scheme': None, 'is_local': True,
+        }
+
+    # SSH-style URL — local only if the host resolves to this machine.
+    return {
+        'kind': 'ssh', 'host': host, 'path': path,
+        'scheme': None, 'is_local': is_local_host(host),
+    }
+
+
+def _check_access(local_path: Optional[str]) -> dict:
+    """Probe a locally-resolvable path for existence and group-writability.
+
+    ``local_path`` is the result of :func:`extract_local_path` (i.e. ``None``
+    for cloud or non-local SSH remotes). Returns a dict with keys
+    ``checkable``, ``accessible``, ``group_writable``, ``group``, ``detail``.
+    """
+    if local_path is None:
+        return {
+            'checkable': False, 'accessible': None,
+            'group_writable': None, 'group': None,
+            'detail': 'not locally checkable (remote host or cloud)',
+        }
+
+    p = Path(local_path)
+    if not p.exists():
+        return {
+            'checkable': True, 'accessible': False,
+            'group_writable': None, 'group': None,
+            'detail': f'path not found: {local_path}',
+        }
+
+    import grp
+    try:
+        st = p.stat()
+        group_writable = bool(st.st_mode & 0o020)
+        try:
+            group = grp.getgrgid(st.st_gid).gr_name
+        except (KeyError, OSError):
+            group = str(st.st_gid)
+    except OSError as e:
+        return {
+            'checkable': True, 'accessible': True,
+            'group_writable': None, 'group': None,
+            'detail': f'accessible (could not stat: {e})',
+        }
+
+    if group_writable:
+        detail = f'accessible, group-writable (group: {group})'
+    else:
+        detail = f'accessible, NOT group-writable (group: {group})'
+    return {
+        'checkable': True, 'accessible': True,
+        'group_writable': group_writable, 'group': group,
+        'detail': detail,
+    }
+
+
+def gather_remote_status(
+    remote: Tuple[str, str, bool],
+    repo_path: Optional[Path] = None,
+    deep: bool = False,
+) -> dict:
+    """Collect status information for a single configured remote.
+
+    Pure data gathering (no printing) so it is easy to test and to render
+    as either a human report or JSON. ``remote`` is a ``(name, url,
+    is_default)`` tuple as returned by :func:`list_remotes`.
+
+    The ``deep`` flag enables an O(objects) walk of the remote's blob tree
+    to count objects and bytes; it is skipped for remotes that are not
+    locally accessible or that have been archived (pruned).
+    """
+    # Lazy imports to avoid a circular import (operations imports this module).
+    from .archive import operations as ops
+    from .archive import signpost as signpost_mod
+    from .archive import registry as registry_mod
+    from .errors import ArchiveError
+
+    name, url, is_default = remote
+    loc = classify_location(url)
+    local_path = extract_local_path(url) if loc['kind'] != 'cloud' else None
+
+    info: dict = {
+        'name': name,
+        'url': url,
+        'is_default': is_default,
+        'kind': loc['kind'],
+        'host': loc['host'],
+        'scheme': loc['scheme'],
+        'path': loc['path'],
+        'is_local': loc['is_local'],
+        'access': _check_access(local_path),
+        'layout': None,
+        'archived': None,
+        'objects': None,
+        'size_bytes': None,
+    }
+
+    # Archive status — a signpost at the remote root means it was pruned to
+    # cold storage. Cross-reference the central register (if configured) for
+    # verification state and object/byte counts recorded at archive time.
+    signpost = None
+    if local_path:
+        signpost = signpost_mod.detect(Path(local_path))
+    if signpost is not None:
+        archived = {
+            'backend': signpost.backend,
+            'backend_dir': signpost.backend_dir,
+            'archive_name': signpost.archive_name,
+            'pruned_at': signpost.pruned_at,
+            'source_layout': signpost.source_layout,
+            'verified_at': None,
+            'verified_ok': None,
+            'total_objects': None,
+            'total_size_bytes': None,
+        }
+        root = repo_path or utils.find_project_root()
+        try:
+            entry = registry_mod.read_entry(
+                registry_mod.project_slug(root), signpost.archive_name)
+        except Exception:
+            entry = None
+        if entry is not None:
+            archived['verified_at'] = entry.status.verified_at
+            archived['verified_ok'] = entry.status.verified_ok
+            archived['total_objects'] = entry.total_objects
+            archived['total_size_bytes'] = entry.total_size_bytes
+        info['archived'] = archived
+        # Pruned remote — blobs live in cold storage, not on disk.
+        info['layout'] = _friendly_layout(signpost.source_layout)
+        info['layout_note'] = 'pruned — data in cold storage'
+        return info
+
+    # Not archived — detect the on-disk layout if we can reach it.
+    if local_path and Path(local_path).exists():
+        try:
+            layout = ops.detect_source_layout(Path(local_path))
+            info['layout'] = _friendly_layout(layout)
+            if deep:
+                _keys, stats = ops.scan_prefixes(Path(local_path), layout)
+                info['objects'] = sum(n for n, _ in stats.values())
+                info['size_bytes'] = sum(b for _, b in stats.values())
+        except ArchiveError:
+            # No blob layout present — configured but never pushed to.
+            info['layout'] = 'uninitialized'
+
+    return info
+
+
+def format_remote_status(statuses: List[dict]) -> str:
+    """Render :func:`gather_remote_status` results as a human report."""
+    if not statuses:
+        return "No remotes configured."
+
+    blocks = []
+    for s in statuses:
+        default = "  (default)" if s['is_default'] else ""
+        lines = [f"Remote: {s['name']}{default}"]
+        lines.append(f"  URL:        {s['url']}")
+
+        if s['kind'] == 'cloud':
+            location = f"cloud ({s['scheme']})"
+        elif s['kind'] == 'local-path':
+            location = "local (this filesystem)"
+        elif s['is_local']:
+            location = f"local host ({s['host']})"
+        else:
+            location = f"remote host: {s['host']}"
+        lines.append(f"  Location:   {location}")
+
+        lines.append(f"  Access:     {s['access']['detail']}")
+
+        layout = s.get('layout') or 'unknown'
+        note = s.get('layout_note')
+        lines.append(f"  Layout:     {layout}" + (f"  ({note})" if note else ""))
+
+        arch = s.get('archived')
+        if arch:
+            dest = f"{arch['backend']}:{arch['backend_dir']}"
+            extras = []
+            if arch.get('pruned_at'):
+                extras.append(f"pruned {arch['pruned_at'][:10]}")
+            if arch.get('verified_ok') is True and arch.get('verified_at'):
+                extras.append(f"verified {arch['verified_at'][:10]}")
+            elif arch.get('verified_ok') is False:
+                extras.append("verification FAILED")
+            suffix = f"  ({'; '.join(extras)})" if extras else ""
+            lines.append(f"  Archived:   yes -> {dest}{suffix}")
+            if arch.get('total_objects') is not None:
+                lines.append(
+                    f"  Objects:    {arch['total_objects']:,} "
+                    f"(at archive time)")
+            if arch.get('total_size_bytes') is not None:
+                lines.append(
+                    f"  Disk usage: {utils.format_size(arch['total_size_bytes'])} "
+                    f"(at archive time)")
+        else:
+            lines.append("  Archived:   no")
+
+        if s.get('objects') is not None:
+            lines.append(f"  Objects:    {s['objects']:,}")
+        if s.get('size_bytes') is not None:
+            lines.append(f"  Disk usage: {utils.format_size(s['size_bytes'])}")
+
+        blocks.append("\n".join(lines))
+
+    return "\n\n".join(blocks)
+
+
 def check_remote_access_from_repo(
     repo_spec: str,
     owner: Optional[str] = None,

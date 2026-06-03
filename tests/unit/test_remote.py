@@ -14,6 +14,9 @@ from dt.remote import (
     configure_local_override,
     init_remote,
     list_remotes,
+    classify_location,
+    gather_remote_status,
+    format_remote_status,
 )
 from dt.errors import RemoteError
 
@@ -403,3 +406,199 @@ class TestConfigureLocalOverride:
                     )
 
         assert result == "/local/path"
+
+
+# =============================================================================
+# classify_location tests
+# =============================================================================
+
+class TestClassifyLocation:
+    """Tests for the classify_location function."""
+
+    def test_bare_local_path(self):
+        loc = classify_location("/data/remotes/proj")
+        assert loc["kind"] == "local-path"
+        assert loc["host"] is None
+        assert loc["path"] == "/data/remotes/proj"
+        assert loc["is_local"] is True
+
+    def test_cloud_remote(self):
+        loc = classify_location("s3://bucket/key")
+        assert loc["kind"] == "cloud"
+        assert loc["scheme"] == "s3"
+        assert loc["path"] is None
+        assert loc["is_local"] is False
+
+    def test_ssh_remote_non_local(self):
+        with patch("dt.remote.is_local_host", return_value=False):
+            loc = classify_location("ssh://elsewhere.example.org/data/proj")
+        assert loc["kind"] == "ssh"
+        assert loc["host"] == "elsewhere.example.org"
+        assert loc["path"] == "/data/proj"
+        assert loc["is_local"] is False
+
+    def test_ssh_remote_local_host(self):
+        with patch("dt.remote.is_local_host", return_value=True):
+            loc = classify_location("ssh://here.example.org/data/proj")
+        assert loc["is_local"] is True
+
+
+# =============================================================================
+# gather_remote_status tests
+# =============================================================================
+
+class TestGatherRemoteStatus:
+    """Tests for the gather_remote_status function."""
+
+    def test_accessible_v3_remote_not_archived(self, tmp_path):
+        """A reachable v3 remote reports layout and group-writability."""
+        remote_dir = tmp_path / "proj"
+        (remote_dir / "files" / "md5" / "00").mkdir(parents=True)
+
+        info = gather_remote_status((str(remote_dir).split("/")[-1], str(remote_dir), True))
+
+        assert info["is_default"] is True
+        assert info["kind"] == "local-path"
+        assert info["is_local"] is True
+        assert info["access"]["accessible"] is True
+        assert info["layout"] == "v3"
+        assert info["archived"] is None
+        # No deep scan requested.
+        assert info["objects"] is None
+
+    def test_uninitialized_remote(self, tmp_path):
+        """A configured-but-empty remote reports 'uninitialized'."""
+        remote_dir = tmp_path / "proj"
+        remote_dir.mkdir()
+
+        info = gather_remote_status(("proj", str(remote_dir), False))
+
+        assert info["layout"] == "uninitialized"
+        assert info["archived"] is None
+
+    def test_missing_path_not_accessible(self, tmp_path):
+        """A remote whose path does not exist is reported inaccessible."""
+        missing = tmp_path / "nope"
+
+        info = gather_remote_status(("proj", str(missing), False))
+
+        assert info["access"]["accessible"] is False
+        assert "path not found" in info["access"]["detail"]
+        assert info["layout"] is None
+
+    def test_ssh_remote_not_locally_checkable(self):
+        """A non-local SSH remote is not probed on the filesystem."""
+        with patch("dt.remote.is_local_host", return_value=False):
+            info = gather_remote_status(
+                ("rem", "ssh://elsewhere.example.org/data/proj", False))
+
+        assert info["kind"] == "ssh"
+        assert info["is_local"] is False
+        assert info["access"]["checkable"] is False
+        assert info["layout"] is None
+
+    def test_deep_scan_counts_objects(self, tmp_path):
+        """--deep walks the blob tree and reports object/byte counts."""
+        remote_dir = tmp_path / "proj"
+        prefix = remote_dir / "files" / "md5" / "00"
+        prefix.mkdir(parents=True)
+        (prefix / "abc123").write_bytes(b"hello")  # 5 bytes
+
+        info = gather_remote_status(("proj", str(remote_dir), True), deep=True)
+
+        assert info["layout"] == "v3"
+        assert info["objects"] == 1
+        assert info["size_bytes"] == 5
+
+    def test_archived_remote_reads_signpost(self, tmp_path):
+        """A pruned remote with a signpost reports archive destination."""
+        from dt.archive.signpost import ArchiveSignpost
+
+        remote_dir = tmp_path / "proj"
+        remote_dir.mkdir()
+        fake_signpost = ArchiveSignpost(
+            archive_name="proj-2026",
+            backend="mdss",
+            backend_dir="tape/proj",
+            source_layout="dvc-v3",
+            source_remote=str(remote_dir),
+            git_url="https://example.org/proj",
+            git_ref="abc",
+            manifest_in_repo=".dvc/archives/proj-2026.manifest.yaml",
+            pruned_at="2026-05-30T10:00:00+00:00",
+            pruned_by="someone",
+            path=remote_dir / "ARCHIVED.yaml",
+        )
+
+        with patch("dt.archive.signpost.detect", return_value=fake_signpost):
+            with patch("dt.archive.registry.read_entry", return_value=None):
+                info = gather_remote_status(("proj", str(remote_dir), True))
+
+        assert info["archived"]["backend"] == "mdss"
+        assert info["archived"]["backend_dir"] == "tape/proj"
+        assert info["layout"] == "v3"
+        assert info["layout_note"] == "pruned — data in cold storage"
+
+
+# =============================================================================
+# format_remote_status tests
+# =============================================================================
+
+class TestFormatRemoteStatus:
+    """Tests for the format_remote_status function."""
+
+    def test_empty(self):
+        assert format_remote_status([]) == "No remotes configured."
+
+    def test_renders_key_fields(self):
+        status = {
+            "name": "myremote",
+            "url": "/data/proj",
+            "is_default": True,
+            "kind": "local-path",
+            "host": None,
+            "scheme": None,
+            "path": "/data/proj",
+            "is_local": True,
+            "access": {"accessible": True, "detail": "accessible, group-writable (group: ab12)"},
+            "layout": "v3",
+            "archived": None,
+            "objects": None,
+            "size_bytes": None,
+        }
+        out = format_remote_status([status])
+        assert "Remote: myremote  (default)" in out
+        assert "Location:   local (this filesystem)" in out
+        assert "Layout:     v3" in out
+        assert "Archived:   no" in out
+
+    def test_renders_archived(self):
+        status = {
+            "name": "myremote",
+            "url": "/data/proj",
+            "is_default": False,
+            "kind": "local-path",
+            "host": None,
+            "scheme": None,
+            "path": "/data/proj",
+            "is_local": True,
+            "access": {"accessible": True, "detail": "accessible"},
+            "layout": "v3",
+            "layout_note": "pruned — data in cold storage",
+            "archived": {
+                "backend": "mdss",
+                "backend_dir": "tape/proj",
+                "pruned_at": "2026-05-30T10:00:00+00:00",
+                "verified_at": "2026-05-31T00:00:00+00:00",
+                "verified_ok": True,
+                "total_objects": 1234,
+                "total_size_bytes": 5000,
+            },
+            "objects": None,
+            "size_bytes": None,
+        }
+        out = format_remote_status([status])
+        assert "Archived:   yes -> mdss:tape/proj" in out
+        assert "pruned 2026-05-30" in out
+        assert "verified 2026-05-31" in out
+        assert "1,234" in out

@@ -11,6 +11,7 @@ from . import errors
 from . import init as init_mod
 from . import cache as cache_mod
 from . import remote as remote_mod
+from . import remote_verify as remote_verify_mod
 from . import doctor as doctor_mod
 from . import auth as auth_mod
 from . import push as push_mod
@@ -611,6 +612,157 @@ def remote_list(repository, owner, show_all):
     for name, url, is_default in remotes:
         default_marker = " (default)" if is_default else ""
         click.echo(f"{name}{default_marker}: {url}")
+
+
+@remote.command('status')
+@click.argument('remote_name', required=False)
+@click.option('--all', 'show_all', is_flag=True,
+              help='Report on every configured remote, not just the default')
+@click.option('--size', '--deep', 'deep', is_flag=True,
+              help='Walk the blob tree to count objects and disk usage '
+                   '(slow on large remotes; local remotes only)')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+def remote_status(remote_name, show_all, deep, json_output):
+    """Report on the status of configured DVC remotes.
+
+    Shows where each remote lives (local filesystem, another host, or
+    cloud), whether it is accessible and group-writable, its DVC layout
+    (v2 / v3 / mixed), and whether it has been archived to cold storage.
+
+    By default only the default remote is reported. Use a REMOTE_NAME to
+    target one remote, or --all to report on every configured remote.
+    Pass --size/--deep to also count objects and disk usage (this walks
+    the blob tree and can be slow).
+
+    \b
+    Examples:
+        dt remote status                  # Default remote, fast probe
+        dt remote status --all            # Every configured remote
+        dt remote status myremote --size  # One remote, with counts
+        dt remote status --json           # Machine-readable output
+    """
+    remotes = remote_mod.list_remotes(project_only=False)
+    if not remotes:
+        click.echo("No remotes configured.")
+        return
+
+    if remote_name:
+        selected = [r for r in remotes if r[0] == remote_name]
+        if not selected:
+            raise click.ClickException(f"No remote named '{remote_name}'")
+    elif show_all:
+        selected = remotes
+    else:
+        selected = [r for r in remotes if r[2]]  # is_default
+        if not selected:
+            # No default configured — fall back to reporting all.
+            selected = remotes
+
+    statuses = [
+        remote_mod.gather_remote_status(r, deep=deep) for r in selected
+    ]
+
+    if json_output:
+        import json
+        click.echo(json.dumps(statuses, indent=2))
+    else:
+        click.echo(remote_mod.format_remote_status(statuses))
+
+
+@remote.command('verify')
+@click.argument('remote_name', required=False)
+@click.option('--jobs', '-j', type=int, default=None,
+              help='Number of hashing threads per node (default: from '
+                   'archive.scan_jobs config).')
+@click.option('--workers', '-w', type=int, default=None,
+              help='Distribute verification across N compute nodes via qxub.')
+@click.option('--report', type=click.Path(), default=None,
+              help='Write the JSON verification report to this path.')
+@click.option('--json', 'json_output', is_flag=True,
+              help='Print the JSON report to stdout instead of a summary.')
+@click.option('--no-wait', is_flag=True,
+              help='With --workers: submit jobs and exit without waiting.')
+@click.option('--worker', type=int, default=None,
+              help='Worker ID (internal, used by submitted jobs).')
+@click.option('--num-workers', type=int, default=None,
+              help='Total workers (internal, used by submitted jobs).')
+@click.option('--remote-dir', default=None,
+              help='Resolved remote path (internal, used by submitted jobs).')
+@click.option('--report-dir', default=None,
+              help='Partial-report directory (internal, used by jobs).')
+@click.option('--verbose', '-v', is_flag=True, help='Print detailed progress.')
+def remote_verify(remote_name, jobs, workers, report, json_output, no_wait,
+                  worker, num_workers, remote_dir, report_dir, verbose):
+    """Exhaustively verify that each blob in a remote matches its checksum.
+
+    Hashes every object in the remote and compares it to the md5 implied by
+    its path. This catches silent corruption and the truncated/partial blobs
+    left behind when a transfer is interrupted (e.g. a push job hitting a
+    walltime limit).
+
+    Produces a machine-readable JSON report (--report / --json) listing the
+    bad objects, suitable for feeding into downstream diagnosis or repair.
+
+    Verification reads blobs directly, so the remote must be on a
+    locally-accessible filesystem.
+
+    \b
+    Examples:
+        dt remote verify                       # Verify the default remote
+        dt remote verify myremote -j 16        # 16 hashing threads
+        dt remote verify --report verify.json  # Write JSON report
+        dt remote verify --workers 32          # Distribute over 32 nodes
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    try:
+        # Worker mode: verify this worker's prefix partition (called by qxub).
+        if worker is not None and num_workers and remote_dir and report_dir:
+            remote_verify_mod.worker_verify(
+                remote_dir=_Path(remote_dir),
+                worker_id=worker,
+                num_workers=num_workers,
+                report_dir=_Path(report_dir),
+                jobs=jobs,
+                verbose=verbose,
+            )
+            return
+
+        # Distributed mode: submit qxub jobs, then merge partial reports.
+        if workers is not None:
+            job_ids, rdir, rep = remote_verify_mod.parallel_verify(
+                remote_name, num_workers=workers, jobs=jobs,
+                wait=not no_wait, verbose=verbose)
+            if rep is None:
+                click.echo(f"Submitted {len(job_ids)} job(s); partial "
+                           f"reports will land in {rdir}")
+                click.echo(f"Monitor with: qxub monitor {' '.join(job_ids)}")
+                return
+        else:
+            # Single-node mode.
+            name, url, path = remote_verify_mod.resolve_local_remote(
+                remote_name)
+            totals, bad_entries, layout = remote_verify_mod.verify_remote(
+                path, jobs=jobs, progress=verbose)
+            rep = remote_verify_mod.build_report(
+                name, url, layout, totals, bad_entries, jobs or 0)
+
+        if report:
+            with open(report, 'w') as f:
+                _json.dump(rep, f, indent=2)
+            click.echo(f"Report written to {report}")
+
+        if json_output:
+            click.echo(_json.dumps(rep, indent=2))
+        else:
+            click.echo(remote_verify_mod.format_report_summary(rep))
+
+        if rep['totals']['bad'] > 0:
+            raise SystemExit(1)
+
+    except remote_mod.RemoteError as e:
+        raise click.ClickException(str(e))
 
 
 # =============================================================================
