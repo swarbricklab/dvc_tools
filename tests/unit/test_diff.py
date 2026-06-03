@@ -31,6 +31,7 @@ from dt.diff import (
     _format_html,
     _render_tree_diff_style,
     _run_dvc_diff_md,
+    _summarise_daff_json,
 )
 from dt.errors import DiffError
 
@@ -134,14 +135,20 @@ class TestCSVHandler:
                 assert "daff" in call_args
 
     def test_diff_with_html_output_format(self, tmp_path):
-        """Test that HTML output format is requested correctly."""
+        """HTML output: daff produces a CSV diff which is then rendered to HTML.
+
+        daff has no ``--output-format html``; CSVHandler asks for CSV output
+        and feeds it through ``daff render``. The diff is computed with
+        space-separated flags (``--output-format csv``), and the final
+        subprocess call is ``daff render <tmpfile>``.
+        """
         old_file = tmp_path / "old.csv"
         new_file = tmp_path / "new.csv"
         old_file.write_text("a,b\n1,2\n")
         new_file.write_text("a,b\n1,3\n")
-        
+
         handler = CSVHandler()
-        
+
         with patch("shutil.which", return_value="/usr/bin/daff"):
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(
@@ -149,11 +156,120 @@ class TestCSVHandler:
                     stdout="<html>diff</html>",
                     stderr="",
                 )
-                
-                result = handler.diff(old_file, new_file, output_format="html")
-                
-                call_args = mock_run.call_args[0][0]
-                assert "--output-format=html" in call_args
+
+                handler.diff(old_file, new_file, output_format="html")
+
+                # First call: compute the diff with CSV output (space-separated)
+                diff_cmd = mock_run.call_args_list[0][0][0]
+                assert "--output-format" in diff_cmd
+                assert diff_cmd[diff_cmd.index("--output-format") + 1] == "csv"
+                # The "=" form must never be used (daff treats it as a filename)
+                assert not any("--output-format=" in str(a) for a in diff_cmd)
+                # Final call renders the diff CSV to HTML
+                render_cmd = mock_run.call_args_list[-1][0][0]
+                assert render_cmd[:2] == ["daff", "render"]
+
+    def test_tsv_passes_input_format_tsv(self, tmp_path):
+        """A .tsv file must be diffed with an explicit --input-format tsv,
+        since daff otherwise mis-parses tab-separated data."""
+        old_file = tmp_path / "old.tsv"
+        new_file = tmp_path / "new.tsv"
+        old_file.write_text("a\tb\n1\t2\n")
+        new_file.write_text("a\tb\n1\t3\n")
+
+        handler = CSVHandler()
+
+        with patch("shutil.which", return_value="/usr/bin/daff"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="diff output", stderr="",
+                )
+                handler.diff(old_file, new_file)
+                cmd = mock_run.call_args[0][0]
+                assert "--input-format" in cmd
+                assert cmd[cmd.index("--input-format") + 1] == "tsv"
+
+    def test_csv_passes_input_format_csv(self, tmp_path):
+        """A .csv file is diffed with an explicit --input-format csv."""
+        old_file = tmp_path / "old.csv"
+        new_file = tmp_path / "new.csv"
+        old_file.write_text("a,b\n1,2\n")
+        new_file.write_text("a,b\n1,3\n")
+
+        handler = CSVHandler()
+
+        with patch("shutil.which", return_value="/usr/bin/daff"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="diff output", stderr="",
+                )
+                handler.diff(old_file, new_file)
+                cmd = mock_run.call_args[0][0]
+                assert "--input-format" in cmd
+                assert cmd[cmd.index("--input-format") + 1] == "csv"
+
+    def test_txt_sniffs_tab_delimiter(self, tmp_path):
+        """A tab-separated .txt file is sniffed and diffed as TSV."""
+        old_file = tmp_path / "old.txt"
+        new_file = tmp_path / "new.txt"
+        old_file.write_text("a\tb\tc\n1\t2\t3\n")
+        new_file.write_text("a\tb\tc\n1\t2\t9\n")
+
+        handler = CSVHandler()
+        assert handler._input_format(old_file) == "tsv"
+
+    def test_summary_uses_space_separated_output_format(self, tmp_path):
+        """Summary mode must use the space-separated --output-format json form
+        (daff treats the '=' form as a filename)."""
+        old_file = tmp_path / "old.tsv"
+        new_file = tmp_path / "new.tsv"
+        old_file.write_text("a\tb\n1\t2\n")
+        new_file.write_text("a\tb\n1\t3\n")
+
+        handler = CSVHandler()
+
+        with patch("shutil.which", return_value="/usr/bin/daff"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout='{"sheet": []}', stderr="",
+                )
+                handler.diff(old_file, new_file, detail_level="summary")
+                cmd = mock_run.call_args[0][0]
+                assert "--output-format" in cmd
+                assert cmd[cmd.index("--output-format") + 1] == "json"
+                assert not any("--output-format=" in str(a) for a in cmd)
+
+
+class TestSummariseDaffJson:
+    """Tests for parsing daff JSON output into a row-count summary."""
+
+    def test_parses_sheet_wrapped_output(self):
+        """Newer daff wraps rows in {"sheet": [...]}."""
+        payload = json.dumps({"sheet": [
+            ["@@", "id", "name"],
+            ["", "1", "A"],
+            ["---", "2", "B"],
+            ["->", "3", "C->CC"],
+            ["+++", "4", "D"],
+        ]})
+        result = _summarise_daff_json(payload)
+        assert "1 row(s) added" in result
+        assert "1 row(s) deleted" in result
+        assert "1 row(s) modified" in result
+
+    def test_parses_bare_list_output(self):
+        """Older daff emits a bare list of rows."""
+        payload = json.dumps([
+            ["@@", "id"],
+            ["+++", "5"],
+            ["+++", "6"],
+        ])
+        result = _summarise_daff_json(payload)
+        assert "2 row(s) added" in result
+
+    def test_handles_unparseable_output(self):
+        result = _summarise_daff_json("not json")
+        assert "could not parse" in result
 
 
 # =============================================================================
@@ -300,6 +416,35 @@ class TestDiff:
                 # This will fail because of the complex mocking, but we verify
                 # the fallback logic
                 pass
+
+    def test_direct_mode_reports_no_changes_for_identical_files(self, tmp_path):
+        """Identical files short-circuit to an explicit no-changes message."""
+        a = tmp_path / "a.csv"
+        b = tmp_path / "b.csv"
+        a.write_text("id,name\n1,foo\n")
+        b.write_text("id,name\n1,foo\n")
+
+        result = content_diff(str(a), compare_path=str(b))
+
+        assert "No changes detected" in result
+        assert str(a) in result and str(b) in result
+
+    def test_direct_mode_diffs_when_files_differ(self, tmp_path):
+        """Differing files are passed to the handler rather than short-circuited."""
+        a = tmp_path / "a.csv"
+        b = tmp_path / "b.csv"
+        a.write_text("id,name\n1,foo\n")
+        b.write_text("id,name\n1,bar\n")
+
+        with patch("dt.diff.get_handler") as mock_get:
+            mock_handler = MagicMock()
+            mock_handler.diff.return_value = "real diff"
+            mock_get.return_value = mock_handler
+
+            result = content_diff(str(a), compare_path=str(b))
+
+        assert result == "real diff"
+        mock_handler.diff.assert_called_once()
 
 
 # =============================================================================
