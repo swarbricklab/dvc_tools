@@ -680,6 +680,12 @@ def remote_status(remote_name, show_all, deep, json_output):
               help='Write the JSON verification report to this path.')
 @click.option('--json', 'json_output', is_flag=True,
               help='Print the JSON report to stdout instead of a summary.')
+@click.option('--full', is_flag=True,
+              help='Re-hash every blob, ignoring (and rebuilding) the '
+                   'incremental verification ledger.')
+@click.option('--no-ledger', is_flag=True,
+              help='Do not read or write the incremental verification ledger '
+                   'in the remote.')
 @click.option('--no-wait', is_flag=True,
               help='With --workers: submit jobs and exit without waiting.')
 @click.option('--worker', type=int, default=None,
@@ -691,8 +697,9 @@ def remote_status(remote_name, show_all, deep, json_output):
 @click.option('--report-dir', default=None,
               help='Partial-report directory (internal, used by jobs).')
 @click.option('--verbose', '-v', is_flag=True, help='Print detailed progress.')
-def remote_verify(remote_name, jobs, workers, report, json_output, no_wait,
-                  worker, num_workers, remote_dir, report_dir, verbose):
+def remote_verify(remote_name, jobs, workers, report, json_output, full,
+                  no_ledger, no_wait, worker, num_workers, remote_dir,
+                  report_dir, verbose):
     """Exhaustively verify that each blob in a remote matches its checksum.
 
     Hashes every object in the remote and compares it to the md5 implied by
@@ -701,7 +708,12 @@ def remote_verify(remote_name, jobs, workers, report, json_output, no_wait,
     walltime limit).
 
     Produces a machine-readable JSON report (--report / --json) listing the
-    bad objects, suitable for feeding into downstream diagnosis or repair.
+    bad and incomplete objects, suitable for feeding into downstream
+    diagnosis or repair.
+
+    Verified blobs are recorded in a ledger under <remote>/.dt-verify/ so
+    later runs skip anything unchanged since it last passed; --full forces a
+    full re-hash and --no-ledger disables the ledger entirely.
 
     Verification reads blobs directly, so the remote must be on a
     locally-accessible filesystem.
@@ -711,10 +723,13 @@ def remote_verify(remote_name, jobs, workers, report, json_output, no_wait,
         dt remote verify                       # Verify the default remote
         dt remote verify myremote -j 16        # 16 hashing threads
         dt remote verify --report verify.json  # Write JSON report
+        dt remote verify --full                # Ignore ledger, re-hash all
         dt remote verify --workers 32          # Distribute over 32 nodes
     """
     import json as _json
     from pathlib import Path as _Path
+
+    use_ledger = not no_ledger
 
     try:
         # Worker mode: verify this worker's prefix partition (called by qxub).
@@ -725,6 +740,8 @@ def remote_verify(remote_name, jobs, workers, report, json_output, no_wait,
                 num_workers=num_workers,
                 report_dir=_Path(report_dir),
                 jobs=jobs,
+                use_ledger=use_ledger,
+                full=full,
                 verbose=verbose,
             )
             return
@@ -733,6 +750,7 @@ def remote_verify(remote_name, jobs, workers, report, json_output, no_wait,
         if workers is not None:
             job_ids, rdir, rep = remote_verify_mod.parallel_verify(
                 remote_name, num_workers=workers, jobs=jobs,
+                use_ledger=use_ledger, full=full,
                 wait=not no_wait, verbose=verbose)
             if rep is None:
                 click.echo(f"Submitted {len(job_ids)} job(s); partial "
@@ -743,10 +761,13 @@ def remote_verify(remote_name, jobs, workers, report, json_output, no_wait,
             # Single-node mode.
             name, url, path = remote_verify_mod.resolve_local_remote(
                 remote_name)
-            totals, bad_entries, layout = remote_verify_mod.verify_remote(
-                path, jobs=jobs, progress=verbose)
+            totals, bad_entries, incomplete_entries, layout = \
+                remote_verify_mod.verify_remote(
+                    path, jobs=jobs, progress=verbose,
+                    use_ledger=use_ledger, full=full)
             rep = remote_verify_mod.build_report(
-                name, url, layout, totals, bad_entries, jobs or 0)
+                name, url, layout, totals, bad_entries, incomplete_entries,
+                jobs or 0, ledger_used=use_ledger)
 
         if report:
             with open(report, 'w') as f:

@@ -47,13 +47,15 @@ class TestVerifyRemote:
         _place_blob(remote, b"alpha\n")
         _place_blob(remote, b"beta\n")
 
-        totals, bad, layout = rv.verify_remote(remote, jobs=2)
+        totals, bad, incomplete, layout = rv.verify_remote(
+            remote, jobs=2, use_ledger=False)
 
         assert layout == "dvc-v3"
         assert totals["objects"] == 2
         assert totals["ok"] == 2
         assert totals["bad"] == 0
         assert bad == []
+        assert incomplete == []
 
     def test_detects_corrupt_blob(self, tmp_path):
         remote = tmp_path / "remote"
@@ -61,7 +63,8 @@ class TestVerifyRemote:
         # A blob whose content does not match its name (truncated transfer).
         _place_blob(remote, b"truncated", name="ff" + "0" * 30)
 
-        totals, bad, _ = rv.verify_remote(remote, jobs=2)
+        totals, bad, _inc, _ = rv.verify_remote(
+            remote, jobs=2, use_ledger=False)
 
         assert totals["objects"] == 2
         assert totals["ok"] == 1
@@ -72,22 +75,97 @@ class TestVerifyRemote:
         assert bad[0]["expected_md5"] == "ff" + "0" * 30
         assert bad[0]["actual_md5"] != bad[0]["expected_md5"]
 
+    def test_tmp_file_reported_incomplete_not_bad(self, tmp_path):
+        """A leftover *.tmp from a killed transfer is 'incomplete', not 'bad'."""
+        remote = tmp_path / "remote"
+        _place_blob(remote, b"good\n")
+        d = remote / "files" / "md5" / "ab"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ("c" * 30 + ".tmp")).write_bytes(b"partial")
+
+        totals, bad, incomplete, _ = rv.verify_remote(
+            remote, jobs=2, use_ledger=False)
+
+        assert totals["ok"] == 1
+        assert totals["bad"] == 0
+        assert totals["incomplete"] == 1
+        assert bad == []
+        assert len(incomplete) == 1
+        assert incomplete[0]["status"] == rv.STATUS_INCOMPLETE
+        assert incomplete[0]["path"].endswith(".tmp")
+
     def test_only_prefixes_restricts_walk(self, tmp_path):
         remote = tmp_path / "remote"
         h = _place_blob(remote, b"good\n")
         _place_blob(remote, b"truncated", name="ff" + "0" * 30)
 
         # Restrict to the bad blob's prefix only.
-        totals, bad, _ = rv.verify_remote(
-            remote, jobs=1, only_prefixes={"ff"})
+        totals, bad, _inc, _ = rv.verify_remote(
+            remote, jobs=1, only_prefixes={"ff"}, use_ledger=False)
         assert totals["objects"] == 1
         assert totals["bad"] == 1
 
         # Restrict to the good blob's prefix only.
-        totals2, bad2, _ = rv.verify_remote(
-            remote, jobs=1, only_prefixes={h[:2]})
+        totals2, bad2, _inc2, _ = rv.verify_remote(
+            remote, jobs=1, only_prefixes={h[:2]}, use_ledger=False)
         assert totals2["objects"] == 1
         assert totals2["bad"] == 0
+
+
+# =============================================================================
+# incremental ledger
+# =============================================================================
+
+class TestIncrementalLedger:
+    def test_second_run_skips_unchanged(self, tmp_path):
+        remote = tmp_path / "remote"
+        _place_blob(remote, b"alpha\n")
+        _place_blob(remote, b"beta\n")
+
+        # First run hashes everything and writes the ledger.
+        totals1, _, _, _ = rv.verify_remote(remote, jobs=2)
+        assert totals1["ok"] == 2
+        assert totals1["skipped"] == 0
+        assert (remote / rv.LEDGER_DIRNAME).is_dir()
+
+        # Second run skips unchanged blobs.
+        totals2, _, _, _ = rv.verify_remote(remote, jobs=2)
+        assert totals2["objects"] == 2
+        assert totals2["ok"] == 0
+        assert totals2["skipped"] == 2
+        assert totals2["bad"] == 0
+
+    def test_full_ignores_ledger(self, tmp_path):
+        remote = tmp_path / "remote"
+        _place_blob(remote, b"alpha\n")
+        rv.verify_remote(remote, jobs=1)  # populate ledger
+
+        totals, _, _, _ = rv.verify_remote(remote, jobs=1, full=True)
+        assert totals["ok"] == 1
+        assert totals["skipped"] == 0
+
+    def test_changed_blob_is_rehashed(self, tmp_path):
+        remote = tmp_path / "remote"
+        h = _place_blob(remote, b"alpha\n")
+        rv.verify_remote(remote, jobs=1)  # ledger now records the good blob
+
+        # Corrupt the blob in place (size/mtime change → ledger miss).
+        import os
+        import time
+        blob = remote / "files" / "md5" / h[:2] / h[2:]
+        time.sleep(0.01)
+        blob.write_bytes(b"corrupted now")
+        os.utime(blob, None)
+
+        totals, bad, _, _ = rv.verify_remote(remote, jobs=1)
+        assert totals["skipped"] == 0
+        assert totals["bad"] == 1
+
+    def test_no_ledger_does_not_write(self, tmp_path):
+        remote = tmp_path / "remote"
+        _place_blob(remote, b"alpha\n")
+        rv.verify_remote(remote, jobs=1, use_ledger=False)
+        assert not (remote / rv.LEDGER_DIRNAME).exists()
 
 
 # =============================================================================
@@ -95,29 +173,47 @@ class TestVerifyRemote:
 # =============================================================================
 
 class TestReport:
+    def _totals(self, **kw):
+        t = {"objects": 0, "ok": 0, "bad": 0, "incomplete": 0,
+             "skipped": 0, "bytes": 0}
+        t.update(kw)
+        return t
+
     def test_build_report_v3_no_caveat(self):
         rep = rv.build_report(
-            "r", "/p", "dvc-v3", {"objects": 1, "ok": 1, "bad": 0, "bytes": 5},
-            [], jobs=4)
+            "r", "/p", "dvc-v3", self._totals(objects=1, ok=1, bytes=5),
+            [], [], jobs=4)
         assert rep["legacy_hash_caveat"] is False
         assert rep["remote"] == "r"
         assert rep["totals"]["ok"] == 1
+        assert rep["incomplete"] == []
 
     def test_build_report_v2_has_caveat(self):
         rep = rv.build_report(
-            "r", "/p", "dvc-v2", {"objects": 0, "ok": 0, "bad": 0, "bytes": 0},
-            [], jobs=1)
+            "r", "/p", "dvc-v2", self._totals(), [], [], jobs=1)
         assert rep["legacy_hash_caveat"] is True
 
-    def test_format_summary_lists_bad(self):
+    def test_format_summary_lists_bad_and_incomplete(self):
         rep = rv.build_report(
-            "r", "/p", "dvc-v3", {"objects": 1, "ok": 0, "bad": 1, "bytes": 9},
+            "r", "/p", "dvc-v3",
+            self._totals(objects=2, bad=1, incomplete=1, bytes=9),
             [{"path": "files/md5/ff/x", "expected_md5": "ffx",
               "actual_md5": "zzz", "size_bytes": 9,
-              "status": rv.STATUS_MISMATCH}], jobs=1)
+              "status": rv.STATUS_MISMATCH}],
+            [{"path": "files/md5/ab/c.tmp", "status": rv.STATUS_INCOMPLETE}],
+            jobs=1)
         out = rv.format_report_summary(rep)
         assert "Bad:      1" in out
         assert "files/md5/ff/x" in out
+        assert "Incomplete: 1" in out
+        assert "files/md5/ab/c.tmp" in out
+
+    def test_format_summary_shows_skipped(self):
+        rep = rv.build_report(
+            "r", "/p", "dvc-v3", self._totals(objects=5, ok=2, skipped=3),
+            [], [], jobs=1, ledger_used=True)
+        out = rv.format_report_summary(rep)
+        assert "Skipped:  3" in out
 
 
 # =============================================================================
@@ -127,16 +223,22 @@ class TestReport:
 class TestMergeParts:
     def test_merges_partial_reports(self, tmp_path):
         (tmp_path / "part_0.json").write_text(json.dumps({
-            "totals": {"objects": 2, "ok": 2, "bad": 0, "bytes": 10},
-            "bad": []}))
+            "totals": {"objects": 2, "ok": 2, "bad": 0, "incomplete": 0,
+                       "skipped": 0, "bytes": 10},
+            "bad": [], "incomplete": []}))
         (tmp_path / "part_1.json").write_text(json.dumps({
-            "totals": {"objects": 3, "ok": 2, "bad": 1, "bytes": 20},
-            "bad": [{"path": "files/md5/ff/x", "status": "mismatch"}]}))
+            "totals": {"objects": 3, "ok": 1, "bad": 1, "incomplete": 1,
+                       "skipped": 0, "bytes": 20},
+            "bad": [{"path": "files/md5/ff/x", "status": "mismatch"}],
+            "incomplete": [{"path": "files/md5/ab/y.tmp",
+                            "status": "incomplete"}]}))
 
-        totals, bad = rv._merge_parts(tmp_path)
+        totals, bad, incomplete = rv._merge_parts(tmp_path)
 
-        assert totals == {"objects": 5, "ok": 4, "bad": 1, "bytes": 30}
+        assert totals == {"objects": 5, "ok": 3, "bad": 1, "incomplete": 1,
+                          "skipped": 0, "bytes": 30}
         assert len(bad) == 1
+        assert len(incomplete) == 1
 
 
 # =============================================================================
