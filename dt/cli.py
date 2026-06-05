@@ -12,6 +12,7 @@ from . import init as init_mod
 from . import cache as cache_mod
 from . import remote as remote_mod
 from . import remote_verify as remote_verify_mod
+from . import remote_ops as remote_ops_mod
 from . import doctor as doctor_mod
 from . import auth as auth_mod
 from . import push as push_mod
@@ -784,6 +785,113 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
 
     except remote_mod.RemoteError as e:
         raise click.ClickException(str(e))
+
+
+@remote.command('copy')
+@click.argument('args', nargs=-1, required=True)
+@click.option('--as', 'as_name', default=None,
+              help='Register the duplicate as a new DVC remote with this name.')
+@click.option('--copy', 'force_copy', is_flag=True,
+              help='Force independent byte copies (required to land on a '
+                   'broader-permissions volume); default is reflink/hardlink '
+                   'where possible.')
+@click.option('--group-writable', is_flag=True,
+              help='Make the destination directories group-writable + setgid '
+                   'for shared access.')
+@click.option('--jobs', '-j', type=int, default=None,
+              help='Number of parallel transfer threads.')
+@click.option('--verbose', '-v', is_flag=True, help='Print detailed progress.')
+def remote_copy(args, as_name, force_copy, group_writable, jobs, verbose):
+    """Duplicate a remote's blob tree to NEW_PATH.
+
+    \b
+    Usage:
+        dt remote copy NEW_PATH            # copy the default remote
+        dt remote copy REMOTE NEW_PATH     # copy a named remote
+
+    By default uses reflink → hardlink → copy (space-efficient on the same
+    filesystem). Use --copy to force independent byte copies — required when
+    crossing filesystems or when the duplicate must carry different/broader
+    permissions than the source (a hardlink shares the source's inode and
+    therefore its permissions).
+
+    \b
+    Examples:
+        dt remote copy /data/remotes/proj-backup
+        dt remote copy myremote /scratch/proj --copy --group-writable
+        dt remote copy myremote /data/proj2 --as proj2
+    """
+    if len(args) == 1:
+        remote_name, new_path = None, args[0]
+    elif len(args) == 2:
+        remote_name, new_path = args
+    else:
+        raise click.ClickException(
+            "Usage: dt remote copy [REMOTE] NEW_PATH")
+    try:
+        result = remote_ops_mod.copy_remote(
+            remote_name, new_path, as_name=as_name, independent=force_copy,
+            group_writable=group_writable, jobs=jobs, verbose=verbose)
+    except remote_mod.RemoteError as e:
+        raise click.ClickException(str(e))
+
+    click.echo(f"Copied {result['source']} -> {result['dest']}")
+    click.echo(f"  {result['files']:,} file(s), "
+               f"{utils.format_size(result['bytes'])}"
+               + (f", {result['skipped']:,} skipped"
+                  if result['skipped'] else ""))
+    if result['registered']:
+        click.echo(f"  Registered DVC remote '{result['registered']}' "
+                   f"-> {result['dest']}")
+
+
+@remote.command('move')
+@click.argument('args', nargs=-1, required=True)
+@click.option('--quick', is_flag=True,
+              help='For cross-filesystem moves, verify with size+presence '
+                   'instead of a full checksum re-hash before deleting the '
+                   'source.')
+@click.option('--jobs', '-j', type=int, default=None,
+              help='Number of parallel transfer/verify threads.')
+@click.option('--verbose', '-v', is_flag=True, help='Print detailed progress.')
+def remote_move(args, quick, jobs, verbose):
+    """Relocate a remote to NEW_PATH and repoint .dvc/config.
+
+    \b
+    Usage:
+        dt remote move NEW_PATH            # move the default remote
+        dt remote move REMOTE NEW_PATH     # move a named remote
+
+    On the same filesystem this is an instant rename. Across filesystems it
+    copies, verifies the copy (full checksum, or size+presence with --quick),
+    and only then deletes the source. Every configured remote whose URL
+    resolved to the old location is repointed to the new one.
+
+    \b
+    Examples:
+        dt remote move /g/data/proj/remotes/proj      # rename on same fs
+        dt remote move myremote /scratch/proj --quick # cross-fs, fast check
+    """
+    if len(args) == 1:
+        remote_name, new_path = None, args[0]
+    elif len(args) == 2:
+        remote_name, new_path = args
+    else:
+        raise click.ClickException(
+            "Usage: dt remote move [REMOTE] NEW_PATH")
+    try:
+        result = remote_ops_mod.move_remote(
+            remote_name, new_path, quick=quick, jobs=jobs, verbose=verbose)
+    except remote_mod.RemoteError as e:
+        raise click.ClickException(str(e))
+
+    click.echo(f"Moved {result['source']} -> {result['dest']} "
+               f"({result['method']})")
+    if result['repointed']:
+        click.echo(f"  Repointed {len(result['repointed'])} remote(s): "
+                   + ", ".join(n for n, _, _ in result['repointed']))
+    else:
+        click.echo("  No configured remotes referenced the old path.")
 
 
 # =============================================================================
