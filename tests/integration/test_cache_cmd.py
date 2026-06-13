@@ -100,9 +100,14 @@ class TestCacheRm:
             capture_output=True,
             text=True,
         )
-        
+
         # Dry run should complete without actually deleting
         assert result.returncode in (0, 1)
+        # Regression (#136): collect_hashes_for_targets() must not be shadowed
+        # by a duplicate def, which produced a TypeError on the rm path.
+        combined = result.stdout + result.stderr
+        assert 'Traceback' not in combined, combined
+        assert 'TypeError' not in combined, combined
     
     def test_cache_rm_requires_force_or_remote(self, dvc_repo_with_files, monkeypatch):
         """Cache rm blocks deletion if not in remote (without --force)."""
@@ -117,6 +122,9 @@ class TestCacheRm:
         # May block or succeed depending on remote status
         # Should at least not crash
         assert result.returncode in (0, 1)
+        combined = result.stdout + result.stderr
+        assert 'Traceback' not in combined, combined
+        assert 'TypeError' not in combined, combined
     
     def test_cache_rm_force(self, dvc_repo_with_files, monkeypatch):
         """'--force' allows deletion without remote check."""
