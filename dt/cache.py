@@ -655,7 +655,7 @@ def validate_cache(
     # Build list of files to check
     if targets:
         # Get hashes for specific targets
-        file_hashes, hash_to_path = collect_hashes_for_targets(targets)
+        file_hashes, hash_to_path = collect_target_hashes_via_index(targets)
         files_to_check = []
         for file_hash in file_hashes:
             cache_path = hash_to_cache_path(cache_dir, file_hash)
@@ -745,7 +745,7 @@ def validate_cache(
     }
 
 
-def collect_hashes_for_targets(
+def collect_target_hashes_via_index(
     targets: List[str],
 ) -> Tuple[List[str], Dict[str, str]]:
     """Collect file hashes for the given targets.
