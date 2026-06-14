@@ -31,23 +31,25 @@ from .errors import PushError
 # =============================================================================
 
 
-def get_files_size(file_hashes: List[str]) -> int:
-    """Get total size of files in cache.
-    
+def get_file_sizes(file_hashes: List[str]) -> Dict[str, int]:
+    """Stat each cached blob once and return per-hash sizes in bytes.
+
     Args:
         file_hashes: List of MD5 hashes
-        
+
     Returns:
-        Total size in bytes (0 if cache not accessible)
+        Dict mapping each hash to its size in bytes. Missing blobs (and the
+        case where the cache is not accessible) map to 0.
     """
+    sizes: Dict[str, int] = {h: 0 for h in file_hashes}
+
     try:
         repo = Repo()
         # repo.cache.local.path already points to the hash directory (files/md5)
         cache_dir = Path(repo.cache.local.path)
     except Exception:
-        return 0
-    
-    total = 0
+        return sizes
+
     for file_hash in file_hashes:
         # Handle .dir suffix
         hash_clean = file_hash.replace('.dir', '')
@@ -55,15 +57,27 @@ def get_files_size(file_hashes: List[str]) -> int:
         suffix = hash_clean[2:]
         if file_hash.endswith('.dir'):
             suffix += '.dir'
-        
+
         cache_file = cache_dir / prefix / suffix
         if cache_file.exists():
             try:
-                total += cache_file.stat().st_size
+                sizes[file_hash] = cache_file.stat().st_size
             except OSError:
                 pass
-    
-    return total
+
+    return sizes
+
+
+def get_files_size(file_hashes: List[str]) -> int:
+    """Get total size of files in cache.
+
+    Args:
+        file_hashes: List of MD5 hashes
+
+    Returns:
+        Total size in bytes (0 if cache not accessible)
+    """
+    return sum(get_file_sizes(file_hashes).values())
 
 
 # =============================================================================
@@ -296,24 +310,59 @@ def build_manifest(
 def partition_manifest(
     manifest: Dict[str, Any],
     num_workers: int,
+    sizes: Optional[Dict[str, int]] = None,
+    verbose: bool = False,
 ) -> Dict[int, List[str]]:
-    """Partition manifest files across workers by hash prefix.
-    
+    """Partition manifest files across workers, balancing bytes per worker.
+
+    Uses greedy longest-processing-time (LPT) bin-packing: files are sorted
+    largest-first and each is assigned to the currently least-loaded worker.
+    This balances the total bytes per worker, so wave wall-clock approaches
+    ``max(total_bytes / num_workers, largest_single_file) / per-worker-rate``
+    instead of being dominated by whichever worker a hash-prefix split happened
+    to hand the big files (see issue #138).
+
+    The key partitioning invariant is preserved: each file is assigned to
+    exactly one worker, so partitions are disjoint and workers never contend.
+    Assignment is deterministic given the file sizes (ties broken by hash, then
+    by lowest worker id).
+
     Args:
         manifest: Manifest from build_manifest()
         num_workers: Number of workers
-        
+        sizes: Optional precomputed hash->size map (bytes). If omitted, sizes
+            are read from the cache. Missing/0-size blobs are treated as 0.
+        verbose: Log the resulting per-worker byte balance.
+
     Returns:
         Dict mapping worker_id to list of file hashes
     """
+    files = manifest['files']
+
+    if sizes is None:
+        sizes = get_file_sizes(files)
+
     partitions: Dict[int, List[str]] = {i: [] for i in range(num_workers)}
-    
-    for file_hash in manifest['files']:
-        # Use first 2 chars (hex prefix) for partitioning
-        prefix_value = int(file_hash[:2], 16)
-        worker_id = prefix_value % num_workers
+    loads = [0] * num_workers
+
+    # Largest files first; tie-break by hash so ordering is reproducible
+    # regardless of the manifest's file order.
+    for file_hash in sorted(files, key=lambda h: (sizes.get(h, 0), h), reverse=True):
+        # Assign to the least-loaded worker; tie-break by lowest worker id.
+        worker_id = min(range(num_workers), key=lambda w: (loads[w], w))
         partitions[worker_id].append(file_hash)
-    
+        loads[worker_id] += sizes.get(file_hash, 0)
+
+    if verbose:
+        active = [load for load in loads if load > 0]
+        if active:
+            print(
+                f"Partition byte balance across {len(active)} active worker(s): "
+                f"min={utils.format_size(min(active))}, "
+                f"max={utils.format_size(max(active))}, "
+                f"total={utils.format_size(sum(loads))}"
+            )
+
     return partitions
 
 
@@ -422,9 +471,9 @@ def parallel_push(
             print("Nothing to push")
         return [], None
     
-    # Partition files
-    partitions = partition_manifest(manifest, num_workers)
-    
+    # Partition files (size-aware, balances bytes per worker)
+    partitions = partition_manifest(manifest, num_workers, verbose=verbose)
+
     # Check how many workers actually have files
     active_workers = sum(1 for files in partitions.values() if files)
     if verbose:

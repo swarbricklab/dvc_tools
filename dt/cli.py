@@ -2680,9 +2680,10 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
                 click.echo("Nothing to push.")
                 return
             
-            # Calculate total size if possible
-            total_size = push_mod.get_files_size(files)
-            
+            # Calculate sizes once and reuse for the total and partitioning
+            sizes = push_mod.get_file_sizes(files)
+            total_size = sum(sizes.values())
+
             if verbose:
                 click.echo(f"Files to push ({len(files)} files, {utils.format_size(total_size)}):")
                 for file_hash in sorted(files):
@@ -2695,11 +2696,15 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
             else:
                 click.echo(f"Would push {len(files)} file(s), {utils.format_size(total_size)}")
                 if workers:
-                    partitions = push_mod.partition_manifest(manifest, workers)
+                    partitions = push_mod.partition_manifest(manifest, workers, sizes=sizes)
                     click.echo(f"\nWith {workers} workers:")
                     for worker_id, worker_files in partitions.items():
                         if worker_files:
-                            click.echo(f"  Worker {worker_id}: {len(worker_files)} file(s)")
+                            worker_bytes = sum(sizes.get(h, 0) for h in worker_files)
+                            click.echo(
+                                f"  Worker {worker_id}: {len(worker_files)} file(s), "
+                                f"{utils.format_size(worker_bytes)}"
+                            )
             return
         
         # Worker mode: called by submitted jobs
