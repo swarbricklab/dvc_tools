@@ -8,8 +8,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from dt.push import (
+    get_file_sizes,
     get_files_size,
     get_project_remotes,
+    partition_manifest,
     push_to_remote,
     push_all,
     build_manifest,
@@ -71,18 +73,129 @@ class TestGetFilesSize:
         """Test skips files that don't exist in cache."""
         cache_dir = tmp_path / "files" / "md5"
         (cache_dir / "ab").mkdir(parents=True)
-        
+
         file1 = cache_dir / "ab" / "c123"
         file1.write_bytes(b"x" * 100)
         # def456 doesn't exist
-        
+
         mock_repo = MagicMock()
         mock_repo.cache.local.path = str(cache_dir)
-        
+
         with patch("dt.push.Repo", return_value=mock_repo):
             result = get_files_size(["abc123", "def456"])
-            
+
             assert result == 100
+
+
+# =============================================================================
+# get_file_sizes tests
+# =============================================================================
+
+class TestGetFileSizes:
+    """Tests for the get_file_sizes function."""
+
+    def test_returns_zero_map_when_repo_not_available(self):
+        """Returns 0 for every hash when the cache is not accessible."""
+        with patch("dt.push.Repo", side_effect=Exception("No repo")):
+            result = get_file_sizes(["abc123", "def456"])
+
+            assert result == {"abc123": 0, "def456": 0}
+
+    def test_returns_per_file_sizes(self, tmp_path):
+        """Returns each blob's size keyed by hash."""
+        cache_dir = tmp_path / "files" / "md5"
+        (cache_dir / "ab").mkdir(parents=True)
+        (cache_dir / "de").mkdir(parents=True)
+        (cache_dir / "ab" / "c123").write_bytes(b"x" * 100)
+        (cache_dir / "de" / "f456").write_bytes(b"y" * 200)
+
+        mock_repo = MagicMock()
+        mock_repo.cache.local.path = str(cache_dir)
+
+        with patch("dt.push.Repo", return_value=mock_repo):
+            result = get_file_sizes(["abc123", "def456"])
+
+            assert result == {"abc123": 100, "def456": 200}
+
+    def test_missing_blob_is_zero(self, tmp_path):
+        """Missing blobs map to 0 rather than being dropped."""
+        cache_dir = tmp_path / "files" / "md5"
+        (cache_dir / "ab").mkdir(parents=True)
+        (cache_dir / "ab" / "c123").write_bytes(b"x" * 100)
+
+        mock_repo = MagicMock()
+        mock_repo.cache.local.path = str(cache_dir)
+
+        with patch("dt.push.Repo", return_value=mock_repo):
+            result = get_file_sizes(["abc123", "def456"])
+
+            assert result == {"abc123": 100, "def456": 0}
+
+
+# =============================================================================
+# partition_manifest tests
+# =============================================================================
+
+class TestPartitionManifest:
+    """Tests for size-aware (LPT) partitioning (issue #138)."""
+
+    def test_each_file_assigned_exactly_once(self):
+        """Partitions are disjoint and cover every file."""
+        files = [f"{i:02x}aaaa" for i in range(20)]
+        sizes = {h: 1 for h in files}
+        manifest = {"files": files}
+
+        partitions = partition_manifest(manifest, 4, sizes=sizes)
+
+        assigned = [h for fs in partitions.values() for h in fs]
+        assert sorted(assigned) == sorted(files)
+        assert len(assigned) == len(set(assigned))  # no duplicates
+
+    def test_balances_bytes_not_counts(self):
+        """One big file is isolated; small files balance the others."""
+        # Hash prefixes chosen so a naive prefix % 2 split would put the big
+        # file and several small files on the same worker.
+        files = ["00big", "02s", "04s", "06s", "08s"]
+        sizes = {"00big": 1000, "02s": 10, "04s": 10, "06s": 10, "08s": 10}
+        manifest = {"files": files}
+
+        partitions = partition_manifest(manifest, 2, sizes=sizes)
+        loads = {w: sum(sizes[h] for h in fs) for w, fs in partitions.items()}
+
+        # The big file sits alone; all small files land on the other worker.
+        big_worker = next(w for w, fs in partitions.items() if "00big" in fs)
+        assert loads[big_worker] == 1000
+        other = 1 - big_worker
+        assert loads[other] == 40
+
+    def test_deterministic_regardless_of_input_order(self):
+        """LPT result does not depend on manifest file ordering."""
+        sizes = {"a1": 50, "b2": 50, "c3": 30, "d4": 20, "e5": 20}
+        p1 = partition_manifest({"files": ["a1", "b2", "c3", "d4", "e5"]}, 3, sizes=sizes)
+        p2 = partition_manifest({"files": ["e5", "d4", "c3", "b2", "a1"]}, 3, sizes=sizes)
+
+        assert p1 == p2
+
+    def test_handles_more_workers_than_files(self):
+        """Extra workers simply get empty partitions."""
+        manifest = {"files": ["a1", "b2"]}
+        sizes = {"a1": 5, "b2": 5}
+
+        partitions = partition_manifest(manifest, 5, sizes=sizes)
+
+        assert set(partitions.keys()) == set(range(5))
+        non_empty = [fs for fs in partitions.values() if fs]
+        assert len(non_empty) == 2
+
+    def test_missing_sizes_treated_as_zero(self):
+        """Files absent from the size map are assigned without error."""
+        manifest = {"files": ["a1", "b2", "c3"]}
+        sizes = {"a1": 100}  # b2, c3 missing
+
+        partitions = partition_manifest(manifest, 2, sizes=sizes)
+
+        assigned = [h for fs in partitions.values() for h in fs]
+        assert sorted(assigned) == ["a1", "b2", "c3"]
 
 
 # =============================================================================
