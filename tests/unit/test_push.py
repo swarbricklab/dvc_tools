@@ -15,6 +15,9 @@ from dt.push import (
     push_to_remote,
     push_all,
     build_manifest,
+    push_partition,
+    parallel_push,
+    _missing_from_remote,
 )
 from dt.errors import PushError
 
@@ -354,3 +357,143 @@ class TestBuildManifest:
                 
                 assert result["files"] == []
                 assert result["paths"] == {}
+
+
+# =============================================================================
+# _missing_from_remote tests
+# =============================================================================
+
+class TestMissingFromRemote:
+    """Tests for the _missing_from_remote helper."""
+
+    def test_returns_empty_for_empty_input(self):
+        """No hashes in -> no remote call, empty set out."""
+        cache_odb = MagicMock()
+        remote_odb = MagicMock()
+        with patch("dvc_data.hashfile.status.compare_status") as mock_status:
+            result = _missing_from_remote(cache_odb, remote_odb, set())
+            assert result == set()
+            mock_status.assert_not_called()
+
+    def test_returns_hashes_still_new_on_remote(self):
+        """status.new entries are reported as still missing."""
+        cache_odb = MagicMock()
+        remote_odb = MagicMock()
+        status = MagicMock(new=[MagicMock(value="h1"), MagicMock(value="h2")])
+        with patch("dvc_data.hashfile.status.compare_status", return_value=status):
+            result = _missing_from_remote(cache_odb, remote_odb, {"h1", "h2", "h3"})
+            assert result == {"h1", "h2"}
+
+    def test_invalidates_remote_cache_before_checking(self):
+        """Stale fsspec listings are dropped before the existence check."""
+        cache_odb = MagicMock()
+        remote_odb = MagicMock()
+        status = MagicMock(new=[])
+        with patch("dvc_data.hashfile.status.compare_status", return_value=status):
+            _missing_from_remote(cache_odb, remote_odb, {"h1"})
+            remote_odb.fs.invalidate_cache.assert_called_once()
+
+
+# =============================================================================
+# push_partition tests (retry + remote verification, issue #141)
+# =============================================================================
+
+def _mock_transfer_result(failed):
+    """Build a fake dvc_data transfer result with the given failed set."""
+    return MagicMock(failed=set(failed), transferred=set())
+
+
+class TestPushPartitionRetry:
+    """Tests for push_partition's retry-and-verify behaviour."""
+
+    def test_clean_transfer_skips_remote_check(self):
+        """When transfer reports no failures, trust it (no extra remote calls)."""
+        with patch("dt.push.Repo"), \
+             patch("dvc_data.hashfile.transfer.transfer",
+                   return_value=_mock_transfer_result([])) as mock_transfer, \
+             patch("dt.push._missing_from_remote") as mock_missing:
+            pushed, failed = push_partition({"h1", "h2"})
+            assert (pushed, failed) == (2, 0)
+            mock_transfer.assert_called_once()
+            mock_missing.assert_not_called()
+
+    def test_failure_but_landed_is_success(self):
+        """Transfer errors yet objects present on remote -> success, no retry."""
+        with patch("dt.push.Repo"), \
+             patch("dvc_data.hashfile.transfer.transfer",
+                   return_value=_mock_transfer_result(["h1"])) as mock_transfer, \
+             patch("dt.push._missing_from_remote", return_value=set()), \
+             patch("dt.push.time.sleep") as mock_sleep:
+            pushed, failed = push_partition({"h1", "h2"})
+            assert (pushed, failed) == (2, 0)
+            mock_transfer.assert_called_once()
+            mock_sleep.assert_not_called()
+
+    def test_retries_only_missing_then_succeeds(self):
+        """A genuinely-missing file is re-sent and confirmed on retry."""
+        with patch("dt.push.Repo"), \
+             patch("dvc_data.hashfile.transfer.transfer",
+                   return_value=_mock_transfer_result(["h2"])) as mock_transfer, \
+             patch("dt.push._missing_from_remote",
+                   side_effect=[{"h2"}, set()]) as mock_missing, \
+             patch("dt.push.time.sleep") as mock_sleep:
+            pushed, failed = push_partition({"h1", "h2"}, max_retries=3)
+            assert (pushed, failed) == (2, 0)
+            assert mock_transfer.call_count == 2
+            assert mock_missing.call_count == 2
+            mock_sleep.assert_called_once()
+
+    def test_persistent_missing_reported_as_failed(self):
+        """Files still missing after max_retries are reported as failures."""
+        with patch("dt.push.Repo"), \
+             patch("dvc_data.hashfile.transfer.transfer",
+                   return_value=_mock_transfer_result(["h2"])), \
+             patch("dt.push._missing_from_remote", return_value={"h2"}), \
+             patch("dt.push.time.sleep"):
+            pushed, failed = push_partition({"h1", "h2"}, max_retries=2)
+            assert (pushed, failed) == (1, 1)
+
+    def test_empty_partition_is_noop(self):
+        """No files -> (0, 0) without touching the repo."""
+        with patch("dt.push.Repo") as mock_repo:
+            assert push_partition(set()) == (0, 0)
+            mock_repo.assert_not_called()
+
+
+# =============================================================================
+# parallel_push reconciliation tests (issue #141)
+# =============================================================================
+
+class TestParallelPushReconciliation:
+    """parallel_push bases success on remote state, not worker exit codes."""
+
+    def _patches(self, final_files, monitor_success):
+        """Common patch set: first build_manifest has files, final returns final_files."""
+        return [
+            patch("dt.push.build_manifest", side_effect=[
+                {"files": ["h1", "h2"], "paths": {}, "remote": None, "repo_root": "/r"},
+                {"files": final_files, "paths": {}, "remote": None, "repo_root": "/r"},
+            ]),
+            patch("dt.push.partition_manifest", return_value={0: ["h1", "h2"]}),
+            patch("dt.push.hpc.save_manifest", return_value=Path("/tmp/m")),
+            patch("dt.push.hpc.submit_workers", return_value=["job1"]),
+            patch("dt.push.hpc.monitor_jobs", return_value=monitor_success),
+        ]
+
+    def test_worker_failure_but_remote_complete_is_success(self):
+        """monitor reports failure, but remote has everything -> no error."""
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in self._patches(final_files=[], monitor_success=False):
+                stack.enter_context(p)
+            job_ids, manifest_dir = parallel_push(num_workers=2, wait=True)
+            assert job_ids == ["job1"]
+
+    def test_remote_incomplete_raises(self):
+        """Files genuinely missing from remote -> PushError with the count."""
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in self._patches(final_files=["h2"], monitor_success=True):
+                stack.enter_context(p)
+            with pytest.raises(PushError, match="1 file"):
+                parallel_push(num_workers=2, wait=True)

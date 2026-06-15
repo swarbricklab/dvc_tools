@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -24,6 +25,11 @@ from . import config as cfg
 from . import hpc
 from . import utils
 from .errors import PushError
+
+# Default number of times a worker re-attempts files that did not land on the
+# remote (transient CompleteMultipartUpload / NoSuchUpload failures under
+# concurrency; see issue #141). Each retry re-initiates a fresh transfer.
+DEFAULT_PUSH_RETRIES = 3
 
 
 # =============================================================================
@@ -366,71 +372,155 @@ def partition_manifest(
     return partitions
 
 
+def _missing_from_remote(
+    cache_odb: Any,
+    remote_odb: Any,
+    file_hashes: Set[str],
+    verbose: bool = False,
+) -> Set[str]:
+    """Return the subset of ``file_hashes`` whose objects are not on the remote.
+
+    Uses the same ``compare_status`` check ``build_manifest`` uses to decide
+    what needs pushing, so the answer reflects the real remote state rather
+    than the exit code of a prior transfer. The remote filesystem cache is
+    invalidated first so existence checks issued right after a transfer see
+    freshly-written objects. This is what lets us treat objects that landed
+    despite a transient CompleteMultipartUpload error as successful (#141).
+    """
+    try:
+        from dvc_data.hashfile.status import compare_status
+        from dvc_data.hashfile.hash_info import HashInfo
+    except ImportError as e:
+        raise PushError(f"DVC internals not available: {e}")
+
+    if not file_hashes:
+        return set()
+
+    # Drop any cached directory listing so a post-transfer existence check
+    # does not return a stale "absent" answer for objects just written.
+    try:
+        remote_odb.fs.invalidate_cache()
+    except Exception:
+        pass
+
+    obj_ids = [HashInfo('md5', h) for h in file_hashes]
+    status = compare_status(
+        cache_odb,
+        remote_odb,
+        obj_ids,
+        check_deleted=False,
+        shallow=True,
+    )
+    # status.new == present in cache but not on remote == still needs pushing.
+    return {hi.value for hi in status.new}
+
+
 def push_partition(
     file_hashes: Set[str],
     remote: Optional[str] = None,
     jobs: int = 1,
     verbose: bool = False,
+    max_retries: int = DEFAULT_PUSH_RETRIES,
 ) -> Tuple[int, int]:
     """Push a partition of files using direct cache-to-remote transfer.
-    
+
     This bypasses DVC's workspace index entirely, avoiding SQLite lock
     contention when running parallel workers. We transfer directly from
     the cache ODB to the remote ODB using the file hashes.
-    
+
+    If ``transfer`` reports any failures, the remote is queried directly to
+    find which files genuinely did not land (transient multipart errors can
+    fire even though the object was written, #141). Files still missing are
+    re-transferred up to ``max_retries`` times with backoff, and the returned
+    failure count reflects real remote absence rather than transfer exit codes.
+
     Args:
         file_hashes: Set of file hashes to push
         remote: Optional remote name
         jobs: Number of parallel upload threads
         verbose: Print progress
-        
+        max_retries: Times to re-attempt files missing from the remote
+
     Returns:
-        Tuple of (pushed_count, failed_count)
+        Tuple of (pushed_count, failed_count), where failed_count is the
+        number of files confirmed still missing from the remote.
     """
     try:
         from dvc_data.hashfile.transfer import transfer
         from dvc_data.hashfile.hash_info import HashInfo
     except ImportError as e:
         raise PushError(f"DVC internals not available: {e}")
-    
+
     if not file_hashes:
         return 0, 0
-    
+
     repo = Repo()
-    
+
     if verbose:
         print(f"Preparing to push {len(file_hashes)} files...")
-    
+
     # Get cache and remote ODBs directly (no index access)
     cache_odb = repo.cache.local
     remote_obj = repo.cloud.get_remote(name=remote)
     remote_odb = remote_obj.odb
-    
+
     if verbose:
         print(f"Cache: {cache_odb.path}")
         print(f"Remote: {remote_odb.path}")
-    
-    # Create HashInfo objects for the files to push
-    obj_ids = [HashInfo('md5', h) for h in file_hashes]
-    
-    if verbose:
-        print(f"Transferring {len(obj_ids)} files...")
-    
-    # Direct transfer from cache to remote
-    result = transfer(
-        cache_odb,
-        remote_odb,
-        obj_ids,
-        jobs=jobs,
-    )
-    
-    pushed = len(result.transferred)
-    failed = len(result.failed)
-    
-    if verbose:
-        print(f"Transferred: {pushed}, Failed: {failed}")
-    
-    return pushed, failed
+
+    total = len(file_hashes)
+    remaining: Set[str] = set(file_hashes)
+    attempt = 0
+
+    while True:
+        if verbose:
+            label = "Transferring" if attempt == 0 else f"Retry {attempt}: transferring"
+            print(f"{label} {len(remaining)} file(s)...")
+
+        result = transfer(
+            cache_odb,
+            remote_odb,
+            [HashInfo('md5', h) for h in remaining],
+            jobs=jobs,
+        )
+
+        if not result.failed:
+            # Transfer reports clean success; trust it (no extra remote
+            # round-trips on the happy path).
+            if verbose:
+                print(f"Transferred: {total}, Failed: 0")
+            return total, 0
+
+        # Some transfers reported failure. A transient CompleteMultipartUpload /
+        # NoSuchUpload error can fire even though the object landed, so check the
+        # remote directly rather than trusting the reported failure count (#141).
+        missing = _missing_from_remote(cache_odb, remote_odb, remaining, verbose=verbose)
+
+        if not missing:
+            if verbose:
+                print(
+                    f"All {len(remaining)} file(s) confirmed on remote despite "
+                    f"{len(result.failed)} transfer error(s)"
+                )
+            return total, 0
+
+        if attempt >= max_retries:
+            if verbose:
+                print(
+                    f"{len(missing)} file(s) still missing from remote after "
+                    f"{attempt} retr{'y' if attempt == 1 else 'ies'}"
+                )
+            return total - len(missing), len(missing)
+
+        attempt += 1
+        backoff = min(60, 5 * (2 ** (attempt - 1)))
+        if verbose:
+            print(
+                f"{len(missing)} file(s) did not land; retrying in {backoff}s "
+                f"(attempt {attempt}/{max_retries})..."
+            )
+        time.sleep(backoff)
+        remaining = missing
 
 
 # =============================================================================
@@ -511,9 +601,26 @@ def parallel_push(
             success = hpc.monitor_jobs(job_ids, verbose=verbose)
         except hpc.HPCError as e:
             raise PushError(str(e))
-        if not success:
-            raise PushError("Some jobs failed")
-    
+
+        # Authoritative completion check: a worker's exit code can report
+        # failure for objects that actually landed (transient multipart errors,
+        # #141), so base success on what is genuinely still missing from the
+        # remote rather than on per-job exit status.
+        if verbose:
+            print("Verifying remote contents...")
+        remaining = build_manifest(targets=targets, remote=remote, verbose=False)
+        n_remaining = len(remaining['files'])
+
+        if n_remaining:
+            raise PushError(
+                f"{n_remaining} file(s) still missing from remote after push "
+                f"(workers reported {'success' if success else 'failure'}). "
+                f"Re-run the push to send the remainder."
+            )
+
+        if not success and verbose:
+            print("Workers reported errors, but all files are present on the remote.")
+
     return job_ids, manifest_dir
 
 
