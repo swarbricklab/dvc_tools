@@ -20,7 +20,6 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 from dvc.utils.serialize import dump_yaml
 
-from . import diff as diff_mod
 from . import dvc_lock
 from . import find as find_mod
 from . import tmp as tmp_mod
@@ -54,7 +53,6 @@ class SourceChanges:
     diff_summary: str  # Human-readable summary
     new_path: Optional[str] = None  # If deleted but moved, the new path
     diff_error: Optional[str] = None  # Error message if diff failed
-    diff_files: Optional[Dict] = None  # Raw diff data: {added: [...], modified: [...], deleted: [...]}
 
 
 # =============================================================================
@@ -118,28 +116,83 @@ def _get_head_rev(clone_path: Path) -> str:
     return result.stdout.strip()
 
 
+def _compute_source_hash(
+    repo_url: str,
+    path: str,
+    rev: str,
+    verbose: bool = False,
+) -> Tuple[Optional[str], int]:
+    """Compute the DVC hash of source data at a revision.
+
+    Lists the path at ``rev`` and reconstructs the hash exactly the way
+    ``dt update`` builds it: the file md5 for a single-file import, or the
+    ``.dir`` manifest md5 for a directory. This works for *any* path,
+    including a subpath of a tracked directory, because ``dvc list``
+    resolves paths within the tree regardless of how they are tracked.
+    This is what makes change detection robust where ``dvc diff
+    --targets`` (which resolves against stage/out paths) is not.
+
+    Args:
+        repo_url: URL of source repository.
+        path: Path within repo to hash.
+        rev: Git revision to hash at.
+        verbose: Print progress messages.
+
+    Returns:
+        Tuple of (hash, nfiles). Returns (None, 0) if the path lists
+        nothing or cannot be listed at this revision (e.g. it was moved
+        or deleted).
+    """
+    try:
+        entries = _get_file_listing(repo_url, path, rev, verbose=verbose)
+    except UpdateError as e:
+        if verbose:
+            print(f"  Could not list {path} at {rev[:12]}...: {e}")
+        return None, 0
+
+    if not entries:
+        return None, 0
+
+    # Single file: exactly one entry whose relpath is just the filename.
+    source_filename = Path(path).name
+    if len(entries) == 1 and entries[0]['relpath'] == source_filename:
+        return entries[0]['md5'], 1
+
+    # Directory: hash matches outs.md5 (the .dir manifest md5).
+    manifest_content = utils.build_dir_manifest(entries)
+    dir_hash = f"{hashlib.md5(manifest_content).hexdigest()}.dir"
+    return dir_hash, len(entries)
+
+
 def _check_source_changes(
     clone_path: Path,
     path: str,
     locked_rev: str,
     head_rev: str,
+    repo_url: str,
     current_hash: Optional[str] = None,
     verbose: bool = False,
 ) -> SourceChanges:
-    """Check if source data has changed between locked_rev and HEAD.
-    
-    Uses `dvc diff --targets` in the cloned source repo to compare revisions.
-    If the path appears deleted but the hash still exists elsewhere,
-    detects this as a move and returns the new path.
-    
+    """Check if source data has changed between the locked state and HEAD.
+
+    Compares the hash recorded in the .dvc file (``current_hash``) against
+    the hash of the source data at ``head_rev``, computed from
+    ``dvc list``. This is robust against the import path not lining up with
+    a tracked stage/out path, which is where ``dvc diff --targets`` fails.
+
+    If the path lists nothing at HEAD, the data may have moved: the hash is
+    searched for elsewhere in the repo and, if found at a new path, the move
+    is reported instead of a change.
+
     Args:
-        clone_path: Path to cloned source repo.
+        clone_path: Path to cloned source repo (used for move detection).
         path: Path within repo to check.
         locked_rev: Currently locked revision.
         head_rev: HEAD revision to compare against.
-        current_hash: Current hash of the tracked data (for move detection).
+        repo_url: URL of source repository (used to list at HEAD).
+        current_hash: Hash recorded in the .dvc file (the locked data).
         verbose: Print progress messages.
-        
+
     Returns:
         SourceChanges with comparison results, including new_path if moved.
     """
@@ -152,165 +205,77 @@ def _check_source_changes(
             deleted=0,
             diff_summary="Same revision",
         )
-    
-    # First check if locked_rev is valid
-    rev_check = subprocess.run(
-        ['git', 'rev-parse', '--verify', locked_rev],
-        cwd=clone_path,
-        capture_output=True,
-        text=True,
-    )
-    
-    if rev_check.returncode != 0:
-        # Locked revision doesn't exist - cannot determine changes
+
+    # Without a recorded hash there is nothing to compare against.
+    if not current_hash:
         return SourceChanges(
-            has_changes=True,  # Treat as changed since we can't verify
+            has_changes=True,  # Cannot verify - treat as changed
             head_rev=head_rev,
             added=0,
             modified=0,
             deleted=0,
-            diff_summary="Unknown locked revision",
-            diff_error=f"Revision {locked_rev[:12]}... not found in repo",
+            diff_summary="Unknown current hash",
+            diff_error="No recorded hash in .dvc file",
         )
-    
-    # Run dvc diff using shared function
-    try:
-        diff_data = diff_mod._run_dvc_diff(
-            old_rev=locked_rev,
-            new_rev=head_rev,
-            targets=[path],
-            cwd=clone_path,
+
+    head_hash, _ = _compute_source_hash(repo_url, path, head_rev, verbose=verbose)
+
+    if head_hash is None:
+        # Path lists nothing at HEAD - data may have moved or been deleted.
+        if verbose:
+            print(f"  Path absent at HEAD, searching for hash {current_hash[:12]}...")
+        new_path = find_mod.find_hash_in_repo(
+            current_hash, clone_path, revision=head_rev, verbose=verbose
         )
-    except diff_mod.DiffError as e:
-        error_msg = str(e)
-        error_lower = error_msg.lower()
-        
-        # Check if it's a path/file not found error - meaning path doesn't exist at one revision
-        is_path_error = any(phrase in error_lower for phrase in [
-            'not found',
-            'does not exist',
-            'no such file or directory',
-        ])
-        
-        if is_path_error:
-            # Path might have moved - try to find by hash
-            if current_hash:
-                if verbose:
-                    print(f"  Path error detected, searching for hash {current_hash[:12]}...")
-                new_path = find_mod.find_hash_in_repo(
-                    current_hash, clone_path, revision=head_rev, verbose=verbose
-                )
-                if new_path:
-                    # Check if actually moved vs same path (rev_lock was just unknown)
-                    if new_path != path:
-                        return SourceChanges(
-                            has_changes=False,  # Data unchanged, just moved
-                            head_rev=head_rev,
-                            added=0,
-                            modified=0,
-                            deleted=1,  # Deleted from old path
-                            diff_summary=f"Moved: {path} → {new_path}",
-                            new_path=new_path,
-                        )
-                    else:
-                        # Same path, same hash - no changes, just rev_lock was unknown
-                        return SourceChanges(
-                            has_changes=False,
-                            head_rev=head_rev,
-                            added=0,
-                            modified=0,
-                            deleted=0,
-                            diff_summary="No changes (locked revision updated)",
-                        )
-        
-        # Other error - cannot determine changes
+        if new_path and new_path != path:
+            return SourceChanges(
+                has_changes=False,  # Data unchanged, just moved
+                head_rev=head_rev,
+                added=0,
+                modified=0,
+                deleted=1,
+                diff_summary=f"Moved: {path} → {new_path}",
+                new_path=new_path,
+            )
+        if new_path:
+            # Same path, same hash - unchanged (rev_lock just advances).
+            return SourceChanges(
+                has_changes=False,
+                head_rev=head_rev,
+                added=0,
+                modified=0,
+                deleted=0,
+                diff_summary="No changes",
+            )
+        # Hash not found anywhere at HEAD - data is gone.
         return SourceChanges(
             has_changes=True,
             head_rev=head_rev,
             added=0,
             modified=0,
-            deleted=0,
-            diff_summary="Diff failed",
-            diff_error=error_msg or "dvc diff returned non-zero",
+            deleted=1,
+            diff_summary="Path no longer present at HEAD",
         )
-    
-    added = diff_data.get('added', [])
-    modified = diff_data.get('modified', [])
-    deleted = diff_data.get('deleted', [])
-    
-    # Check for moves: if our path is deleted but hash exists elsewhere
-    if deleted and current_hash:
-        deleted_hashes = {d.get('hash', {}).get('old', '') for d in deleted}
-        search_hash = current_hash.replace('.dir', '')
-        
-        if search_hash in {h.replace('.dir', '') for h in deleted_hashes}:
-            # Our data was deleted - check if it moved
-            new_path = find_mod.find_hash_in_repo(
-                current_hash, clone_path, revision=head_rev, verbose=verbose
-            )
-            if new_path and new_path != path:
-                return SourceChanges(
-                    has_changes=False,  # Data unchanged, just moved
-                    head_rev=head_rev,
-                    added=0,
-                    modified=0,
-                    deleted=1,
-                    diff_summary=f"Moved: {path} → {new_path}",
-                    new_path=new_path,
-                )
-    
-    has_changes = bool(added or modified or deleted)
-    
-    # Build summary
-    parts = []
-    if added:
-        parts.append(f"+{len(added)} added")
-    if modified:
-        parts.append(f"~{len(modified)} modified")
-    if deleted:
-        parts.append(f"-{len(deleted)} deleted")
-    
-    # Store file paths for detailed status output
-    diff_files = {
-        'added': [f.get('path', '') for f in added],
-        'modified': [f.get('path', '') for f in modified],
-        'deleted': [f.get('path', '') for f in deleted],
-    }
-    
+
+    if head_hash == current_hash:
+        return SourceChanges(
+            has_changes=False,
+            head_rev=head_rev,
+            added=0,
+            modified=0,
+            deleted=0,
+            diff_summary="No changes",
+        )
+
+    # Hash differs - the data changed between the locked state and HEAD.
     return SourceChanges(
-        has_changes=has_changes,
+        has_changes=True,
         head_rev=head_rev,
-        added=len(added),
-        modified=len(modified),
-        deleted=len(deleted),
-        diff_summary=', '.join(parts) if parts else "No changes",
-        diff_files=diff_files,
+        added=0,
+        modified=1,
+        deleted=0,
+        diff_summary=f"Hash changed: {current_hash[:12]}... → {head_hash[:12]}...",
     )
-
-
-def _print_status_summary(changes: SourceChanges, max_files: int = 5):
-    """Print a compact diff summary for --status output.
-    
-    Args:
-        changes: SourceChanges with diff files data.
-        max_files: Max files to show per category before truncating.
-    """
-    if not changes.diff_files:
-        return
-    
-    for category, prefix in [('added', '+'), ('modified', '~'), ('deleted', '-')]:
-        files = changes.diff_files.get(category, [])
-        if not files:
-            continue
-        
-        # Show up to max_files
-        shown = files[:max_files]
-        for f in shown:
-            print(f"    {prefix} {f}")
-        
-        remaining = len(files) - max_files
-        if remaining > 0:
-            print(f"    {prefix} ... and {remaining} more")
 
 
 def _get_file_listing(
@@ -696,6 +661,7 @@ def update(
                 
                 changes = _check_source_changes(
                     clone_path, info.path, info.locked_rev, head_rev,
+                    repo_url=info.repo_url,
                     current_hash=info.current_hash, verbose=verbose
                 )
                 
