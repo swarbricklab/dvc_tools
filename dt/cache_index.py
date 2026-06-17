@@ -23,6 +23,13 @@ Locking
 SQLite (via diskcache) provides built-in file-level locking, safe for
 concurrent readers and serialised writers.  We set a generous timeout
 (120 s) to handle contention on shared caches.
+
+Permissions
+───────────
+The index mirrors the permissions of the DVC cache it lives in (derived from
+DVC's ``cache.shared`` config): a shared (group) cache yields a group
+read/writable index — so every member who can write the cache can also
+update the index — while a private cache keeps it private.
 """
 
 import os
@@ -31,8 +38,6 @@ from pathlib import Path
 from typing import Iterable, Optional, Set
 
 import click
-
-from . import config as cfg
 
 
 # Default SQLite timeout for concurrent access (seconds)
@@ -67,6 +72,7 @@ class CacheIndex:
         self._db_dir = self._cache_root / _INDEX_DIR / _INDEX_DB
         self._db = None
         self._timeout = timeout
+        self._modes: Optional[tuple[int, int]] = None
 
     # -- Lazy open --------------------------------------------------------
 
@@ -77,11 +83,8 @@ class CacheIndex:
 
         import diskcache
 
-        # Create directory with correct permissions
         if not self._read_only:
             self._db_dir.mkdir(parents=True, exist_ok=True)
-            _apply_permissions(self._db_dir.parent)  # .dt dir
-            _apply_permissions(self._db_dir)          # cache.db dir
 
         self._db = diskcache.Cache(
             str(self._db_dir),
@@ -91,11 +94,47 @@ class CacheIndex:
             sqlite_journal_mode='delete',
         )
 
+        # Match the index's permissions to the cache it lives in.  diskcache
+        # only creates the SQLite file once the Cache is opened, so we apply
+        # permissions here (after open) rather than before.
+        if not self._read_only:
+            self._apply_permissions()
+
     @property
     def db(self):
         """Access the underlying diskcache, opening lazily."""
         self._open()
         return self._db
+
+    # -- Permissions ------------------------------------------------------
+
+    def _cache_modes(self) -> tuple[int, int]:
+        """Return ``(file_mode, dir_mode)`` to match this cache's own perms."""
+        if self._modes is None:
+            self._modes = _read_cache_modes(self._cache_root)
+        return self._modes
+
+    def _apply_permissions(self) -> None:
+        """Match the index's permissions to the DVC cache it lives in.
+
+        The diskcache store is a directory (``cache.db/``) containing a
+        SQLite file.  We chmod the directories to the cache's directory mode
+        and every file to the cache's file mode, so a shared (group) cache
+        keeps the index group read/writable — letting every member who can
+        write the cache also update the index — while a private cache keeps
+        it private.  Failures (e.g. files owned by another user) are ignored.
+        """
+        if self._read_only:
+            return
+        file_mode, dir_mode = self._cache_modes()
+        # Directories: .dt/ and .dt/cache.db/
+        _chmod(self._db_dir.parent, dir_mode)
+        _chmod(self._db_dir, dir_mode)
+        # SQLite file(s) diskcache created inside cache.db/
+        if self._db_dir.is_dir():
+            for entry in self._db_dir.iterdir():
+                if entry.is_file():
+                    _chmod(entry, file_mode)
 
     # -- Core API ---------------------------------------------------------
 
@@ -203,7 +242,7 @@ class CacheIndex:
                 self.db.set(oid, True)
 
         n = len(self.db)
-        _apply_permissions(self._db_dir)
+        self._apply_permissions()
         return n
 
     # -- Info -------------------------------------------------------------
@@ -285,52 +324,40 @@ def _scan_cache_oids(cache_root: Path, verbose: bool = False) -> list[str]:
 
 
 # =========================================================================
-# Permissions helper
+# Permissions helpers
 # =========================================================================
 
-def _apply_permissions(path: Path) -> None:
-    """Apply ``cache.permissions`` config to *path*.
-
-    Reads the ``cache.permissions`` config value (e.g. ``ug+rw``, ``0o2775``)
-    and applies it.  Falls back to ``0o2775`` (rwxrwsr-x) if not configured,
-    which is the standard for shared HPC caches.
-    """
-    perm_str = cfg.get_value('cache.permissions')
-
-    if perm_str is None:
-        # Default: group-writable + setgid
-        mode = 0o2775
-    elif isinstance(perm_str, int):
-        mode = perm_str
-    elif perm_str.startswith('0o') or perm_str.startswith('0O'):
-        mode = int(perm_str, 8)
-    else:
-        # Symbolic like 'ug+rw' — map common patterns
-        mode = _parse_symbolic_permissions(perm_str)
-
+def _chmod(path: Path, mode: int) -> None:
+    """chmod *path* to *mode*, ignoring failures (e.g. not the owner)."""
     try:
         os.chmod(path, mode)
-    except PermissionError:
+    except OSError:
         pass
 
 
-def _parse_symbolic_permissions(perm_str: str) -> int:
-    """Best-effort parse of symbolic permission strings.
+def _read_cache_modes(cache_root: Path) -> tuple[int, int]:
+    """Return ``(file_mode, dir_mode)`` matching the DVC cache's own perms.
 
-    Supports common patterns used in HPC: ``ug+rw``, ``a+rw``, etc.
-    Falls back to 0o2775 for anything we can't parse.
+    DVC derives these modes from the ``cache.shared`` config (set via
+    ``dvc config cache.shared group``): a shared cache uses ``0o664`` for
+    files and ``0o2775`` for directories (group read/write, setgid on dirs)
+    so any member of the group can update the cache; an unshared cache uses
+    modes derived from the process umask.  We read the modes straight off the
+    repo's local object database so the index always mirrors the cache it
+    lives in.
+
+    Falls back to umask-derived modes (matching DVC's own non-shared default)
+    if the DVC repo can't be loaded.
     """
-    # Start from a reasonable base
-    mode = 0o2775
+    try:
+        from dvc.repo import Repo
 
-    if 'ug+rw' in perm_str:
-        mode = 0o2775
-    elif 'a+rw' in perm_str:
-        mode = 0o2777
-    elif 'g+rw' in perm_str:
-        mode = 0o2775
-
-    return mode
+        odb = Repo().cache.local
+        return int(odb._file_mode), int(odb._dir_mode)
+    except Exception:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask, 0o777 & ~umask
 
 
 # =========================================================================
