@@ -237,42 +237,21 @@ def install(force: bool = False, verbose: bool = False) -> List[str]:
     if verbose:
         print(f"  Installed merge driver: {MERGE_DRIVER_NAME}")
 
-    # Write default config if no hooks config exists in any scope
-    existing = cfg.get_value('hooks')
-    if existing is None:
-        _write_default_config(verbose=verbose)
-    elif verbose:
-        # Tell the user where existing hooks config was found
+    # NOTE: we deliberately do NOT write a default hooks config to any scope.
+    # Defaults live in DEFAULT_HOOKS_CONFIG and are applied as a code-level
+    # fallback by _get_checks(), so hooks work out of the box without a
+    # high-precedence local/project file silently overriding a user's own
+    # preferences. Users/teams opt in to overrides with `dt config set`.
+    if verbose:
         for scope in cfg.SCOPES:
             scope_data = cfg.load_scope_config(scope)
             if scope_data.get('hooks'):
-                print(f"  Hooks config inherited from {scope} scope")
+                print(f"  Hooks config overrides found in {scope} scope")
                 break
+        else:
+            print("  Using built-in default hooks config")
 
     return installed
-
-
-def _write_default_config(verbose: bool = False) -> None:
-    """Write default hooks config to local scope."""
-    import yaml
-
-    paths = cfg.get_config_paths()
-    local_path = paths['local']
-
-    if local_path.exists():
-        with open(local_path) as f:
-            data = yaml.safe_load(f) or {}
-    else:
-        data = {}
-
-    data.setdefault('hooks', DEFAULT_HOOKS_CONFIG['hooks'])
-
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(local_path, 'w') as f:
-        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-
-    if verbose:
-        print("  Wrote default hooks config to local scope")
 
 
 def uninstall(verbose: bool = False) -> List[str]:
@@ -316,18 +295,43 @@ def uninstall(verbose: bool = False) -> List[str]:
 # Check resolution
 # =============================================================================
 
+def _merge_check_settings(hook_name: str) -> Dict[str, Dict]:
+    """Deep-merge the built-in default checks with configured overrides.
+
+    The built-in :data:`DEFAULT_HOOKS_CONFIG` provides the baseline so hooks
+    work out of the box without any config file being written (and without a
+    high-precedence scope silently *forcing* behaviour). Configured scopes
+    override the defaults per leaf — e.g. setting ``dvc-checkout.enabled:
+    false`` at any scope disables it, while unspecified fields fall back to
+    the built-in default. To drop a default check, disable it explicitly;
+    omitting it does not remove it.
+    """
+    defaults = (
+        DEFAULT_HOOKS_CONFIG['hooks'].get(hook_name, {}).get('checks', {})
+    )
+    configured = cfg.get_value(f'hooks.{hook_name}.checks')
+    if not isinstance(configured, dict):
+        configured = {}
+
+    merged: Dict[str, Dict] = {}
+    for name in list(defaults) + [n for n in configured if n not in defaults]:
+        settings = dict(defaults.get(name, {}))
+        override = configured.get(name)
+        if isinstance(override, dict):
+            settings.update(override)
+        merged[name] = settings
+    return merged
+
+
 def _get_checks(hook_name: str) -> List[Dict]:
-    """Load enabled checks for a hook from config.
+    """Load enabled checks for a hook, merging built-in defaults with config.
 
     Returns:
-        List of dicts with keys: name, mode, command, max_size, enabled, source.
+        List of dicts with keys: name, mode, command, max_size, network,
+        enabled.
     """
-    checks_cfg = cfg.get_value(f'hooks.{hook_name}.checks')
-    if not checks_cfg or not isinstance(checks_cfg, dict):
-        return []
-
     checks = []
-    for name, settings in checks_cfg.items():
+    for name, settings in _merge_check_settings(hook_name).items():
         if not isinstance(settings, dict):
             continue
         entry = {
@@ -336,14 +340,46 @@ def _get_checks(hook_name: str) -> List[Dict]:
             'mode': settings.get('mode', 'sync'),
             'command': settings.get('command'),
             'max_size': settings.get('max_size', '1MB'),
+            'network': settings.get('network', False),
         }
         checks.append(entry)
     return checks
 
 
 def _get_checks_with_sources(hook_name: str) -> List[Dict]:
-    """Load checks for a hook, annotated with the config scope they come from."""
+    """Load checks for a hook, annotated with the config scope they come from.
+
+    Seeded with the built-in defaults (``source='default'``) so ``dt hook
+    list`` shows the effective behaviour even when nothing is written to a
+    config file. Configured scopes overlay the defaults, lowest precedence
+    first, so the reported ``source`` is the highest-precedence scope that
+    set each field.
+    """
     checks = []
+
+    def _upsert(name, settings, source):
+        existing = next((c for c in checks if c['name'] == name), None)
+        entry = {
+            'name': name,
+            'enabled': settings.get('enabled', True),
+            'mode': settings.get('mode', 'sync'),
+            'command': settings.get('command'),
+            'max_size': settings.get('max_size', '1MB'),
+            'network': settings.get('network', False),
+            'source': source,
+        }
+        if existing:
+            idx = checks.index(existing)
+            checks[idx] = entry
+        else:
+            checks.append(entry)
+
+    # Built-in defaults first (lowest precedence)
+    defaults = DEFAULT_HOOKS_CONFIG['hooks'].get(hook_name, {}).get('checks', {})
+    for name, settings in defaults.items():
+        if isinstance(settings, dict):
+            _upsert(name, settings, 'default')
+
     for scope in reversed(cfg.SCOPES):
         scope_data = cfg.load_scope_config(scope)
         scope_checks = (
@@ -357,22 +393,13 @@ def _get_checks_with_sources(hook_name: str) -> List[Dict]:
         for name, settings in scope_checks.items():
             if not isinstance(settings, dict):
                 continue
-            # Higher-precedence scope wins (processed later in loop)
+            # Merge onto whatever lower-precedence layer set, so unspecified
+            # fields keep the default rather than reverting to hard-coded.
             existing = next((c for c in checks if c['name'] == name), None)
-            entry = {
-                'name': name,
-                'enabled': settings.get('enabled', True),
-                'mode': settings.get('mode', 'sync'),
-                'command': settings.get('command'),
-                'max_size': settings.get('max_size', '1MB'),
-                'source': scope,
-            }
-            if existing:
-                # Replace with higher-precedence scope
-                idx = checks.index(existing)
-                checks[idx] = entry
-            else:
-                checks.append(entry)
+            base = dict(existing) if existing else {}
+            base.pop('source', None)
+            base.update(settings)
+            _upsert(name, base, scope)
     return checks
 
 
@@ -453,7 +480,11 @@ def _run_builtin_check(name: str, hook_name: str, check_cfg: Dict,
         return check_large_files(max_size_str=str(max_size), verbose=verbose)
 
     if name == 'dvc-checkout':
-        return _run_dvc_checkout(hook_args, verbose=verbose)
+        return _run_dvc_checkout(
+            hook_args,
+            network=bool(check_cfg.get('network', False)),
+            verbose=verbose,
+        )
 
     if name == 'index-sync':
         return _run_index_sync(verbose=verbose)
@@ -465,8 +496,22 @@ def _run_builtin_check(name: str, hook_name: str, check_cfg: Dict,
     return False
 
 
-def _run_dvc_checkout(hook_args: List[str], verbose: bool = False) -> bool:
-    """Run DVC checkout for post-checkout hook.
+def _run_dvc_checkout(
+    hook_args: List[str],
+    network: bool = False,
+    verbose: bool = False,
+) -> bool:
+    """Relink DVC-tracked files after a branch switch (post-checkout hook).
+
+    Runs ``dt pull`` to sync the workspace to the new commit. By default
+    ``network=False``: only local sources are used (local cache + any
+    locally-mounted remote, e.g. the shared cache on HPC), and anything not
+    already available is reported, not downloaded. This makes the hook safe
+    on a laptop with a multi-TB remote on NCI — switching branches never
+    triggers an inline network pull, and can never hang on an SSH prompt.
+
+    Set ``network: true`` on the ``dvc-checkout`` check to opt back into
+    fetching missing data from the remote on checkout.
 
     Skips during rebase/merge.  Only runs on branch switch (flag == 1)
     where HEAD actually moved — ``git checkout -b`` fires the hook with
@@ -498,7 +543,7 @@ def _run_dvc_checkout(hook_args: List[str], verbose: bool = False) -> bool:
             return True
 
     from . import pull as pull_mod
-    pull_mod.pull(verbose=verbose)
+    pull_mod.pull(verbose=verbose, network=network)
     return True
 
 
@@ -724,6 +769,11 @@ def hook_run(hook_name: str, hook_args: Optional[List[str]] = None,
     for check in enabled:
         name = check['name']
         mode = check.get('mode', 'sync')
+
+        if mode == 'off':
+            if level >= VERBOSITY_VERBOSE:
+                print(f"  – {name} (mode: off)", flush=True)
+            continue
 
         if mode == 'async':
             job_id = _dispatch_async_check(
