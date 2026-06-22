@@ -1762,8 +1762,8 @@ def auth():
 
 
 @auth.command('setup')
-@click.option('-u', '--username', default=None,
-              help='Default SSH username for remote hosts.')
+@click.option('-u', '--username', default=lambda: cfg.get_value('username'),
+              help='Default SSH username for remote hosts (default: username from config).')
 @click.option('--config', 'config_path',
               type=click.Path(exists=True, dir_okay=False),
               default=None,
