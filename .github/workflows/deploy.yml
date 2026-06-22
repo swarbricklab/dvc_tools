@@ -119,6 +119,47 @@ jobs:
           echo "Builder SSH did not become ready in time." >&2
           exit 1
 
+      - name: Reclaim builder disk if low
+        # The remote builder is warm and shared across projects, so its Docker
+        # images and BuildKit cache accumulate over time (this repo's SHA-pinned
+        # git deps make the build cache grow monotonically, since each run gets
+        # a fresh cache key). A full conda-pack build needs several GB of
+        # transient headroom; when the disk is too full it dies with
+        # "No space left on device" mid-build.
+        #
+        # We don't scrub every run — other (non-pinned) consumers of this
+        # builder benefit from the cache. Instead, reclaim only when free space
+        # on the Docker data filesystem drops below MIN_FREE_GB. The prune is
+        # conservative for a shared builder: build cache + dangling images +
+        # stopped containers are all rebuildable and never delete another
+        # project's tagged images.
+        env:
+          MIN_FREE_GB: "20"
+        run: |
+          gcloud compute ssh "$REMOTE_BUILDER_HOST" \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+            --tunnel-through-iap --quiet \
+            --ssh-flag="-o ConnectTimeout=15" \
+            --command='set -e
+          MIN_FREE_GB='"$MIN_FREE_GB"'
+          ROOT=$(sudo docker info --format "{{.DockerRootDir}}" 2>/dev/null || echo /var/lib/docker)
+          [ -d "$ROOT" ] || ROOT=/
+          AVAIL_GB=$(df -Pk "$ROOT" | awk "NR==2 {print int(\$4/1024/1024)}")
+          echo "Builder free space on $ROOT: ${AVAIL_GB}G (threshold ${MIN_FREE_GB}G)"
+          sudo docker system df || true
+          if [ "$AVAIL_GB" -ge "$MIN_FREE_GB" ]; then
+            echo "Above threshold; keeping cache."
+            exit 0
+          fi
+          echo "Below threshold; reclaiming build cache + dangling images..."
+          sudo docker builder prune -af
+          sudo docker image prune -f
+          sudo docker container prune -f
+          sudo find /var/lib/absconda -maxdepth 1 -name "*.tar.gz" -mtime +1 -delete 2>/dev/null || true
+          echo "--- after reclaim ---"
+          df -h "$ROOT"
+          sudo docker system df || true'
+
       - name: Pin git deps to commit SHAs
         # The conda env spec installs dvc_tools and qxub from `git+https://...`
         # URLs without a ref. pip's wheel cache keys on URL only, so on a warm
