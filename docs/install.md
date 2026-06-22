@@ -10,7 +10,7 @@ the standard local > project > user > system precedence.
 ## Quick Start
 
 ```bash
-# Install hooks and write default check config
+# Install hook scripts (no config file is written — defaults live in dt)
 dt install
 
 # See what was configured
@@ -39,13 +39,43 @@ git config so `.dvc` file conflicts are resolved automatically.
 |------|-------|------|--------------|
 | `pre-commit` | `dvc-status` | sync | Runs `dvc status` to warn about uncommitted DVC changes |
 | `pre-commit` | `large-files` | sync | Rejects staged files larger than `max_size` (default 1 MB) |
-| `post-checkout` | `dvc-checkout` | sync | Runs `dvc checkout` after branch switch (skips file checkouts and rebases) |
+| `post-checkout` | `dvc-checkout` | sync | Relinks DVC-tracked files after a branch switch — **local-only by default** (skips file checkouts and rebases) |
 | `pre-push` | `dvc-push` | remind | Warns about unpushed DVC data without blocking the git push (see [`dvc-push` modes](#dvc-push-modes)) |
 
-All defaults are written to *local* scope (`.dt/config.local.yaml`) so
-they do not get committed to the repository.  Override them from any
-scope—set `enabled: false` to turn a check off, or change `mode` to
-`async` to offload it to a compute node.
+These defaults are **baked into `dt`**, not written to a config file.
+`dt install` therefore writes no `.dt/config.local.yaml` — hooks work out
+of the box, and a user's `user`/`system` preferences are never silently
+overridden by an auto-written high-precedence file.
+
+Override any field from any scope (standard `local > project > user >
+system` precedence): set `enabled: false` to turn a check off, `mode: off`
+to skip it, or `mode: async` to offload it to a compute node. Overrides
+deep-merge with the defaults per field, so configuring one field of one
+check leaves the other defaults intact; to drop a default check, disable it
+explicitly.
+
+### `dvc-checkout` is local-only by default
+
+After a branch switch, `dvc-checkout` runs `dt pull` to relink the
+workspace, but with **`network: false`** by default: it uses only local
+sources (the local cache plus any locally-mounted remote, e.g. the shared
+cache on HPC). Data that isn't already available is **reported, not
+downloaded**.
+
+This makes branch switches safe on a collaborator's laptop where the remote
+is a multi-TB store on NCI — a checkout never triggers an inline,
+potentially huge network pull, and can never hang on an SSH prompt. On HPC,
+where the remote is on a mounted filesystem, the relink is still fast
+because local symlinking is unaffected.
+
+To opt back into fetching missing data from the remote on checkout (the
+pre-0.12.5 behaviour), set:
+
+```bash
+dt config set hooks.post-checkout.checks.dvc-checkout.network true
+```
+
+Run an explicit `dt pull` any time to fetch missing data over the network.
 
 ## Commands
 
@@ -60,10 +90,12 @@ dt install [--force] [-v]
 | `--force` | Overwrite existing hooks even if they were not installed by dt |
 | `-v, --verbose` | Print detailed progress |
 
-Installs hook scripts, the DVC merge driver, and default check
-configuration.  If hooks already exist and were not installed by dt,
-the command refuses to overwrite them unless `--force` is given.
-Re-running `dt install` on hooks already installed by dt is a no-op.
+Installs hook scripts and the DVC merge driver. It does **not** write any
+check configuration — the defaults are built into `dt` and applied as a
+fallback, so nothing is forced into a committed or high-precedence file. If
+hooks already exist and were not installed by dt, the command refuses to
+overwrite them unless `--force` is given. Re-running `dt install` on hooks
+already installed by dt is a no-op.
 
 ### dt uninstall
 

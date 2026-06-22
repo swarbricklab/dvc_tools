@@ -1234,7 +1234,10 @@ def _dvc_fetch_from_remote(
         print(f"Running: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # stdin=DEVNULL: never block on an interactive SSH prompt (see _run_dvc_fetch).
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
         if result.returncode == 0:
             msg = result.stdout.strip() or f"Fetched from remote '{remote_name}'"
             return [(remote_name, True, msg)]
@@ -1707,11 +1710,16 @@ def _run_repo_import_network_fetch(
         print(f"  Running: {' '.join(cmd)}")
 
     try:
+        # stdin=DEVNULL so a misconfigured SSH remote can't block the
+        # transfer on an interactive password / host-key prompt — fail fast
+        # instead of hanging (critical when invoked from the post-checkout hook).
         if verbose:
-            result = subprocess.run(cmd)
+            result = subprocess.run(cmd, stdin=subprocess.DEVNULL)
             error_msg = "(see above)" if result.returncode != 0 else ""
         else:
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+            )
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
         if result.returncode == 0:
             _strip_added_rev_keys(stage_path, rev_was_set, verbose=verbose)
@@ -1737,11 +1745,16 @@ def _run_dvc_fetch(dvc_path: Path, verbose: bool = False) -> Tuple[bool, str]:
         print(f"  Running: {' '.join(cmd)}")
 
     try:
+        # stdin=DEVNULL so a misconfigured SSH remote can't block the
+        # transfer on an interactive password / host-key prompt — fail fast
+        # instead of hanging (critical when invoked from the post-checkout hook).
         if verbose:
-            result = subprocess.run(cmd)
+            result = subprocess.run(cmd, stdin=subprocess.DEVNULL)
             error_msg = "(see above)" if result.returncode != 0 else ""
         else:
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+            )
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
         if result.returncode == 0:
             return (True, "Fetched via dvc fetch (network)")

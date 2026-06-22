@@ -115,13 +115,14 @@ class TestInstall:
 
         assert set(installed) == set(install.HOOK_NAMES)
 
-    def test_install_writes_default_config(self, git_repo):
+    def test_install_does_not_write_config(self, git_repo):
+        # Install must NOT auto-write a hooks config: defaults live in code so
+        # nothing in a high-precedence scope silently overrides user prefs.
         install.install()
-        config_path = git_repo / '.dt' / 'config.local.yaml'
-        assert config_path.exists()
-        content = config_path.read_text()
-        assert 'hooks' in content
-        assert 'large-files' in content
+        assert not (git_repo / '.dt' / 'config.local.yaml').exists()
+        # Hooks still resolve from the built-in defaults.
+        names = {c['name'] for c in install._get_checks('pre-commit')}
+        assert 'large-files' in names
 
     def test_install_refuses_existing_foreign_hook(self, git_repo):
         hooks_dir = git_repo / '.git' / 'hooks'
@@ -220,14 +221,28 @@ class TestCheckLargeFiles:
 class TestGetChecks:
     """Tests for check resolution from config."""
 
-    def test_returns_empty_when_no_config(self, tmp_path, monkeypatch):
+    def test_falls_back_to_builtin_defaults_when_no_config(self, tmp_path, monkeypatch):
+        # With no config file anywhere, hooks resolve from DEFAULT_HOOKS_CONFIG
+        # (baked into code) rather than being empty.
         monkeypatch.chdir(tmp_path)
         (tmp_path / '.git').mkdir()
         (tmp_path / '.dt').mkdir()
         checks = install._get_checks('pre-commit')
-        assert checks == []
+        names = {c['name'] for c in checks}
+        assert names == {'dvc-status', 'large-files'}
 
-    def test_reads_config(self, tmp_path, monkeypatch):
+    def test_post_checkout_default_is_local_only(self, tmp_path, monkeypatch):
+        # Safe default: dvc-checkout enabled but network=False (no auto-download).
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / '.git').mkdir()
+        (tmp_path / '.dt').mkdir()
+        checks = {c['name']: c for c in install._get_checks('post-checkout')}
+        assert checks['dvc-checkout']['enabled'] is True
+        assert checks['dvc-checkout']['network'] is False
+
+    def test_config_overrides_merge_with_defaults(self, tmp_path, monkeypatch):
+        # Configuring one field of one check overrides just that field and does
+        # NOT drop the other default checks (deep-merge per leaf).
         monkeypatch.chdir(tmp_path)
         (tmp_path / '.git').mkdir()
         dt_dir = tmp_path / '.dt'
@@ -238,21 +253,35 @@ class TestGetChecks:
             'hooks': {
                 'pre-commit': {
                     'checks': {
-                        'large-files': {
-                            'enabled': True,
-                            'mode': 'sync',
-                            'max_size': '100MB',
-                        },
+                        'large-files': {'max_size': '100MB'},
                     },
                 },
             },
         }
         (dt_dir / 'config.yaml').write_text(yaml.safe_dump(config_data))
 
-        checks = install._get_checks('pre-commit')
-        assert len(checks) == 1
-        assert checks[0]['name'] == 'large-files'
-        assert checks[0]['max_size'] == '100MB'
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        # dvc-status survives from defaults; large-files keeps default enabled
+        # while the configured max_size wins.
+        assert set(checks) == {'dvc-status', 'large-files'}
+        assert checks['large-files']['max_size'] == '100MB'
+        assert checks['large-files']['enabled'] is True
+
+    def test_network_opt_in(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / '.git').mkdir()
+        dt_dir = tmp_path / '.dt'
+        dt_dir.mkdir()
+
+        import yaml
+        (dt_dir / 'config.yaml').write_text(yaml.safe_dump({
+            'hooks': {'post-checkout': {'checks': {
+                'dvc-checkout': {'network': True},
+            }}},
+        }))
+
+        checks = {c['name']: c for c in install._get_checks('post-checkout')}
+        assert checks['dvc-checkout']['network'] is True
 
 
 # =============================================================================
@@ -263,10 +292,11 @@ class TestHookRun:
     """Tests for hook_run."""
 
     def test_no_checks_configured_passes(self, tmp_path, monkeypatch):
+        # A hook with no built-in defaults and no config has nothing to run.
         monkeypatch.chdir(tmp_path)
         (tmp_path / '.git').mkdir()
         (tmp_path / '.dt').mkdir()
-        assert install.hook_run('pre-commit') is True
+        assert install.hook_run('post-merge') is True
 
     @patch('dt.install._get_checks')
     def test_sync_check_failure_raises(self, mock_get_checks):
@@ -310,6 +340,18 @@ class TestHookRun:
             'enabled': True,
             'mode': 'sync',
             'command': 'true',  # always succeeds
+        }]
+
+        assert install.hook_run('pre-commit') is True
+
+    @patch('dt.install._get_checks')
+    def test_mode_off_skipped(self, mock_get_checks):
+        # mode: off must skip the check entirely, even though it would fail.
+        mock_get_checks.return_value = [{
+            'name': 'off-check',
+            'enabled': True,
+            'mode': 'off',
+            'command': 'false',  # would fail if run
         }]
 
         assert install.hook_run('pre-commit') is True
@@ -618,7 +660,7 @@ class TestRunDvcPush:
                    return_value=('local', '/data/remote')), \
              patch.object(install.subprocess, 'run') as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
-            install._run_dvc_push()
+            install._run_dvc_push({'mode': 'sync'})
 
         cmd = mock_run.call_args[0][0]
         assert cmd == ['dvc', 'push', '-r', 'local']
@@ -630,7 +672,7 @@ class TestRunDvcPush:
                    return_value=None), \
              patch.object(install.subprocess, 'run') as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
-            install._run_dvc_push()
+            install._run_dvc_push({'mode': 'sync'})
 
         cmd = mock_run.call_args[0][0]
         assert cmd == ['dvc', 'push']
@@ -645,7 +687,7 @@ class TestRunDvcPush:
                 returncode=1, stdout='', stderr='push error',
             )
             with pytest.raises(HookError, match="dvc push failed"):
-                install._run_dvc_push()
+                install._run_dvc_push({'mode': 'sync'})
 
 
 class TestRunCheck:
