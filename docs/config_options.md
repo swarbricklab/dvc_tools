@@ -10,6 +10,7 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 |--------|-------------|---------|
 | `owner` | Default GitHub owner (user or org) for [short repository names](clone.md#short-name-feature) | `myorg` |
 | `team` | GitHub team for [`gh repo create --team`](https://cli.github.com/manual/gh_repo_create) | `analysts` |
+| `username` | Default SSH username for remote hosts, used by [`dt clone`](clone.md) and [`dt auth setup`](auth.md) | `jr9959` |
 | `cache.root` | Root directory for [shared external caches](cache.md) | `/g/data/a56/dvc_cache` |
 | `remote.root` | Root directory for [DVC remote storage](remote.md) | `/g/data/a56/dvc_remote` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
@@ -45,6 +46,16 @@ This can be a personal GitHub username or an organization name—GitHub uses "ow
 Used by `dt init` when suggesting the `gh repo create` command. If set, adds `--team=<value>` to the suggested command.
 
 > **Note:** The `--team` option only applies when `owner` is a GitHub organization. If `owner` is a personal GitHub account, the team setting is ignored.
+
+### `username`
+
+Default SSH username used when setting up access to remote hosts (e.g. your NCI login for `gadi-dm.nci.org.au`). Both `dt clone` and `dt auth setup` use it as the default for `--username`, so setting it once avoids being prompted for your username on every run.
+
+```bash
+dt config set --user username jr9959
+```
+
+Resolution order during auth setup: a per-host `--config` YAML file, then `--username` (which defaults to this config value), then a username embedded in the remote URL, then an interactive prompt. SSH/forge hosts like `github.com` always use `git` and ignore this setting.
 
 ### `cache.root`
 
