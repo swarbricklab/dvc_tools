@@ -2933,7 +2933,7 @@ def data_status(ctx, threads, no_wait, verbose, worker):
 ))
 @click.argument('targets', nargs=-1, type=click.Path())
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('--update', is_flag=True, help='Recover from .dir failures by rebuilding manifests with dt update')
+@click.option('--update', is_flag=True, help='Allow mutating import re-resolution (dvc update / .dvc rewrite) and .dir manifest rebuild for imports that cannot be fetched otherwise')
 @click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
 @click.option('--dry', is_flag=True, help='Show stage categorization without fetching (for troubleshooting)')
 @click.option('--force', is_flag=True, help='Force re-fetch even if .dir exists in cache (ensures all child files are fetched)')
@@ -3226,29 +3226,38 @@ def mv(src, dst, verbose):
 @click.option('--dry', '--dry-run', is_flag=True,
               help='Show what would be pulled without actually pulling.')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('--update', is_flag=True, help='Rebuild .dir files and update .dvc hashes if mismatched')
+@click.option('--update', is_flag=True,
+              help='Allow mutating import re-resolution (dvc update / .dvc rewrite, '
+                   'advancing pins) for imports that cannot be pulled otherwise.')
 @click.option('--network/--no-network', default=True,
               help='Enable/disable network access for fetching. Default: enabled.')
 def pull(targets, force, dry, verbose, update, network):
     """Pull DVC-tracked files (fetch + checkout).
-    
+
     This is the dt equivalent of `dvc pull`. It fetches data to the cache
     and checks out to the workspace in one step.
-    
+
     For imports and local-remote scenarios, uses dt fetch for efficient
-    local cache symlinks. For data requiring network access, uses dvc fetch.
-    
+    local cache symlinks. For data requiring network access, falls back to
+    `dvc fetch` (non-mutating) — it materialises exactly the revisions the
+    lockfile already pins and never rewrites a .dvc file.
+
+    `--update` is the explicit opt-in for advancing/re-resolving imports: it
+    permits the mutating `dvc update` path for the stubborn imports DVC can't
+    pull otherwise (rewriting the .dvc file). Without it, such imports fail
+    with a hint rather than silently re-pinning (see issue #146).
+
     By default, network access is enabled. Use --no-network to only fetch
     data available locally (from local remotes or import sources).
-    
+
     \b
     Examples:
-        dt pull                    # Pull all tracked files
+        dt pull                    # Pull all tracked files (pinned, non-mutating)
         dt pull data/              # Pull specific target
         dt pull --dry              # Show what would be pulled
         dt pull -v                 # Show detailed progress
         dt pull --force data/      # Force re-fetch (after cache validate --fix)
-        dt pull --update           # Rebuild .dir files, update .dvc if needed
+        dt pull --update           # Permit mutating import re-resolution (dvc update)
         dt pull --no-network       # Only pull data available locally
     """
     try:

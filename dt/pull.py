@@ -137,7 +137,11 @@ def pull(
             - None for all stages
         verbose: Print detailed progress.
         force: Delete .dir manifests before pulling to force re-fetch.
-        update: If True, rebuild .dir files for imports if missing.
+        update: If True, permit the mutating import re-resolution path
+                (`dvc update`, which rewrites the .dvc file / advances pins)
+                and .dir manifest rebuild for imports that can't otherwise be
+                materialised. Default False: only pinned, non-mutating
+                materialisation (see issue #146).
         network: If True (default), fall back to network fetch when
                  local cache is not available. If False, only use local
                  sources and report what would need network access.
@@ -216,15 +220,15 @@ def pull(
             if "No local source" in message or "use --network" in message.lower():
                 network_needed.append(source_name)
     
-    # If network=False and some items needed network, show helpful message
+    # fetch_from_plan already lists each failed stage individually with its
+    # reason; here we only add a consolidated, actionable hint for the
+    # network=False case (avoids re-listing the same names).
     if not network and network_needed:
-        print(f"\n{len(network_needed)} stage(s) require network access:")
-        for name in network_needed[:5]:  # Show first 5
-            print(f"  - {name}")
-        if len(network_needed) > 5:
-            print(f"  ... and {len(network_needed) - 5} more")
-        print("\nTo fetch these, run: dt pull --network")
-        print("Or configure a local remote accessible on this filesystem.")
+        print(
+            f"\n{len(network_needed)} stage(s) need network access. "
+            "Re-run with `dt pull --network`, or configure a local remote "
+            "accessible on this filesystem."
+        )
     
     if dry:
         # Dry run - don't checkout
