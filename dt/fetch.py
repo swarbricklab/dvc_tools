@@ -650,6 +650,19 @@ def _recover_dir_failures(
     return results
 
 
+def _report_failures(results: List[Tuple[str, bool, str]]) -> List[Tuple[str, str]]:
+    """Print each failed stage with its reason, not just a count.
+
+    Returns the list of (name, message) failures (empty if none).
+    """
+    failures = [(name, msg) for name, ok, msg in results if not ok]
+    if failures:
+        print(f"\n{len(failures)} stage(s) failed:")
+        for name, msg in failures:
+            print(f"  ✗ {name}: {msg}")
+    return failures
+
+
 def fetch_from_plan(
     plan: FetchPlan,
     verbose: bool = False,
@@ -784,10 +797,13 @@ def fetch_from_plan(
                     continue
                 results.append((stage.addressing, False, "URL import requires network (use --network)"))
     
-    # Early return if no sources with hashes to fetch
+    # Early return if no sources with hashes to fetch. This is the pure
+    # import / no-local-source path, so report any failures individually
+    # here too (the end-of-function reporting below is not reached).
     if plan.total_hashes == 0:
         if verbose and not results:
             print("No hashes to fetch")
+        _report_failures(results)
         idx.close()
         return results
     
@@ -1015,7 +1031,11 @@ def fetch_from_plan(
     # Report v2 files (placed in v2 location)
     if plan.v2_hashes and verbose:
         print(f"\nNote: {len(plan.v2_hashes)} files from v2 format .dvc files placed in legacy cache location.")
-    
+
+    # List each failure individually with its reason, so a partial failure is
+    # actionable (which stage, and why) rather than just a count at the end.
+    _report_failures(results)
+
     # Summary - always show if there were failures, or if verbose
     if total_failed > 0 or verbose:
         if skipped_by_index > 0:

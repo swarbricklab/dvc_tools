@@ -531,6 +531,21 @@ class TestFetchFromPlan:
         assert success is False
         assert 'No local source' in msg
     
+    def test_failures_reported_individually(self, capsys):
+        """Each failed stage is printed with its reason, not just a count."""
+        s1 = MagicMock(); s1.addressing = 'a.dvc'
+        s2 = MagicMock(); s2.addressing = 'b.dvc'
+
+        plan = fetch.FetchPlan()
+        plan.no_source = [s1, s2]
+
+        fetch.fetch_from_plan(plan, network=False)
+
+        out = capsys.readouterr().out
+        assert '2 stage(s) failed:' in out
+        assert '✗ a.dvc' in out
+        assert '✗ b.dvc' in out
+
     def test_no_source_stages_use_dvc_fetch_with_network(self):
         """Stages in no_source use dvc fetch with --network."""
         mock_stage = MagicMock()
