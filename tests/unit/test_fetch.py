@@ -1103,21 +1103,36 @@ class TestRunRepoImportNetworkFetch:
         stage.is_repo_import = True
         return stage
 
-    def test_uses_dvc_update_with_rev_lock(self, tmp_path):
-        """Uses dvc update --rev <rev_lock> when rev_lock is present."""
+    def test_default_materialises_via_dvc_fetch_no_mutation(self, tmp_path):
+        """Default (no --update): pull via dvc fetch; never run mutating dvc update."""
         stage = self._make_stage(tmp_path)
         import_info = {'url': 'git@github.com:org/repo.git', 'rev': 'deadbeef', 'path': 'data.csv'}
 
         with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('dt.fetch._run_dvc_fetch',
+                   return_value=(True, 'Fetched via dvc fetch (network)')) as mock_fetch, \
              patch('subprocess.run') as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
             success, message = fetch._run_repo_import_network_fetch(stage)
 
         assert success is True
-        assert 'dvc update' in message
-        cmd = mock_run.call_args[0][0]
-        assert cmd[:3] == ['dvc', 'update', '--rev']
-        assert 'deadbeef' in cmd
+        assert mock_fetch.called
+        # The mutating `dvc update` path must not run on the default pull.
+        mock_run.assert_not_called()
+
+    def test_default_no_update_fails_with_hint(self, tmp_path):
+        """Default: an import dvc fetch can't satisfy fails with a --update hint, no mutation."""
+        stage = self._make_stage(tmp_path)
+        import_info = {'url': 'git@github.com:org/repo.git', 'rev': 'deadbeef', 'path': 'data.csv'}
+
+        with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('dt.fetch._run_dvc_fetch',
+                   return_value=(False, 'dvc fetch failed: not in remote')), \
+             patch('subprocess.run') as mock_run:
+            success, message = fetch._run_repo_import_network_fetch(stage)  # update=False
+
+        assert success is False
+        assert '--update' in message
+        mock_run.assert_not_called()  # no dvc update
 
     def test_falls_back_to_dvc_fetch_when_no_rev_lock(self, tmp_path):
         """Falls back to _run_dvc_fetch when import info has no rev_lock."""
@@ -1131,15 +1146,34 @@ class TestRunRepoImportNetworkFetch:
         assert mock_fallback.called
         assert success is True
 
-    def test_propagates_dvc_update_failure(self, tmp_path):
-        """Failure in dvc update is reported."""
+    def test_update_uses_dvc_update_with_rev_lock(self, tmp_path):
+        """--update: a stubborn import falls back to dvc update --rev <rev_lock>."""
         stage = self._make_stage(tmp_path)
         import_info = {'url': 'git@github.com:org/repo.git', 'rev': 'deadbeef', 'path': 'data.csv'}
 
         with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('dt.fetch._run_dvc_fetch', return_value=(False, 'dvc fetch failed')), \
+             patch('dt.fetch._strip_added_rev_keys'), \
+             patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
+            success, message = fetch._run_repo_import_network_fetch(stage, update=True)
+
+        assert success is True
+        assert 'dvc update' in message
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:3] == ['dvc', 'update', '--rev']
+        assert 'deadbeef' in cmd
+
+    def test_update_propagates_dvc_update_failure(self, tmp_path):
+        """--update: failure in dvc update is reported."""
+        stage = self._make_stage(tmp_path)
+        import_info = {'url': 'git@github.com:org/repo.git', 'rev': 'deadbeef', 'path': 'data.csv'}
+
+        with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('dt.fetch._run_dvc_fetch', return_value=(False, 'dvc fetch failed')), \
              patch('subprocess.run') as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='Authentication failed')
-            success, message = fetch._run_repo_import_network_fetch(stage)
+            success, message = fetch._run_repo_import_network_fetch(stage, update=True)
 
         assert success is False
         assert 'Authentication failed' in message

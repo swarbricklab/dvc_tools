@@ -137,7 +137,11 @@ def pull(
             - None for all stages
         verbose: Print detailed progress.
         force: Delete .dir manifests before pulling to force re-fetch.
-        update: If True, rebuild .dir files for imports if missing.
+        update: If True, permit the mutating import re-resolution path
+                (`dvc update`, which rewrites the .dvc file / advances pins)
+                and .dir manifest rebuild for imports that can't otherwise be
+                materialised. Default False: only pinned, non-mutating
+                materialisation (see issue #146).
         network: If True (default), fall back to network fetch when
                  local cache is not available. If False, only use local
                  sources and report what would need network access.

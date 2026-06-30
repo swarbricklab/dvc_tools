@@ -667,7 +667,10 @@ def fetch_from_plan(
         verbose: Print detailed progress.
         show_progress: Show progress bar.
         network: Fall back to dvc fetch for stages without local source.
-        update: If True, attempt to recover from .dir failures by running dt update.
+        update: If True, permit mutating import recovery — the `dvc update`
+            source re-resolve (rewrites the .dvc file) and .dir manifest
+            rebuild — for imports that can't be materialised non-mutatingly.
+            Default False: pinned, non-mutating materialisation only.
         force: If True, don't skip .dir files that are already cached. This ensures
             all child files are fetched even if the .dir manifest exists in cache.
         destination: Explicit destination cache path. If None, uses primary cache.
@@ -695,7 +698,7 @@ def fetch_from_plan(
                     # repo rather than the current project's remote.  This
                     # handles git-tracked sources and avoids auth errors from
                     # S3 remotes that don't hold imported data.
-                    success, msg = _run_repo_import_network_fetch(stage, verbose)
+                    success, msg = _run_repo_import_network_fetch(stage, verbose, update=update)
                 else:
                     success, msg = _run_dvc_fetch(stage.addressing, verbose)
                 results.append((stage.addressing, success, msg))
@@ -1002,7 +1005,7 @@ def fetch_from_plan(
             print(f"\nNetwork fallback for {len(network_fallback_stages)} repo import(s) not found in local cache...")
         for stage_name in sorted(network_fallback_stages):
             mock_stage = SimpleNamespace(path=stage_name, addressing=stage_name)
-            success, msg = _run_repo_import_network_fetch(mock_stage, verbose, cache_base=cache_base)
+            success, msg = _run_repo_import_network_fetch(mock_stage, verbose, cache_base=cache_base, update=update)
             if success:
                 total_fetched += 1
             else:
@@ -1590,25 +1593,33 @@ def _run_repo_import_network_fetch(
     stage: Any,
     verbose: bool = False,
     cache_base: Optional[str] = None,
+    update: bool = False,
 ) -> Tuple[bool, str]:
-    """Network-fetch a repo import stage.
+    """Network-fetch a repo import stage, materialising the *pinned* revision.
+
+    All of the default-path attempts are **non-mutating** — they materialise
+    the data the ``.dvc`` file already pins without ever rewriting it. Only the
+    explicit ``--update`` opt-in may re-resolve the import from its source and
+    rewrite the ``.dvc`` (see issue #146).
 
     Order of operations:
 
-    1. **Cache check** — if every output (and ``.dir`` child) for the stage is
-       already present in the primary DVC cache, return immediately.  This
-       avoids spurious network calls (and the ``.dvc`` rewrites they would
-       trigger) when the data is already on disk, e.g. when the source repo's
-       local cache is no longer mounted but the user fetched the data earlier.
-    2. **git show from tmp clone** — read the file directly from
-       ``.dt/tmp/clones/`` via ``git show <rev_lock>:<path>``.  No side-effects
-       on the ``.dvc`` file.
-    3. **dvc update --rev <rev_lock>** — last-resort fallback for files that
-       live in the source repo's own DVC remote (not git-tracked) and so can't
-       be served via ``git show``.  DVC's ``update --rev`` writes both
-       ``rev_lock`` and ``rev`` into the ``.dvc`` file; any ``rev`` key that
-       wasn't originally present is stripped afterwards so unpinned imports
-       stay unpinned.
+    1. **Cache check** — if every output (and ``.dir`` child) is already in the
+       primary DVC cache, return immediately.
+    2. **git show from tmp clone** — read a git-tracked file directly via
+       ``git show <rev_lock>:<path>``.  No side-effects on the ``.dvc`` file.
+    3. **dvc fetch** — standard, non-mutating pull of the pinned outputs from
+       *this* repo's own remote (the ``dvc pull`` equivalent in the fetch
+       phase). Handles imports whose data was pushed alongside the repo.
+    4. **dvc update --rev <rev_lock>** — *only when ``update=True``*.
+       Re-resolves the import from its **source** repo for the stubborn cases
+       DVC can't otherwise pull (e.g. directory imports whose data lives only
+       in the source's remote). This MUTATES the ``.dvc`` file: DVC writes both
+       ``rev_lock`` and ``rev``; any ``rev`` key that wasn't originally present
+       is stripped afterwards so unpinned imports stay unpinned.
+
+    Without ``--update``, if steps 1–3 can't satisfy a pinned import the stage
+    fails with a hint rather than silently mutating the ``.dvc`` file.
 
     If no ``rev_lock`` is recorded in the .dvc file (unusual) the call falls
     back to plain ``dvc fetch`` so we do not inadvertently update to HEAD.
@@ -1619,6 +1630,8 @@ def _run_repo_import_network_fetch(
         verbose: Print progress messages.
         cache_base: Optional path to the DVC cache root.  When omitted the
             primary DVC cache is resolved automatically.
+        update: If True, allow the mutating ``dvc update`` source re-resolve as
+            a last resort. Defaults to False (pure pinned materialisation).
 
     Returns:
         Tuple of (success, message).
@@ -1653,7 +1666,7 @@ def _run_repo_import_network_fetch(
 
     _cache_base = _resolve_primary_cache_base(cache_base)
 
-    # --- Attempt 0: already in destination cache? Skip all network work. ---
+    # --- Attempt 1: already in destination cache? Skip all network work. ---
     if dvc_data and _cache_base and _stage_outputs_fully_cached(dvc_data, _cache_base):
         if verbose:
             print(f"  {stage_path}: already cached, skipping network fetch")
@@ -1662,7 +1675,7 @@ def _run_repo_import_network_fetch(
     outs = dvc_data.get('outs', []) if isinstance(dvc_data, dict) else []
     expected_md5 = outs[0].get('md5') if outs else None
 
-    # --- Attempt 1: read file from tmp clone via git show (no .dvc side-effects) ---
+    # --- Attempt 2: read file from tmp clone via git show (no .dvc side-effects) ---
     if url and source_path and expected_md5 and not expected_md5.endswith('.dir'):
         try:
             clone_path = tmp_mod.clone_repo(url, refresh=False, verbose=False)
@@ -1702,7 +1715,23 @@ def _run_repo_import_network_fetch(
             if verbose:
                 print(f"  git show failed ({e}), falling back to dvc update")
 
-    # --- Attempt 2: dvc update (rewrites the .dvc file — we patch it back below) ---
+    # --- Attempt 3: dvc fetch — standard, non-mutating pull of the pinned
+    # outputs from this repo's own remote. This is the `dvc pull` equivalent
+    # in the fetch phase and never rewrites the .dvc file. ---
+    success, msg = _run_dvc_fetch(stage_path, verbose=verbose)
+    if success:
+        return (True, msg)
+
+    # --- Attempt 4: dvc update — re-resolve from the import's source repo.
+    # MUTATES the .dvc file, so it is gated behind --update. ---
+    if not update:
+        return (
+            False,
+            "pinned import not found in cache, source git, or this repo's "
+            "remote. Re-run with `dt pull --update` to re-resolve it from the "
+            "source repo (note: --update rewrites the .dvc file).",
+        )
+
     rev_was_set = _snapshot_repo_rev_keys(dvc_data)
 
     cmd = ['dvc', 'update', '--rev', rev_lock, str(stage_path)]
@@ -1723,7 +1752,7 @@ def _run_repo_import_network_fetch(
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
         if result.returncode == 0:
             _strip_added_rev_keys(stage_path, rev_was_set, verbose=verbose)
-            return (True, "Fetched via dvc update (network)")
+            return (True, "Fetched via dvc update (network, --update)")
         else:
             return (False, f"dvc update failed: {error_msg}")
     except (OSError, FileNotFoundError) as e:
