@@ -3074,9 +3074,15 @@ def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, reg
         else:
             click.echo(f"\n✓ {successes} stages processed")
         
-        if failures and successes == 0:
+        # Exit non-zero when everything failed, or when a hard verification
+        # failure occurred even on partial success — a silently incomplete
+        # cache must never look like a clean fetch (issue #151).
+        verification_failed = any(
+            target == 'cache verification' for target, _ in failures
+        )
+        if (failures and successes == 0) or verification_failed:
             raise SystemExit(1)
-    
+
     except errors.HashMismatchError as e:
         # Clean error message with suggestion
         raise click.ClickException(str(e))
@@ -3611,9 +3617,15 @@ def update(targets, rev, no_download, rebuild, force, dry_run, status, verbose):
                 else:
                     any_failure = True
         
-        if any_failure and not any_success:
+        # A post-rebuild fetch/verification failure is hard: an incomplete
+        # cache must never be reported as a successful update, even when some
+        # imports rebuilt cleanly (issue #151).
+        fetch_failed = any(
+            target == 'fetch' and not success for target, success, _ in results
+        )
+        if (any_failure and not any_success) or fetch_failed:
             raise SystemExit(1)
-    
+
     except update_mod.UpdateError as e:
         raise click.ClickException(str(e))
 
