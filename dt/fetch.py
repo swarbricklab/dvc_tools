@@ -1704,6 +1704,64 @@ def _strip_added_rev_keys(
     dump_yaml(dvc_path, data)
 
 
+def _recover_import_via_source_clone(
+    url: str,
+    source_path: str,
+    rev_lock: str,
+    cache_base: str,
+    verbose: bool = False,
+) -> Tuple[bool, str]:
+    """Non-mutating recovery of a pinned import from its SOURCE repo.
+
+    Uses the source repo's own clone in ``.dt/tmp`` (checked out at
+    ``rev_lock``): we point the clone's DVC cache at *this* project's primary
+    cache and run ``dvc fetch`` inside the clone. DVC then pulls the pinned
+    objects from the *source* repo's own remote straight into our cache. This
+    fetches data that this repo's remote does not hold (the classic case for a
+    ``--rev``-pinned import) WITHOUT ever touching our ``.dvc`` file — unlike
+    ``dvc update``, which rewrites it. See issues #70 and #146.
+
+    Returns (success, message). Never raises.
+    """
+    from . import tmp as tmp_mod
+    from . import import_data as import_mod
+
+    try:
+        # Clone (or reuse) the source repo checked out at the pinned rev.
+        clone_path = tmp_mod.clone_repo(url, refresh=False, verbose=False, rev=rev_lock)
+    except Exception as e:
+        return (False, f"could not access source repo clone: {e}")
+
+    # Point the clone's cache at our primary cache so fetched objects land here.
+    try:
+        import_mod.configure_clone_cache(clone_path, cache_base)
+    except Exception as e:
+        return (False, f"could not configure source clone cache: {e}")
+
+    cmd = ['dvc', 'fetch', source_path]
+    if verbose:
+        print(f"  Running (in source clone): {' '.join(cmd)}")
+
+    try:
+        # stdin=DEVNULL so a misconfigured source remote can't block on an
+        # interactive credential/host-key prompt — fail fast instead of hanging.
+        if verbose:
+            result = subprocess.run(cmd, cwd=clone_path, stdin=subprocess.DEVNULL)
+            error_msg = "(see above)" if result.returncode != 0 else ""
+        else:
+            result = subprocess.run(
+                cmd, cwd=clone_path, capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
+            )
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+    except (OSError, FileNotFoundError) as e:
+        return (False, f"source-clone dvc fetch failed: {e}")
+
+    if result.returncode == 0:
+        return (True, "Fetched from source repo remote via clone (non-mutating)")
+    return (False, f"source-clone dvc fetch failed: {error_msg}")
+
+
 def _run_repo_import_network_fetch(
     stage: Any,
     verbose: bool = False,
@@ -1726,14 +1784,19 @@ def _run_repo_import_network_fetch(
     3. **dvc fetch** — standard, non-mutating pull of the pinned outputs from
        *this* repo's own remote (the ``dvc pull`` equivalent in the fetch
        phase). Handles imports whose data was pushed alongside the repo.
-    4. **dvc update --rev <rev_lock>** — *only when ``update=True``*.
-       Re-resolves the import from its **source** repo for the stubborn cases
-       DVC can't otherwise pull (e.g. directory imports whose data lives only
-       in the source's remote). This MUTATES the ``.dvc`` file: DVC writes both
-       ``rev_lock`` and ``rev``; any ``rev`` key that wasn't originally present
-       is stripped afterwards so unpinned imports stay unpinned.
+    4. **source-clone dvc fetch** — non-mutating recovery from the import's
+       **source** repo, using the source clone in ``.dt/tmp`` checked out at
+       ``rev_lock`` with its cache pointed at ours. Pulls the pinned objects
+       from the source's own remote (the classic ``--rev``-pinned directory
+       import whose data lives only in the source), all without touching our
+       ``.dvc`` file. Runs by default.
+    5. **dvc update --rev <rev_lock>** — *only when ``update=True``*.
+       Last-resort re-resolve of the import from its source that MUTATES the
+       ``.dvc`` file: DVC writes both ``rev_lock`` and ``rev``; any ``rev`` key
+       that wasn't originally present is stripped afterwards so unpinned imports
+       stay unpinned.
 
-    Without ``--update``, if steps 1–3 can't satisfy a pinned import the stage
+    Without ``--update``, if steps 1–4 can't satisfy a pinned import the stage
     fails with a hint rather than silently mutating the ``.dvc`` file.
 
     If no ``rev_lock`` is recorded in the .dvc file (unusual) the call falls
@@ -1837,14 +1900,28 @@ def _run_repo_import_network_fetch(
     if success:
         return (True, msg)
 
-    # --- Attempt 4: dvc update — re-resolve from the import's source repo.
+    # --- Attempt 4: non-mutating recovery from the import's SOURCE repo via
+    # its tmp clone (cache pointed at ours). Pulls the pinned objects from the
+    # source's own remote — the case this repo's remote (attempt 3) can't
+    # satisfy for a --rev-pinned import — without rewriting our .dvc. ---
+    if url and source_path and _cache_base:
+        success, msg = _recover_import_via_source_clone(
+            url, source_path, rev_lock, _cache_base, verbose=verbose
+        )
+        if success:
+            return (True, msg)
+        elif verbose:
+            print(f"  source-clone recovery did not satisfy the import: {msg}")
+
+    # --- Attempt 5: dvc update — re-resolve from the import's source repo.
     # MUTATES the .dvc file, so it is gated behind --update. ---
     if not update:
         return (
             False,
-            "pinned import not found in cache, source git, or this repo's "
-            "remote. Re-run with `dt pull --update` to re-resolve it from the "
-            "source repo (note: --update rewrites the .dvc file).",
+            "pinned import not found in cache, source git, this repo's remote, "
+            "or the source repo's remote. Re-run with `dt pull --update` to "
+            "re-resolve it from the source repo (note: --update rewrites the "
+            ".dvc file).",
         )
 
     rev_was_set = _snapshot_repo_rev_keys(dvc_data)

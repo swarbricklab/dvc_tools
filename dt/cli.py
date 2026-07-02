@@ -3387,7 +3387,7 @@ def tmp_clean(repository, owner, clean_all):
 @click.option('--no-checkout', is_flag=True, help='Skip checkout after import')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing temp clone (for offline use)')
 @click.option('--no-download', is_flag=True, help='Create .dvc file without downloading data (like dvc import --no-download)')
-@click.option('--rev', default=None, help='Git revision to lock to (used with --no-download; defaults to tmp clone HEAD)')
+@click.option('--rev', default=None, help='Git revision (branch, tag, or commit) to import from and lock to (defaults to the source default-branch HEAD)')
 @click.option('--csv', 'csv_path', default=None, type=click.Path(exists=True), help='CSV file with paths to import (requires "path" column, optional "output" column)')
 @click.option('--dvc-import-fallback/--no-dvc-import-fallback', default=True, help='If no local source cache is found, delegate to dvc import (default: enabled).')
 @click.option('-f', '--force', is_flag=True, help='Overwrite existing output')
@@ -3404,16 +3404,18 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
     
     \b
     Options:
+      --rev REV       Import from a specific git revision (branch, tag, or
+                      commit) and lock to it. Defaults to the source repo's
+                      default-branch HEAD. Works with and without --no-download.
       --no-download   Create .dvc file without downloading data.
                       Uses the tmp clone HEAD (or --rev) for rev_lock.
-      --rev REV       Lock to a specific git revision (with --no-download).
       --csv FILE      Import every row from a CSV file. The CSV must have
                       a "path" column; an optional "output" column maps
                       to -o/--out.
     --no-dvc-import-fallback
                 Disable automatic fallback to `dvc import` when the
                 source remote is not locally accessible.
-    
+
     \b
     Examples:
         dt import neochemo data/processed
@@ -3421,6 +3423,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
         dt import git@github.com:lab/project.git results/model
         dt import neochemo data/large --no-checkout
         dt import neochemo data/file --no-refresh
+        dt import neochemo data/file --rev dev
         dt import neochemo data/file --no-download
         dt import neochemo data/file --no-download --rev abc123
         dt import neochemo --csv paths.csv
@@ -3491,6 +3494,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
             refresh=not no_refresh,
             allow_dvc_fallback=dvc_import_fallback,
             force=force,
+            rev=rev,
         )
         
         click.echo(f"Created {dvc_file}")
