@@ -104,22 +104,27 @@ def clone_repo(
     owner: Optional[str] = None,
     refresh: bool = True,
     verbose: bool = True,
+    rev: Optional[str] = None,
 ) -> Path:
     """Clone or refresh a repository in .dt/tmp/clones/.
-    
+
     Creates a full clone so that dvc.yaml, dvc.lock, and all .dvc files
     are available for DVC commands like `dvc list` and `dvc diff` can
     compare against any revision.
-    
+
     Args:
         repo_spec: Repository URL or short name
         owner: Optional owner for short names
         refresh: If True, update existing clone (default True)
         verbose: Print progress messages
-        
+        rev: Optional git revision (branch, tag, or commit) to check out.
+            When given, the clone is left at that revision instead of the
+            default branch HEAD. Overrides the origin/HEAD reset done by a
+            refresh.
+
     Returns:
         Path to the cloned repository
-        
+
     Raises:
         TmpError: If cloning fails
     """
@@ -127,45 +132,98 @@ def clone_repo(
         utils.check_git()
     except utils.DependencyError as e:
         raise TmpError(str(e))
-    
+
     url = resolve_repository_url(repo_spec, owner)
     repo_id = get_repo_id(repo_spec, owner)
-    
+
     tmp_dir = get_tmp_dir()
     repo_path = tmp_dir / repo_id
-    
+
     # Ensure .dt/.gitignore is up to date (covers /tmp/ and other entries)
     utils.ensure_dt_gitignore()
-    
+
     if repo_path.exists():
         if refresh:
             if verbose:
                 print(f"Refreshing {repo_id}...")
-            return _refresh_clone(repo_path, verbose=verbose)
+            _refresh_clone(repo_path, verbose=verbose)
         else:
             if verbose:
                 print(f"Using cached {repo_id}")
-            return repo_path
-    
-    # Create parent directory
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    
-    if verbose:
-        print(f"Cloning {url} to .dt/tmp/clones/{repo_id}...")
+    else:
+        # Create parent directory
+        tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Full clone for dvc.yaml etc and to support dvc diff against any revision
-    result = subprocess.run(
-        ['git', 'clone', url, str(repo_path)],
-        capture_output=True,
-        text=True,
-    )
-    
-    if result.returncode != 0:
-        raise TmpError(f"Failed to clone repository: {result.stderr}")
-    
+        if verbose:
+            print(f"Cloning {url} to .dt/tmp/clones/{repo_id}...")
+
+        # Full clone for dvc.yaml etc and to support dvc diff against any revision
+        result = subprocess.run(
+            ['git', 'clone', url, str(repo_path)],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            raise TmpError(f"Failed to clone repository: {result.stderr}")
+
+        if verbose:
+            print(f"Cloned to .dt/tmp/clones/{repo_id}")
+
+    # Check out an explicit revision if requested (after any refresh reset).
+    if rev:
+        _checkout_rev(repo_path, rev, verbose=verbose)
+
+    return repo_path
+
+
+def _checkout_rev(repo_path: Path, rev: str, verbose: bool = True) -> Path:
+    """Fetch and check out a specific git revision in an existing clone.
+
+    Handles branches, tags, and commit hashes. The clone may be shallow, so
+    the revision is fetched explicitly before checkout.
+
+    Args:
+        repo_path: Path to the git repository clone.
+        rev: Git revision (branch, tag, or commit hash) to check out.
+        verbose: Print progress messages.
+
+    Returns:
+        Path to the repository.
+
+    Raises:
+        TmpError: If the revision cannot be fetched or checked out.
+    """
     if verbose:
-        print(f"Cloned to .dt/tmp/clones/{repo_id}")
-    
+        print(f"Checking out revision {rev}...")
+
+    # Fetch the specific rev (may not be present in a shallow clone). Try a
+    # shallow fetch first, then a full fetch as a fallback.
+    fetched = subprocess.run(
+        ['git', 'fetch', '--depth', '1', 'origin', rev],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if fetched.returncode != 0:
+        fetched = subprocess.run(
+            ['git', 'fetch', 'origin', rev],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+
+    # Prefer checking out the named rev; fall back to FETCH_HEAD (covers the
+    # case where the rev was only reachable via the explicit fetch above).
+    checkout = subprocess.run(
+        ['git', 'checkout', rev],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if checkout.returncode != 0:
+        checkout = subprocess.run(
+            ['git', 'checkout', 'FETCH_HEAD'],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        if checkout.returncode != 0:
+            detail = checkout.stderr.strip() or fetched.stderr.strip() or 'unknown error'
+            raise TmpError(f"Could not check out revision '{rev}': {detail}")
+
     return repo_path
 
 

@@ -721,9 +721,12 @@ def _delegate_to_dvc_import(
     out_path: Path,
     checkout: bool,
     verbose: bool = False,
+    rev: Optional[str] = None,
 ) -> Path:
     """Fallback to ``dvc import`` for sources without local cache access."""
     cmd = ['dvc', 'import', repo_url, path, '--out', str(out_path)]
+    if rev:
+        cmd.extend(['--rev', rev])
     if not checkout:
         cmd.append('--no-download')
 
@@ -749,9 +752,10 @@ def import_data(
     refresh: bool = True,
     allow_dvc_fallback: bool = True,
     force: bool = False,
+    rev: Optional[str] = None,
 ) -> Tuple[Path, Optional[str]]:
     """Import DVC-tracked data from a remote repository.
-    
+
     Args:
         repository: Repository name, alias, or URL.
         path: Path to the file/directory in the remote repo.
@@ -762,10 +766,14 @@ def import_data(
         refresh: Whether to refresh temp clone (default True).
         allow_dvc_fallback: If True, delegate to dvc import when no local cache exists.
         force: Overwrite existing output (default False).
-        
+        rev: Optional git revision (branch, tag, or commit) to import from.
+            When given, the source is read at that revision and the import is
+            pinned to the resolved commit. Defaults to the source repo's
+            default-branch HEAD.
+
     Returns:
         Tuple of (dvc_file_path, cache_path used).
-        
+
     Raises:
         ImportError: If import fails.
     """
@@ -794,17 +802,19 @@ def import_data(
         print(f"Ensuring clone of {repository}...")
     
     try:
-        clone_path = tmp_mod.clone_repo(repository, owner=owner, refresh=refresh)
+        clone_path = tmp_mod.clone_repo(repository, owner=owner, refresh=refresh, rev=rev)
     except tmp_mod.TmpError as e:
         raise ImportError(f"Failed to clone repository: {e}")
-    
+
     if verbose:
         print(f"Using clone at {clone_path}")
-    
+
     # Get repository URL and commit hash for deps section
     repo_url = tmp_mod.resolve_repository_url(repository, owner)
-    
-    # Get HEAD commit hash from clone
+
+    # Get HEAD commit hash from clone. When --rev was given the clone is now
+    # checked out at that revision, so this resolves the branch/tag/commit to
+    # the exact commit we pin to (rev_lock).
     commit_result = subprocess.run(
         ['git', 'rev-parse', 'HEAD'],
         cwd=clone_path,
@@ -839,6 +849,7 @@ def import_data(
                 out_path=out_path,
                 checkout=checkout,
                 verbose=verbose,
+                rev=rev,
             )
             return dvc_file, None
         raise ImportError(
@@ -1275,6 +1286,7 @@ def import_from_csv(
                     verbose=verbose,
                     refresh=not no_refresh,
                     allow_dvc_fallback=allow_dvc_fallback,
+                    rev=rev,
                 )
                 results.append((row_path, True, f"Created {dvc_file}"))
         except Exception as e:

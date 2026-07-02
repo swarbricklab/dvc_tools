@@ -24,6 +24,7 @@ Imports files or directories from another DVC repository by:
 
 - `--out, -o <path>`: Destination path for imported files (default: basename of source path)
 - `--owner <owner>`: Override the GitHub owner for short repository names
+- `--rev <rev>`: Import from a specific git revision (branch, tag, or commit) and lock to it. Defaults to the source repo's default-branch HEAD. Works with and without `--no-download`.
 - `--no-checkout`: Create `.dvc` file without checking out the data
 - `--no-dvc-import-fallback`: Fail if no local source cache is found (do not delegate to `dvc import`)
 - `-v, --verbose`: Show detailed progress
@@ -37,12 +38,19 @@ dt import git@github.com:myorg/otherproject.git data/processed
 # Import with custom output name
 dt import otherproject data/samples --out my_samples
 
+# Import from a specific branch, tag, or commit (pins to the resolved commit)
+dt import otherproject data/processed --rev dev
+dt import otherproject data/processed --rev v1.2.0
+
 # Import without checking out (just create .dvc file)
 dt import neochemo data/large_dataset --no-checkout
 
 # Fail fast when source cache is off-world (disable delegation)
 dt import neochemo data/large_dataset --no-dvc-import-fallback
 ```
+
+The `--rev` value is resolved to the exact commit and recorded as the import's
+`rev_lock`, so the import is reproducibly pinned to that revision.
 
 ## How it works
 
