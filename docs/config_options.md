@@ -294,6 +294,29 @@ dt config set summary.output_dir project_docs
 
 The `--out` flag on `dt summary` overrides this setting.
 
+## secrets Options
+
+### `secrets.gcp.locations`
+
+**Default:** _unset_ (GCP automatic/global replication)
+
+Region(s) in which `dt auth credentials set` creates GCP Secret Manager
+secrets. When unset, secrets are created with GCP's default automatic
+(global) replication. When set, secrets are created with **user-managed**
+replication in the given region(s) — required in projects governed by a
+`constraints/gcp.resourceLocations` org policy, which forbids creating
+secrets in `global`.
+
+Accepts a single region or a comma-separated list.
+
+```bash
+# Single region
+dt config set secrets.gcp.locations australia-southeast1
+
+# Multiple regions
+dt config set secrets.gcp.locations australia-southeast1,australia-southeast2
+```
+
 ## See also
 
 - [dt config](config.md) - Set and get configuration values

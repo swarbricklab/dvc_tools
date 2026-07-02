@@ -827,6 +827,25 @@ def _check_dvc_remote(ep: Endpoint, remote_name: str,
     return _check_dvc_remote_impl(ep, remote_name, verbose=verbose)
 
 
+def _reachability_probe_paths(path: str) -> List[str]:
+    """Listing probe paths to tell "empty" apart from "missing" for #150.
+
+    Returns the original path first (an empty prefix in an existing bucket
+    lists cleanly), then the bucket root (a fresh empty bucket lists cleanly
+    even when a sub-prefix does not). Deduplicated, order preserved.
+    """
+    probes = [path]
+    if '://' in path:
+        scheme, rest = path.split('://', 1)
+        bucket = rest.split('/', 1)[0]
+        root = f'{scheme}://{bucket}'
+    else:
+        root = path.split('/', 1)[0]
+    if root and root not in probes:
+        probes.append(root)
+    return probes
+
+
 def _check_dvc_remote_impl(ep: Endpoint, remote_name: str,
                            verbose: bool = False,
                            _repo_factory=None) -> Optional[CheckResult]:
@@ -862,6 +881,22 @@ def _check_dvc_remote_impl(ep: Endpoint, remote_name: str,
         )
 
     if not reachable:
+        # fs.exists() on an object-store prefix is a key-listing probe, so a
+        # valid-but-empty bucket (the normal state of a freshly-created S3/R2
+        # remote) reports False even though it is reachable and writable.
+        # Distinguish "reachable but empty" from "unreachable/misnamed" with a
+        # listing probe before failing, and don't emit the misleading "Check
+        # remote URL" hint when the bucket itself is fine (issue #150).
+        for probe in _reachability_probe_paths(odb.path):
+            try:
+                odb.fs.ls(probe)
+            except Exception:
+                continue
+            return CheckResult(
+                endpoint=ep, status=STATUS_WARN,
+                summary='reachable but empty (no objects yet)',
+                hints=['Expected for a brand-new remote; nothing has been pushed yet.'],
+            )
         return CheckResult(
             endpoint=ep, status=STATUS_FAIL,
             summary='remote path does not exist',
