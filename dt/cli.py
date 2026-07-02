@@ -13,6 +13,7 @@ from . import cache as cache_mod
 from . import remote as remote_mod
 from . import remote_verify as remote_verify_mod
 from . import remote_ops as remote_ops_mod
+from . import remote_quarantine as remote_quarantine_mod
 from . import doctor as doctor_mod
 from . import auth as auth_mod
 from . import push as push_mod
@@ -687,6 +688,16 @@ def remote_status(remote_name, show_all, deep, json_output):
 @click.option('--no-ledger', is_flag=True,
               help='Do not read or write the incremental verification ledger '
                    'in the remote.')
+@click.option('--status', 'status_flag', is_flag=True,
+              help='Instant status from the ledger + a stat-only scan (no '
+                   'hashing): verified/bad/unscanned counts and last scan time.')
+@click.option('--recheck', is_flag=True,
+              help='Re-hash ONLY the previously-bad blobs (from the remote\'s '
+                   '.dt-verify/bad.json) to confirm a fix.')
+@click.option('--recheck-report', 'recheck_report', default=None,
+              type=click.Path(),
+              help='With --recheck: read the bad list from this report file '
+                   'instead of bad.json (implies --recheck).')
 @click.option('--no-wait', is_flag=True,
               help='With --workers: submit jobs and exit without waiting.')
 @click.option('--worker', type=int, default=None,
@@ -699,8 +710,8 @@ def remote_status(remote_name, show_all, deep, json_output):
               help='Partial-report directory (internal, used by jobs).')
 @click.option('--verbose', '-v', is_flag=True, help='Print detailed progress.')
 def remote_verify(remote_name, jobs, workers, report, json_output, full,
-                  no_ledger, no_wait, worker, num_workers, remote_dir,
-                  report_dir, verbose):
+                  no_ledger, status_flag, recheck, recheck_report, no_wait,
+                  worker, num_workers, remote_dir, report_dir, verbose):
     """Exhaustively verify that each blob in a remote matches its checksum.
 
     Hashes every object in the remote and compares it to the md5 implied by
@@ -725,6 +736,9 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
         dt remote verify myremote -j 16        # 16 hashing threads
         dt remote verify --report verify.json  # Write JSON report
         dt remote verify --full                # Ignore ledger, re-hash all
+        dt remote verify --status              # Instant status, no hashing
+        dt remote verify --recheck             # Re-check just the last bad blobs
+        dt remote verify --recheck-report r.json  # ...from a specific report
         dt remote verify --workers 32          # Distribute over 32 nodes
     """
     import json as _json
@@ -733,6 +747,57 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
     use_ledger = not no_ledger
 
     try:
+        # --status: instant ledger + stat-only summary, no hashing.
+        if status_flag:
+            name, url, path = remote_verify_mod.resolve_local_remote(
+                remote_name)
+            st = remote_verify_mod.status_summary(path, jobs=jobs)
+            if json_output:
+                st = {**st, 'remote': name, 'url': url}
+                click.echo(_json.dumps(st, indent=2))
+            else:
+                click.echo(remote_verify_mod.format_status_summary(
+                    st, remote_label=name))
+            return
+
+        # --recheck: re-hash only the previously-bad blobs to confirm a fix.
+        if recheck or recheck_report:
+            name, url, path = remote_verify_mod.resolve_local_remote(
+                remote_name)
+            src = (_Path(recheck_report) if recheck_report
+                   else remote_verify_mod.bad_report_file(path))
+            prior = remote_verify_mod.load_bad_report(src)
+            if prior is None:
+                raise click.ClickException(
+                    f"No bad-blob report to re-check at {src}. Run "
+                    f"'dt remote verify' first.")
+            entries = (prior.get('bad', []) or []) + \
+                (prior.get('incomplete', []) or [])
+            if not entries:
+                click.echo("Nothing to re-check: last scan found no bad blobs.")
+                return
+            totals, bad_entries, incomplete_entries, layout = \
+                remote_verify_mod.recheck_entries(
+                    path, entries, use_ledger=use_ledger)
+            rep = remote_verify_mod.build_report(
+                name, url, layout, totals, bad_entries, incomplete_entries,
+                jobs or 0, ledger_used=use_ledger)
+            # Rewrite bad.json to the still-bad set (prunes fixed blobs).
+            remote_verify_mod.write_bad_report(path, rep)
+            if report:
+                with open(report, 'w') as f:
+                    _json.dump(rep, f, indent=2)
+                click.echo(f"Report written to {report}")
+            if json_output:
+                click.echo(_json.dumps(rep, indent=2))
+            else:
+                n = totals['objects']
+                click.echo(f"Re-checked {n} previously-bad blob(s):")
+                click.echo(remote_verify_mod.format_report_summary(rep))
+            if rep['totals']['bad'] > 0:
+                raise SystemExit(1)
+            return
+
         # Worker mode: verify this worker's prefix partition (called by qxub).
         if worker is not None and num_workers and remote_dir and report_dir:
             remote_verify_mod.worker_verify(
@@ -748,6 +813,7 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
             return
 
         # Distributed mode: submit qxub jobs, then merge partial reports.
+        path = None
         if workers is not None:
             job_ids, rdir, rep = remote_verify_mod.parallel_verify(
                 remote_name, num_workers=workers, jobs=jobs,
@@ -770,6 +836,17 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
                 name, url, layout, totals, bad_entries, incomplete_entries,
                 jobs or 0, ledger_used=use_ledger)
 
+        # Persist the bad-blob report into the remote (best-effort) so the last
+        # scan's findings survive between runs and can feed --recheck and
+        # dt remote quarantine (#152). Single-node already resolved the path;
+        # only the distributed branch needs to resolve it here.
+        try:
+            _bad_path = path or remote_verify_mod.resolve_local_remote(
+                remote_name)[2]
+            remote_verify_mod.write_bad_report(_bad_path, rep)
+        except remote_mod.RemoteError:
+            pass
+
         if report:
             with open(report, 'w') as f:
                 _json.dump(rep, f, indent=2)
@@ -782,6 +859,135 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
 
         if rep['totals']['bad'] > 0:
             raise SystemExit(1)
+
+    except remote_mod.RemoteError as e:
+        raise click.ClickException(str(e))
+
+
+@remote.command('quarantine')
+@click.argument('remote_name', required=False)
+@click.option('--from-report', 'from_report', default=None,
+              type=click.Path(),
+              help='Bad-blob report to act on (default: the remote\'s '
+                   '.dt-verify/bad.json written by dt remote verify).')
+@click.option('--verify', 'run_verify', is_flag=True,
+              help='Run a fresh verify first and quarantine what it finds, '
+                   'instead of reading a saved report.')
+@click.option('--restore', 'restore_ts', default=None,
+              help='Restore a quarantine batch (by timestamp) back to the '
+                   'remote instead of quarantining.')
+@click.option('--list', 'list_batches', is_flag=True,
+              help='List quarantine batches in the remote and exit.')
+@click.option('--dry-run', is_flag=True,
+              help='Show what would be quarantined without moving anything.')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON.')
+@click.option('--jobs', '-j', type=int, default=None,
+              help='Hashing threads for an inline --verify.')
+@click.option('--verbose', '-v', is_flag=True, help='Print detailed progress.')
+def remote_quarantine(remote_name, from_report, run_verify, restore_ts,
+                      list_batches, dry_run, json_output, jobs, verbose):
+    """Move corrupt/incomplete blobs aside so `dvc push` re-uploads them.
+
+    Reads the bad-blob report left by `dt remote verify` (or runs a fresh
+    verify with --verify) and MOVES each bad/incomplete blob — plus the
+    enclosing .dir object(s) that reference it — into
+    <remote>/.dt-verify/quarantine/<timestamp>/. Quarantining the .dir is
+    essential: `dvc push` skips a directory whose .dir is already present in
+    the remote, so the bad member would never be re-examined otherwise.
+
+    Move-not-delete keeps the corrupt bytes for forensics and is reversible
+    with --restore. After quarantining, run `dvc push` from a repo whose cache
+    holds a good copy, then `dt remote verify --recheck` to confirm.
+
+    \b
+    Examples:
+        dt remote verify myremote           # find bad blobs -> bad.json
+        dt remote quarantine myremote       # move them (+ .dir) aside
+        dvc push                            # re-upload good copies
+        dt remote verify --recheck          # confirm just those
+        dt remote quarantine --list         # list quarantine batches
+        dt remote quarantine --restore 20260702T101500Z
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    try:
+        name, url, path = remote_verify_mod.resolve_local_remote(remote_name)
+
+        if list_batches:
+            batches = remote_quarantine_mod.list_quarantines(path)
+            if json_output:
+                click.echo(_json.dumps(batches, indent=2))
+            elif not batches:
+                click.echo("No quarantine batches in this remote.")
+            else:
+                click.echo(f"Quarantine batches in {name}:")
+                for b in batches:
+                    click.echo(f"  {b['timestamp']}  {b['count']} blob(s)  "
+                               f"({b['quarantined_at']})")
+            return
+
+        if restore_ts:
+            result = remote_quarantine_mod.restore_quarantine(
+                path, restore_ts, verbose=verbose)
+            if json_output:
+                click.echo(_json.dumps(result, indent=2))
+            else:
+                click.echo(f"Restored {len(result['restored'])} blob(s) to "
+                           f"{name}.")
+                if result['skipped']:
+                    click.echo(f"  Skipped {len(result['skipped'])} already "
+                               f"present in the remote (kept in quarantine).")
+            return
+
+        # Gather the bad entries: fresh verify, or a saved report.
+        if run_verify:
+            totals, bad_entries, incomplete_entries, layout = \
+                remote_verify_mod.verify_remote(
+                    path, jobs=jobs, progress=verbose)
+            rep = remote_verify_mod.build_report(
+                name, url, layout, totals, bad_entries, incomplete_entries,
+                jobs or 0)
+            remote_verify_mod.write_bad_report(path, rep)
+            entries = bad_entries + incomplete_entries
+        else:
+            src = (_Path(from_report) if from_report
+                   else remote_verify_mod.bad_report_file(path))
+            prior = remote_verify_mod.load_bad_report(src)
+            if prior is None:
+                raise click.ClickException(
+                    f"No bad-blob report at {src}. Run 'dt remote verify' "
+                    f"first, or pass --verify to scan now.")
+            entries = (prior.get('bad', []) or []) + \
+                (prior.get('incomplete', []) or [])
+
+        if not entries:
+            click.echo("No bad blobs to quarantine.")
+            return
+
+        result = remote_quarantine_mod.quarantine(
+            path, entries, verbose=verbose, dry_run=dry_run)
+
+        if json_output:
+            click.echo(_json.dumps(result, indent=2))
+            return
+
+        # Break down what was actually moved (result['moved']), so the counts
+        # add up even when some listed blobs were already absent.
+        n_dir = sum(1 for e in result['moved']
+                    if e['reason'] == remote_quarantine_mod.REASON_DIR_ENCLOSING)
+        n_bad = len(result['moved']) - n_dir
+        verb = "Would quarantine" if dry_run else "Quarantined"
+        click.echo(f"{verb} {len(result['moved'])} blob(s) "
+                   f"({n_bad} bad + {n_dir} enclosing .dir) from {name}.")
+        if result['quarantine_dir'] and not dry_run:
+            click.echo(f"  -> {result['quarantine_dir']}")
+        if result['missing']:
+            click.echo(f"  {len(result['missing'])} listed blob(s) already "
+                       f"absent from the remote.")
+        if not dry_run:
+            click.echo("Next: `dvc push` from a repo with good copies, then "
+                       "`dt remote verify --recheck`.")
 
     except remote_mod.RemoteError as e:
         raise click.ClickException(str(e))
