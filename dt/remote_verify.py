@@ -45,10 +45,15 @@ from .errors import RemoteError
 STATUS_MISMATCH = 'mismatch'
 STATUS_UNREADABLE = 'unreadable'
 STATUS_INCOMPLETE = 'incomplete'
+STATUS_MISSING = 'missing'
 
 REPORT_VERSION = 2
 
 LEDGER_DIRNAME = '.dt-verify'
+
+# Persisted bad-blob report: the last scan's bad/incomplete findings, so they
+# survive between runs and can feed `--recheck` and `dt remote quarantine`.
+BAD_REPORT_FILENAME = 'bad.json'
 
 # A valid md5 reconstructed from a blob path is exactly 32 lowercase hex
 # chars. Anything else (e.g. a leftover ``*.tmp`` from a killed transfer) is
@@ -129,6 +134,59 @@ def _write_prefix_ledger(
         return True
     except OSError:
         return False
+
+
+# =============================================================================
+# Persisted bad-blob report (issue #152)
+# =============================================================================
+
+def bad_report_file(remote_dir: Path) -> Path:
+    """Path to the persisted bad-blob report inside the remote's ledger dir."""
+    return remote_dir / LEDGER_DIRNAME / BAD_REPORT_FILENAME
+
+
+def write_bad_report(remote_dir: Path, report: dict) -> bool:
+    """Persist the bad/incomplete findings to ``<remote>/.dt-verify/bad.json``.
+
+    Best-effort: needs the ledger dir to be writable. Overwriting on each scan
+    naturally prunes entries that now pass. Returns success.
+    """
+    ledger_dir = _setup_ledger_dir(remote_dir)
+    if ledger_dir is None:
+        return False
+    payload = {
+        'report_version': report.get('report_version', REPORT_VERSION),
+        'remote': report.get('remote'),
+        'url': report.get('url'),
+        'layout': report.get('layout'),
+        'scanned_at': report.get('scanned_at'),
+        'totals': report.get('totals'),
+        'bad': report.get('bad', []),
+        'incomplete': report.get('incomplete', []),
+    }
+    final = bad_report_file(remote_dir)
+    tmp = ledger_dir / f'.{BAD_REPORT_FILENAME}.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, final)
+        try:
+            os.chmod(final, 0o664)
+        except OSError:
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def load_bad_report(path: Path) -> Optional[dict]:
+    """Load a persisted bad report (bad.json or a --report file). None if absent."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 def _verify_one_prefix(
@@ -361,6 +419,260 @@ def format_report_summary(report: dict, show_bad: bool = True) -> str:
         lines.append("  Incomplete / stray files:")
         for e in report['incomplete']:
             lines.append(f"    [{e['status']}] {e['path']}")
+    return "\n".join(lines)
+
+
+# =============================================================================
+# Targeted re-check of previously-bad blobs (issue #152)
+# =============================================================================
+
+def _prefix_key_for_rel(rel_path: str, layout: str) -> Tuple[str, str]:
+    """Return ``(ledger_key, name)`` for a blob's remote-relative path.
+
+    Mirrors the manifest keys used by the ledger so a re-checked blob that now
+    passes is recorded under the same ``<key>.json`` a full scan would use
+    (``'00'`` for pure layouts, ``'v3-00'`` / ``'v2-00'`` for mixed).
+    """
+    parts = rel_path.split('/')
+    name = parts[-1]
+    if parts[:2] == ['files', 'md5']:
+        prefix = parts[2] if len(parts) > 3 else ''
+        key = f'v3-{prefix}' if layout == 'dvc-mixed' else prefix
+    else:
+        prefix = parts[0] if len(parts) > 1 else ''
+        key = f'v2-{prefix}' if layout == 'dvc-mixed' else prefix
+    return key, name
+
+
+def recheck_entries(
+    remote_dir: Path,
+    entries: List[dict],
+    layout: Optional[str] = None,
+    use_ledger: bool = True,
+) -> Tuple[Dict[str, int], List[dict], List[dict], str]:
+    """Re-hash only the given (previously-bad) blobs to confirm a fix.
+
+    ``entries`` are report entries carrying at least ``path`` (remote-relative).
+    Hashes just those blobs — no full-store walk. Blobs that now pass are added
+    to the ledger (so a later incremental run skips them); still-bad ones are
+    returned. A blob that has vanished (e.g. quarantined but not yet re-pushed)
+    is reported as ``missing``.
+
+    Returns ``(totals, still_bad, still_incomplete, layout)``.
+    """
+    from .archive import operations as ops
+
+    ledger_dir = _setup_ledger_dir(remote_dir) if use_ledger else None
+
+    # Layout is only needed to compute the ledger key for now-OK blobs, so
+    # detect it lazily — recheck must work even when every listed blob has
+    # vanished (an empty remote has no detectable layout).
+    def _layout() -> str:
+        nonlocal layout
+        if layout is None:
+            try:
+                layout = ops.detect_source_layout(remote_dir)
+            except Exception:
+                layout = 'dvc-v3'
+        return layout
+
+    totals = _zero_totals()
+    still_bad: List[dict] = []
+    still_incomplete: List[dict] = []
+    # Group now-OK blobs by ledger key so we touch each ledger file once.
+    now_ok: Dict[str, Dict[str, list]] = {}
+
+    for entry in entries:
+        rel = entry.get('path')
+        if not rel:
+            continue
+        totals['objects'] += 1
+        f = remote_dir / rel
+        name = rel.split('/')[-1]
+
+        # Stray / non-blob artefact (name doesn't reconstruct a valid md5).
+        expected = entry.get('expected_md5')
+        if expected is None:
+            hex_prefix = _prefix_key_for_rel(rel, layout)[0][-2:]
+            expected = expected_md5_for_blob(hex_prefix, name)
+        if not _HASH_RE.match(expected or ''):
+            # Stray file: gone means the fix (deletion) worked; else still stray.
+            if not f.exists():
+                totals['ok'] += 1
+                continue
+            totals['incomplete'] += 1
+            still_incomplete.append({'path': rel, 'status': STATUS_INCOMPLETE})
+            continue
+
+        try:
+            st = f.stat()
+        except OSError as exc:
+            # ENOENT => the blob is genuinely gone (e.g. quarantined, not yet
+            # re-pushed). Any other errno (EACCES, EIO, ...) is a present but
+            # unreadable blob — don't misreport a permission problem as loss.
+            import errno as _errno
+            is_missing = getattr(exc, 'errno', None) == _errno.ENOENT
+            totals['bad'] += 1
+            still_bad.append({
+                'path': rel, 'expected_md5': expected, 'actual_md5': None,
+                'size_bytes': None,
+                'status': STATUS_MISSING if is_missing else STATUS_UNREADABLE,
+            })
+            continue
+
+        try:
+            actual = utils.md5_file(f)
+        except OSError:
+            totals['bad'] += 1
+            still_bad.append({
+                'path': rel, 'expected_md5': expected, 'actual_md5': None,
+                'size_bytes': st.st_size, 'status': STATUS_UNREADABLE,
+            })
+            continue
+
+        totals['bytes'] += st.st_size
+        if actual == expected:
+            totals['ok'] += 1
+            if ledger_dir is not None:
+                key, _ = _prefix_key_for_rel(rel, _layout())
+                now_ok.setdefault(key, {})[name] = [st.st_size, st.st_mtime_ns]
+        else:
+            totals['bad'] += 1
+            still_bad.append({
+                'path': rel, 'expected_md5': expected, 'actual_md5': actual,
+                'size_bytes': st.st_size, 'status': STATUS_MISMATCH,
+            })
+
+    # Promote now-OK blobs into the ledger (merge, don't clobber other entries).
+    if ledger_dir is not None:
+        for key, sigs in now_ok.items():
+            merged = _load_prefix_ledger(ledger_dir, key)
+            merged.update(sigs)
+            _write_prefix_ledger(ledger_dir, key, merged)
+
+    still_bad.sort(key=lambda e: e['path'])
+    still_incomplete.sort(key=lambda e: e['path'])
+    return totals, still_bad, still_incomplete, _layout()
+
+
+# =============================================================================
+# Prompt status report from the ledger + stat-only scan (issue #152)
+# =============================================================================
+
+def _status_one_prefix(
+    key: str, dir_path: Path, ledger_dir: Optional[Path], full_ledger: dict,
+) -> Dict[str, int]:
+    """Stat (no hashing) every blob under one prefix; classify vs the ledger."""
+    counts = {'objects': 0, 'verified_unchanged': 0, 'unscanned_or_changed': 0,
+              'bytes': 0}
+    old = full_ledger.get(key, {})
+    try:
+        children = list(dir_path.iterdir())
+    except OSError:
+        return counts
+    for f in children:
+        try:
+            if not f.is_file():
+                continue
+            st = f.stat()
+        except OSError:
+            continue
+        counts['objects'] += 1
+        counts['bytes'] += st.st_size
+        if old.get(f.name) == [st.st_size, st.st_mtime_ns]:
+            counts['verified_unchanged'] += 1
+        else:
+            counts['unscanned_or_changed'] += 1
+    return counts
+
+
+def status_summary(
+    remote_dir: Path,
+    layout: Optional[str] = None,
+    jobs: Optional[int] = None,
+) -> dict:
+    """Instant status: ledger + bad.json + a stat-only enumeration (no hashing).
+
+    Reports how many blobs passed the previous scan (and when), how many were
+    bad at that scan, and — via a stat-only walk — the total blob count and how
+    many are unscanned or changed since the ledger and would be re-hashed next.
+    """
+    from .archive import operations as ops
+
+    layout = layout or ops.detect_source_layout(remote_dir)
+    ledger_dir = remote_dir / LEDGER_DIRNAME
+    entries = _prefix_dirs(remote_dir, layout)
+    n_jobs = jobs if jobs and jobs > 0 else ops.default_scan_jobs()
+
+    # Load every per-prefix ledger once (keyed by manifest key), and record the
+    # most recent ledger write as the "last scan" time.
+    full_ledger: Dict[str, dict] = {}
+    ledger_ok = 0
+    last_scan_ns = 0
+    if ledger_dir.is_dir():
+        for key, _hexp, _p in entries:
+            data = _load_prefix_ledger(ledger_dir, key)
+            full_ledger[key] = data
+            ledger_ok += len(data)
+            try:
+                mt = _ledger_file(ledger_dir, key).stat().st_mtime_ns
+                last_scan_ns = max(last_scan_ns, mt)
+            except OSError:
+                pass
+
+    totals = {'objects': 0, 'verified_unchanged': 0,
+              'unscanned_or_changed': 0, 'bytes': 0}
+    with ThreadPoolExecutor(max_workers=n_jobs) as pool:
+        futures = [pool.submit(_status_one_prefix, key, p, ledger_dir,
+                               full_ledger) for key, _hexp, p in entries]
+        for fut in as_completed(futures):
+            c = fut.result()
+            for k in totals:
+                totals[k] += c[k]
+
+    # Bad count + when, from the persisted bad report (if any).
+    bad_report = load_bad_report(bad_report_file(remote_dir))
+    bad_count = 0
+    bad_scanned_at = None
+    if bad_report:
+        bad_count = len(bad_report.get('bad', []))
+        bad_scanned_at = bad_report.get('scanned_at')
+
+    last_scan_at = None
+    if last_scan_ns:
+        last_scan_at = _dt.datetime.fromtimestamp(
+            last_scan_ns / 1e9, _dt.timezone.utc).isoformat(timespec='seconds')
+
+    return {
+        'report_version': REPORT_VERSION,
+        'layout': layout,
+        'ledger_ok': ledger_ok,
+        'ledger_last_scan': last_scan_at,
+        'bad': bad_count,
+        'bad_scanned_at': bad_scanned_at,
+        'total_objects': totals['objects'],
+        'verified_unchanged': totals['verified_unchanged'],
+        'unscanned_or_changed': totals['unscanned_or_changed'],
+        'bytes': totals['bytes'],
+    }
+
+
+def format_status_summary(status: dict, remote_label: str = '') -> str:
+    """Render the instant status report as a human-readable summary."""
+    header = f"Remote: {remote_label}  ({status['layout']})" if remote_label \
+        else f"Layout: {status['layout']}"
+    last = status.get('ledger_last_scan') or 'never'
+    lines = [
+        header,
+        f"  Verified OK: {status['ledger_ok']:,} (last scan {last})",
+        f"  Bad:         {status['bad']:,}"
+        + (f" (as of {status['bad_scanned_at']})"
+           if status.get('bad_scanned_at') else ''),
+        f"  Total blobs: {status['total_objects']:,} "
+        f"({utils.format_size(status['bytes'])})",
+        f"  Unscanned/changed since ledger: "
+        f"{status['unscanned_or_changed']:,} (would be re-hashed next run)",
+    ]
     return "\n".join(lines)
 
 
