@@ -4,9 +4,38 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
+from .. import config as cfg
 from .base import SecretBackend, SecretError
+
+
+def _configured_secret_locations() -> Optional[str]:
+    """Return the configured GCP secret location(s), or None.
+
+    Read from the ``secrets.gcp.locations`` config key (a comma-separated
+    list of regions, e.g. ``australia-southeast1``). When unset, secrets are
+    created with GCP's default automatic (global) replication — preserving the
+    original behaviour. Setting it switches to user-managed replication in the
+    given region(s), which is required under a ``gcp.resourceLocations`` org
+    policy that forbids creating secrets in ``global`` (issue #149).
+    """
+    value = cfg.get_value('secrets.gcp.locations', None)
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        value = ','.join(str(v).strip() for v in value if str(v).strip())
+    else:
+        value = str(value).strip()
+    return value or None
+
+
+def _replication_create_flags() -> List[str]:
+    """gcloud ``secrets create`` flags for the configured replication policy."""
+    locations = _configured_secret_locations()
+    if not locations:
+        return []
+    return ['--replication-policy=user-managed', f'--locations={locations}']
 
 
 class GCPSecretBackend(SecretBackend):
@@ -152,6 +181,16 @@ class GCPSecretBackend(SecretBackend):
                 ids.append(secret_id[len(self.prefix):])
         return sorted(ids)
 
+    def _create_secret_hint(self, secret_id: str) -> str:
+        """Return the ``gcloud secrets create`` command shown in error hints.
+
+        Includes the configured replication flags so the suggested manual
+        command also works under a ``gcp.resourceLocations`` org policy (#149).
+        """
+        parts = [f'gcloud secrets create {secret_id}', f'--project={self.project}']
+        parts.extend(_replication_create_flags())
+        return ' '.join(parts)
+
     def _cli_set_secret(self, repo_name: str, content: str) -> None:
         """Create or update a secret via gcloud CLI."""
         import tempfile
@@ -169,6 +208,7 @@ class GCPSecretBackend(SecretBackend):
                 result = subprocess.run(
                     [gcloud, 'secrets', 'create', secret_id,
                      f'--project={self.project}',
+                     *_replication_create_flags(),
                      f'--data-file={tmp_path}'],
                     capture_output=True, text=True,
                 )
@@ -206,7 +246,7 @@ class GCPSecretBackend(SecretBackend):
         if 'NOT_FOUND' in result.stderr:
             raise SecretError(
                 f"Secret '{secret_id}' not found in project '{self.project}'.\n"
-                f"Create it with: gcloud secrets create {secret_id} --project={self.project}"
+                f"Create it with: {self._create_secret_hint(secret_id)}"
             )
         if 'PERMISSION_DENIED' in result.stderr:
             raise SecretError(
@@ -288,7 +328,7 @@ class GCPSecretBackend(SecretBackend):
         except gcp_exceptions.NotFound:
             raise SecretError(
                 f"Secret '{self._get_secret_id(repo_name)}' not found in project '{self.project}'.\n"
-                f"Create it with: gcloud secrets create {self._get_secret_id(repo_name)} --project={self.project}"
+                f"Create it with: {self._create_secret_hint(self._get_secret_id(repo_name))}"
             )
         except gcp_exceptions.PermissionDenied:
             # Fall back to gcloud CLI for the rest of this session

@@ -1153,7 +1153,10 @@ class TestCheckDvcRemote:
                       source="DVC remote 'gcs'")
         mock_odb = MagicMock()
         mock_odb.fs.exists.return_value = False
-        mock_odb.path = '/bucket/files/md5'
+        # A genuinely missing/misnamed bucket: both the prefix and the bucket
+        # root fail to list.
+        mock_odb.fs.ls.side_effect = FileNotFoundError('no such bucket')
+        mock_odb.path = 'gs://bucket/files/md5'
 
         mock_repo = MagicMock()
         mock_repo.cloud.get_remote_odb.return_value = mock_odb
@@ -1162,6 +1165,50 @@ class TestCheckDvcRemote:
                                         _repo_factory=lambda: mock_repo)
         assert result.status == STATUS_FAIL
         assert 'does not exist' in result.summary
+
+    def test_warn_when_reachable_but_empty(self):
+        """An empty-but-valid S3/R2 bucket warns rather than falsely failing
+        with a 'Check remote URL' hint (issue #150)."""
+        ep = Endpoint(type='s3', url='s3://xenium',
+                      source="DVC remote 'bcarc_xenium'")
+        mock_odb = MagicMock()
+        # exists() is False for an empty bucket (key-listing probe finds nothing)
+        mock_odb.fs.exists.return_value = False
+        # ...but ls() succeeds (returns an empty listing) because the bucket is real
+        mock_odb.fs.ls.return_value = []
+        mock_odb.path = 's3://xenium'
+
+        mock_repo = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = mock_odb
+
+        result = _check_dvc_remote_impl(ep, 'bcarc_xenium',
+                                        _repo_factory=lambda: mock_repo)
+        assert result.status == STATUS_WARN
+        assert 'empty' in result.summary
+        # Must not send the user chasing a URL config error that isn't there.
+        assert not any('Check remote URL' in h for h in result.hints)
+
+    def test_warn_when_bucket_root_lists_but_prefix_empty(self):
+        """Empty sub-prefix in an existing bucket: prefix ls fails, bucket root
+        ls succeeds -> still WARN, not FAIL (issue #150)."""
+        ep = Endpoint(type='s3', url='s3://xenium/data',
+                      source="DVC remote 'bcarc_xenium'")
+        mock_odb = MagicMock()
+        mock_odb.fs.exists.return_value = False
+
+        def _ls(path):
+            if path == 's3://xenium':
+                return []
+            raise FileNotFoundError('empty prefix')
+        mock_odb.fs.ls.side_effect = _ls
+        mock_odb.path = 's3://xenium/data/files/md5'
+
+        mock_repo = MagicMock()
+        mock_repo.cloud.get_remote_odb.return_value = mock_odb
+
+        result = _check_dvc_remote_impl(ep, 'bcarc_xenium',
+                                        _repo_factory=lambda: mock_repo)
+        assert result.status == STATUS_WARN
 
     def test_fail_when_access_error(self):
         ep = Endpoint(type='s3', url='s3://bucket',
