@@ -1238,20 +1238,43 @@ class TestRunRepoImportNetworkFetch:
         # The mutating `dvc update` path must not run on the default pull.
         mock_run.assert_not_called()
 
-    def test_default_no_update_fails_with_hint(self, tmp_path):
-        """Default: an import dvc fetch can't satisfy fails with a --update hint, no mutation."""
+    def test_default_recovers_via_source_clone(self, tmp_path):
+        """Default: when this repo's remote misses, the pinned import is
+        recovered non-mutatingly from the source repo's clone (issue #70)."""
         stage = self._make_stage(tmp_path)
         import_info = {'url': 'git@github.com:org/repo.git', 'rev': 'deadbeef', 'path': 'data.csv'}
 
         with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
              patch('dt.fetch._run_dvc_fetch',
                    return_value=(False, 'dvc fetch failed: not in remote')), \
+             patch('dt.fetch._recover_import_via_source_clone',
+                   return_value=(True, 'Fetched from source repo remote via clone (non-mutating)')) as mock_recover, \
+             patch('subprocess.run') as mock_run:
+            success, message = fetch._run_repo_import_network_fetch(stage)  # update=False
+
+        assert success is True
+        assert mock_recover.called
+        assert 'non-mutating' in message
+        # The mutating `dvc update` must not run on the default pull.
+        mock_run.assert_not_called()
+
+    def test_default_no_update_fails_with_hint(self, tmp_path):
+        """Default: when neither remote nor the source clone can satisfy a
+        pinned import, fail with a --update hint and no mutation."""
+        stage = self._make_stage(tmp_path)
+        import_info = {'url': 'git@github.com:org/repo.git', 'rev': 'deadbeef', 'path': 'data.csv'}
+
+        with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('dt.fetch._run_dvc_fetch',
+                   return_value=(False, 'dvc fetch failed: not in remote')), \
+             patch('dt.fetch._recover_import_via_source_clone',
+                   return_value=(False, 'source-clone dvc fetch failed')), \
              patch('subprocess.run') as mock_run:
             success, message = fetch._run_repo_import_network_fetch(stage)  # update=False
 
         assert success is False
         assert '--update' in message
-        mock_run.assert_not_called()  # no dvc update
+        mock_run.assert_not_called()  # no mutating dvc update
 
     def test_falls_back_to_dvc_fetch_when_no_rev_lock(self, tmp_path):
         """Falls back to _run_dvc_fetch when import info has no rev_lock."""
@@ -1272,6 +1295,8 @@ class TestRunRepoImportNetworkFetch:
 
         with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
              patch('dt.fetch._run_dvc_fetch', return_value=(False, 'dvc fetch failed')), \
+             patch('dt.fetch._recover_import_via_source_clone',
+                   return_value=(False, 'source-clone dvc fetch failed')), \
              patch('dt.fetch._strip_added_rev_keys'), \
              patch('subprocess.run') as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
@@ -1290,12 +1315,67 @@ class TestRunRepoImportNetworkFetch:
 
         with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
              patch('dt.fetch._run_dvc_fetch', return_value=(False, 'dvc fetch failed')), \
+             patch('dt.fetch._recover_import_via_source_clone',
+                   return_value=(False, 'source-clone dvc fetch failed')), \
              patch('subprocess.run') as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='Authentication failed')
             success, message = fetch._run_repo_import_network_fetch(stage, update=True)
 
         assert success is False
         assert 'Authentication failed' in message
+
+
+class TestRecoverImportViaSourceClone:
+    """Tests for _recover_import_via_source_clone (non-mutating pull recovery)."""
+
+    def test_success_fetches_in_source_clone(self, tmp_path):
+        """Points the source clone's cache at ours and runs dvc fetch there."""
+        clone_path = tmp_path / 'clone'
+        clone_path.mkdir()
+
+        with patch('dt.tmp.clone_repo', return_value=clone_path) as mock_clone, \
+             patch('dt.import_data.configure_clone_cache') as mock_cfg, \
+             patch('subprocess.run',
+                   return_value=MagicMock(returncode=0, stdout='', stderr='')) as mock_run:
+            success, msg = fetch._recover_import_via_source_clone(
+                'git@github.com:org/repo.git', 'data/dir', 'deadbeef', '/my/cache'
+            )
+
+        assert success is True
+        # Clone is checked out at the pinned rev.
+        assert mock_clone.call_args.kwargs.get('rev') == 'deadbeef'
+        # Clone cache is redirected to our primary cache.
+        mock_cfg.assert_called_once_with(clone_path, '/my/cache')
+        # dvc fetch runs inside the clone, targeting the source path.
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ['dvc', 'fetch', 'data/dir']
+        assert mock_run.call_args.kwargs.get('cwd') == clone_path
+
+    def test_failure_when_source_fetch_fails(self, tmp_path):
+        """A failing dvc fetch in the clone returns failure, not an exception."""
+        clone_path = tmp_path / 'clone'
+        clone_path.mkdir()
+
+        with patch('dt.tmp.clone_repo', return_value=clone_path), \
+             patch('dt.import_data.configure_clone_cache'), \
+             patch('subprocess.run',
+                   return_value=MagicMock(returncode=1, stdout='', stderr='no remote')):
+            success, msg = fetch._recover_import_via_source_clone(
+                'git@github.com:org/repo.git', 'data/dir', 'deadbeef', '/my/cache'
+            )
+
+        assert success is False
+        assert 'source-clone dvc fetch failed' in msg
+
+    def test_clone_error_is_caught(self, tmp_path):
+        """A clone/checkout error is returned as failure, never raised."""
+        with patch('dt.tmp.clone_repo', side_effect=Exception('bad rev')):
+            success, msg = fetch._recover_import_via_source_clone(
+                'git@github.com:org/repo.git', 'data/dir', 'deadbeef', '/my/cache'
+            )
+
+        assert success is False
+        assert 'could not access source repo clone' in msg
 
 
 class TestFetchUrlImport:

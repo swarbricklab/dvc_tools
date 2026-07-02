@@ -351,6 +351,46 @@ class TestImportDataFallback:
     @patch.object(tmp_mod, 'clone_repo')
     @patch.object(import_mod.remote_mod, 'find_local_remote_from_repo', return_value=None)
     @patch('subprocess.run')
+    def test_rev_threaded_to_clone_and_dvc_import(
+        self,
+        mock_run,
+        mock_find_remote,
+        mock_clone,
+        mock_resolve_url,
+        mock_check_dvc,
+        tmp_path,
+        monkeypatch,
+    ):
+        """--rev is passed to clone_repo and appended to the dvc import fallback."""
+        monkeypatch.chdir(tmp_path)
+        clone_path = tmp_path / 'clone'
+        clone_path.mkdir()
+        mock_clone.return_value = clone_path
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout='abc123\n'),
+            MagicMock(returncode=0, stdout=''),
+        ]
+
+        import_mod.import_data(
+            repository='repo',
+            path='data/file.csv',
+            out='imported.csv',
+            rev='dev',
+        )
+
+        # clone_repo received rev=...
+        assert mock_clone.call_args.kwargs.get('rev') == 'dev'
+        # dvc import command carries --rev dev
+        import_cmd = mock_run.call_args_list[1].args[0]
+        assert '--rev' in import_cmd
+        assert import_cmd[import_cmd.index('--rev') + 1] == 'dev'
+
+    @patch.object(utils, 'check_dvc')
+    @patch.object(tmp_mod, 'resolve_repository_url', return_value='git@github.com:org/repo.git')
+    @patch.object(tmp_mod, 'clone_repo')
+    @patch.object(import_mod.remote_mod, 'find_local_remote_from_repo', return_value=None)
+    @patch('subprocess.run')
     def test_no_checkout_uses_no_download_with_dvc_import(
         self,
         mock_run,

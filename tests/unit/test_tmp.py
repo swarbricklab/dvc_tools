@@ -173,11 +173,11 @@ class TestCloneRepo:
         """Raises TmpError when git clone fails."""
         monkeypatch.chdir(tmp_path)
         (tmp_path / '.gitignore').touch()
-        
+
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_result.stderr = 'clone failed'
-        
+
         with patch('subprocess.run', return_value=mock_result):
             with patch('dt.tmp.utils.check_git'):
                 with pytest.raises(TmpError, match="Failed to clone"):
@@ -185,3 +185,74 @@ class TestCloneRepo:
                         'git@github.com:org/repo.git',
                         verbose=False
                     )
+
+    def test_checks_out_rev_after_clone(self, tmp_path, monkeypatch):
+        """When rev is given, the clone is checked out at that revision."""
+        monkeypatch.chdir(tmp_path)
+
+        ok = MagicMock()
+        ok.returncode = 0
+        ok.stderr = ''
+
+        calls = []
+        def capture_run(cmd, **kwargs):
+            calls.append(cmd)
+            return ok
+
+        with patch('subprocess.run', side_effect=capture_run):
+            with patch('dt.tmp.utils.check_git'):
+                tmp.clone_repo(
+                    'git@github.com:org/repo.git',
+                    refresh=False,
+                    verbose=False,
+                    rev='dev',
+                )
+
+        # git clone, then a fetch of the rev, then a checkout of the rev.
+        assert calls[0][0:2] == ['git', 'clone']
+        assert any(c[0:2] == ['git', 'fetch'] and 'dev' in c for c in calls)
+        assert any(c[0:3] == ['git', 'checkout', 'dev'] for c in calls)
+
+    def test_checkout_rev_falls_back_to_fetch_head(self, tmp_path, monkeypatch):
+        """If `git checkout <rev>` fails, fall back to FETCH_HEAD."""
+        monkeypatch.chdir(tmp_path)
+
+        def run(cmd, **kwargs):
+            r = MagicMock()
+            r.stderr = ''
+            # Only `git checkout <rev>` (named) fails; everything else succeeds.
+            if cmd[0:2] == ['git', 'checkout'] and cmd[2] == 'abc123':
+                r.returncode = 1
+                r.stderr = 'pathspec did not match'
+            else:
+                r.returncode = 0
+            return r
+
+        calls = []
+        def capture(cmd, **kwargs):
+            calls.append(cmd)
+            return run(cmd, **kwargs)
+
+        with patch('subprocess.run', side_effect=capture):
+            with patch('dt.tmp.utils.check_git'):
+                tmp.clone_repo('git@github.com:org/repo.git', refresh=False,
+                               verbose=False, rev='abc123')
+
+        assert any(c[0:3] == ['git', 'checkout', 'FETCH_HEAD'] for c in calls)
+
+    def test_checkout_rev_raises_when_unresolvable(self, tmp_path, monkeypatch):
+        """A revision that can't be fetched or checked out raises TmpError."""
+        monkeypatch.chdir(tmp_path)
+
+        def run(cmd, **kwargs):
+            r = MagicMock()
+            r.stderr = 'no such ref'
+            # clone succeeds; every fetch/checkout of the rev fails.
+            r.returncode = 0 if cmd[0:2] == ['git', 'clone'] else 1
+            return r
+
+        with patch('subprocess.run', side_effect=run):
+            with patch('dt.tmp.utils.check_git'):
+                with pytest.raises(TmpError, match="Could not check out revision"):
+                    tmp.clone_repo('git@github.com:org/repo.git', refresh=False,
+                                   verbose=False, rev='nope')

@@ -149,6 +149,14 @@ For targets tracked by import `.dvc` files, runs `dt fetch` which:
 
 Then runs `dvc checkout` to link files from cache to workspace.
 
+For a **pinned import** (e.g. one created with `dt import --rev`) whose data is
+not in this repo's own remote, `dt pull` recovers it **non-mutatingly** from the
+import's source: it checks out the source repo's clone at the locked revision,
+points that clone's cache at your primary cache, and runs `dvc fetch` there, so
+the pinned objects are pulled from the source's own remote without rewriting
+your `.dvc` file. Only if that also fails does `dt pull` report an error and
+suggest `--update` (which re-resolves and rewrites the `.dvc`).
+
 ### Step 4: Pull remaining data
 
 Runs `dvc pull` for targets not tracked by imports, fetching from configured remotes.
