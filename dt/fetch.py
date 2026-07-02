@@ -360,7 +360,8 @@ def _expand_dir_hash(
     from dvc_data.hashfile.hash_info import HashInfo
     
     child_files = []
-    
+    loaded = False  # True once any db successfully loaded the manifest
+
     # Try source_db first
     for db in [source_db, fallback_db]:
         if db is None:
@@ -368,6 +369,7 @@ def _expand_dir_hash(
         try:
             hi = HashInfo("md5", dir_hash)
             tree = Tree.load(db, hi)
+            loaded = True
             for key, (meta, hash_info) in tree.iteritems():
                 # key is a tuple of path components, e.g., ('subdir', 'file.txt')
                 rel_path = '/'.join(key) if key else ''
@@ -382,7 +384,17 @@ def _expand_dir_hash(
         except Exception:
             # Try next database
             continue
-    
+
+    # Distinguish a genuinely empty directory (manifest loaded, no children)
+    # from a manifest that could not be read at all. The latter would silently
+    # drop every child of this directory from the fetch plan (issue #151), so
+    # surface it rather than returning an empty list quietly.
+    if not loaded:
+        print(
+            f"Warning: could not read .dir manifest {dir_hash} from source cache; "
+            f"its child files will not be fetched"
+        )
+
     return child_files
 
 
@@ -661,6 +673,77 @@ def _report_failures(results: List[Tuple[str, bool, str]]) -> List[Tuple[str, st
         for name, msg in failures:
             print(f"  ✗ {name}: {msg}")
     return failures
+
+
+def _locate_hash(plan: 'FetchPlan', h: str) -> Tuple[Optional[str], Optional[str]]:
+    """Find the (stage_name, path) a hash came from, across all source groups."""
+    for group in plan.sources.values():
+        stage = group.get_stage_for_hash(h)
+        path = group.get_path_for_hash(h)
+        if stage or path:
+            return stage, path
+    return None, None
+
+
+def _verify_cached_hashes(
+    plan: 'FetchPlan',
+    all_hashes: set,
+    cache_base: str,
+    idx: 'cache_index.CacheIndex',
+    verbose: bool = False,
+) -> List[str]:
+    """Confirm every requested hash actually landed in the cache.
+
+    The cache index is advisory — it can go stale after a ``dvc gc``, so a
+    hash "skipped by index" may in fact be absent — and a link reported as
+    "skipped/self-heal" is trusted without a stat. Without this check, dropped
+    objects surface only much later as a cryptic ``dvc status``/``checkout``
+    failure ("not in cache"), see issue #151. We therefore stat every requested
+    hash on disk. Any stale index entries for missing hashes are dropped so a
+    re-run retries them rather than trusting the index again.
+
+    Returns the list of missing hashes (empty if all present).
+    """
+    missing = []
+    for h in all_hashes:
+        use_v3 = h not in plan.v2_hashes
+        cache_path = cache_ops.get_cache_file_path(
+            h, Path(cache_base), use_v3_layout=use_v3
+        )
+        if not cache_path.exists():
+            missing.append(h)
+
+    n_requested = len(all_hashes)
+    n_present = n_requested - len(missing)
+
+    if missing:
+        # Clear the stale/false-positive index entries so a re-run retries them.
+        idx.remove_many(missing)
+        print(
+            f"\n✗ Verification: {n_requested} requested, {n_present} present in cache, "
+            f"{len(missing)} MISSING after fetch"
+        )
+        for h in sorted(missing)[:20]:
+            stage_name, path = _locate_hash(plan, h)
+            if stage_name and path:
+                print(f"    {h} ({stage_name}: {path})")
+            elif path:
+                print(f"    {h} ({path})")
+            elif stage_name:
+                print(f"    {h} ({stage_name})")
+            else:
+                print(f"    {h}")
+        if len(missing) > 20:
+            print(f"    ... and {len(missing) - 20} more")
+        print(
+            "  Hint: these objects were requested but never landed in cache. "
+            "The stale index entries have been cleared — re-run `dt fetch`. "
+            "If it persists, the source cache may be missing these objects."
+        )
+    elif verbose:
+        print(f"\n✓ Verification: all {n_requested} requested objects present in cache")
+
+    return missing
 
 
 def fetch_from_plan(
@@ -1031,6 +1114,18 @@ def fetch_from_plan(
     # Report v2 files (placed in v2 location)
     if plan.v2_hashes and verbose:
         print(f"\nNote: {len(plan.v2_hashes)} files from v2 format .dvc files placed in legacy cache location.")
+
+    # Post-fetch verification: confirm every requested object actually landed
+    # in the cache (catches stale-index false-positives and silently-dropped
+    # links). Runs after all recovery/network fallback so re-materialised
+    # objects are counted as present. See issue #151.
+    missing_hashes = _verify_cached_hashes(plan, all_hashes, cache_base, idx, verbose=verbose)
+    if missing_hashes:
+        total_failed += len(missing_hashes)
+        results.append(
+            ('cache verification', False,
+             f"{len(missing_hashes)} object(s) missing from cache after fetch")
+        )
 
     # List each failure individually with its reason, so a partial failure is
     # actionable (which stage, and why) rather than just a count at the end.

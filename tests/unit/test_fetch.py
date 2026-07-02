@@ -436,11 +436,115 @@ class TestExpandDirHash:
     def test_returns_empty_on_error(self):
         """Returns empty list if tree load fails."""
         mock_db = MagicMock()
-        
+
         with patch('dvc_data.hashfile.tree.Tree.load', side_effect=Exception("Not found")):
             result = fetch._expand_dir_hash('abc123.dir', mock_db)
-        
+
         assert result == []
+
+    def test_warns_when_manifest_unreadable(self, capsys):
+        """A .dir manifest that can't be loaded warns (silent drop guard #151)."""
+        mock_db = MagicMock()
+
+        with patch('dvc_data.hashfile.tree.Tree.load', side_effect=Exception("Not found")):
+            result = fetch._expand_dir_hash('abc123.dir', mock_db)
+
+        assert result == []
+        out = capsys.readouterr().out
+        assert 'could not read .dir manifest abc123.dir' in out
+
+    def test_no_warning_for_genuinely_empty_dir(self, capsys):
+        """An empty-but-readable manifest does not warn."""
+        mock_db = MagicMock()
+        empty_tree = MagicMock()
+        empty_tree.iteritems.return_value = []
+
+        with patch('dvc_data.hashfile.tree.Tree.load', return_value=empty_tree):
+            result = fetch._expand_dir_hash('abc123.dir', mock_db)
+
+        assert result == []
+        out = capsys.readouterr().out
+        assert 'could not read' not in out
+
+
+class TestVerifyCachedHashes:
+    """Tests for post-fetch cache verification (#151)."""
+
+    def _write_cache_object(self, cache_base, md5):
+        """Create a fake cache object file at the v3 location for md5."""
+        p = fetch.cache_ops.get_cache_file_path(md5, Path(cache_base), use_v3_layout=True)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('x')
+        return p
+
+    def _plan_with_hashes(self, hashes, source_path='/src'):
+        plan = fetch.FetchPlan()
+        group = plan.add_source(Path(source_path), 'src')
+        for h in hashes:
+            group.add_hash(h, stage_name='data.dvc', path='data')
+        return plan
+
+    def test_all_present_returns_no_missing(self, tmp_path):
+        """No misses when every requested hash is on disk."""
+        cache_base = str(tmp_path / 'cache')
+        hashes = {'a' * 32, 'b' * 32}
+        for h in hashes:
+            self._write_cache_object(cache_base, h)
+        plan = self._plan_with_hashes(hashes)
+        idx = fetch.cache_index.CacheIndex(Path(cache_base))
+        try:
+            missing = fetch._verify_cached_hashes(plan, hashes, cache_base, idx)
+        finally:
+            idx.close()
+        assert missing == []
+
+    def test_detects_missing_and_clears_stale_index(self, tmp_path, capsys):
+        """A hash the index claims is present but is absent on disk is caught,
+        and its stale index entry is cleared so a re-run retries it."""
+        cache_base = str(tmp_path / 'cache')
+        present = 'a' * 32
+        missing = 'b' * 32
+        self._write_cache_object(cache_base, present)
+        plan = self._plan_with_hashes({present, missing})
+        idx = fetch.cache_index.CacheIndex(Path(cache_base))
+        # Stale index: claims the missing hash is cached.
+        idx.add(missing)
+        try:
+            result = fetch._verify_cached_hashes(
+                plan, {present, missing}, cache_base, idx
+            )
+            assert result == [missing]
+            # Stale entry must be removed so the next fetch retries it.
+            assert missing not in idx
+        finally:
+            idx.close()
+
+        out = capsys.readouterr().out
+        assert 'MISSING after fetch' in out
+        assert missing in out
+
+    def test_fetch_from_plan_appends_verification_failure(self, tmp_path, capsys):
+        """fetch_from_plan reports a failure result when an index-skipped hash
+        never actually landed in the cache."""
+        cache_base = str(tmp_path / 'cache')
+        Path(cache_base).mkdir(parents=True, exist_ok=True)
+        missing = 'c' * 32
+        plan = self._plan_with_hashes({missing}, source_path=str(tmp_path / 'src'))
+
+        # Pre-seed the index so the hash is "skipped by index" and never fetched,
+        # reproducing the stale-index silent-drop from #151.
+        idx = fetch.cache_index.CacheIndex(Path(cache_base))
+        idx.add(missing)
+        idx.close()
+
+        results = fetch.fetch_from_plan(plan, destination=Path(cache_base), show_progress=False)
+
+        verification_failures = [
+            (name, msg) for name, ok, msg in results
+            if not ok and name == 'cache verification'
+        ]
+        assert verification_failures, "expected a cache verification failure"
+        assert 'missing from cache' in verification_failures[0][1]
 
 
 class TestCollectHashesFromStage:

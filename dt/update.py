@@ -860,10 +860,28 @@ def update(
         print(f"\nFetching data for {len(updated_targets)} updated import(s)...")
         from . import fetch as fetch_mod
         try:
-            fetch_mod.fetch(targets=updated_targets, verbose=verbose, destination=cache)
+            fetch_results = fetch_mod.fetch(
+                targets=updated_targets, verbose=verbose, destination=cache
+            )
+            # Surface fetch failures (including post-fetch cache verification
+            # misses) so a silently-incomplete rebuild is not reported as
+            # success (issue #151). Previously the return value was discarded
+            # and only a raised exception was noticed.
+            fetch_failures = [
+                (name, msg) for name, ok, msg in (fetch_results or []) if not ok
+            ]
+            if fetch_failures:
+                for name, msg in fetch_failures:
+                    print(f"  ✗ fetch: {name}: {msg}")
+                results.append((
+                    'fetch', False,
+                    f"fetch reported {len(fetch_failures)} failure(s) after rebuild"
+                ))
+                print(f"  Run 'dt fetch {' '.join(updated_targets)}' to retry")
         except Exception as e:
             print(f"  Warning: fetch failed: {e}")
             print(f"  Run 'dt fetch {' '.join(updated_targets)}' manually")
+            results.append(('fetch', False, f"fetch raised: {e}"))
         
         # Checkout files to workspace
         print(f"\nChecking out files to workspace...")
