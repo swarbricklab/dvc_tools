@@ -407,10 +407,15 @@ def _scan_one_prefix(p: Path) -> Tuple[int, int]:
     try:
         with os.scandir(p) as it:
             for entry in it:
-                if entry.is_file(follow_symlinks=False):
+                # follow_symlinks=True so counts/sizes match what the archive
+                # tar captures (it runs with --dereference): a symlink to a real
+                # blob is counted as that blob at its target size; a dangling
+                # symlink is neither a file nor stat-able and is skipped here,
+                # just as tar --dereference would fail on it downstream.
+                if entry.is_file(follow_symlinks=True):
                     n += 1
                     try:
-                        size_sum += entry.stat(follow_symlinks=False).st_size
+                        size_sum += entry.stat(follow_symlinks=True).st_size
                     except OSError:
                         continue
     except OSError:
@@ -864,7 +869,13 @@ def build_prefix_tarball(
         if p.exists():
             p.unlink()
 
-    cmd = ['tar', '-C', str(remote), '-cf', str(target_tmp)]
+    # --dereference: follow symlinks and archive the *content* they point at,
+    # never the link itself. A remote should only ever hold real blobs, but a
+    # misconfigured/legacy remote can contain symlinked objects (e.g. a .dir
+    # planted by an older `dt update`); without this, tar would bake those
+    # links into the archive, where they dangle on restore. If a symlink is
+    # dangling, tar fails loudly here rather than archiving a broken link.
+    cmd = ['tar', '-C', str(remote), '-cf', str(target_tmp), '--dereference']
     cmd.extend(_COMPRESSION_TAR_FLAGS[compress])
     cmd.append(member_path)
 

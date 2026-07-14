@@ -14,6 +14,7 @@ from . import remote as remote_mod
 from . import remote_verify as remote_verify_mod
 from . import remote_ops as remote_ops_mod
 from . import remote_quarantine as remote_quarantine_mod
+from . import remote_fsck as remote_fsck_mod
 from . import doctor as doctor_mod
 from . import auth as auth_mod
 from . import push as push_mod
@@ -1098,6 +1099,102 @@ def remote_move(args, quick, jobs, verbose):
                    + ", ".join(n for n, _, _ in result['repointed']))
     else:
         click.echo("  No configured remotes referenced the old path.")
+
+
+@remote.command('fsck')
+@click.argument('remote_name', required=False)
+@click.option('--repair', is_flag=True,
+              help='Replace each resolvable symlink with a verified real copy. '
+                   'Without this, fsck only reports.')
+@click.option('--json', 'json_output', is_flag=True,
+              help='Print the JSON report to stdout instead of a summary.')
+@click.option('--verbose', '-v', is_flag=True, help='Print each symlink found.')
+def remote_fsck(remote_name, repair, json_output, verbose):
+    """Scan a remote for symlinked blobs and optionally repair them.
+
+    A healthy remote holds only real files. An older `dt update` could plant a
+    symlinked `<hash>.dir` in a shared remote pointing at a per-machine local
+    cache path; such links dangle for everyone else, hide the object from
+    `dt find`, and corrupt archives.
+
+    By default this only reports. With --repair, each symlink whose target
+    still resolves is replaced by a real, read-only copy — but only after the
+    target's content is confirmed to hash to the object's path-implied md5, so
+    a repair can never write wrong content into a hash-named slot. Dangling
+    symlinks (target gone) cannot be recovered from the link and must be
+    rebuilt from a repo that still has the data (e.g. `dt update`).
+
+    The remote must be on a locally-accessible filesystem.
+
+    \b
+    Examples:
+        dt remote fsck                     # Report symlinks in the default remote
+        dt remote fsck myremote            # Report for a named remote
+        dt remote fsck --repair            # Repair recoverable symlinks
+        dt remote fsck --json              # Machine-readable report
+    """
+    import json as _json
+
+    try:
+        report = remote_fsck_mod.fsck_remote(
+            remote_name, repair=repair, verbose=verbose,
+        )
+    except errors.RemoteError as e:
+        raise click.ClickException(str(e))
+
+    if json_output:
+        click.echo(_json.dumps(report.to_dict(), indent=2))
+    else:
+        if report.total == 0:
+            click.echo(f"Remote '{report.remote_name}': no symlinked blobs "
+                       f"found. ({report.layout})")
+        else:
+            repaired = sum(1 for f in report.findings if f.repaired)
+            click.echo(
+                f"Remote '{report.remote_name}' ({report.layout}): "
+                f"{report.total} symlink(s) — "
+                f"{len(report.resolvable)} resolvable, "
+                f"{len(report.dangling)} dangling."
+            )
+            if repair:
+                click.echo(f"  Repaired: {repaired}")
+                unresolved = [f for f in report.findings
+                              if not f.repaired and f.outcome]
+                for f in unresolved[:20]:
+                    click.echo(f"  ! {f.rel}: {f.outcome}")
+                if len(unresolved) > 20:
+                    click.echo(f"  ... and {len(unresolved) - 20} more "
+                               f"(use --json for the full list)")
+            else:
+                for f in report.findings[:20]:
+                    state = "ok" if f.resolves else "DANGLING"
+                    click.echo(f"  [{state}] {f.rel} ({f.owner}) -> {f.target}")
+                if report.total > 20:
+                    click.echo(f"  ... and {report.total - 20} more "
+                               f"(use --json for the full list)")
+                click.echo("Run with --repair to fix the resolvable ones you own.")
+
+            # Symlinks owned by other users cannot be repaired by this run;
+            # list who to ask so they can run --repair themselves.
+            others = report.other_owners()
+            if others:
+                click.echo(
+                    f"\nOwned by other users — ask them to run "
+                    f"`dt remote fsck {report.remote_name} --repair`:"
+                )
+                for user in sorted(others):
+                    counts = others[user]
+                    click.echo(
+                        f"  {user}: {counts['total']} symlink(s) "
+                        f"({counts['repairable']} repairable)"
+                    )
+
+    # Non-zero exit if unresolved problems remain (for scripting/CI).
+    remaining = sum(
+        1 for f in report.findings if not f.repaired
+    ) if repair else report.total
+    if remaining:
+        raise SystemExit(1)
 
 
 # =============================================================================

@@ -36,7 +36,7 @@ class TestUpdateHelp:
         )
         
         assert result.returncode == 0
-        assert 'Examples:' in result.stdout
+        assert 'Common workflows:' in result.stdout
         assert 'dt update' in result.stdout
 
 
