@@ -496,39 +496,53 @@ def _push_dir_to_remote(
     verbose: bool = False,
 ) -> bool:
     """Push .dir file to source remote.
-    
+
+    The write must never be a symlink: the remote is shared, but ``dir_file``
+    lives in this machine's local cache, so a symlinked ``.dir`` in the remote
+    would point at a per-machine path and dangle for every other user (it also
+    trips up ``dt find`` and gets baked into archives). We therefore transfer
+    via :func:`remote_ops._transfer_file`, which uses reflink → hardlink → copy
+    and deliberately never symlinks — the same rule the rest of the remote-write
+    machinery follows.
+
     Args:
         dir_file: Path to local .dir file.
         remote_path: Path to source remote.
         dir_hash: Hash of the .dir file (with .dir suffix).
         verbose: Print progress messages.
-        
+
     Returns:
         True if file was pushed, False if already exists.
     """
-    from . import cache_ops
-    
+    from . import remote_ops
+    from .errors import RemoteError
+
     # Determine destination path in remote
     hash_only = dir_hash.replace('.dir', '')
     dest_v3 = remote_path / 'files' / 'md5' / hash_only[:2] / f"{hash_only[2:]}.dir"
     dest_v2 = remote_path / hash_only[:2] / f"{hash_only[2:]}.dir"
-    
+
     # Check if already exists
     if dest_v3.exists() or dest_v2.exists():
         if verbose:
             print(f"  .dir already in source remote")
         return False
-    
-    # Push to v3 layout
+
+    # Push to v3 layout using the symlink-free remote-write helper.
     dest_v3.parent.mkdir(parents=True, exist_ok=True)
-    success, link_type = cache_ops.link_file(dir_file, dest_v3, verbose=verbose, label=dir_hash)
-    
-    if success:
+    try:
+        method = remote_ops._transfer_file(dir_file, dest_v3, independent=False)
+    except RemoteError as e:
         if verbose:
-            print(f"  Pushed .dir to source remote ({link_type})")
-        return True
-    
-    return False
+            print(f"  Warning: could not push .dir to source remote: {e}")
+        return False
+
+    if method == 'skipped':
+        return False
+
+    if verbose:
+        print(f"  Pushed .dir to source remote ({method})")
+    return True
 
 
 # =============================================================================
