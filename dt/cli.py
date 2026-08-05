@@ -4634,6 +4634,8 @@ def install(force, verbose):
     Hooks installed:
         pre-commit      Run dvc status, reject large files
         post-checkout   Update DVC files after branch switch
+        post-merge      Update DVC files after a merge
+        post-rewrite    Update DVC files after a rebase / commit --amend
         pre-push        Push DVC cache to remotes
 
     \b
@@ -4701,7 +4703,8 @@ def hook_run(hook_name, args, verbose):
     ``dt install``. It reads the check configuration and runs each
     enabled check in order.
 
-    HOOK_NAME is the git hook (pre-commit, post-checkout, pre-push).
+    HOOK_NAME is the git hook (pre-commit, post-checkout, post-merge,
+    post-rewrite, pre-push).
 
     \b
     Examples:
@@ -4772,7 +4775,8 @@ def hook_run_check(hook_name, check_name, args, worker, verbose):
     With --worker, runs the check directly and saves the result to
     .dt/hook-results/.
 
-    HOOK_NAME is the git hook (pre-commit, post-checkout, pre-push).
+    HOOK_NAME is the git hook (pre-commit, post-checkout, post-merge,
+    post-rewrite, pre-push).
     CHECK_NAME is the name of the check to run.
 
     \b
