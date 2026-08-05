@@ -32,7 +32,22 @@ from .errors import HookError, InstallError
 # Constants
 # =============================================================================
 
-HOOK_NAMES = ['pre-commit', 'post-checkout', 'pre-push']
+HOOK_NAMES = [
+    'pre-commit',
+    'post-checkout',
+    # post-merge and post-rewrite reconcile the workspace after ``git merge``
+    # and ``git rebase``/``git commit --amend`` — without these, the tree can
+    # end up disagreeing with dvc.lock and the drift only surfaces days
+    # later when it gets committed (issue #159).
+    'post-merge',
+    'post-rewrite',
+    'pre-push',
+]
+
+# Environment variable that skips the safety gates in ``_run_dvc_checkout``
+# (subset-drop / upstream-behind). Intended as a one-shot override for cases
+# where the older lock really is what the user wants materialised.
+FORCE_HOOK_ENV = 'DT_HOOK_FORCE'
 
 # Retry schedule for the pre-push ``dvc-push`` hook when it hits DVC's
 # workspace lock. The hook typically runs deferred on a compute node while the
@@ -69,6 +84,22 @@ DEFAULT_HOOKS_CONFIG = {
             },
         },
         'post-checkout': {
+            'checks': {
+                'dvc-checkout': {
+                    'enabled': True,
+                    'mode': 'sync',
+                },
+            },
+        },
+        'post-merge': {
+            'checks': {
+                'dvc-checkout': {
+                    'enabled': True,
+                    'mode': 'sync',
+                },
+            },
+        },
+        'post-rewrite': {
             'checks': {
                 'dvc-checkout': {
                     'enabled': True,
@@ -493,6 +524,7 @@ def _run_builtin_check(name: str, hook_name: str, check_cfg: Dict,
     if name == 'dvc-checkout':
         return _run_dvc_checkout(
             hook_args,
+            hook_name=hook_name,
             network=bool(check_cfg.get('network', False)),
             verbose=verbose,
         )
@@ -507,12 +539,138 @@ def _run_builtin_check(name: str, hook_name: str, check_cfg: Dict,
     return False
 
 
+def _git_rev_parse(rev: str) -> Optional[str]:
+    """Resolve *rev* to a full commit sha, or return None if it doesn't exist."""
+    result = subprocess.run(
+        ['git', 'rev-parse', '--verify', '--quiet', rev],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
+
+
+def _lock_out_paths(rev: str) -> Optional[set]:
+    """Return the set of tracked out paths recorded in dvc.lock at *rev*.
+
+    Uses ``git show <rev>:dvc.lock`` so we don't need a working copy of the
+    other side. Returns ``None`` if the lock is absent at that rev or cannot
+    be parsed — callers must treat that as "unknown, do not gate on it".
+    """
+    try:
+        import yaml  # local: avoids importing yaml at module load
+    except ImportError:
+        return None
+
+    result = subprocess.run(
+        ['git', 'show', f'{rev}:dvc.lock'],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        data = yaml.safe_load(result.stdout)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    paths: set = set()
+    stages = data.get('stages') if isinstance(data.get('stages'), dict) else {}
+    for stage in stages.values():
+        if not isinstance(stage, dict):
+            continue
+        for out in (stage.get('outs') or []):
+            path = out.get('path') if isinstance(out, dict) else None
+            if path:
+                paths.add(path)
+    return paths
+
+
+def _upstream_behind() -> Optional[int]:
+    """Return how many commits HEAD is behind its configured upstream.
+
+    Returns ``None`` if no upstream is configured, if the check errors,
+    or if we're not on a branch. Does not fetch — the check is a snapshot
+    of what git already knows locally, so it costs no network and cannot
+    hang on a slow remote.
+    """
+    result = subprocess.run(
+        ['git', 'rev-list', '--count', 'HEAD..@{upstream}'],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _summarize_checkout_output(output: str) -> Tuple[List[str], List[str], List[str]]:
+    """Parse ``dvc checkout`` output into (added, modified, deleted) path lists.
+
+    ``dvc checkout`` prints one line per changed file like ``A <path>``,
+    ``M <path>``, or ``D <path>``. We surface these unconditionally so the
+    hook never silently deletes files (issue #159).
+    """
+    added: List[str] = []
+    modified: List[str] = []
+    deleted: List[str] = []
+    for line in (output or '').splitlines():
+        s = line.strip()
+        if len(s) < 3 or s[1] != ' ':
+            continue
+        marker, path = s[0], s[2:].strip()
+        if not path:
+            continue
+        if marker == 'A':
+            added.append(path)
+        elif marker == 'M':
+            modified.append(path)
+        elif marker == 'D':
+            deleted.append(path)
+    return added, modified, deleted
+
+
+def _resolve_prev_new(
+    hook_name: str,
+    hook_args: List[str],
+) -> Tuple[Optional[str], Optional[str], bool]:
+    """Resolve (prev, new, is_file_checkout) for a ``dvc-checkout`` invocation.
+
+    Args are semantic per hook:
+
+    - ``post-checkout``: ``<prev> <new> <flag>``. ``flag == '0'`` means a file
+      checkout (nothing for DVC to do) — surfaced as ``is_file_checkout=True``.
+    - ``post-merge``: ``<squash-flag>``. Compare ``HEAD@{1}`` (pre-merge tip)
+      to ``HEAD``.
+    - ``post-rewrite``: ``<command>``. Compare ``HEAD@{1}`` (pre-rewrite tip)
+      to ``HEAD``. Stdin also lists rewritten commits but we don't need them.
+
+    Returns ``(None, None, False)`` when the previous head can't be resolved,
+    which callers should treat as "we don't know — proceed without gating".
+    """
+    if hook_name == 'post-checkout' and len(hook_args) >= 3:
+        prev, new, flag = hook_args[0], hook_args[1], hook_args[2]
+        return prev, new, (flag == '0')
+
+    if hook_name in ('post-merge', 'post-rewrite'):
+        prev = _git_rev_parse('HEAD@{1}')
+        new = _git_rev_parse('HEAD')
+        return prev, new, False
+
+    return None, None, False
+
+
 def _run_dvc_checkout(
     hook_args: List[str],
+    hook_name: str = 'post-checkout',
     network: bool = False,
     verbose: bool = False,
 ) -> bool:
-    """Relink DVC-tracked files after a branch switch (post-checkout hook).
+    """Relink DVC-tracked files after a branch switch, merge, or rewrite.
 
     Runs ``dt pull`` to sync the workspace to the new commit. By default
     ``network=False``: only local sources are used (local cache + any
@@ -524,24 +682,34 @@ def _run_dvc_checkout(
     Set ``network: true`` on the ``dvc-checkout`` check to opt back into
     fetching missing data from the remote on checkout.
 
-    Skips during rebase/merge.  Only runs on branch switch (flag == 1)
-    where HEAD actually moved — ``git checkout -b`` fires the hook with
-    prev-HEAD == new-HEAD and nothing for DVC to do.
-    """
-    # post-checkout args: <prev-HEAD> <new-HEAD> <flag>
-    # flag=1 means branch checkout, flag=0 means file checkout
-    if len(hook_args) >= 3:
-        prev_head, new_head, flag = hook_args[0], hook_args[1], hook_args[2]
-        if flag == '0':
-            if verbose:
-                print("  dvc-checkout: file checkout, skipping")
-            return True
-        if prev_head == new_head:
-            if verbose:
-                print("  dvc-checkout: HEAD unchanged (e.g. branch create), skipping")
-            return True
+    Safety gates (issue #159): before reconciling, the hook refuses to run
+    when the incoming ``dvc.lock`` strictly drops outs that the outgoing lock
+    had, or when the branch is behind its upstream — both of which risk a
+    silent destructive reconciliation. Set the environment variable
+    :data:`FORCE_HOOK_ENV` to any truthy value to bypass the gates for a
+    single git operation.
 
-    # Skip during rebase
+    Skips during rebase (the post-rewrite hook picks up after the rebase
+    completes). Skips file-only post-checkout invocations. Skips when
+    ``prev == new`` (``git checkout -b`` at the current tip).
+    """
+    from . import pull as pull_mod
+
+    prev_head, new_head, is_file_checkout = _resolve_prev_new(hook_name, hook_args)
+
+    if is_file_checkout:
+        if verbose:
+            print("  dvc-checkout: file checkout, skipping")
+        return True
+
+    if prev_head and new_head and prev_head == new_head:
+        if verbose:
+            print(
+                "  dvc-checkout: HEAD unchanged (e.g. branch create), skipping"
+            )
+        return True
+
+    # Skip during rebase — post-rewrite will pick up after it completes.
     git_dir_result = subprocess.run(
         ['git', 'rev-parse', '--git-dir'],
         capture_output=True, text=True,
@@ -553,8 +721,75 @@ def _run_dvc_checkout(
                 print("  dvc-checkout: rebase in progress, skipping")
             return True
 
-    from . import pull as pull_mod
-    pull_mod.pull(verbose=verbose, network=network)
+    force = bool(os.environ.get(FORCE_HOOK_ENV, ''))
+
+    # Gate 1: incoming lock drops outs the outgoing lock had.
+    # Only fires on the "strict rollback" shape (new_paths ⊂ prev_paths) so
+    # normal merges that add and remove don't trip it. Requires both revs to
+    # resolve — during a fresh clone the prev side won't, so we skip the gate.
+    if not force and prev_head and new_head:
+        prev_paths = _lock_out_paths(prev_head)
+        new_paths = _lock_out_paths(new_head)
+        if prev_paths is not None and new_paths is not None:
+            if new_paths < prev_paths:
+                dropped = prev_paths - new_paths
+                print(
+                    f"  dvc-checkout: refusing to reconcile — the incoming "
+                    f"dvc.lock drops {len(dropped)} out(s):",
+                    flush=True,
+                )
+                for path in sorted(dropped)[:20]:
+                    print(f"    - {path}", flush=True)
+                if len(dropped) > 20:
+                    print(
+                        f"    ... and {len(dropped) - 20} more", flush=True
+                    )
+                print(
+                    f"  Run `dvc checkout` (or set {FORCE_HOOK_ENV}=1) "
+                    f"if that is really what you want.",
+                    flush=True,
+                )
+                return True
+
+    # Gate 2: current branch is behind its upstream. A reconciliation against
+    # a stale lock can trigger a large network pull (or, on a laptop, hang)
+    # so we prefer to warn and let the user `git pull` first.
+    if not force:
+        behind = _upstream_behind()
+        if behind and behind > 0:
+            print(
+                f"  dvc-checkout: refusing to reconcile — branch is "
+                f"{behind} commit(s) behind @{{upstream}}. "
+                f"Run `git pull` first, then `dvc checkout`, or set "
+                f"{FORCE_HOOK_ENV}=1 to reconcile against the older lock.",
+                flush=True,
+            )
+            return True
+
+    # Fetch + checkout. We always capture the dvc checkout phase so we can
+    # emit an A/M/D summary — historically the hook printed only "✓
+    # dvc-checkout", which silently masked 20 GB deletions. The reconciled
+    # counts (and the D paths) are printed unconditionally.
+    _success, _fetched, _failed, checkout_output = pull_mod.pull(
+        verbose=verbose,
+        network=network,
+        return_checkout_output=True,
+    )
+
+    added, modified, deleted = _summarize_checkout_output(checkout_output)
+    if added or modified or deleted:
+        print(
+            f"  dvc-checkout: reconciled workspace — "
+            f"+{len(added)} added, ~{len(modified)} modified, "
+            f"-{len(deleted)} deleted",
+            flush=True,
+        )
+        if deleted:
+            print("  Deleted:", flush=True)
+            for path in deleted[:20]:
+                print(f"    - {path}", flush=True)
+            if len(deleted) > 20:
+                print(f"    ... and {len(deleted) - 20} more", flush=True)
     return True
 
 

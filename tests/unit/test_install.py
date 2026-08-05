@@ -296,7 +296,7 @@ class TestHookRun:
         monkeypatch.chdir(tmp_path)
         (tmp_path / '.git').mkdir()
         (tmp_path / '.dt').mkdir()
-        assert install.hook_run('post-merge') is True
+        assert install.hook_run('post-applypatch') is True
 
     @patch('dt.install._get_checks')
     def test_sync_check_failure_raises(self, mock_get_checks):
@@ -581,7 +581,7 @@ class TestDispatchAsyncCheck:
 
 
 class TestRunDvcCheckout:
-    """Tests for _run_dvc_checkout fast-path skips."""
+    """Tests for _run_dvc_checkout fast-path skips and safety gates (#159)."""
 
     def test_skips_file_checkout(self):
         with patch('dt.pull.pull') as mock_pull:
@@ -595,12 +595,162 @@ class TestRunDvcCheckout:
             mock_pull.assert_not_called()
 
     def test_runs_pull_on_branch_switch(self):
-        with patch('dt.pull.pull') as mock_pull, \
+        # No safety gate fires (both locks look identical), so we fall through
+        # to fetch + checkout. Return a plausible pull tuple so the summary
+        # logic doesn't blow up.
+        with patch('dt.pull.pull',
+                   return_value=(True, 0, 0, '')) as mock_pull, \
+             patch.object(install, '_lock_out_paths', return_value=set()), \
+             patch.object(install, '_upstream_behind', return_value=None), \
              patch.object(install.subprocess, 'run') as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout='/tmp/.git\n')
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout='/tmp/.git\n', stderr='',
+            )
             with patch.object(install.Path, 'exists', return_value=False):
-                assert install._run_dvc_checkout(['abc', 'def', '1']) is True
+                assert install._run_dvc_checkout(
+                    ['abc', 'def', '1'], hook_name='post-checkout'
+                ) is True
             mock_pull.assert_called_once()
+
+    def test_gate_blocks_when_lock_drops_outs(self, capsys):
+        # Incoming lock is a strict subset (drops a path prev had), so we
+        # must warn+skip rather than reconcile.
+        with patch('dt.pull.pull') as mock_pull, \
+             patch.object(install, '_git_rev_parse',
+                          side_effect=['prevsha', 'newsha']), \
+             patch.object(install, '_lock_out_paths',
+                          side_effect=[{'a', 'b', 'c'}, {'a', 'b'}]), \
+             patch.object(install, '_upstream_behind', return_value=None), \
+             patch.object(install.subprocess, 'run',
+                          return_value=MagicMock(
+                              returncode=0, stdout='/tmp/.git\n', stderr='')), \
+             patch.object(install.Path, 'exists', return_value=False):
+            assert install._run_dvc_checkout(
+                ['abc', 'def', '1'], hook_name='post-checkout'
+            ) is True
+        mock_pull.assert_not_called()
+        out = capsys.readouterr().out
+        assert 'refusing to reconcile' in out
+        assert 'drops 1 out' in out
+        assert '- c' in out
+
+    def test_gate_allows_normal_merge_diff(self):
+        # New has both drops and adds — not a strict rollback, so we
+        # proceed to reconcile.
+        with patch('dt.pull.pull',
+                   return_value=(True, 0, 0, '')) as mock_pull, \
+             patch.object(install, '_git_rev_parse',
+                          side_effect=['prevsha', 'newsha']), \
+             patch.object(install, '_lock_out_paths',
+                          side_effect=[{'a', 'b'}, {'a', 'c'}]), \
+             patch.object(install, '_upstream_behind', return_value=None), \
+             patch.object(install.subprocess, 'run',
+                          return_value=MagicMock(
+                              returncode=0, stdout='/tmp/.git\n', stderr='')), \
+             patch.object(install.Path, 'exists', return_value=False):
+            assert install._run_dvc_checkout(
+                ['abc', 'def', '1'], hook_name='post-checkout'
+            ) is True
+        mock_pull.assert_called_once()
+
+    def test_gate_blocks_when_behind_upstream(self, capsys):
+        with patch('dt.pull.pull') as mock_pull, \
+             patch.object(install, '_git_rev_parse', return_value=None), \
+             patch.object(install, '_upstream_behind', return_value=3), \
+             patch.object(install.subprocess, 'run',
+                          return_value=MagicMock(
+                              returncode=0, stdout='/tmp/.git\n', stderr='')), \
+             patch.object(install.Path, 'exists', return_value=False):
+            assert install._run_dvc_checkout(
+                ['abc', 'def', '1'], hook_name='post-checkout'
+            ) is True
+        mock_pull.assert_not_called()
+        out = capsys.readouterr().out
+        assert '3 commit' in out
+        assert 'git pull' in out
+
+    def test_gates_bypassed_by_force_env(self, monkeypatch):
+        monkeypatch.setenv(install.FORCE_HOOK_ENV, '1')
+        with patch('dt.pull.pull',
+                   return_value=(True, 0, 0, '')) as mock_pull, \
+             patch.object(install, '_git_rev_parse',
+                          side_effect=['prevsha', 'newsha']), \
+             patch.object(install, '_lock_out_paths',
+                          side_effect=[{'a', 'b', 'c'}, {'a', 'b'}]), \
+             patch.object(install, '_upstream_behind', return_value=5), \
+             patch.object(install.subprocess, 'run',
+                          return_value=MagicMock(
+                              returncode=0, stdout='/tmp/.git\n', stderr='')), \
+             patch.object(install.Path, 'exists', return_value=False):
+            assert install._run_dvc_checkout(
+                ['abc', 'def', '1'], hook_name='post-checkout'
+            ) is True
+        mock_pull.assert_called_once()
+
+    def test_post_merge_uses_head_at_one(self):
+        # post-merge args are (<squash-flag>,), not (prev,new,flag). The hook
+        # should resolve prev/new from HEAD@{1}/HEAD via git.
+        rev_calls = []
+
+        def fake_git_rev_parse(rev):
+            rev_calls.append(rev)
+            return {'HEAD@{1}': 'prevsha', 'HEAD': 'newsha'}.get(rev)
+
+        with patch('dt.pull.pull',
+                   return_value=(True, 0, 0, '')) as mock_pull, \
+             patch.object(install, '_git_rev_parse',
+                          side_effect=fake_git_rev_parse), \
+             patch.object(install, '_lock_out_paths', return_value=set()), \
+             patch.object(install, '_upstream_behind', return_value=None), \
+             patch.object(install.subprocess, 'run',
+                          return_value=MagicMock(
+                              returncode=0, stdout='/tmp/.git\n', stderr='')), \
+             patch.object(install.Path, 'exists', return_value=False):
+            assert install._run_dvc_checkout(
+                ['0'], hook_name='post-merge'
+            ) is True
+
+        assert 'HEAD@{1}' in rev_calls
+        assert 'HEAD' in rev_calls
+        mock_pull.assert_called_once()
+
+    def test_prints_summary_from_checkout_output(self, capsys):
+        checkout_output = 'A new/file\nM changed/file\nD dropped/file\n'
+        with patch('dt.pull.pull',
+                   return_value=(True, 0, 0, checkout_output)), \
+             patch.object(install, '_git_rev_parse', return_value=None), \
+             patch.object(install, '_upstream_behind', return_value=None), \
+             patch.object(install.subprocess, 'run',
+                          return_value=MagicMock(
+                              returncode=0, stdout='/tmp/.git\n', stderr='')), \
+             patch.object(install.Path, 'exists', return_value=False):
+            install._run_dvc_checkout(
+                ['abc', 'def', '1'], hook_name='post-checkout'
+            )
+        out = capsys.readouterr().out
+        assert '+1 added' in out
+        assert '~1 modified' in out
+        assert '-1 deleted' in out
+        assert 'dropped/file' in out
+
+
+class TestSummarizeCheckoutOutput:
+    """Unit tests for _summarize_checkout_output."""
+
+    def test_parses_amd_lines(self):
+        text = 'A one\nM two\nD three\n'
+        added, modified, deleted = install._summarize_checkout_output(text)
+        assert added == ['one']
+        assert modified == ['two']
+        assert deleted == ['three']
+
+    def test_ignores_noise(self):
+        text = "Building workspace index...\n\nCheckout complete\n"
+        added, modified, deleted = install._summarize_checkout_output(text)
+        assert (added, modified, deleted) == ([], [], [])
+
+    def test_empty_input(self):
+        assert install._summarize_checkout_output('') == ([], [], [])
 
 
 class TestDvcPushNeedsInternet:
