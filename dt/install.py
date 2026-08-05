@@ -17,6 +17,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -32,6 +33,16 @@ from .errors import HookError, InstallError
 # =============================================================================
 
 HOOK_NAMES = ['pre-commit', 'post-checkout', 'pre-push']
+
+# Retry schedule for the pre-push ``dvc-push`` hook when it hits DVC's
+# workspace lock. The hook typically runs deferred on a compute node while the
+# developer keeps using the workspace, so a lock collision is a normal
+# transient condition (issue #158). Waits are seconds between attempts; total
+# ~9 minutes, comfortably inside a copyq walltime.
+DVC_PUSH_LOCK_BACKOFF_SECONDS: Tuple[int, ...] = (
+    5, 10, 20, 30, 60, 60, 60, 60, 60, 60, 60, 60,
+)
+DVC_PUSH_LOCK_ERROR_MARKER = 'Unable to acquire lock'
 
 HOOK_TEMPLATE = """\
 #!/bin/sh
@@ -626,9 +637,44 @@ def _confirm_push() -> bool:
     return answer in ('y', 'yes')
 
 
-def _do_dvc_push(verbose: bool = False) -> None:
-    """Execute ``dvc push``, preferring a local remote if available."""
+def _is_dvc_lock_error(output: str) -> bool:
+    """Return True if *output* looks like a DVC workspace-lock collision.
+
+    Matches the human-readable error DVC raises when another process holds
+    ``.dvc/tmp/lock`` — the hook's push job races normal local work by design
+    (async PBS submit runs later while the developer keeps using the tree),
+    so this is a transient condition worth retrying (issue #158).
+    """
+    return DVC_PUSH_LOCK_ERROR_MARKER in (output or '')
+
+
+def _do_dvc_push(
+    verbose: bool = False,
+    backoff_seconds: Tuple[int, ...] = DVC_PUSH_LOCK_BACKOFF_SECONDS,
+    sleep: Optional[callable] = None,
+) -> None:
+    """Execute ``dvc push``, preferring a local remote if available.
+
+    Retries with backoff on DVC workspace-lock errors: the pre-push hook is
+    typically submitted to a compute node and runs while the developer keeps
+    using the workspace, so a lock collision with an inline ``dvc``/``dt``
+    invocation is a normal transient condition. Non-lock failures fail fast
+    with the same :class:`HookError` as before.
+
+    The total retry budget is bounded by ``backoff_seconds`` (default
+    ~9 minutes across 12 attempts, comfortably inside a copyq walltime).
+
+    Args:
+        verbose: If True, add ``-v`` to the underlying ``dvc push`` call and
+            echo its stdout on success.
+        backoff_seconds: Wait between retries. Also determines the max number
+            of retry attempts (``len(backoff_seconds)``).
+        sleep: Injectable sleep function (used by tests).
+    """
     from . import remote as remote_mod
+
+    if sleep is None:
+        sleep = time.sleep
 
     remotes = remote_mod.list_remotes()
     local = remote_mod.find_local_remote(remotes)
@@ -641,12 +687,34 @@ def _do_dvc_push(verbose: bool = False) -> None:
 
     if verbose:
         cmd.append('-v')
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
+
+    max_attempts = 1 + len(backoff_seconds)
+    for attempt in range(1, max_attempts + 1):
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            if verbose and result.stdout.strip():
+                print(f"  dvc-push: {result.stdout.strip()}")
+            return
+
         output = (result.stdout + result.stderr).strip()
-        raise HookError(f"dvc push failed:\n{output}")
-    if verbose and result.stdout.strip():
-        print(f"  dvc-push: {result.stdout.strip()}")
+
+        if not _is_dvc_lock_error(output) or attempt >= max_attempts:
+            if attempt > 1:
+                output = (
+                    f"After {attempt} attempt(s), dvc push still fails:\n"
+                    f"{output}"
+                )
+            raise HookError(f"dvc push failed:\n{output}")
+
+        wait = backoff_seconds[attempt - 1]
+        if verbose:
+            print(
+                f"  dvc-push: workspace lock held by another process; "
+                f"retrying in {wait}s "
+                f"(attempt {attempt + 1}/{max_attempts})",
+                flush=True,
+            )
+        sleep(wait)
 
 
 def _dvc_push_needs_internet() -> bool:
