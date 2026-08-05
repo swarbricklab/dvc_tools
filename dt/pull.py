@@ -9,6 +9,7 @@ back to dvc fetch.
 """
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -117,18 +118,19 @@ def pull(
     update: bool = False,
     network: bool = True,
     dry: bool = False,
-) -> Tuple[bool, int, int]:
+    return_checkout_output: bool = False,
+) -> Tuple:
     """Pull DVC-tracked files: fetch to cache + checkout to workspace.
-    
+
     This is the simple model: dt pull = dt fetch + dvc checkout.
-    
+
     By default, network=True means data will be fetched however possible:
     - Local cache symlinks for imports and local remotes (fast, no network)
     - Network download via dvc fetch for cloud remotes (slower, needs network)
-    
+
     With network=False, only local sources are used. If data requires
     network access, an informative message is shown.
-    
+
     Args:
         targets: Specific targets to pull. Can be:
             - .dvc file paths (e.g., 'data.dvc')
@@ -146,10 +148,16 @@ def pull(
                  local cache is not available. If False, only use local
                  sources and report what would need network access.
         dry: If True, show what would be pulled without pulling.
-        
+        return_checkout_output: If True, capture the raw stdout of the
+            underlying ``dvc checkout`` call and return it as the fourth
+            element of the result tuple. Used by the post-checkout hook
+            (issue #159) to summarise A/M/D changes even when non-verbose.
+
     Returns:
-        Tuple of (success, fetched_count, failed_count).
-        
+        Tuple of (success, fetched_count, failed_count) by default, or
+        (success, fetched_count, failed_count, checkout_output) when
+        ``return_checkout_output=True``.
+
     Raises:
         PullError: If pull fails.
     """
@@ -232,33 +240,48 @@ def pull(
     
     if dry:
         # Dry run - don't checkout
+        if return_checkout_output:
+            return True, 0, 0, ''
         return True, 0, 0
-    
+
     # Phase 2: Checkout (links from cache to workspace)
     if verbose:
         print("\n=== Checkout phase ===")
-    
+
     cmd = ['dvc', 'checkout']
     if force:
         cmd.append('--force')
     if targets:
         cmd.extend(targets)
-    
+
     if verbose:
         print(f"Running: {' '.join(cmd)}")
-    
-    result = subprocess.run(cmd, capture_output=not verbose, text=True)
-    
+
+    # Always capture when the caller asked for the raw output; otherwise keep
+    # the historical behaviour of streaming in verbose mode.
+    capture = True if return_checkout_output else (not verbose)
+    result = subprocess.run(cmd, capture_output=capture, text=True)
+
+    if return_checkout_output and verbose:
+        # Preserve the "user sees dvc output live" experience by echoing the
+        # captured streams after the run completes.
+        if result.stdout:
+            sys.stdout.write(result.stdout)
+        if result.stderr:
+            sys.stderr.write(result.stderr)
+
     if result.returncode != 0:
-        if not verbose and result.stderr:
+        if capture and result.stderr:
             print(f"Checkout error: {result.stderr.strip()}")
         # Don't fail completely - fetch may have succeeded for some
         # User can run dvc checkout manually to see details
-    
+
     success = (failed == 0 and result.returncode == 0)
-    
+
     if verbose:
         print(f"\nPull complete: {fetched} fetched, {failed} failed")
-    
+
+    if return_checkout_output:
+        return success, fetched, failed, (result.stdout or '')
     return success, fetched, failed
 
