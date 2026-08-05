@@ -690,6 +690,88 @@ class TestRunDvcPush:
                 install._run_dvc_push({'mode': 'sync'})
 
 
+class TestDoDvcPushLockRetry:
+    """Retry-with-backoff around ``dvc push`` on workspace-lock errors (#158)."""
+
+    _LOCK_STDERR = (
+        "ERROR: failed to push data to the cloud - Unable to acquire lock. "
+        "Most likely another DVC process is running or was terminated abruptly."
+    )
+
+    def test_retries_on_lock_error_then_succeeds(self):
+        # First call sees the lock error, second call succeeds. We should not
+        # raise, and we should sleep exactly once between the two attempts.
+        run_results = [
+            MagicMock(returncode=1, stdout='', stderr=self._LOCK_STDERR),
+            MagicMock(returncode=0, stdout='pushed', stderr=''),
+        ]
+        sleeps = []
+        with patch('dt.remote.list_remotes', return_value=[]), \
+             patch('dt.remote.find_local_remote', return_value=None), \
+             patch.object(install.subprocess, 'run',
+                          side_effect=run_results) as mock_run:
+            install._do_dvc_push(
+                backoff_seconds=(1, 2, 3),
+                sleep=sleeps.append,
+            )
+        assert mock_run.call_count == 2
+        assert sleeps == [1]
+
+    def test_gives_up_after_all_retries_exhausted(self):
+        # Every attempt sees the same lock error. Total attempts = 1 + len(backoff).
+        backoff = (1, 2, 3)
+        sleeps = []
+        result = MagicMock(returncode=1, stdout='', stderr=self._LOCK_STDERR)
+        with patch('dt.remote.list_remotes', return_value=[]), \
+             patch('dt.remote.find_local_remote', return_value=None), \
+             patch.object(install.subprocess, 'run',
+                          return_value=result) as mock_run:
+            with pytest.raises(HookError, match=r"After \d+ attempt"):
+                install._do_dvc_push(
+                    backoff_seconds=backoff,
+                    sleep=sleeps.append,
+                )
+        assert mock_run.call_count == 1 + len(backoff)
+        # We sleep between attempts, not after the last one.
+        assert sleeps == list(backoff)
+
+    def test_non_lock_error_fails_fast(self):
+        # Any other failure should not retry — that's honest fast-fail.
+        sleeps = []
+        result = MagicMock(
+            returncode=1, stdout='',
+            stderr='ERROR: failed to push data to the cloud - AccessDenied',
+        )
+        with patch('dt.remote.list_remotes', return_value=[]), \
+             patch('dt.remote.find_local_remote', return_value=None), \
+             patch.object(install.subprocess, 'run',
+                          return_value=result) as mock_run:
+            with pytest.raises(HookError, match="AccessDenied"):
+                install._do_dvc_push(
+                    backoff_seconds=(1, 2, 3),
+                    sleep=sleeps.append,
+                )
+        # Fails on the first attempt — no sleep, no retry.
+        assert mock_run.call_count == 1
+        assert sleeps == []
+
+    def test_final_error_message_mentions_attempts(self):
+        # When we exhaust retries, the HookError should say how many attempts.
+        sleeps = []
+        result = MagicMock(returncode=1, stdout='', stderr=self._LOCK_STDERR)
+        with patch('dt.remote.list_remotes', return_value=[]), \
+             patch('dt.remote.find_local_remote', return_value=None), \
+             patch.object(install.subprocess, 'run', return_value=result):
+            with pytest.raises(HookError) as exc:
+                install._do_dvc_push(
+                    backoff_seconds=(1, 1),
+                    sleep=sleeps.append,
+                )
+        msg = str(exc.value)
+        assert 'After 3 attempt' in msg
+        assert 'Unable to acquire lock' in msg
+
+
 class TestRunCheck:
     """Tests for run_check (worker-side)."""
 
