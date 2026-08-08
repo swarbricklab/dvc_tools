@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 from dvc.utils.serialize import dump_yaml
 
+from . import dvc_deps
 from . import dvc_lock
 from . import find as find_mod
 from . import tmp as tmp_mod
@@ -69,38 +70,23 @@ def _parse_import_info(dvc_path: Path) -> Optional[ImportInfo]:
         ImportInfo if valid import file, None otherwise.
     """
     try:
-        with open(dvc_path) as f:
-            data = yaml.safe_load(f)
-        
-        if not data:
-            return None
-        
-        deps = data.get('deps', [])
-        if not deps:
-            return None
-        
-        for dep in deps:
-            repo = dep.get('repo', {})
-            if repo:
-                outs = data.get('outs', [])
-                current_hash = outs[0].get('md5') if outs else None
-                is_directory = current_hash.endswith('.dir') if current_hash else False
-                
-                # DVC uses rev_lock for the locked revision
-                locked_rev = repo.get('rev_lock') or repo.get('rev', '')
-                
-                return ImportInfo(
-                    dvc_path=dvc_path,
-                    repo_url=repo.get('url', ''),
-                    path=dep.get('path', ''),
-                    locked_rev=locked_rev,
-                    current_hash=current_hash,
-                    is_directory=is_directory,
-                )
-        
+        text = Path(dvc_path).read_text()
+    except (OSError, UnicodeDecodeError):
         return None
-    except (OSError, yaml.YAMLError):
+
+    imports, _ = dvc_deps.parse_import_refs(text, str(dvc_path))
+    if not imports:
         return None
+
+    ref = imports[0]
+    return ImportInfo(
+        dvc_path=dvc_path,
+        repo_url=ref.repo_url,
+        path=ref.path,
+        locked_rev=ref.locked_rev,
+        current_hash=ref.md5,
+        is_directory=ref.is_directory,
+    )
 
 
 def _get_head_rev(clone_path: Path) -> str:

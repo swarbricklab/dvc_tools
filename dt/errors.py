@@ -193,3 +193,8 @@ class UpdateError(DTError):
 class SiteCacheError(DTError):
     """Error configuring or applying DVC site_cache_dir."""
     pass
+
+
+class DepsError(DTError):
+    """Error during repo-level dependency operations."""
+    pass

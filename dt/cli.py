@@ -16,6 +16,10 @@ from . import remote_ops as remote_ops_mod
 from . import remote_quarantine as remote_quarantine_mod
 from . import remote_fsck as remote_fsck_mod
 from . import doctor as doctor_mod
+from . import dvc_deps as deps_mod
+from . import repo_graph as repo_graph_mod
+from . import repo_graph_render
+from . import org_index as org_index_mod
 from . import auth as auth_mod
 from . import push as push_mod
 from . import add as add_mod
@@ -4492,25 +4496,40 @@ def index_cache_rebuild(verbose, quiet):
 @click.option('--out', '-o', 'output_dir', help='Output directory (default: docs/)')
 @click.option('--tree-only', is_flag=True, help='Generate only tree.txt')
 @click.option('--dag-only', is_flag=True, help='Generate only dag.md')
-def summary(output_dir, tree_only, dag_only):
+@click.option('--repo-dag', is_flag=True,
+              help='Also generate repo-dag.md (imports between repos; clones '
+                   'upstream repos, so this is much slower)')
+@click.option('--repo-dag-depth', type=int, default=None,
+              help='Maximum depth for repo-dag.md (default: unlimited)')
+def summary(output_dir, tree_only, dag_only, repo_dag, repo_dag_depth):
     """Generate project summary files.
-    
+
     Creates tree.txt (file listing via dvc list --tree) and dag.md
     (pipeline DAG via dvc dag --md) in the output directory.
-    
+
     By default, both files are generated in docs/.
-    
+
+    --repo-dag additionally writes repo-dag.md, the graph of imports *between*
+    repos. It is opt-in because it clones every upstream repo, unlike the other
+    two which are local-only.
+
     \b
     Examples:
         dt summary              # Generate both to docs/
         dt summary --tree-only  # Generate only tree.txt
         dt summary --dag-only   # Generate only dag.md
+        dt summary --repo-dag   # Also generate repo-dag.md
         dt summary -o .         # Generate both to current directory
     """
     try:
         if tree_only and dag_only:
             raise click.ClickException("Cannot use both --tree-only and --dag-only")
-        
+
+        if repo_dag:
+            summary_mod.generate_repo_dag(
+                output_dir=output_dir, depth=repo_dag_depth, verbose=True,
+            )
+
         if tree_only:
             summary_mod.generate_tree(output_dir=output_dir, verbose=True)
         elif dag_only:
@@ -4519,6 +4538,419 @@ def summary(output_dir, tree_only, dag_only):
             summary_mod.generate_all(output_dir=output_dir, verbose=True)
             
     except summary_mod.SummaryError as e:
+        raise click.ClickException(str(e))
+
+
+# =============================================================================
+# Deps commands (dependencies between repositories)
+# =============================================================================
+
+@cli.group()
+def deps():
+    """Inspect dependencies between repositories.
+
+    Where `dvc dag` shows the graph of stages and files inside one repo,
+    `dt deps` shows the graph of imports between repos.
+    """
+    pass
+
+
+@deps.command('list')
+@click.option('--ref', default=None,
+              help='Scan a specific git ref instead of the working tree')
+@click.option('--all-branches', is_flag=True,
+              help='Scan all local and origin branches')
+@click.option('--include-paths', is_flag=True,
+              help='Show example import paths for each source repo')
+@click.option('--max-paths', type=int, default=5, show_default=True,
+              help='Example paths to show per source repo')
+@click.option('--show-refs', is_flag=True,
+              help='List the branches each edge appears on')
+@click.option('--max-refs', type=int, default=5, show_default=True,
+              help='Branches to list per source repo with --show-refs')
+@click.option('--external', is_flag=True,
+              help='Also report dvc import-url sources (s3://, https://, ...)')
+@click.option('--owner', default=lambda: cfg.get_value('owner'),
+              help='Owner used to expand short repo names')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+def deps_list(ref, all_branches, include_paths, max_paths, show_refs, max_refs,
+              external, owner, json_output):
+    """List the repositories this repo imports from.
+
+    Scans .dvc files for deps sections that name a source repo, then collapses
+    them into one line per source repo rather than one per import -- a repo
+    with thousands of imports usually has only a handful of sources.
+
+    Imports are recorded only in .dvc files; dvc.lock and dvc.yaml cannot
+    express a repo dependency, so this scan is complete.
+
+    \b
+    Examples:
+        dt deps list                     # Sources for the working tree
+        dt deps list --include-paths     # Show example paths per source
+        dt deps list --all-branches      # Union of edges across all branches
+        dt deps list --ref origin/dev    # Edges as of one branch
+        dt deps list --json              # Machine-readable output
+    """
+    try:
+        if ref and all_branches:
+            raise click.ClickException(
+                "Cannot use both --ref and --all-branches"
+            )
+
+        result = deps_mod.list_imports(
+            ref=ref,
+            all_branches=all_branches,
+            owner=owner,
+            max_paths=max_paths,
+        )
+
+        ext = result.externals if external else None
+
+        if json_output:
+            click.echo(deps_mod.edges_to_json(
+                result.edges, result.target,
+                externals=ext,
+                scanned_refs=result.scanned_refs,
+                default_ref=result.default_ref,
+            ))
+        else:
+            click.echo(deps_mod.format_edges(
+                result.edges, result.target,
+                externals=ext,
+                include_paths=include_paths,
+                scanned_refs=result.scanned_refs,
+                default_ref=result.default_ref,
+                show_refs=show_refs,
+                max_refs=max_refs,
+            ))
+
+    except errors.DepsError as e:
+        raise click.ClickException(str(e))
+
+
+@deps.command('graph')
+@click.option('--depth', type=int, default=None,
+              help='Maximum depth to expand (default: unlimited)')
+@click.option('--mode', type=click.Choice(['head', 'pinned']), default='head',
+              show_default=True,
+              help='Scan source repos at their default branch, or at the '
+                   'rev_lock we import at')
+@click.option('--format', 'fmt',
+              type=click.Choice(['text', 'mermaid', 'dot', 'json']),
+              default='text', show_default=True, help='Output format')
+@click.option('-o', '--output', type=click.Path(), default=None,
+              help='Write to a file instead of stdout')
+@click.option('--all-branches', is_flag=True,
+              help='Scan all branches of the root repo (sources use one rev)')
+@click.option('--downstream', is_flag=True,
+              help='Also include repos that import FROM this one (needs '
+                   '`dt deps index` to have been run)')
+@click.option('--org', default=None,
+              help='Org whose index to use for --downstream (default: owner)')
+@click.option('--include-paths', is_flag=True,
+              help='Show example import paths (text format only)')
+@click.option('--jobs', '-j', type=int, default=4, show_default=True,
+              help='Concurrent clone/scan workers')
+@click.option('--no-refresh', is_flag=True,
+              help='Use cached clones without fetching updates')
+@click.option('--strict', is_flag=True,
+              help='Exit non-zero if any repo could not be resolved')
+@click.option('--owner', default=lambda: cfg.get_value('owner'),
+              help='Owner used to expand short repo names')
+@click.option('-v', '--verbose', is_flag=True, help='Print progress')
+def deps_graph(depth, mode, fmt, output, all_branches, downstream, org,
+               include_paths, jobs, no_refresh, strict, owner, verbose):
+    """Build the dependency graph between repositories.
+
+    Starts from this repo, follows its imports to their source repos, clones
+    each one, and repeats. Source repos are cloned into .dt/tmp/clones/ and
+    reused, so re-runs are much faster than the first.
+
+    The result is not assumed to be acyclic -- repos can import from each
+    other, and any cycles found are reported rather than treated as an error.
+
+    Repos that cannot be cloned appear as nodes with a gap status instead of
+    being silently dropped. Use --strict to fail when any are present.
+
+    \b
+    Examples:
+        dt deps graph                      # Full upstream graph
+        dt deps graph --depth 1            # Direct sources only (no cloning)
+        dt deps graph --mode pinned        # Follow the revs we import at
+        dt deps graph --format mermaid -o docs/repo-dag.md
+        dt deps graph --strict             # Fail if anything is unreachable
+    """
+    try:
+        if depth is not None and depth < 1:
+            raise click.ClickException("--depth must be at least 1")
+
+        graph = repo_graph_mod.build_upstream(
+            depth=depth,
+            mode=mode,
+            jobs=jobs,
+            refresh=not no_refresh,
+            all_branches=all_branches,
+            owner=owner,
+            verbose=verbose,
+        )
+
+        if downstream:
+            index_org = org or owner
+            if not index_org:
+                raise click.ClickException(
+                    "--downstream needs an org. Use --org or set one: "
+                    "dt config set owner <org>"
+                )
+            index = org_index_mod.load_index(index_org)
+            if not index.repos:
+                raise click.ClickException(
+                    f"No cached index for {index_org}. Build one with: "
+                    f"dt deps index --org {index_org}"
+                )
+            down = org_index_mod.downstream_graph(index, graph.root, depth=depth)
+            graph = org_index_mod.merge_graphs(graph, down)
+
+        kwargs = {}
+        if fmt == 'text':
+            kwargs = {
+                'include_paths': include_paths,
+                'direction': 'both' if downstream else 'up',
+            }
+        rendered = repo_graph_render.render(graph, fmt, **kwargs)
+
+        if output:
+            Path(output).parent.mkdir(parents=True, exist_ok=True)
+            Path(output).write_text(rendered + "\n")
+            click.echo(f"Wrote {output}")
+        else:
+            click.echo(rendered)
+
+        if strict and graph.gaps:
+            raise click.ClickException(
+                f"{len(graph.gaps)} repo(s) could not be resolved"
+            )
+
+    except errors.DepsError as e:
+        raise click.ClickException(str(e))
+
+
+@deps.command('index')
+@click.option('--org', default=lambda: cfg.get_value('owner'),
+              help='GitHub organisation or user (default: configured owner)')
+@click.option('--jobs', '-j', type=int, default=8, show_default=True,
+              help='Concurrent clone/scan workers')
+@click.option('--force', is_flag=True,
+              help='Rescan every repo, ignoring pushed_at')
+@click.option('--include-archived', is_flag=True, help='Include archived repos')
+@click.option('--include-forks', is_flag=True, help='Include forks')
+@click.option('--limit', type=int, default=None,
+              help='Scan at most N repos this run (re-run to continue)')
+@click.option('--no-prefilter', is_flag=True,
+              help='Clone every repo instead of using the trees API to skip '
+                   'those with no .dvc files')
+@click.option('--clear', is_flag=True,
+              help='Delete the cached index instead of refreshing it')
+@click.option('--show', is_flag=True,
+              help='Show the cached index without refreshing')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True, help='Print progress')
+def deps_index(org, jobs, force, include_archived, include_forks, limit,
+               no_prefilter, clear, show, json_output, verbose):
+    """Build or refresh the org-wide import index.
+
+    Scans every repo in the org once and caches the resulting edges, so that
+    upstream and downstream queries become in-memory lookups.
+
+    Refreshes are cheap: GitHub reports each repo's pushed_at timestamp in a
+    single API call, so repos that have not moved since the last scan are
+    skipped without any git operation at all.
+
+    The index itself is small and lives under the user cache directory (or
+    deps.cache_dir). The clones it makes are large and go to the current
+    project's .dt/tmp/clones, manageable with `dt tmp clean`.
+
+    \b
+    Examples:
+        dt deps index --org swarbricklab
+        dt deps index --show           # Summarise the cache, no network
+        dt deps index --force          # Rescan everything
+        dt deps index --clear          # Delete the cache
+    """
+    import json as _json
+
+    try:
+        if not org:
+            raise click.ClickException(
+                "No org specified. Use --org or set one: dt config set owner <org>"
+            )
+
+        if clear:
+            removed = org_index_mod.clear_index(org)
+            click.echo(
+                f"Removed cached index for {org}" if removed
+                else f"No cached index for {org}"
+            )
+            return
+
+        if show:
+            index = org_index_mod.load_index(org)
+            if not index.repos:
+                raise click.ClickException(
+                    f"No cached index for {org}. Build one with: "
+                    f"dt deps index --org {org}"
+                )
+            stats = None
+        else:
+            index, stats = org_index_mod.refresh_index(
+                org, jobs=jobs, force=force,
+                include_archived=include_archived,
+                include_forks=include_forks,
+                prefilter=not no_prefilter,
+                limit=limit,
+                verbose=verbose,
+            )
+
+        if json_output:
+            click.echo(_json.dumps(index.summary(), indent=2))
+        else:
+            click.echo(org_index_mod.format_index_summary(index, stats))
+
+    except errors.DepsError as e:
+        raise click.ClickException(str(e))
+
+
+@deps.command('downstream')
+@click.argument('repository', required=False)
+@click.option('--org', default=lambda: cfg.get_value('owner'),
+              help='GitHub organisation or user (default: configured owner)')
+@click.option('--depth', type=int, default=None,
+              help='Maximum depth to expand (default: unlimited)')
+@click.option('--format', 'fmt',
+              type=click.Choice(['text', 'mermaid', 'dot', 'json']),
+              default='text', show_default=True, help='Output format')
+@click.option('-o', '--output', type=click.Path(), default=None,
+              help='Write to a file instead of stdout')
+@click.option('--refresh', is_flag=True,
+              help='Refresh the org index before querying')
+def deps_downstream(repository, org, depth, fmt, output, refresh):
+    """Show which repositories import FROM this one.
+
+    Answers the inverse of `dt deps graph`: not what this repo depends on, but
+    what depends on it -- the repos that break if you move or delete data here.
+
+    Reads the cached org index, so it needs `dt deps index` to have been run.
+    The query itself does no cloning and no network access.
+
+    \b
+    Examples:
+        dt deps downstream                       # Consumers of this repo
+        dt deps downstream metadata              # Consumers of another repo
+        dt deps downstream --depth 1             # Direct consumers only
+        dt deps downstream --format mermaid
+    """
+    try:
+        if not org:
+            raise click.ClickException(
+                "No org specified. Use --org or set one: dt config set owner <org>"
+            )
+
+        if repository:
+            root_id = deps_mod.normalize_repo_id(repository, owner=org)
+        else:
+            root_id = deps_mod.current_repo_id()
+            if not root_id:
+                raise click.ClickException(
+                    "Could not determine this repo's identity (no origin "
+                    "remote). Pass a repository name explicitly."
+                )
+
+        if refresh:
+            index, _ = org_index_mod.refresh_index(org, verbose=True)
+        else:
+            index = org_index_mod.load_index(org)
+
+        if not index.repos:
+            raise click.ClickException(
+                f"No cached index for {org}. Build one with: "
+                f"dt deps index --org {org}"
+            )
+
+        graph = org_index_mod.downstream_graph(index, root_id, depth=depth)
+
+        if len(graph.nodes) == 1:
+            click.echo(
+                f"No repos in {org} import from {root_id}.\n"
+                f"(Index covers {len(index.scanned_repos)} scanned repos; "
+                f"{len(index.gaps)} could not be read.)"
+            )
+            return
+
+        kwargs = {'direction': 'down'} if fmt == 'text' else {}
+        rendered = repo_graph_render.render(graph, fmt, **kwargs)
+        if output:
+            Path(output).parent.mkdir(parents=True, exist_ok=True)
+            Path(output).write_text(rendered + "\n")
+            click.echo(f"Wrote {output}")
+        else:
+            click.echo(rendered)
+
+    except errors.DepsError as e:
+        raise click.ClickException(str(e))
+
+
+@deps.command('gaps')
+@click.option('--depth', type=int, default=None,
+              help='Maximum depth to expand (default: unlimited)')
+@click.option('--jobs', '-j', type=int, default=4, show_default=True,
+              help='Concurrent clone/scan workers')
+@click.option('--no-refresh', is_flag=True,
+              help='Use cached clones without fetching updates')
+@click.option('--strict', is_flag=True,
+              help='Exit non-zero if any repo could not be resolved')
+@click.option('--owner', default=lambda: cfg.get_value('owner'),
+              help='Owner used to expand short repo names')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+def deps_gaps(depth, jobs, no_refresh, strict, owner, json_output):
+    """Report repositories the graph could not resolve.
+
+    Access to repos across an org is usually uneven, so a dependency graph is
+    routinely incomplete. This lists exactly where, and why.
+
+    Note that over SSH GitHub reports the same "Repository not found" error for
+    a private repo you cannot read and for one that does not exist, so those
+    cases are reported together as no_access.
+
+    \b
+    Examples:
+        dt deps gaps
+        dt deps gaps --strict     # Exit non-zero if any exist (for CI)
+    """
+    import json
+
+    try:
+        graph = repo_graph_mod.build_upstream(
+            depth=depth,
+            jobs=jobs,
+            refresh=not no_refresh,
+            owner=owner,
+        )
+
+        if json_output:
+            click.echo(json.dumps(
+                {'root': graph.root,
+                 'gaps': [n.to_dict() for n in graph.gaps]},
+                indent=2,
+            ))
+        else:
+            click.echo(repo_graph_render.format_gaps(graph))
+
+        if strict and graph.gaps:
+            raise click.ClickException(
+                f"{len(graph.gaps)} repo(s) could not be resolved"
+            )
+
+    except errors.DepsError as e:
         raise click.ClickException(str(e))
 
 
