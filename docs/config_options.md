@@ -25,6 +25,7 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `qxub.queue` | PBS queue for parallel jobs | `copyq` |
 | `qxub.walltime` | Maximum runtime for parallel jobs | `10:00:00` |
 | `qxub.mem` | Memory allocation for parallel jobs | `4GB` |
+| `deps.cache_dir` | Directory for the [org-wide import index](deps.md#dt-deps-index); set to a shared path so a whole lab reuses one scan | `/g/data/a56/dvc-tools/repo-deps` |
 | `auth.github_user` | GitHub username for [`dt auth whoami`](auth.md#dt-auth-whoami) | `alice-smith` |
 | `auth.github_teams` | GitHub team slugs (comma-separated) | `data-team, ops` |
 | `auth.gcp_email` | GCP IAM email address | `alice@proj.iam.gserviceaccount.com` |

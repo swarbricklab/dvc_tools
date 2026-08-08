@@ -20,6 +20,7 @@
 | [`dt push`](#dt-push) | Push DVC-tracked files to all configured remotes |
 | [`dt import`](#dt-import) | Import DVC-tracked data from other repositories |
 | [`dt summary`](#dt-summary) | Generate project documentation (tree.txt, dag.md) |
+| [`dt deps`](#dt-deps) | Inspect dependencies between repositories |
 | [`dt cache`](#dt-cache) | Manage external shared caches |
 | [`dt remote`](#dt-remote) | Manage remote storage |
 | [`dt tmp`](#dt-tmp) | Manage temporary repository clones |
@@ -200,6 +201,22 @@ dt summary [--out <dir>] [--tree-only] [--dag-only]
 ```
 
 Creates tree.txt (DVC-tracked file listing) and dag.md (pipeline DAG in mermaid format). [Full documentation →](summary.md)
+
+---
+
+## dt deps
+
+Inspect dependencies between repositories.
+
+| Subcommand | Description |
+|------------|-------------|
+| `dt deps list` | List the repositories this repo imports from |
+| `dt deps graph` | Build the recursive dependency graph between repos |
+| `dt deps index` | Build/refresh the org-wide import index |
+| `dt deps downstream` | Show which repos import FROM this one |
+| `dt deps gaps` | Report repos the graph could not resolve |
+
+Where `dvc dag` shows the graph of stages inside one repo, `dt deps` shows the graph of imports between repos, collapsing thousands of individual imports into one line per source repo. The graph may contain cycles, which are reported rather than treated as an error. [Full documentation →](deps.md)
 
 ---
 
