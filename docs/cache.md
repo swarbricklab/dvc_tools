@@ -224,6 +224,37 @@ Affected .dir manifests: 1
 - **Debugging pull failures**: Identify why `dvc checkout` might fail
 - **Before important runs**: Ensure cache is healthy before long computations
 
+## dt cache clean
+
+Remove abandoned `.tmp` files left behind by interrupted transfers.
+
+DVC writes each blob to a random temporary name and renames it into place. A
+transfer killed before the rename leaves the partial file behind permanently,
+and since these are dotfiles they never show up in a casual `ls`.
+
+```bash
+dt cache clean                    # Report what could be removed
+dt cache clean --delete           # Remove them
+dt cache clean --min-age 30       # Only files older than 30 days
+dt cache clean --path /path/to/cache --json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--path PATH` | Clean a specific cache directory |
+| `--min-age DAYS` | Only remove files older than this (default: 7) |
+| `--delete` | Actually remove the files. Without this, only reports. |
+| `-j, --jobs N` | Concurrent prefix scanners (default: 8) |
+| `--json` / `-v` | Machine-readable output / list every file |
+
+This is the same sweep as [`dt remote clean`](remote.md#dt-remote-clean),
+pointed at a cache instead of a remote — see there for the full explanation of
+why it is safe, how permissions work, and why empty prefix directories are
+deliberately left in place.
+
+Worth running on a shared cache, where one user's interrupted pulls consume
+quota everyone shares.
+
 ## Related Commands
 
 - [`dt init`](init.md) - Initialize projects with cache setup
