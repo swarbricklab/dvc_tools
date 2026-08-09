@@ -157,6 +157,16 @@ class SweepReport:
 # Helpers
 # =============================================================================
 
+def _fmt_size(n: int) -> str:
+    """Format a byte count, keeping a unit on zero.
+
+    ``utils.format_size(0)`` yields a bare ``'0'``, which reads as a missing
+    value in a size column. Zero-byte temp files are common (a transfer that
+    died immediately), so they show up often enough to matter.
+    """
+    return '0B' if n == 0 else utils.format_size(n)
+
+
 def _username(uid: int) -> str:
     """Resolve a uid to a login name, falling back to the numeric id."""
     try:
@@ -336,7 +346,7 @@ def delete(report: SweepReport, verbose: bool = False) -> SweepReport:
         report.deleted.append(tmp)
         if verbose:
             print(f"  removed {tmp.rel} "
-                  f"({utils.format_size(tmp.size)}, {tmp.owner})")
+                  f"({_fmt_size(tmp.size)}, {tmp.owner})")
 
     return report
 
@@ -515,7 +525,7 @@ def format_report(
         n = len(report.candidates)
         lines.append(
             f"  {n} abandoned .tmp file{'s' if n != 1 else ''}, "
-            f"{utils.format_size(report.bytes_candidate)}"
+            f"{_fmt_size(report.bytes_candidate)}"
         )
         owners = report.by_owner(report.candidates)
         if len(owners) > 1 or not deleted_mode:
@@ -525,26 +535,26 @@ def format_report(
                 lines.append(
                     f"      {owner:<12} {count:>5} file"
                     f"{'s' if count != 1 else ' '}  "
-                    f"{utils.format_size(size)}"
+                    f"{_fmt_size(size)}"
                 )
 
     if verbose:
         for tmp in report.candidates:
             lines.append(f"      {tmp.rel}  "
-                         f"{utils.format_size(tmp.size)}  {tmp.owner}  "
+                         f"{_fmt_size(tmp.size)}  {tmp.owner}  "
                          f"{tmp.age_days:.0f}d")
 
     if report.too_recent:
         n = len(report.too_recent)
         lines.append(
             f"  {n} newer than the age limit, left alone "
-            f"({utils.format_size(sum(t.size for t in report.too_recent))})"
+            f"({_fmt_size(sum(t.size for t in report.too_recent))})"
         )
 
     if deleted_mode:
         lines.append(
             f"  removed {len(report.deleted)}, "
-            f"reclaimed {utils.format_size(report.bytes_reclaimed)}"
+            f"reclaimed {_fmt_size(report.bytes_reclaimed)}"
         )
         if report.skipped_changed:
             lines.append(
@@ -553,7 +563,7 @@ def format_report(
             )
         if report.failed:
             lines.append(f"  {len(report.failed)} could not be removed "
-                         f"({utils.format_size(report.bytes_failed)})")
+                         f"({_fmt_size(report.bytes_failed)})")
             lines.append(_format_failures(report))
 
     return "\n".join(lines)
@@ -578,7 +588,7 @@ def _format_failures(report: SweepReport) -> str:
             f"      {d}  {mode}  dir owner: {dir_owner}"
         )
         lines.append(
-            f"        {len(items)} file(s), {utils.format_size(size)} "
+            f"        {len(items)} file(s), {_fmt_size(size)} "
             f"-- {items[0].reason}"
         )
 
@@ -623,19 +633,19 @@ def format_summary(
         failed = sum(len(r.failed) for r in reports)
         lines.append(
             f"Removed {removed} file{'s' if removed != 1 else ''}, "
-            f"reclaimed {utils.format_size(reclaimed)}"
+            f"reclaimed {_fmt_size(reclaimed)}"
         )
         if failed:
             lines.append(
                 f"{failed} file{'s' if failed != 1 else ''} could not be "
-                f"removed ({utils.format_size(sum(r.bytes_failed for r in reports))})"
+                f"removed ({_fmt_size(sum(r.bytes_failed for r in reports))})"
             )
     else:
         lines.append(
             f"Found {total_files} abandoned .tmp file"
             f"{'s' if total_files != 1 else ''} older than "
             f"{min_age_days:g} day{'s' if min_age_days != 1 else ''}, "
-            f"{utils.format_size(total_bytes)}"
+            f"{_fmt_size(total_bytes)}"
         )
         if total_files:
             owners: Dict[str, Tuple[int, int]] = {}
@@ -648,7 +658,7 @@ def format_summary(
             for owner, (n, b) in sorted(owners.items(), key=lambda kv: -kv[1][1]):
                 lines.append(f"  {owner:<12} {n:>5} file"
                              f"{'s' if n != 1 else ' '}  "
-                             f"{utils.format_size(b)}")
+                             f"{_fmt_size(b)}")
             lines.append('')
             lines.append('Nothing was deleted. Re-run with --delete to remove them.')
 

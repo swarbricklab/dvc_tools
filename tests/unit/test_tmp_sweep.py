@@ -458,6 +458,88 @@ class TestReporting:
         assert data['candidates']['by_owner']
 
 
+class TestSizeFormatting:
+
+    def test_zero_keeps_a_unit(self):
+        """A bare '0' in a size column reads as a missing value."""
+        assert tmp_sweep._fmt_size(0) == '0B'
+
+    def test_nonzero_delegates(self):
+        assert tmp_sweep._fmt_size(1024) == '1.00k'
+
+    def test_zero_byte_file_renders_with_unit(self, store):
+        p = store / 'files' / 'md5' / 'ab' / REAL_TMP_NAMES[0]
+        p.write_bytes(b'')
+        os.utime(p, (time.time() - 30 * DAY,) * 2)
+
+        out = tmp_sweep.format_report(tmp_sweep.scan(store),
+                                      deleted_mode=False)
+        assert '0B' in out
+
+
+# =============================================================================
+# CLI output
+# =============================================================================
+
+class TestCliOutput:
+    """Clean roots must not leave gaps in the output."""
+
+    def _run(self, args):
+        from click.testing import CliRunner
+        from dt.cli import cli
+        return CliRunner().invoke(cli, args)
+
+    def test_no_blank_lines_for_clean_remotes(self, tmp_path):
+        root = tmp_path / 'remotes'
+        clean_names = ['clean1', 'clean2', 'clean3', 'clean4']
+        for name in clean_names:
+            _store(root / name)
+        # only one remote has anything to report
+        _put(_store(root / 'dirty'), 'ab', REAL_TMP_NAMES[0], size=99)
+
+        result = self._run(['remote', 'clean', '--all', '--root', str(root)])
+        assert result.exit_code == 0
+
+        # Everything before the summary, minus the one blank line that
+        # deliberately separates the two.
+        head = result.output.split('Found ')[0].rstrip('\n')
+        assert head.strip(), "expected the dirty remote to be reported"
+        assert '\n\n' not in head, (
+            f"clean remotes left blank lines between reports:\n{head!r}"
+        )
+
+        lines = result.output.splitlines()
+        for name in clean_names:
+            assert f'remote: {name}' not in lines
+        assert 'remote: dirty' in lines
+
+    def test_verbose_shows_clean_remotes(self, tmp_path):
+        root = tmp_path / 'remotes'
+        _store(root / 'a')
+        result = self._run(['remote', 'clean', '--all', '--root', str(root),
+                            '-v'])
+        assert result.exit_code == 0
+        assert 'remote: a' in result.output
+
+    def test_all_clean_reports_nothing_found(self, tmp_path):
+        root = tmp_path / 'remotes'
+        _store(root / 'a')
+        _store(root / 'b')
+        result = self._run(['remote', 'clean', '--all', '--root', str(root)])
+        assert result.exit_code == 0
+        assert 'No abandoned .tmp files' in result.output
+
+    def test_conflicting_targets_rejected(self, tmp_path):
+        result = self._run(['remote', 'clean', '--all', '--path', str(tmp_path)])
+        assert result.exit_code != 0
+        assert 'only one of' in result.output.lower()
+
+    def test_negative_min_age_rejected(self, tmp_path):
+        result = self._run(['cache', 'clean', '--path', str(tmp_path),
+                            '--min-age', '-1'])
+        assert result.exit_code != 0
+
+
 # =============================================================================
 # Shared behaviour across both commands
 # =============================================================================

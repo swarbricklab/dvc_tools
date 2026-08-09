@@ -577,9 +577,13 @@ def _run_clean(kind, min_age, do_delete, jobs, json_output, verbose,
             )
             reports.append(report)
             if not json_output:
-                click.echo(tmp_sweep.format_report(
+                text = tmp_sweep.format_report(
                     report, deleted_mode=do_delete, verbose=verbose,
-                ))
+                )
+                # Empty for a clean root; echoing it anyway would leave a blank
+                # line per remote and bury the ones that need attention.
+                if text:
+                    click.echo(text)
 
         if json_output:
             click.echo(_json.dumps({
