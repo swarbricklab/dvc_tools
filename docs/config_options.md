@@ -12,7 +12,7 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `team` | GitHub team for [`gh repo create --team`](https://cli.github.com/manual/gh_repo_create) | `analysts` |
 | `username` | Default SSH username for remote hosts, used by [`dt clone`](clone.md) and [`dt auth setup`](auth.md) | `jr9959` |
 | `cache.root` | Root directory for [shared external caches](cache.md) | `/g/data/a56/dvc_cache` |
-| `remote.root` | Root directory for [DVC remote storage](remote.md) | `/g/data/a56/dvc_remote` |
+| `remote.root` | Root director**ies** for [DVC remote storage](remote.md). A single path, or a list. The **first** entry is where new remotes are created; the rest are also scanned by `--all`. Manage with `dt config add/remove remote.root <path>` | `/g/data/a56/dvc/analysis` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
 | `site_cache.root` | Root directory for shared DVC [`site_cache_dir`](index.md) | `/g/data/a56/dvc/site` |
 | `site_cache.enabled` | Whether `dt init`/`dt clone` configure `core.site_cache_dir` | `true` |
@@ -26,6 +26,8 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `qxub.walltime` | Maximum runtime for parallel jobs | `10:00:00` |
 | `qxub.mem` | Memory allocation for parallel jobs | `4GB` |
 | `deps.cache_dir` | Directory for the [org-wide import index](deps.md#dt-deps-index); set to a shared path so a whole lab reuses one scan | `/g/data/a56/dvc-tools/repo-deps` |
+| `perms.sticky` | Whether shared dirs get the sticky bit, restricting deletion to file owners (creation is unaffected). Default `true`. Used by `dt remote/cache init` and `perms` | `false` |
+| `perms.allow_other` | Whether shared dirs permit world read/execute (`3775` vs `3770`). Default `false` | `true` |
 | `clean.min_age_days` | Age threshold for [`dt remote clean`](remote.md#dt-remote-clean) / [`dt cache clean`](cache.md#dt-cache-clean) (default: 7) | `14` |
 | `auth.github_user` | GitHub username for [`dt auth whoami`](auth.md#dt-auth-whoami) | `alice-smith` |
 | `auth.github_teams` | GitHub team slugs (comma-separated) | `data-team, ops` |
@@ -67,9 +69,37 @@ The cache stores DVC file content locally, enabling multiple clones of the same 
 
 ### `remote.root`
 
-Base directory for DVC remotes. Each project gets a subdirectory: `{remote.root}/{project_name}/`
+Base director**ies** for DVC remotes. Each project gets a subdirectory:
+`{remote.root}/{project_name}/`
 
-The remote is the authoritative store for DVC-tracked files, accessed via SSH from external systems or directly on the local filesystem.
+The remote is the authoritative store for DVC-tracked files, accessed via SSH
+from external systems or directly on the local filesystem.
+
+May be a single path or a **list**. The first entry is the default — it is where
+`dt init` and `dt remote init` create a new remote. Every entry is scanned by
+`dt remote perms --all` and `dt remote clean --all`.
+
+```yaml
+remote:
+  root:
+    - /g/data/a56/dvc/analysis      # default: new remotes go here
+    - /g/data/a56/dvc/datasets
+    - /g/data/a56/dvc/registries
+    - /g/data/px14/dvc/analysis
+```
+
+Manage the list with [`dt config add` / `dt config remove`](config.md#list-valued-settings).
+
+Scopes override rather than merge: the highest-precedence scope defining
+`remote.root` supplies the whole list.
+
+**Do not list cache roots here.** `/g/data/a56/dvc/cache` and
+`/g/data/px14/dvc/cache` hold caches, not remotes; listing them would have
+`perms` apply remote policy to a cache and `clean` sweep it as one.
+
+Store names are not unique across roots — one site has 18 names appearing under
+more than one root — so `--all` labels each store with just enough of its path
+to stay unambiguous.
 
 ### `ssh.host`
 

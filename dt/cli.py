@@ -19,6 +19,7 @@ from . import doctor as doctor_mod
 from . import dvc_deps as deps_mod
 from . import repo_graph as repo_graph_mod
 from . import tmp_sweep
+from . import perms as perms_mod
 from . import repo_graph_render
 from . import org_index as org_index_mod
 from . import auth as auth_mod
@@ -262,6 +263,70 @@ def config_set(key, value, local, project, user, system):
     scope = _get_scope(local, project, user, system)
     cfg.set_value(key, value, scope)
     click.echo(f"Set {key}={value} in {scope} config.")
+
+
+@config.command('add')
+@click.argument('key')
+@click.argument('value')
+@click.option('--local', is_flag=True, help='Set in local scope')
+@click.option('--project', is_flag=True, help='Set in project scope (default)')
+@click.option('--user', is_flag=True, help='Set in user scope')
+@click.option('--system', is_flag=True, help='Set in system scope')
+def config_add(key, value, local, project, user, system):
+    """Append a value to a list-valued setting.
+
+    Promotes a plain scalar to a list on first use, so `remote.root` can start
+    as one path and grow.
+
+    Scopes override rather than merge, so this writes the whole effective list
+    into the chosen scope — otherwise adding one entry at user scope would
+    silently discard the ones inherited from system scope.
+
+    \b
+    Examples:
+        dt config add remote.root /g/data/px14/dvc/analysis
+        dt config list | grep remote.root
+    """
+    if _count_scope_flags(local, project, user, system) > 1:
+        raise click.UsageError("Only one scope flag can be specified.")
+
+    scope = _get_scope(local, project, user, system)
+    if cfg.add_to_list(key, value, scope):
+        values = cfg.get_str_list(key)
+        click.echo(f"Added to {key} in {scope} config "
+                   f"({len(values)} value{'s' if len(values) != 1 else ''}):")
+        for i, v in enumerate(values):
+            click.echo(f"  {v}{'   <- default' if i == 0 else ''}")
+    else:
+        click.echo(f"{key} already contains {value}")
+
+
+@config.command('remove')
+@click.argument('key')
+@click.argument('value')
+@click.option('--local', is_flag=True, help='Set in local scope')
+@click.option('--project', is_flag=True, help='Set in project scope (default)')
+@click.option('--user', is_flag=True, help='Set in user scope')
+@click.option('--system', is_flag=True, help='Set in system scope')
+def config_remove(key, value, local, project, user, system):
+    """Remove a value from a list-valued setting.
+
+    \b
+    Examples:
+        dt config remove remote.root /g/data/px14/dvc/analysis
+    """
+    if _count_scope_flags(local, project, user, system) > 1:
+        raise click.UsageError("Only one scope flag can be specified.")
+
+    scope = _get_scope(local, project, user, system)
+    if cfg.remove_from_list(key, value, scope):
+        values = cfg.get_str_list(key)
+        click.echo(f"Removed from {key} in {scope} config "
+                   f"({len(values)} remaining):")
+        for i, v in enumerate(values):
+            click.echo(f"  {v}{'   <- default' if i == 0 else ''}")
+    else:
+        raise click.ClickException(f"{key} does not contain '{value}'")
 
 
 @config.command('unset')
@@ -548,6 +613,73 @@ def cache_validate(targets, fix, verbose, json_output, no_progress):
         raise SystemExit(1)
 
 
+def _bool_config(key, default):
+    """Read a boolean config value, tolerating yes/no/true/false strings."""
+    raw = cfg.get_value(key)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _run_perms(kind, do_fix, sticky, allow_other, jobs, json_output, verbose,
+               path=None, remote_name=None, all_remotes=False, root=None):
+    """Shared driver for `dt cache perms` and `dt remote perms`."""
+    import json as _json
+
+    # Flags are tri-state so an unset flag can fall back to the configured
+    # policy; that way a site decides once instead of everyone remembering.
+    if sticky is None:
+        sticky = _bool_config('perms.sticky', perms_mod.DEFAULT_STICKY)
+    if allow_other is None:
+        allow_other = _bool_config('perms.allow_other',
+                                   perms_mod.DEFAULT_ALLOW_OTHER)
+
+    try:
+        if kind == perms_mod.KIND_CACHE:
+            targets = [perms_mod.resolve_cache_target(path)]
+        else:
+            targets = perms_mod.resolve_remote_targets(
+                remote_name=remote_name, path=path,
+                all_remotes=all_remotes, root=root,
+            )
+
+        reports = []
+        for name, directory in targets:
+            report = perms_mod.check(
+                directory, kind=kind, name=name, sticky=sticky,
+                allow_other=allow_other, do_fix=do_fix, jobs=jobs,
+                verbose=verbose,
+            )
+            reports.append(report)
+            if not json_output:
+                text = perms_mod.format_report(
+                    report, fixed_mode=do_fix, verbose=verbose,
+                )
+                if text:
+                    click.echo(text)
+
+        if json_output:
+            click.echo(_json.dumps({
+                'policy': {'sticky': sticky, 'allow_other': allow_other,
+                           'mode': oct(perms_mod.wanted_mode(
+                               sticky, allow_other))},
+                'fixed': do_fix,
+                'roots': [r.to_dict() for r in reports],
+            }, indent=2))
+        else:
+            click.echo(perms_mod.format_summary(
+                reports, fixed_mode=do_fix, sticky=sticky,
+            ))
+
+        if do_fix and any(r.unfixed for r in reports):
+            raise SystemExit(1)
+
+    except errors.CleanError as e:
+        raise click.ClickException(str(e))
+
+
 def _run_clean(kind, min_age, do_delete, jobs, json_output, verbose,
                path=None, remote_name=None, all_remotes=False, root=None):
     """Shared driver for `dt cache clean` and `dt remote clean`."""
@@ -637,6 +769,41 @@ def cache_clean(cache_path, min_age, do_delete, jobs, json_output, verbose):
     _run_clean(
         kind=tmp_sweep.KIND_CACHE, path=cache_path,
         min_age=min_age, do_delete=do_delete, jobs=jobs,
+        json_output=json_output, verbose=verbose,
+    )
+
+
+@cache.command('perms')
+@click.option('--path', 'cache_path', type=click.Path(),
+              help='Check a specific cache directory')
+@click.option('--fix', 'do_fix', is_flag=True,
+              help='Apply the policy. Without this, only reports.')
+@click.option('--sticky/--no-sticky', default=None,
+              help='Require the sticky bit, so only a file\'s owner can '
+                   'delete it (creation is unaffected). Default: on, or the '
+                   'perms.sticky config.')
+@click.option('--allow-other/--no-other', 'allow_other', default=None,
+              help='Permit read access for users outside the group (2775 vs '
+                   '2770). Default: off, or the perms.allow_other config.')
+@click.option('--jobs', '-j', type=int, default=8, show_default=True,
+              help='Concurrent stat workers')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True, help='List every directory')
+def cache_perms(cache_path, do_fix, sticky, allow_other, jobs, json_output,
+                verbose):
+    """Check that a shared cache's directories stay group-writable.
+
+    Same policy and mechanics as `dt remote perms`; see there for detail.
+
+    \b
+    Examples:
+        dt cache perms
+        dt cache perms --fix
+        dt cache perms --fix --sticky
+    """
+    _run_perms(
+        kind=perms_mod.KIND_CACHE, path=cache_path, do_fix=do_fix,
+        sticky=sticky, allow_other=allow_other, jobs=jobs,
         json_output=json_output, verbose=verbose,
     )
 
@@ -1199,14 +1366,78 @@ def remote_move(args, quick, jobs, verbose):
         click.echo("  No configured remotes referenced the old path.")
 
 
+@remote.command('perms')
+@click.argument('remote_name', required=False)
+@click.option('--path', 'remote_path', type=click.Path(),
+              help='Check a specific remote directory')
+@click.option('--all', 'all_remotes', is_flag=True,
+              help='Check every remote under remote.root')
+@click.option('--root', type=click.Path(), multiple=True,
+              help='Remote root for --all; repeatable, and replaces the '
+                   'configured remote.root list entirely')
+@click.option('--fix', 'do_fix', is_flag=True,
+              help='Apply the policy. Without this, only reports.')
+@click.option('--sticky/--no-sticky', default=None,
+              help='Require the sticky bit, so only a file\'s owner can '
+                   'delete it (creation is unaffected). Default: on, or the '
+                   'perms.sticky config.')
+@click.option('--allow-other/--no-other', 'allow_other', default=None,
+              help='Permit read access for users outside the group (2775 vs '
+                   '2770). Default: off, or the perms.allow_other config.')
+@click.option('--jobs', '-j', type=int, default=8, show_default=True,
+              help='Concurrent stat workers')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True, help='List every directory')
+def remote_perms(remote_name, remote_path, all_remotes, root, do_fix, sticky,
+                 allow_other, jobs, json_output, verbose):
+    """Check and repair directory permissions on a shared remote.
+
+    A shared remote only works if its blob directories stay group-writable and
+    setgid. `dt remote init` pre-creates all 256 prefix directories precisely
+    so DVC never has to; where that has not run, DVC creates each prefix on
+    demand under the writing user's umask, often leaving it unwritable by
+    everyone else. The damage is silent until somebody's push fails.
+
+    By default this only reports. Pass --fix to apply the policy.
+
+    With --sticky, directories also get the sticky bit: a file can then be
+    removed or renamed only by its owner, the directory's owner, or root.
+    Everyone can still create objects and push — only deletion is restricted.
+
+    Note that chmod requires ownership, so you can only repair directories you
+    own, even where you can write to them. The report groups deviations by
+    owner for exactly this reason: its job is to tell each person what only
+    they can run.
+
+    \b
+    Examples:
+        dt remote perms                  # Report on the default remote
+        dt remote perms --all            # Report across every remote
+        dt remote perms --fix            # Repair what you own
+        dt remote perms --all --fix --sticky
+    """
+    if sum(bool(x) for x in (remote_name, remote_path, all_remotes)) > 1:
+        raise click.ClickException(
+            "Use only one of REMOTE_NAME, --path, or --all"
+        )
+
+    _run_perms(
+        kind=perms_mod.KIND_REMOTE, path=remote_path, remote_name=remote_name,
+        all_remotes=all_remotes, root=root, do_fix=do_fix, sticky=sticky,
+        allow_other=allow_other, jobs=jobs, json_output=json_output,
+        verbose=verbose,
+    )
+
+
 @remote.command('clean')
 @click.argument('remote_name', required=False)
 @click.option('--path', 'remote_path', type=click.Path(),
               help='Sweep a specific remote directory')
 @click.option('--all', 'all_remotes', is_flag=True,
               help='Sweep every remote under remote.root')
-@click.option('--root', type=click.Path(),
-              help='Remote root for --all (default: the remote.root config)')
+@click.option('--root', type=click.Path(), multiple=True,
+              help='Remote root for --all; repeatable, and replaces the '
+                   'configured remote.root list entirely')
 @click.option('--min-age', type=float, default=None,
               help=f'Only remove files older than this many days '
                    f'(default: {tmp_sweep.DEFAULT_MIN_AGE_DAYS})')

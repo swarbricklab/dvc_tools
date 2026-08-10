@@ -20,7 +20,14 @@ dt remote init [options] [project_name]
 
 ### What it does
 
-- Creates the remote directory structure with proper group permissions
+- Creates the remote directory structure with proper group permissions —
+  all 256 blob prefix directories up front, so DVC never creates one itself
+  under the writing user's umask
+- Applies the shared-directory policy: setgid, group-writable, **sticky**, and
+  no access for users outside the group (`3770`). Sticky means everyone can
+  still push, but only a file's owner can delete it. Override with the
+  `perms.sticky` / `perms.allow_other` config keys, and audit later with
+  [`dt remote perms`](#dt-remote-perms)
 - Sets up SSH remote accessible from external platforms via `dvc remote add -d`
 - Creates a local remote override for efficient transfers within the same system
 - Maintains portability by keeping local remote configuration workspace-specific
@@ -179,6 +186,148 @@ mixed layouts and the case where the bad blob *is* a `.dir`.
 Quarantined blobs land in `<remote>/.dt-verify/quarantine/<timestamp>/<rel-path>`
 with a `manifest.json` restore map.
 
+## dt remote perms
+
+Check and repair directory permissions on a shared remote.
+
+A shared remote only works if its blob directories stay group-writable and
+setgid. [`dt remote init`](#dt-remote-init) pre-creates all 256 prefix
+directories precisely so that DVC never has to — where that hasn't run, DVC
+creates each prefix on demand under the writing user's umask, frequently
+leaving it unwritable by everyone else. The damage is silent until somebody
+else's push fails.
+
+```bash
+dt remote perms                     # Report on the default remote
+dt remote perms --all               # Report across every remote
+dt remote perms --fix               # Repair what you own
+dt remote perms --all --fix         # ...across the whole remote root
+```
+
+| Option | Description |
+|--------|-------------|
+| `REMOTE_NAME` | Check a named remote instead of the default |
+| `--path PATH` | Check a specific remote directory |
+| `--all` | Every remote under `remote.root` |
+| `--root PATH` | Remote root for `--all`; repeatable, replaces the configured list |
+| `--fix` | Apply the policy. Without this, only reports. |
+| `--sticky` / `--no-sticky` | Require the sticky bit (default: on, or the `perms.sticky` config) |
+| `--allow-other` / `--no-other` | Permit world read/execute (default: off, or the `perms.allow_other` config) |
+| `-j, --jobs N` | Concurrent stat workers (default: 8) |
+| `--json` / `-v` | Machine-readable output / list every directory |
+
+### The policy
+
+| Mode | Meaning |
+|------|---------|
+| **`3770`** | **setgid + group write + sticky, no access for others (default)** |
+| `2770` | as above without sticky (`--no-sticky`) |
+| `3775` | sticky, world read/execute permitted (`--allow-other`) |
+| `2775` | neither |
+
+setgid keeps the group on newly created entries.
+
+Only *missing* bits count as deviations. A directory that is **more restrictive**
+than the policy is left alone — so `--allow-other` tolerates world-readable
+directories, it never grants world access to one that lacks it. Loosening
+permissions is not something a repair tool should do silently.
+
+`dt remote init` and `dt cache init` create directories under this same policy,
+resolved from the same config keys, so a store cannot be created under one
+policy and audited under another.
+
+### The sticky bit
+
+Sticky is **on by default**. It adds `+t`, which on a directory means a file may be removed or
+renamed only by **the file's owner, the directory's owner, or root**. Everyone
+with group write can still create files and push — only deletion is restricted.
+This is the mechanism `/tmp` uses, and it works on Lustre.
+
+Two consequences worth knowing:
+
+**Each remote's owner keeps full control of it.** Because the directory owner is
+also exempt, whoever initialised a remote can still delete and move anything
+inside it — including for recovery flows like
+[`dt remote quarantine`](#dt-remote-quarantine). Sticky protects you from *other
+people's* accidents in your remote without taking away your own authority.
+
+**Sticky is not inherited.** A new subdirectory gets setgid but not `+t` (and
+under a typical umask, not group write either), so a remote that loses a prefix
+directory will drift. Because `dt remote init` pre-creates all 256, this is rare
+in practice — but it's why `perms` exists as a re-runnable check rather than a
+one-off.
+
+### Several roots
+
+`remote.root` may list several roots; `--all` sweeps every one of them. The
+first entry stays the default for creating new remotes — adding search roots
+never moves where `dt remote init` puts things.
+
+```bash
+dt remote perms --all                                   # every configured root
+dt remote perms --all --root /g/data/px14/dvc/analysis  # ad-hoc, repeatable
+```
+
+Store names are not unique across roots, so each is labelled with just enough of
+its path to stay unambiguous — a bare name where that is unique, otherwise
+`registries/chromium`, and more of the path if two roots share a basename.
+
+A root that is missing or empty contributes nothing rather than aborting: with
+several configured, one stale entry should not stop the rest being swept.
+
+### Only the owner can repair
+
+There is an asymmetry that shapes this whole command:
+
+- **`unlink` is governed by write permission on the containing directory** — so
+  a group member *can* delete another user's blob.
+- **`chmod` is governed by ownership** — so a group member *cannot* repair
+  another user's directory, even with group write.
+
+Repair is therefore inherently per-owner. The report is grouped that way, and
+its main output is the worklist telling each person what only they can run:
+
+```
+1603 directories deviate from policy, 344 prefix directories missing
+
+Needs the owner to run it:
+  hz7248         772 directories
+  jr9959         357 directories  (you)
+  sl6147         266 directories
+  hk8797         196 directories
+
+Each owner: dt remote perms --all --fix
+```
+
+Creating a *missing* prefix directory only needs write permission on its parent,
+so `--fix` often succeeds at that part even on someone else's remote — and since
+you created it, you own it and the mode sticks.
+
+The exit status is non-zero if anything could not be fixed.
+
+### Layouts
+
+Both DVC layouts are handled, detected from what is actually present rather
+than from a declared version, so a store partway through a migration needs no
+special-casing:
+
+- **v3** — prefixes under `files/md5/`. Expected to hold all 256, since that is
+  what `dt remote init` pre-creates.
+- **v2** — prefixes at the store root, alongside `files/`, `runs/` and the
+  verify ledger. Checked, but *not* expected to be complete: a v2 root
+  legitimately holds only the prefixes in use. This also means v2 stores do not
+  get the pre-creation protection, so their prefixes are created by DVC under
+  whoever's umask.
+- **Mixed** — both, checked together.
+
+### Two kinds of gap
+
+A store holding **none** of the 256 prefixes was simply never pre-created —
+usually a remote nobody has pushed to yet. That's reported as
+`prefix directories not pre-created`, distinct from a store that has **some**
+and reports `N of 256 prefix directories missing`, which means it has drifted.
+Only the second is a sign that something went wrong.
+
 ## dt remote clean
 
 Remove abandoned `.tmp` files left behind by interrupted transfers.
@@ -211,7 +360,7 @@ dt remote clean --path /g/data/.../remote --json
 | `REMOTE_NAME` | Clean a named remote instead of the default |
 | `--path PATH` | Clean a specific remote directory |
 | `--all` | Every remote under `remote.root` |
-| `--root PATH` | Remote root for `--all` (default: the `remote.root` config) |
+| `--root PATH` | Remote root for `--all`; repeatable, replaces the configured list |
 | `--min-age DAYS` | Only remove files older than this (default: 7) |
 | `--delete` | Actually remove the files. Without this, only reports. |
 | `-j, --jobs N` | Concurrent prefix scanners (default: 8) |

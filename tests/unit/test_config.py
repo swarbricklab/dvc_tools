@@ -467,3 +467,95 @@ class TestDTConfigSystemScope:
 
 
 # Run with: pytest tests/test_config.py -v
+
+
+class TestListValuedConfig:
+    """`remote.root` may hold one path or several; both must work."""
+
+    def test_scalar_reads_as_a_one_item_list(self, isolated_config):
+        cfg.set_value('remote.root', '/g/data/a56/dvc/analysis', 'user')
+        assert cfg.get_str_list('remote.root') == ['/g/data/a56/dvc/analysis']
+
+    def test_list_reads_as_a_list(self, isolated_config):
+        cfg.set_value('remote.root', '[/a, /b, /c]', 'user')
+        assert cfg.get_str_list('remote.root') == ['/a', '/b', '/c']
+
+    def test_unset_is_empty(self, isolated_config):
+        assert cfg.get_str_list('remote.root') == []
+
+    def test_default_when_unset(self, isolated_config):
+        assert cfg.get_str_list('remote.root', ['/fallback']) == ['/fallback']
+
+    def test_blank_entries_dropped(self, isolated_config):
+        cfg.set_value('remote.root', "['/a', '', '/b']", 'user')
+        assert cfg.get_str_list('remote.root') == ['/a', '/b']
+
+    def test_order_is_preserved(self, isolated_config):
+        """The first entry is the creation default, so order carries meaning."""
+        cfg.set_value('remote.root', '[/z, /a, /m]', 'user')
+        assert cfg.get_str_list('remote.root') == ['/z', '/a', '/m']
+
+    def test_add_promotes_scalar_to_list(self, isolated_config):
+        cfg.set_value('remote.root', '/a', 'user')
+        assert cfg.add_to_list('remote.root', '/b', 'user') is True
+        assert cfg.get_str_list('remote.root') == ['/a', '/b']
+
+    def test_add_preserves_the_default(self, isolated_config):
+        cfg.set_value('remote.root', '/a', 'user')
+        cfg.add_to_list('remote.root', '/b', 'user')
+        cfg.add_to_list('remote.root', '/c', 'user')
+        assert cfg.get_str_list('remote.root')[0] == '/a'
+
+    def test_add_is_idempotent(self, isolated_config):
+        cfg.set_value('remote.root', '/a', 'user')
+        assert cfg.add_to_list('remote.root', '/a', 'user') is False
+        assert cfg.get_str_list('remote.root') == ['/a']
+
+    def test_add_from_nothing(self, isolated_config):
+        assert cfg.add_to_list('remote.root', '/a', 'user') is True
+        assert cfg.get_str_list('remote.root') == ['/a']
+
+    def test_remove(self, isolated_config):
+        cfg.set_value('remote.root', '[/a, /b, /c]', 'user')
+        assert cfg.remove_from_list('remote.root', '/b', 'user') is True
+        assert cfg.get_str_list('remote.root') == ['/a', '/c']
+
+    def test_remove_absent_value(self, isolated_config):
+        cfg.set_value('remote.root', '[/a]', 'user')
+        assert cfg.remove_from_list('remote.root', '/zzz', 'user') is False
+
+    def test_remove_last_unsets_the_key(self, isolated_config):
+        cfg.set_value('remote.root', '[/a]', 'user')
+        assert cfg.remove_from_list('remote.root', '/a', 'user') is True
+        assert cfg.get_str_list('remote.root') == []
+
+    def test_add_writes_the_whole_effective_list(self, isolated_config,
+                                                 temp_dirs):
+        """Scopes override, so a user-scope add must not drop system entries."""
+        sysdir = Path(temp_dirs['system']) / 'dt'
+        sysdir.mkdir(parents=True, exist_ok=True)
+        (sysdir / 'config.yaml').write_text(
+            yaml.safe_dump({'remote': {'root': ['/sys1', '/sys2']}})
+        )
+        assert cfg.get_str_list('remote.root') == ['/sys1', '/sys2']
+
+        cfg.add_to_list('remote.root', '/mine', 'user')
+        assert cfg.get_str_list('remote.root') == ['/sys1', '/sys2', '/mine']
+
+    def test_round_trip_through_cli(self, isolated_config, runner):
+        runner.invoke(cli, ['config', 'set', 'remote.root', '/a', '--user'])
+        r = runner.invoke(cli, ['config', 'add', 'remote.root', '/b', '--user'])
+        assert r.exit_code == 0
+        assert '<- default' in r.output
+        assert cfg.get_str_list('remote.root') == ['/a', '/b']
+
+        r = runner.invoke(cli, ['config', 'remove', 'remote.root', '/a',
+                                '--user'])
+        assert r.exit_code == 0
+        assert cfg.get_str_list('remote.root') == ['/b']
+
+    def test_cli_remove_absent_errors(self, isolated_config, runner):
+        runner.invoke(cli, ['config', 'set', 'remote.root', '/a', '--user'])
+        r = runner.invoke(cli, ['config', 'remove', 'remote.root', '/nope',
+                                '--user'])
+        assert r.exit_code != 0

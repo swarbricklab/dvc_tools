@@ -310,3 +310,67 @@ class TestCheckAuthAccess:
             diag = doctor.check_auth_access()
         assert diag.passed is False
         assert 'boom' in diag.message
+
+
+class TestCheckRemoteRoot:
+    """`remote.root` may list several roots; all are checked."""
+
+    def test_unconfigured(self):
+        with patch('dt.remote.cfg.get_str_list', return_value=[]):
+            r = doctor.check_remote_root()
+        assert not r.passed
+        assert 'not configured' in r.message
+
+    def test_single_root_ok(self, tmp_path):
+        with patch('dt.remote.cfg.get_str_list', return_value=[str(tmp_path)]):
+            r = doctor.check_remote_root()
+        assert r.passed
+        assert str(tmp_path) in r.message
+
+    def test_several_roots_ok_names_the_default(self, tmp_path):
+        a, b = tmp_path / 'a', tmp_path / 'b'
+        a.mkdir(); b.mkdir()
+        with patch('dt.remote.cfg.get_str_list',
+                   return_value=[str(a), str(b)]):
+            r = doctor.check_remote_root()
+        assert r.passed
+        assert '2 remote roots' in r.message
+        assert str(a) in r.message
+
+    def test_missing_root_reported(self, tmp_path):
+        a = tmp_path / 'a'
+        a.mkdir()
+        with patch('dt.remote.cfg.get_str_list',
+                   return_value=[str(a), str(tmp_path / 'gone')]):
+            r = doctor.check_remote_root()
+        assert not r.passed
+        assert 'do not exist' in r.message
+        assert 'gone' in r.message
+
+    @pytest.mark.skipif(os.getuid() == 0, reason="root bypasses permissions")
+    def test_readonly_secondary_root_is_fine(self, tmp_path):
+        """Only the first root must be writable -- new remotes go there."""
+        a, b = tmp_path / 'a', tmp_path / 'b'
+        a.mkdir(); b.mkdir()
+        os.chmod(b, 0o555)
+        try:
+            with patch('dt.remote.cfg.get_str_list',
+                       return_value=[str(a), str(b)]):
+                r = doctor.check_remote_root()
+            assert r.passed
+            assert 'read-only' in r.message
+        finally:
+            os.chmod(b, 0o755)
+
+    @pytest.mark.skipif(os.getuid() == 0, reason="root bypasses permissions")
+    def test_readonly_default_root_fails(self, tmp_path):
+        a = tmp_path / 'a'
+        a.mkdir()
+        os.chmod(a, 0o555)
+        try:
+            with patch('dt.remote.cfg.get_str_list', return_value=[str(a)]):
+                r = doctor.check_remote_root()
+            assert not r.passed
+            assert 'Default remote root not writable' in r.message
+        finally:
+            os.chmod(a, 0o755)

@@ -333,7 +333,7 @@ class TestResolveTargets:
                 tmp_sweep.resolve_remote_targets()
 
     def test_all_requires_a_root(self):
-        with patch.object(tmp_sweep.cfg, 'get_value', return_value=None):
+        with patch('dt.remote.cfg.get_str_list', return_value=[]):
             with pytest.raises(CleanError, match='--all needs a remote root'):
                 tmp_sweep.resolve_remote_targets(all_remotes=True)
 
@@ -352,7 +352,14 @@ class TestResolveTargets:
         (tmp_path / 'empty').mkdir()
         with pytest.raises(CleanError, match='No DVC remotes found'):
             tmp_sweep.resolve_remote_targets(all_remotes=True,
-                                             root=str(tmp_path / 'empty'))
+                                             root=[str(tmp_path / 'empty')])
+
+    def test_a_bare_string_root_is_one_root(self, tmp_path):
+        """Not a sequence of characters."""
+        _store(tmp_path / 'r' / 'alpha')
+        got = tmp_sweep.resolve_remote_targets(
+            all_remotes=True, root=str(tmp_path / 'r'))
+        assert [l for l, _p in got] == ['alpha']
 
     def test_cache_target_explicit(self):
         name, path = tmp_sweep.resolve_cache_target('/some/cache')
@@ -557,3 +564,151 @@ class TestCacheAndRemoteShareOnePath:
 
         assert c.kind == 'cache' and r.kind == 'remote'
         assert c.bytes_reclaimed == 11 and r.bytes_reclaimed == 22
+
+
+# =============================================================================
+# Multiple remote roots
+# =============================================================================
+
+class TestLabelStores:
+    """Store names collide across roots, so labels must disambiguate."""
+
+    def test_unique_names_stay_bare(self):
+        got = tmp_sweep.label_stores([Path('/r/a/alpha'), Path('/r/b/beta')])
+        assert [l for l, _p in got] == ['alpha', 'beta']
+
+    def test_collision_qualified_by_parent(self):
+        got = tmp_sweep.label_stores([
+            Path('/dvc/analysis/chromium'), Path('/dvc/registries/chromium'),
+        ])
+        assert sorted(l for l, _p in got) == [
+            'analysis/chromium', 'registries/chromium',
+        ]
+
+    def test_collision_across_roots_sharing_a_basename(self):
+        """a56/dvc/analysis and px14/dvc/analysis both end in 'analysis'."""
+        got = dict(tmp_sweep.label_stores([
+            Path('/g/data/a56/dvc/analysis/foo'),
+            Path('/g/data/px14/dvc/analysis/foo'),
+        ]))
+        labels = sorted(got)
+        assert len(set(labels)) == 2
+        assert all('a56' in l or 'px14' in l for l in labels)
+
+    def test_mixed_unique_and_colliding(self):
+        got = dict(tmp_sweep.label_stores([
+            Path('/dvc/analysis/chromium'), Path('/dvc/registries/chromium'),
+            Path('/dvc/analysis/portal'),
+        ]))
+        assert 'portal' in got
+        assert 'analysis/chromium' in got
+
+    def test_labels_map_back_to_paths(self):
+        stores = [Path('/dvc/a/x'), Path('/dvc/b/x')]
+        for label, path in tmp_sweep.label_stores(stores):
+            assert path in stores
+
+
+class TestEnumerateStores:
+
+    def test_scans_every_root(self, tmp_path):
+        r1, r2 = tmp_path / 'r1', tmp_path / 'r2'
+        _store(r1 / 'alpha')
+        _store(r2 / 'beta')
+
+        got = tmp_sweep.enumerate_stores([r1, r2])
+        assert sorted(l for l, _p in got) == ['alpha', 'beta']
+
+    def test_missing_root_is_skipped_not_fatal(self, tmp_path):
+        """One stale entry must not stop the other roots being swept."""
+        r1 = tmp_path / 'r1'
+        _store(r1 / 'alpha')
+
+        got = tmp_sweep.enumerate_stores([r1, tmp_path / 'does-not-exist'])
+        assert [l for l, _p in got] == ['alpha']
+
+    def test_empty_root_contributes_nothing(self, tmp_path):
+        r1, r2 = tmp_path / 'r1', tmp_path / 'r2'
+        _store(r1 / 'alpha')
+        r2.mkdir()
+
+        got = tmp_sweep.enumerate_stores([r1, r2])
+        assert [l for l, _p in got] == ['alpha']
+
+    def test_non_store_directories_ignored(self, tmp_path):
+        r1 = tmp_path / 'r1'
+        _store(r1 / 'alpha')
+        (r1 / 'not-a-remote').mkdir(parents=True)
+
+        got = tmp_sweep.enumerate_stores([r1])
+        assert [l for l, _p in got] == ['alpha']
+
+    def test_same_store_under_two_roots_seen_once(self, tmp_path):
+        """A nested or symlinked root must not double-scan."""
+        r1 = tmp_path / 'r1'
+        _store(r1 / 'alpha')
+        link = tmp_path / 'r2'
+        link.symlink_to(r1)
+
+        got = tmp_sweep.enumerate_stores([r1, link])
+        assert len(got) == 1
+
+    def test_no_stores_anywhere_raises(self, tmp_path):
+        empty = tmp_path / 'empty'
+        empty.mkdir()
+        with pytest.raises(CleanError, match='No DVC remotes found'):
+            tmp_sweep.enumerate_stores([empty])
+
+    def test_collision_labels_applied(self, tmp_path):
+        r1, r2 = tmp_path / 'analysis', tmp_path / 'registries'
+        _store(r1 / 'chromium')
+        _store(r2 / 'chromium')
+
+        got = tmp_sweep.enumerate_stores([r1, r2])
+        assert sorted(l for l, _p in got) == [
+            'analysis/chromium', 'registries/chromium',
+        ]
+
+
+class TestResolveTargetsMultiRoot:
+
+    def test_all_uses_every_configured_root(self, tmp_path):
+        r1, r2 = tmp_path / 'r1', tmp_path / 'r2'
+        _store(r1 / 'alpha')
+        _store(r2 / 'beta')
+
+        with patch('dt.remote.cfg.get_str_list',
+                   return_value=[str(r1), str(r2)]):
+            got = tmp_sweep.resolve_remote_targets(all_remotes=True)
+        assert sorted(l for l, _p in got) == ['alpha', 'beta']
+
+    def test_explicit_roots_replace_the_config(self, tmp_path):
+        r1, r2 = tmp_path / 'r1', tmp_path / 'r2'
+        _store(r1 / 'alpha')
+        _store(r2 / 'beta')
+
+        with patch('dt.remote.cfg.get_str_list', return_value=[str(r1)]):
+            got = tmp_sweep.resolve_remote_targets(
+                all_remotes=True, root=[str(r2)])
+        assert [l for l, _p in got] == ['beta']
+
+    def test_all_with_no_roots_configured(self):
+        with patch('dt.remote.cfg.get_str_list', return_value=[]):
+            with pytest.raises(CleanError, match='--all needs a remote root'):
+                tmp_sweep.resolve_remote_targets(all_remotes=True)
+
+    def test_cli_root_is_repeatable(self, tmp_path):
+        from click.testing import CliRunner
+        from dt.cli import cli
+
+        r1, r2 = tmp_path / 'r1', tmp_path / 'r2'
+        _put(_store(r1 / 'alpha'), 'ab', REAL_TMP_NAMES[0], size=11)
+        _put(_store(r2 / 'beta'), 'ab', REAL_TMP_NAMES[1], size=22)
+
+        result = CliRunner().invoke(cli, [
+            'remote', 'clean', '--all',
+            '--root', str(r1), '--root', str(r2),
+        ])
+        assert result.exit_code == 0
+        assert 'alpha' in result.output and 'beta' in result.output
+        assert '33' in result.output  # 11 + 22 bytes across both roots
