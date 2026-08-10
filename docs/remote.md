@@ -179,6 +179,100 @@ mixed layouts and the case where the bad blob *is* a `.dir`.
 Quarantined blobs land in `<remote>/.dt-verify/quarantine/<timestamp>/<rel-path>`
 with a `manifest.json` restore map.
 
+## dt remote clean
+
+Remove abandoned `.tmp` files left behind by interrupted transfers.
+
+DVC uploads a blob by writing it under a random temporary name in the
+destination's prefix directory, then renaming it into place:
+
+```python
+def tmp_fname(prefix: str = "") -> str:      # dvc_objects/fs/utils.py
+    return f"{prefix}.{token_urlsafe(16)}.tmp"
+```
+
+A push killed before the rename — a cancelled job, a walltime kill, a dropped
+connection — leaves the partial file behind permanently. Nothing in DVC ever
+cleans these up, and because they are dotfiles they never appear in a casual
+`ls`, so on a shared lab remote they quietly accumulate. A first sweep of one
+lab's remote root found **703 files totalling 381 GiB**, most of it a year old.
+
+```bash
+dt remote clean                     # Report on the default remote
+dt remote clean --delete            # Remove them
+dt remote clean --all               # Report across every remote under remote.root
+dt remote clean --all --delete      # Clean the whole remote root
+dt remote clean --min-age 30        # Only files older than 30 days
+dt remote clean --path /g/data/.../remote --json
+```
+
+| Option | Description |
+|--------|-------------|
+| `REMOTE_NAME` | Clean a named remote instead of the default |
+| `--path PATH` | Clean a specific remote directory |
+| `--all` | Every remote under `remote.root` |
+| `--root PATH` | Remote root for `--all` (default: the `remote.root` config) |
+| `--min-age DAYS` | Only remove files older than this (default: 7) |
+| `--delete` | Actually remove the files. Without this, only reports. |
+| `-j, --jobs N` | Concurrent prefix scanners (default: 8) |
+| `--json` / `-v` | Machine-readable output / list every file |
+
+**Reports by default.** Like `dt remote fsck --repair` and `dt cache validate
+--fix`, this only tells you what it found unless you ask it to act. The report
+alone is useful — the per-owner breakdown tells you whose interrupted pushes are
+costing what.
+
+### Why it is safe
+
+**The name shape is matched exactly** — `^\.[A-Za-z0-9_-]{22}\.tmp$`, the
+precise output of `tmp_fname()`. A loose `*.tmp` glob would happily delete
+someone's `notes.tmp`.
+
+**Only files older than `--min-age` are touched**, so a transfer still in flight
+is never considered. Each file is also re-checked immediately before removal and
+skipped if its mtime moved since the scan, which closes the window where a
+stalled transfer resumed mid-sweep.
+
+**Deleting a live temp file cannot corrupt the remote anyway.** The writer keeps
+writing to the now-unlinked inode and its final rename fails with `ENOENT`, so
+the worst case is a failed transfer that gets rerun — never a damaged blob.
+
+**Empty prefix directories are always left in place.** DVC recreates a missing
+prefix directory using the writing user's umask, which may not grant group
+write, silently locking every other group member out of that prefix. Only files
+are ever removed.
+
+### Permissions
+
+Deleting a file you do not own is normal and usually works. Removal depends on
+write and execute permission on the **containing directory**, not on ownership
+of the file — so on a group-writable remote, any group member can clear another
+user's abandoned uploads.
+
+Two things do block it: a directory that is not group-writable (only its owner
+can clean it, regardless of who owns the files inside), and the sticky bit
+(which restricts removal to each file's own owner).
+
+Rather than guessing in advance — a pre-flight check would both race and misread
+ACLs — the command attempts each removal and reports what failed, grouped by the
+directory that blocked it, since that is what has to change:
+
+```
+  3 could not be removed (12.1G)
+      /g/data/px14/dvc/datasets/foo/files/md5/3a  drwxr-sr-x  dir owner: ab1234
+        3 file(s), 12.1G -- permission denied
+      files owned by: cd5678 2, ef9012 1
+```
+
+The exit status is non-zero if any removal failed.
+
+### Scope
+
+Local paths and `ssh://` URLs pointing at a local host. Cloud remotes are
+refused with an explanation rather than silently doing nothing: on `gs://` and
+`s3://` the equivalent waste is abandoned *multipart uploads*, which are not
+stray files and are cleared with a bucket lifecycle rule.
+
 ## dt remote archive
 
 Archive a DVC remote to cold storage (e.g. NCI MDSS), verify it,
