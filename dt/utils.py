@@ -760,41 +760,102 @@ def update_gitignore(pattern: str, gitignore_path: Optional[Path] = None) -> boo
     return True
 
 
-def set_group_writable(path: Path, setgid: bool = True) -> None:
-    """Set group write permissions on a path.
-    
+def shared_dir_mode(
+    sticky: Optional[bool] = None,
+    allow_other: Optional[bool] = None,
+) -> int:
+    """The directory mode for shared caches and remotes.
+
+    Resolved from the ``perms.sticky`` / ``perms.allow_other`` config so that
+    ``dt remote init``, ``dt cache init`` and ``dt remote perms`` cannot drift
+    apart -- a store created under one policy and audited under another would
+    report as broken the moment it was made.
+    """
+    from . import config as cfg
+    from . import perms
+
+    def _resolve(explicit, key, default):
+        if explicit is not None:
+            return explicit
+        raw = cfg.get_value(key)
+        if raw is None:
+            return default
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    return perms.wanted_mode(
+        sticky=_resolve(sticky, 'perms.sticky', perms.DEFAULT_STICKY),
+        allow_other=_resolve(allow_other, 'perms.allow_other',
+                             perms.DEFAULT_ALLOW_OTHER),
+    )
+
+
+def set_group_writable(
+    path: Path,
+    setgid: bool = True,
+    mode: Optional[int] = None,
+) -> bool:
+    """Apply the shared-directory mode to a path.
+
     Args:
         path: Path to set permissions on
-        setgid: Also set the setgid bit (default True for shared directories)
+        setgid: Retained for callers that explicitly want no setgid bit
+        mode: Explicit mode, overriding the configured policy
+
+    Returns:
+        True if the mode was applied. A caller that cannot chmod (chmod
+        requires ownership, unlike unlink) gets False rather than a silent
+        no-op, so it can report which directories were left alone.
     """
-    mode = 0o2775 if setgid else 0o0775
+    if mode is None:
+        mode = shared_dir_mode()
+        if not setgid:
+            mode &= ~0o2000
     try:
         os.chmod(path, mode)
-    except PermissionError:
-        pass
+        return True
+    except (PermissionError, OSError):
+        return False
 
 
-def create_md5_subdirs(parent_dir: Path, verbose: bool = False) -> None:
+def create_md5_subdirs(
+    parent_dir: Path,
+    verbose: bool = False,
+    mode: Optional[int] = None,
+) -> int:
     """Create the files/md5 subdirectory structure for DVC.
-    
-    Creates 256 subdirectories (00-ff) under files/md5 with proper
-    group write permissions for shared access in HPC environments.
-    
+
+    Creates all 256 subdirectories (00-ff) under files/md5 up front. This is
+    the load-bearing part of shared-store setup: because every prefix already
+    exists, DVC never has to create one itself under the writing user's umask,
+    which is what silently locks the rest of the group out of a prefix.
+
     Args:
         parent_dir: Parent directory (cache or remote root)
         verbose: Print progress messages
+        mode: Explicit directory mode, overriding the configured policy
+
+    Returns:
+        Number of directories whose mode could not be set.
     """
+    if mode is None:
+        mode = shared_dir_mode()
+
     files_md5 = parent_dir / "files" / "md5"
     files_md5.mkdir(parents=True, exist_ok=True)
-    set_group_writable(files_md5)
-    
+    failed = 0 if set_group_writable(files_md5, mode=mode) else 1
+
     if verbose:
         print(f"Creating files/md5 subdirectories under {parent_dir}")
-    
+
     for i in range(256):
         subdir = files_md5 / f"{i:02x}"
         subdir.mkdir(exist_ok=True)
-        set_group_writable(subdir)
+        if not set_group_writable(subdir, mode=mode):
+            failed += 1
+
+    return failed
 
 
 # =============================================================================

@@ -128,7 +128,8 @@ This document tracks the unit tests needed for the `dt` package. Tests are group
   - [x] Test with merged config
 - [x] `list_config_with_sources` - list values with source scope
   - [x] Test returns list of (key, value, scope) tuples
-- [ ] `get_list_value` - get list config value merged across scopes
+- [x] `get_str_list` - read a scalar-or-list config value (scope override)
+- [x] `add_to_list` / `remove_from_list` - manage a list-valued key
   - [ ] Test merges lists correctly
   - [ ] Test removes duplicates
 - [ ] `add_list_value` - add value to list config

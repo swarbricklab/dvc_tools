@@ -6,11 +6,63 @@ Handles DVC remote setup with SSH and local access methods for HPC environments.
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 from . import config as cfg
 from . import utils
 from .errors import RemoteError
+
+
+def remote_roots(
+    explicit: Optional[Union[str, Path, Sequence[str]]] = None,
+) -> List[Path]:
+    """Every configured remote root, in order.
+
+    ``remote.root`` may hold a single path or a list. The **first** entry is
+    the default: it is where a new remote is created. The rest are additional
+    places to look when sweeping every remote (``--all``).
+
+    Args:
+        explicit: Roots given on the command line, which replace the config
+            entirely rather than adding to it.
+
+    Returns:
+        Resolved paths, duplicates removed, order preserved. Empty if nothing
+        is configured -- callers decide whether that is fatal.
+    """
+    if explicit:
+        # A bare string is a single root, not a sequence of characters.
+        raw = [explicit] if isinstance(explicit, (str, Path)) else list(explicit)
+    else:
+        raw = cfg.get_str_list('remote.root')
+
+    roots: List[Path] = []
+    seen = set()
+    for item in raw:
+        # resolve() so that two spellings of one directory, or a symlink and
+        # its target, do not get scanned twice.
+        p = Path(item).expanduser().resolve()
+        if p not in seen:
+            seen.add(p)
+            roots.append(p)
+    return roots
+
+
+def default_remote_root(explicit: Optional[str] = None) -> Path:
+    """The root used when creating a new remote: the first configured entry."""
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+
+    roots = remote_roots()
+    if not roots:
+        raise RemoteError(
+            "Remote root not configured.\n"
+            "Either specify --remote-root or set remote.root:\n"
+            "  dt config set remote.root /path/to/remote\n"
+            "Additional roots can be added with:\n"
+            "  dt config add remote.root /path/to/other/remotes"
+        )
+    return roots[0]
 
 
 def resolve_remote_path(
@@ -38,39 +90,53 @@ def resolve_remote_path(
     if remote_path:
         return Path(remote_path).resolve()
     
-    # Get remote root from argument or config
-    root = remote_root or cfg.get_value('remote.root')
-    if not root:
-        raise RemoteError(
-            "Remote root not configured.\n"
-            "Either specify --remote-root or set remote.root:\n"
-            "  dt config set remote.root /path/to/remote"
-        )
-    
+    # Where a new remote goes: the first configured root.
+    root = default_remote_root(remote_root)
+
     # Get project name
     project_name = name or utils.get_project_name()
-    
-    return Path(root) / project_name
+
+    return root / project_name
 
 
-def init_remote_structure(remote_dir: Path, verbose: bool = True) -> None:
+def init_remote_structure(
+    remote_dir: Path,
+    verbose: bool = True,
+    sticky: Optional[bool] = None,
+    allow_other: Optional[bool] = None,
+) -> None:
     """Initialize the remote directory structure with proper permissions.
-    
-    Creates the files/md5 subdirectories (00-ff) required by DVC
-    with group write permissions for shared access.
-    
+
+    Creates all 256 files/md5 subdirectories (00-ff) required by DVC, group
+    writable and setgid so the whole group can push, and by default sticky so
+    that only a file's owner can delete it. Creation is unaffected by the
+    sticky bit -- everyone can still write.
+
     Args:
         remote_dir: Path to the remote directory
         verbose: Print progress messages
+        sticky: Override the configured sticky policy
+        allow_other: Override the configured world-access policy
     """
+    mode = utils.shared_dir_mode(sticky=sticky, allow_other=allow_other)
+
     if verbose:
-        print(f"Initializing remote structure at {remote_dir}")
-    
+        print(f"Initializing remote structure at {remote_dir} "
+              f"(mode {oct(mode)})")
+
     remote_dir.mkdir(parents=True, exist_ok=True)
-    utils.set_group_writable(remote_dir)
-    
+    failed = 0 if utils.set_group_writable(remote_dir, mode=mode) else 1
+
     # Create files/md5 structure with 00-ff subdirectories
-    utils.create_md5_subdirs(remote_dir, verbose=verbose)
+    failed += utils.create_md5_subdirs(remote_dir, verbose=verbose, mode=mode)
+
+    if failed and verbose:
+        # chmod needs ownership, so this is what happens when re-initialising
+        # somebody else's remote. Silence here would leave a store that looks
+        # set up but is not.
+        print(f"  warning: could not set the mode on {failed} director"
+              f"{'ies' if failed != 1 else 'y'} (chmod requires ownership; "
+              f"ask the owner to run: dt remote perms --fix)")
 
 
 def configure_dvc_remote(
