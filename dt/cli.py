@@ -265,6 +265,70 @@ def config_set(key, value, local, project, user, system):
     click.echo(f"Set {key}={value} in {scope} config.")
 
 
+@config.command('add')
+@click.argument('key')
+@click.argument('value')
+@click.option('--local', is_flag=True, help='Set in local scope')
+@click.option('--project', is_flag=True, help='Set in project scope (default)')
+@click.option('--user', is_flag=True, help='Set in user scope')
+@click.option('--system', is_flag=True, help='Set in system scope')
+def config_add(key, value, local, project, user, system):
+    """Append a value to a list-valued setting.
+
+    Promotes a plain scalar to a list on first use, so `remote.root` can start
+    as one path and grow.
+
+    Scopes override rather than merge, so this writes the whole effective list
+    into the chosen scope — otherwise adding one entry at user scope would
+    silently discard the ones inherited from system scope.
+
+    \b
+    Examples:
+        dt config add remote.root /g/data/px14/dvc/analysis
+        dt config list | grep remote.root
+    """
+    if _count_scope_flags(local, project, user, system) > 1:
+        raise click.UsageError("Only one scope flag can be specified.")
+
+    scope = _get_scope(local, project, user, system)
+    if cfg.add_to_list(key, value, scope):
+        values = cfg.get_str_list(key)
+        click.echo(f"Added to {key} in {scope} config "
+                   f"({len(values)} value{'s' if len(values) != 1 else ''}):")
+        for i, v in enumerate(values):
+            click.echo(f"  {v}{'   <- default' if i == 0 else ''}")
+    else:
+        click.echo(f"{key} already contains {value}")
+
+
+@config.command('remove')
+@click.argument('key')
+@click.argument('value')
+@click.option('--local', is_flag=True, help='Set in local scope')
+@click.option('--project', is_flag=True, help='Set in project scope (default)')
+@click.option('--user', is_flag=True, help='Set in user scope')
+@click.option('--system', is_flag=True, help='Set in system scope')
+def config_remove(key, value, local, project, user, system):
+    """Remove a value from a list-valued setting.
+
+    \b
+    Examples:
+        dt config remove remote.root /g/data/px14/dvc/analysis
+    """
+    if _count_scope_flags(local, project, user, system) > 1:
+        raise click.UsageError("Only one scope flag can be specified.")
+
+    scope = _get_scope(local, project, user, system)
+    if cfg.remove_from_list(key, value, scope):
+        values = cfg.get_str_list(key)
+        click.echo(f"Removed from {key} in {scope} config "
+                   f"({len(values)} remaining):")
+        for i, v in enumerate(values):
+            click.echo(f"  {v}{'   <- default' if i == 0 else ''}")
+    else:
+        raise click.ClickException(f"{key} does not contain '{value}'")
+
+
 @config.command('unset')
 @click.argument('key')
 @click.option('--local', is_flag=True, help='Unset in local scope')
@@ -1308,8 +1372,9 @@ def remote_move(args, quick, jobs, verbose):
               help='Check a specific remote directory')
 @click.option('--all', 'all_remotes', is_flag=True,
               help='Check every remote under remote.root')
-@click.option('--root', type=click.Path(),
-              help='Remote root for --all (default: the remote.root config)')
+@click.option('--root', type=click.Path(), multiple=True,
+              help='Remote root for --all; repeatable, and replaces the '
+                   'configured remote.root list entirely')
 @click.option('--fix', 'do_fix', is_flag=True,
               help='Apply the policy. Without this, only reports.')
 @click.option('--sticky/--no-sticky', default=None,
@@ -1370,8 +1435,9 @@ def remote_perms(remote_name, remote_path, all_remotes, root, do_fix, sticky,
               help='Sweep a specific remote directory')
 @click.option('--all', 'all_remotes', is_flag=True,
               help='Sweep every remote under remote.root')
-@click.option('--root', type=click.Path(),
-              help='Remote root for --all (default: the remote.root config)')
+@click.option('--root', type=click.Path(), multiple=True,
+              help='Remote root for --all; repeatable, and replaces the '
+                   'configured remote.root list entirely')
 @click.option('--min-age', type=float, default=None,
               help=f'Only remove files older than this many days '
                    f'(default: {tmp_sweep.DEFAULT_MIN_AGE_DAYS})')

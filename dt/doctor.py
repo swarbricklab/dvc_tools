@@ -252,29 +252,58 @@ def check_cache_root() -> DiagnosticResult:
 
 
 def check_remote_root() -> DiagnosticResult:
-    """Check if remote root is configured and accessible."""
-    remote_root = cfg.get_value('remote.root')
+    """Check that every configured remote root is present and writable.
 
-    if not remote_root:
+    ``remote.root`` may list several roots. The first is where new remotes are
+    created, so it has to be writable; the rest only need to be readable for
+    ``--all`` sweeps, but a missing entry is still worth reporting since it is
+    usually a stale path rather than an intentional one.
+    """
+    from . import remote as remote_mod
+
+    roots = remote_mod.remote_roots()
+
+    if not roots:
         return DiagnosticResult(
             "remote_root", False, "Remote root not configured",
             "Run: dt config set remote.root /path/to/remote"
         )
 
-    remote_path = Path(remote_root)
-    if remote_path.exists():
-        if os.access(remote_path, os.W_OK):
-            return DiagnosticResult("remote_root", True, f"Remote root accessible ({remote_root})")
-        else:
-            return DiagnosticResult(
-                "remote_root", False, f"Remote root not writable ({remote_root})",
-                "Check directory permissions"
-            )
-    else:
+    missing = [r for r in roots if not r.exists()]
+    unwritable = [r for r in roots
+                  if r.exists() and not os.access(r, os.W_OK)]
+
+    if missing:
         return DiagnosticResult(
-            "remote_root", False, f"Remote root does not exist ({remote_root})",
-            "Create the directory or update the configuration"
+            "remote_root", False,
+            f"{len(missing)} of {len(roots)} remote root(s) do not exist "
+            f"({', '.join(str(r) for r in missing)})",
+            "Create the directories, or drop them: "
+            "dt config remove remote.root <path>"
         )
+
+    if unwritable:
+        # Only the first root must be writable -- that is where new remotes go.
+        if roots[0] in unwritable:
+            return DiagnosticResult(
+                "remote_root", False,
+                f"Default remote root not writable ({roots[0]})",
+                "Check directory permissions; new remotes are created here"
+            )
+        return DiagnosticResult(
+            "remote_root", True,
+            f"{len(roots)} remote root(s) accessible; "
+            f"{len(unwritable)} read-only (fine for --all sweeps)"
+        )
+
+    if len(roots) == 1:
+        return DiagnosticResult(
+            "remote_root", True, f"Remote root accessible ({roots[0]})"
+        )
+    return DiagnosticResult(
+        "remote_root", True,
+        f"{len(roots)} remote roots accessible (default: {roots[0]})"
+    )
 
 
 def check_archived_remotes() -> DiagnosticResult:

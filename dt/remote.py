@@ -6,11 +6,63 @@ Handles DVC remote setup with SSH and local access methods for HPC environments.
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 from . import config as cfg
 from . import utils
 from .errors import RemoteError
+
+
+def remote_roots(
+    explicit: Optional[Union[str, Path, Sequence[str]]] = None,
+) -> List[Path]:
+    """Every configured remote root, in order.
+
+    ``remote.root`` may hold a single path or a list. The **first** entry is
+    the default: it is where a new remote is created. The rest are additional
+    places to look when sweeping every remote (``--all``).
+
+    Args:
+        explicit: Roots given on the command line, which replace the config
+            entirely rather than adding to it.
+
+    Returns:
+        Resolved paths, duplicates removed, order preserved. Empty if nothing
+        is configured -- callers decide whether that is fatal.
+    """
+    if explicit:
+        # A bare string is a single root, not a sequence of characters.
+        raw = [explicit] if isinstance(explicit, (str, Path)) else list(explicit)
+    else:
+        raw = cfg.get_str_list('remote.root')
+
+    roots: List[Path] = []
+    seen = set()
+    for item in raw:
+        # resolve() so that two spellings of one directory, or a symlink and
+        # its target, do not get scanned twice.
+        p = Path(item).expanduser().resolve()
+        if p not in seen:
+            seen.add(p)
+            roots.append(p)
+    return roots
+
+
+def default_remote_root(explicit: Optional[str] = None) -> Path:
+    """The root used when creating a new remote: the first configured entry."""
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+
+    roots = remote_roots()
+    if not roots:
+        raise RemoteError(
+            "Remote root not configured.\n"
+            "Either specify --remote-root or set remote.root:\n"
+            "  dt config set remote.root /path/to/remote\n"
+            "Additional roots can be added with:\n"
+            "  dt config add remote.root /path/to/other/remotes"
+        )
+    return roots[0]
 
 
 def resolve_remote_path(
@@ -38,19 +90,13 @@ def resolve_remote_path(
     if remote_path:
         return Path(remote_path).resolve()
     
-    # Get remote root from argument or config
-    root = remote_root or cfg.get_value('remote.root')
-    if not root:
-        raise RemoteError(
-            "Remote root not configured.\n"
-            "Either specify --remote-root or set remote.root:\n"
-            "  dt config set remote.root /path/to/remote"
-        )
-    
+    # Where a new remote goes: the first configured root.
+    root = default_remote_root(remote_root)
+
     # Get project name
     project_name = name or utils.get_project_name()
-    
-    return Path(root) / project_name
+
+    return root / project_name
 
 
 def init_remote_structure(

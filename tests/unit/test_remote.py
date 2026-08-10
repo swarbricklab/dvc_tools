@@ -629,3 +629,61 @@ class TestFormatRemoteStatus:
         assert "pruned 2026-05-30" in out
         assert "verified 2026-05-31" in out
         assert "1,234" in out
+
+
+class TestRemoteRoots:
+    """`remote.root` may be one path or several; the first is the default."""
+
+    def test_scalar(self, tmp_path):
+        from dt.remote import remote_roots
+        with patch("dt.remote.cfg.get_str_list", return_value=[str(tmp_path)]):
+            assert remote_roots() == [tmp_path.resolve()]
+
+    def test_list_preserves_order(self):
+        from dt.remote import remote_roots
+        with patch("dt.remote.cfg.get_str_list",
+                   return_value=['/z/one', '/a/two']):
+            assert [p.name for p in remote_roots()] == ['one', 'two']
+
+    def test_duplicates_removed(self):
+        """Two spellings of one directory must not be scanned twice."""
+        from dt.remote import remote_roots
+        with patch("dt.remote.cfg.get_str_list",
+                   return_value=['/a/x', '/a/./x', '/a/x/']):
+            assert len(remote_roots()) == 1
+
+    def test_unset_is_empty(self):
+        from dt.remote import remote_roots
+        with patch("dt.remote.cfg.get_str_list", return_value=[]):
+            assert remote_roots() == []
+
+    def test_explicit_replaces_config(self):
+        from dt.remote import remote_roots
+        with patch("dt.remote.cfg.get_str_list", return_value=['/from/config']):
+            got = remote_roots(['/explicit'])
+        assert [str(p) for p in got] == ['/explicit']
+
+    def test_default_root_is_the_first_entry(self):
+        from dt.remote import default_remote_root
+        with patch("dt.remote.cfg.get_str_list",
+                   return_value=['/first', '/second']):
+            assert str(default_remote_root()) == '/first'
+
+    def test_default_root_explicit_wins(self):
+        from dt.remote import default_remote_root
+        with patch("dt.remote.cfg.get_str_list", return_value=['/first']):
+            assert str(default_remote_root('/other')) == '/other'
+
+    def test_default_root_unconfigured_raises(self):
+        from dt.remote import default_remote_root
+        from dt.errors import RemoteError
+        with patch("dt.remote.cfg.get_str_list", return_value=[]):
+            with pytest.raises(RemoteError, match="not configured"):
+                default_remote_root()
+
+    def test_new_remotes_are_created_under_the_first_root(self):
+        """Adding search roots must not move where new remotes land."""
+        with patch("dt.remote.cfg.get_str_list",
+                   return_value=['/first', '/second', '/third']):
+            got = resolve_remote_path(name='myproj')
+        assert str(got) == '/first/myproj'

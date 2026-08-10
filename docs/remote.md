@@ -209,7 +209,7 @@ dt remote perms --all --fix         # ...across the whole remote root
 | `REMOTE_NAME` | Check a named remote instead of the default |
 | `--path PATH` | Check a specific remote directory |
 | `--all` | Every remote under `remote.root` |
-| `--root PATH` | Remote root for `--all` |
+| `--root PATH` | Remote root for `--all`; repeatable, replaces the configured list |
 | `--fix` | Apply the policy. Without this, only reports. |
 | `--sticky` / `--no-sticky` | Require the sticky bit (default: on, or the `perms.sticky` config) |
 | `--allow-other` / `--no-other` | Permit world read/execute (default: off, or the `perms.allow_other` config) |
@@ -256,6 +256,24 @@ under a typical umask, not group write either), so a remote that loses a prefix
 directory will drift. Because `dt remote init` pre-creates all 256, this is rare
 in practice — but it's why `perms` exists as a re-runnable check rather than a
 one-off.
+
+### Several roots
+
+`remote.root` may list several roots; `--all` sweeps every one of them. The
+first entry stays the default for creating new remotes — adding search roots
+never moves where `dt remote init` puts things.
+
+```bash
+dt remote perms --all                                   # every configured root
+dt remote perms --all --root /g/data/px14/dvc/analysis  # ad-hoc, repeatable
+```
+
+Store names are not unique across roots, so each is labelled with just enough of
+its path to stay unambiguous — a bare name where that is unique, otherwise
+`registries/chromium`, and more of the path if two roots share a basename.
+
+A root that is missing or empty contributes nothing rather than aborting: with
+several configured, one stale entry should not stop the rest being swept.
 
 ### Only the owner can repair
 
@@ -342,7 +360,7 @@ dt remote clean --path /g/data/.../remote --json
 | `REMOTE_NAME` | Clean a named remote instead of the default |
 | `--path PATH` | Clean a specific remote directory |
 | `--all` | Every remote under `remote.root` |
-| `--root PATH` | Remote root for `--all` (default: the `remote.root` config) |
+| `--root PATH` | Remote root for `--all`; repeatable, replaces the configured list |
 | `--min-age DAYS` | Only remove files older than this (default: 7) |
 | `--delete` | Actually remove the files. Without this, only reports. |
 | `-j, --jobs N` | Concurrent prefix scanners (default: 8) |

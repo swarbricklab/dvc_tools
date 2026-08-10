@@ -38,7 +38,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import config as cfg
 from . import remote as remote_mod
 from . import utils
 from .errors import CleanError
@@ -383,11 +382,80 @@ def looks_like_dvc_store(path: Path) -> bool:
         return False
 
 
+def label_stores(stores: Sequence[Path]) -> List[Tuple[str, Path]]:
+    """Name each store as briefly as stays unambiguous.
+
+    Store names collide across roots -- one site has 18 names appearing under
+    more than one root, some under three -- so a bare name would quietly merge
+    distinct remotes in the reader's mind. Qualifying everything with its root
+    is not enough either, since two roots can share a basename
+    (``a56/dvc/analysis`` and ``px14/dvc/analysis``).
+
+    So: use the bare name where it is unique, else add parent directories one
+    at a time until it is, falling back to the full path.
+    """
+    labels: Dict[Path, str] = {}
+    remaining = list(stores)
+
+    for depth in range(0, 4):
+        if not remaining:
+            break
+        candidates: Dict[str, List[Path]] = {}
+        for p in remaining:
+            parts = p.parts[-(depth + 1):]
+            candidates.setdefault('/'.join(parts), []).append(p)
+        still: List[Path] = []
+        for label, paths in candidates.items():
+            if len(paths) == 1:
+                labels[paths[0]] = label
+            else:
+                still.extend(paths)
+        remaining = still
+
+    for p in remaining:  # pathological: fall back to the full path
+        labels[p] = str(p)
+
+    return [(labels[p], p) for p in stores]
+
+
+def enumerate_stores(roots: Sequence[Path]) -> List[Tuple[str, Path]]:
+    """Find every DVC store across the given roots.
+
+    A root that is missing or holds nothing contributes nothing rather than
+    aborting the run: with several roots configured, one stale entry should not
+    stop the others being swept.
+    """
+    stores: List[Path] = []
+    seen = set()
+    for base in roots:
+        if not base.is_dir():
+            continue
+        try:
+            children = sorted(base.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            resolved = child.resolve()
+            if resolved in seen:
+                continue
+            if looks_like_dvc_store(child):
+                seen.add(resolved)
+                stores.append(child)
+
+    if not stores:
+        listed = ', '.join(str(r) for r in roots)
+        raise CleanError(f"No DVC remotes found under: {listed}")
+
+    return label_stores(stores)
+
+
 def resolve_remote_targets(
     remote_name: Optional[str] = None,
     path: Optional[str] = None,
     all_remotes: bool = False,
-    root: Optional[str] = None,
+    root: Optional[Sequence[str]] = None,
 ) -> List[Tuple[str, Path]]:
     """Work out which remote directories to sweep.
 
@@ -402,26 +470,17 @@ def resolve_remote_targets(
         return [(str(path), Path(path).resolve())]
 
     if all_remotes:
-        remote_root = root or cfg.get_value('remote.root')
-        if not remote_root:
+        roots = remote_mod.remote_roots(root)
+        if not roots:
             raise CleanError(
                 "--all needs a remote root, and remote.root is not configured.\n"
                 "Either pass --root /path/to/remotes or set it:\n"
                 "  dt config set remote.root /path/to/remotes"
             )
-        base = Path(remote_root).resolve()
-        if not base.is_dir():
-            raise CleanError(f"Remote root does not exist: {base}")
-
-        targets = []
-        for child in sorted(base.iterdir()):
-            if child.is_dir() and looks_like_dvc_store(child):
-                targets.append((child.name, child))
-        if not targets:
-            raise CleanError(f"No DVC remotes found under {base}")
-        return targets
+        return enumerate_stores(roots)
 
     # Default: the current repo's remote(s).
+
     remotes = remote_mod.list_remotes()
     if not remotes:
         raise CleanError(

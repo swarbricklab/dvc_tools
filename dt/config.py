@@ -208,6 +208,73 @@ def unset_value(key: str, scope: str = 'user') -> bool:
     return True
 
 
+def get_str_list(key: str, default: Optional[List[str]] = None) -> List[str]:
+    """Get a configuration value as a list of strings, honouring scope override.
+
+    A key may hold either a single scalar or a list; both spellings are valid
+    and a plain string keeps working unchanged. Blank entries are dropped and
+    order is preserved, since for search paths the first entry carries meaning
+    (it is the default used when creating something new).
+
+    Scopes override rather than merge: the highest-precedence scope that
+    defines the key supplies the whole list. Contrast :func:`get_list_value`,
+    which merges a key's entries across every scope and tags each with its
+    origin -- useful for display, wrong for a search path where you must be
+    able to drop an inherited entry.
+
+    Args:
+        key: Dot-separated key path (e.g. 'remote.root')
+        default: Value to return when the key is absent
+
+    Returns:
+        List of strings; empty if the key is unset.
+    """
+    raw = get_value(key)
+    if raw is None:
+        return list(default) if default else []
+    if isinstance(raw, (list, tuple)):
+        items = [str(v).strip() for v in raw]
+    else:
+        items = [str(raw).strip()]
+    return [v for v in items if v]
+
+
+def add_to_list(key: str, value: str, scope: str = 'user') -> bool:
+    """Append a value to a list-valued key, promoting a scalar if needed.
+
+    Scopes override rather than merge, so this reads the *effective* value and
+    writes the whole list back into ``scope``. Otherwise adding one entry at
+    user scope would silently discard the four inherited from system scope.
+
+    Returns:
+        True if added, False if it was already present.
+    """
+    current = get_str_list(key)
+    if value in current:
+        return False
+    set_value(key, yaml.safe_dump(current + [value], default_flow_style=True,
+                                  sort_keys=False).strip(), scope=scope)
+    return True
+
+
+def remove_from_list(key: str, value: str, scope: str = 'user') -> bool:
+    """Remove a value from a list-valued key.
+
+    Returns:
+        True if removed, False if it was not present.
+    """
+    current = get_str_list(key)
+    if value not in current:
+        return False
+    remaining = [v for v in current if v != value]
+    if remaining:
+        set_value(key, yaml.safe_dump(remaining, default_flow_style=True,
+                                      sort_keys=False).strip(), scope=scope)
+    else:
+        unset_value(key, scope=scope)
+    return True
+
+
 def flatten_dict(d: dict, parent_key: str = '', sep: str = '.') -> dict:
     """Flatten a nested dict into dot-separated keys.
     
