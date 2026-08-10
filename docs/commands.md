@@ -228,6 +228,7 @@ Manage external shared caches.
 |------------|-------------|
 | `dt cache init` | Set up an external shared cache with proper permissions |
 | `dt cache rm` | Remove cached files for specified targets |
+| `dt cache clean` | Remove abandoned .tmp files from interrupted transfers |
 
 [Full documentation →](cache.md)
 
@@ -241,6 +242,7 @@ Manage remote storage.
 |------------|-------------|
 | `dt remote init` | Set up remote storage with SSH and local access methods |
 | `dt remote list [repo]` | List DVC remotes (optionally from a remote repository) |
+| `dt remote clean` | Remove abandoned .tmp files from interrupted transfers |
 | `dt remote archive create <name>` | Archive a remote (stage + deposit in one go) |
 | `dt remote archive stage <name>` | Build inner tarballs in staging (compute-node phase) |
 | `dt remote archive deposit <name>` | Upload staged tarballs to backend (data-mover phase) |

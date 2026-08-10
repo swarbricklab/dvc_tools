@@ -198,3 +198,8 @@ class SiteCacheError(DTError):
 class DepsError(DTError):
     """Error during repo-level dependency operations."""
     pass
+
+
+class CleanError(DTError):
+    """Error while sweeping abandoned .tmp files from a cache or remote."""
+    pass

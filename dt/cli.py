@@ -18,6 +18,7 @@ from . import remote_fsck as remote_fsck_mod
 from . import doctor as doctor_mod
 from . import dvc_deps as deps_mod
 from . import repo_graph as repo_graph_mod
+from . import tmp_sweep
 from . import repo_graph_render
 from . import org_index as org_index_mod
 from . import auth as auth_mod
@@ -545,6 +546,99 @@ def cache_validate(targets, fix, verbose, json_output, no_progress):
     # Exit with error if corruption found and not fixed
     if corrupted and not fix:
         raise SystemExit(1)
+
+
+def _run_clean(kind, min_age, do_delete, jobs, json_output, verbose,
+               path=None, remote_name=None, all_remotes=False, root=None):
+    """Shared driver for `dt cache clean` and `dt remote clean`."""
+    import json as _json
+
+    if min_age is None:
+        configured = cfg.get_value('clean.min_age_days')
+        min_age = float(configured) if configured else \
+            tmp_sweep.DEFAULT_MIN_AGE_DAYS
+    if min_age < 0:
+        raise click.ClickException("--min-age cannot be negative")
+
+    try:
+        if kind == tmp_sweep.KIND_CACHE:
+            targets = [tmp_sweep.resolve_cache_target(path)]
+        else:
+            targets = tmp_sweep.resolve_remote_targets(
+                remote_name=remote_name, path=path,
+                all_remotes=all_remotes, root=root,
+            )
+
+        reports = []
+        for name, directory in targets:
+            report = tmp_sweep.sweep(
+                directory, kind=kind, name=name, min_age_days=min_age,
+                do_delete=do_delete, jobs=jobs, verbose=verbose,
+            )
+            reports.append(report)
+            if not json_output:
+                text = tmp_sweep.format_report(
+                    report, deleted_mode=do_delete, verbose=verbose,
+                )
+                # Empty for a clean root; echoing it anyway would leave a blank
+                # line per remote and bury the ones that need attention.
+                if text:
+                    click.echo(text)
+
+        if json_output:
+            click.echo(_json.dumps({
+                'min_age_days': min_age,
+                'deleted': do_delete,
+                'roots': [r.to_dict() for r in reports],
+            }, indent=2))
+        else:
+            click.echo(tmp_sweep.format_summary(
+                reports, deleted_mode=do_delete, min_age_days=min_age,
+            ))
+
+        if do_delete and any(r.failed for r in reports):
+            raise SystemExit(1)
+
+    except errors.CleanError as e:
+        raise click.ClickException(str(e))
+
+
+@cache.command('clean')
+@click.option('--path', 'cache_path', type=click.Path(),
+              help='Sweep a specific cache directory')
+@click.option('--min-age', type=float, default=None,
+              help=f'Only remove files older than this many days '
+                   f'(default: {tmp_sweep.DEFAULT_MIN_AGE_DAYS})')
+@click.option('--delete', 'do_delete', is_flag=True,
+              help='Actually remove the files. Without this, only reports.')
+@click.option('--jobs', '-j', type=int, default=8, show_default=True,
+              help='Concurrent prefix scanners')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True, help='List every file')
+def cache_clean(cache_path, min_age, do_delete, jobs, json_output, verbose):
+    """Remove abandoned .tmp files left by interrupted transfers.
+
+    DVC writes each blob to a temporary name and renames it into place. A
+    transfer killed before the rename leaves the partial file behind forever,
+    and since these are dotfiles they never show up in a casual listing.
+
+    By default this only reports what it finds. Pass --delete to remove them.
+
+    Empty prefix directories are always left alone: DVC would recreate a
+    missing one with the writing user's umask, which may not grant group write
+    and would lock other group members out of that prefix.
+
+    \b
+    Examples:
+        dt cache clean                    # Report what could be removed
+        dt cache clean --delete           # Remove them
+        dt cache clean --min-age 30       # Only files older than 30 days
+    """
+    _run_clean(
+        kind=tmp_sweep.KIND_CACHE, path=cache_path,
+        min_age=min_age, do_delete=do_delete, jobs=jobs,
+        json_output=json_output, verbose=verbose,
+    )
 
 
 @cli.group()
@@ -1103,6 +1197,67 @@ def remote_move(args, quick, jobs, verbose):
                    + ", ".join(n for n, _, _ in result['repointed']))
     else:
         click.echo("  No configured remotes referenced the old path.")
+
+
+@remote.command('clean')
+@click.argument('remote_name', required=False)
+@click.option('--path', 'remote_path', type=click.Path(),
+              help='Sweep a specific remote directory')
+@click.option('--all', 'all_remotes', is_flag=True,
+              help='Sweep every remote under remote.root')
+@click.option('--root', type=click.Path(),
+              help='Remote root for --all (default: the remote.root config)')
+@click.option('--min-age', type=float, default=None,
+              help=f'Only remove files older than this many days '
+                   f'(default: {tmp_sweep.DEFAULT_MIN_AGE_DAYS})')
+@click.option('--delete', 'do_delete', is_flag=True,
+              help='Actually remove the files. Without this, only reports.')
+@click.option('--jobs', '-j', type=int, default=8, show_default=True,
+              help='Concurrent prefix scanners')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+@click.option('-v', '--verbose', is_flag=True, help='List every file')
+def remote_clean(remote_name, remote_path, all_remotes, root, min_age,
+                 do_delete, jobs, json_output, verbose):
+    """Remove abandoned .tmp files left by interrupted transfers.
+
+    DVC uploads a blob by writing it under a random temporary name and then
+    renaming it into place. A push killed before the rename leaves the partial
+    file behind forever. Nothing in DVC cleans these up, and because they are
+    dotfiles they never appear in a casual listing, so on a shared remote they
+    quietly accumulate into hundreds of gigabytes.
+
+    By default this only reports. Pass --delete to remove them.
+
+    Only files matching DVC's exact temporary-name shape are ever considered,
+    and only those older than --min-age, so a transfer still in flight is never
+    touched. Empty prefix directories are always left in place, since DVC would
+    recreate a missing one with the writing user's umask and could lock other
+    group members out of that prefix.
+
+    Deleting a file you do not own is normal and usually works: removal depends
+    on write permission on the containing directory, not on file ownership.
+    Anything that cannot be removed is reported, grouped by the directory that
+    blocked it.
+
+    \b
+    Examples:
+        dt remote clean                     # Report on the default remote
+        dt remote clean --delete            # Remove them
+        dt remote clean --all               # Report across every remote
+        dt remote clean --all --delete      # Clean the whole remote root
+        dt remote clean --min-age 30        # Only files older than 30 days
+    """
+    if sum(bool(x) for x in (remote_name, remote_path, all_remotes)) > 1:
+        raise click.ClickException(
+            "Use only one of REMOTE_NAME, --path, or --all"
+        )
+
+    _run_clean(
+        kind=tmp_sweep.KIND_REMOTE, path=remote_path, remote_name=remote_name,
+        all_remotes=all_remotes, root=root, min_age=min_age,
+        do_delete=do_delete, jobs=jobs, json_output=json_output,
+        verbose=verbose,
+    )
 
 
 @remote.command('fsck')
