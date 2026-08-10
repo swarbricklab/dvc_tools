@@ -224,6 +224,34 @@ Affected .dir manifests: 1
 - **Debugging pull failures**: Identify why `dvc checkout` might fail
 - **Before important runs**: Ensure cache is healthy before long computations
 
+## dt cache perms
+
+Check that a shared cache's directories stay group-writable.
+
+```bash
+dt cache perms                    # Report
+dt cache perms --fix              # Repair what you own
+dt cache perms --fix --sticky     # ...and restrict deletion to file owners
+```
+
+| Option | Description |
+|--------|-------------|
+| `--path PATH` | Check a specific cache directory |
+| `--fix` | Apply the policy. Without this, only reports. |
+| `--sticky` / `--no-sticky` | Require the sticky bit (default: `perms.sticky` config, else off) |
+| `--allow-other` / `--no-other` | World read/execute, `2775` vs `2770` |
+| `-j, --jobs N` | Concurrent stat workers (default: 8) |
+| `--json` / `-v` | Machine-readable output / list every directory |
+
+Same policy and mechanics as [`dt remote perms`](remote.md#dt-remote-perms) —
+see there for the full explanation of the mode table, the sticky bit, and why
+repair is inherently per-owner.
+
+One difference: a cache also has a `runs/` run-cache tree, which
+[`dt cache init`](#dt-cache-init) pre-creates with the same 256 prefixes. `dt
+cache perms` expects that full set; `dt remote perms` does not, since a remote
+may carry an empty `runs/` with nothing owed.
+
 ## dt cache clean
 
 Remove abandoned `.tmp` files left behind by interrupted transfers.

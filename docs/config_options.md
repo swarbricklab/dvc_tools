@@ -26,6 +26,8 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `qxub.walltime` | Maximum runtime for parallel jobs | `10:00:00` |
 | `qxub.mem` | Memory allocation for parallel jobs | `4GB` |
 | `deps.cache_dir` | Directory for the [org-wide import index](deps.md#dt-deps-index); set to a shared path so a whole lab reuses one scan | `/g/data/a56/dvc-tools/repo-deps` |
+| `perms.sticky` | Default for [`dt remote perms`](remote.md#dt-remote-perms) / [`dt cache perms`](cache.md#dt-cache-perms): restrict deletion to file owners (creation is unaffected) | `true` |
+| `perms.allow_other` | Whether shared dirs grant world read/execute (`2775` vs `2770`) | `false` |
 | `clean.min_age_days` | Age threshold for [`dt remote clean`](remote.md#dt-remote-clean) / [`dt cache clean`](cache.md#dt-cache-clean) (default: 7) | `14` |
 | `auth.github_user` | GitHub username for [`dt auth whoami`](auth.md#dt-auth-whoami) | `alice-smith` |
 | `auth.github_teams` | GitHub team slugs (comma-separated) | `data-team, ops` |

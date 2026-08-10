@@ -179,6 +179,108 @@ mixed layouts and the case where the bad blob *is* a `.dir`.
 Quarantined blobs land in `<remote>/.dt-verify/quarantine/<timestamp>/<rel-path>`
 with a `manifest.json` restore map.
 
+## dt remote perms
+
+Check and repair directory permissions on a shared remote.
+
+A shared remote only works if its blob directories stay group-writable and
+setgid. [`dt remote init`](#dt-remote-init) pre-creates all 256 prefix
+directories precisely so that DVC never has to — where that hasn't run, DVC
+creates each prefix on demand under the writing user's umask, frequently
+leaving it unwritable by everyone else. The damage is silent until somebody
+else's push fails.
+
+```bash
+dt remote perms                     # Report on the default remote
+dt remote perms --all               # Report across every remote
+dt remote perms --fix               # Repair what you own
+dt remote perms --all --fix --sticky
+```
+
+| Option | Description |
+|--------|-------------|
+| `REMOTE_NAME` | Check a named remote instead of the default |
+| `--path PATH` | Check a specific remote directory |
+| `--all` | Every remote under `remote.root` |
+| `--root PATH` | Remote root for `--all` |
+| `--fix` | Apply the policy. Without this, only reports. |
+| `--sticky` / `--no-sticky` | Require the sticky bit (default: `perms.sticky` config, else off) |
+| `--allow-other` / `--no-other` | World read/execute, `2775` vs `2770` (default: `perms.allow_other` config, else on) |
+| `-j, --jobs N` | Concurrent stat workers (default: 8) |
+| `--json` / `-v` | Machine-readable output / list every directory |
+
+### The policy
+
+| Mode | Meaning |
+|------|---------|
+| `2775` | setgid + group write + world read (default) |
+| `3775` | ...plus sticky |
+| `2770` | as above, no access for others (`--no-other`) |
+| `3770` | sticky and no others |
+
+setgid keeps the group on newly created entries. Only *missing* bits count as
+deviations — a directory that is more permissive in some unrelated respect is
+left alone.
+
+### The sticky bit
+
+`--sticky` adds `+t`, which on a directory means a file may be removed or
+renamed only by **the file's owner, the directory's owner, or root**. Everyone
+with group write can still create files and push — only deletion is restricted.
+This is the mechanism `/tmp` uses, and it works on Lustre.
+
+Two consequences worth knowing:
+
+**Each remote's owner keeps full control of it.** Because the directory owner is
+also exempt, whoever initialised a remote can still delete and move anything
+inside it — including for recovery flows like
+[`dt remote quarantine`](#dt-remote-quarantine). Sticky protects you from *other
+people's* accidents in your remote without taking away your own authority.
+
+**Sticky is not inherited.** A new subdirectory gets setgid but not `+t` (and
+under a typical umask, not group write either), so a remote that loses a prefix
+directory will drift. Because `dt remote init` pre-creates all 256, this is rare
+in practice — but it's why `perms` exists as a re-runnable check rather than a
+one-off.
+
+### Only the owner can repair
+
+There is an asymmetry that shapes this whole command:
+
+- **`unlink` is governed by write permission on the containing directory** — so
+  a group member *can* delete another user's blob.
+- **`chmod` is governed by ownership** — so a group member *cannot* repair
+  another user's directory, even with group write.
+
+Repair is therefore inherently per-owner. The report is grouped that way, and
+its main output is the worklist telling each person what only they can run:
+
+```
+1603 directories deviate from policy, 344 prefix directories missing
+
+Needs the owner to run it:
+  hz7248         772 directories
+  jr9959         357 directories  (you)
+  sl6147         266 directories
+  hk8797         196 directories
+
+Each owner: dt remote perms --all --fix
+```
+
+Creating a *missing* prefix directory only needs write permission on its parent,
+so `--fix` often succeeds at that part even on someone else's remote — and since
+you created it, you own it and the mode sticks.
+
+The exit status is non-zero if anything could not be fixed.
+
+### Two kinds of gap
+
+A store holding **none** of the 256 prefixes was simply never pre-created —
+usually a remote nobody has pushed to yet. That's reported as
+`prefix directories not pre-created`, distinct from a store that has **some**
+and reports `N of 256 prefix directories missing`, which means it has drifted.
+Only the second is a sign that something went wrong.
+
 ## dt remote clean
 
 Remove abandoned `.tmp` files left behind by interrupted transfers.
