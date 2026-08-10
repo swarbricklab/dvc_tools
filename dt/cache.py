@@ -55,33 +55,52 @@ def resolve_cache_path(
     return Path(root) / project_name
 
 
-def init_cache_structure(cache_dir: Path, verbose: bool = True) -> None:
+def init_cache_structure(
+    cache_dir: Path,
+    verbose: bool = True,
+    sticky: Optional[bool] = None,
+    allow_other: Optional[bool] = None,
+) -> None:
     """Initialize the cache directory structure with proper permissions.
-    
-    Creates the files/md5 subdirectories (00-ff) and runs directory
-    with group write permissions for shared access in HPC environments.
-    
+
+    Creates all 256 files/md5 subdirectories (00-ff) and the run cache, group
+    writable and setgid so the whole group can use the cache, and by default
+    sticky so that only a file's owner can delete it. Creation is unaffected by
+    the sticky bit -- everyone can still write.
+
     Args:
         cache_dir: Path to the cache directory
         verbose: Print progress messages
+        sticky: Override the configured sticky policy
+        allow_other: Override the configured world-access policy
     """
+    mode = utils.shared_dir_mode(sticky=sticky, allow_other=allow_other)
+
     if verbose:
-        print(f"Initializing cache structure at {cache_dir}")
-    
+        print(f"Initializing cache structure at {cache_dir} "
+              f"(mode {oct(mode)})")
+
     cache_dir.mkdir(parents=True, exist_ok=True)
-    utils.set_group_writable(cache_dir)
-    
+    failed = 0 if utils.set_group_writable(cache_dir, mode=mode) else 1
+
     # Create runs directory for DVC run cache with 00-ff subdirectories
     runs_dir = cache_dir / "runs"
     runs_dir.mkdir(exist_ok=True)
-    utils.set_group_writable(runs_dir)
+    if not utils.set_group_writable(runs_dir, mode=mode):
+        failed += 1
     for i in range(256):
         subdir = runs_dir / f"{i:02x}"
         subdir.mkdir(exist_ok=True)
-        utils.set_group_writable(subdir)
-    
+        if not utils.set_group_writable(subdir, mode=mode):
+            failed += 1
+
     # Create files/md5 structure with 00-ff subdirectories
-    utils.create_md5_subdirs(cache_dir, verbose=verbose)
+    failed += utils.create_md5_subdirs(cache_dir, verbose=verbose, mode=mode)
+
+    if failed and verbose:
+        print(f"  warning: could not set the mode on {failed} director"
+              f"{'ies' if failed != 1 else 'y'} (chmod requires ownership; "
+              f"ask the owner to run: dt cache perms --fix)")
 
 
 def configure_dvc_cache(repo_path: Path, cache_dir: Path, verbose: bool = True) -> None:

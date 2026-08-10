@@ -20,7 +20,14 @@ dt remote init [options] [project_name]
 
 ### What it does
 
-- Creates the remote directory structure with proper group permissions
+- Creates the remote directory structure with proper group permissions —
+  all 256 blob prefix directories up front, so DVC never creates one itself
+  under the writing user's umask
+- Applies the shared-directory policy: setgid, group-writable, **sticky**, and
+  no access for users outside the group (`3770`). Sticky means everyone can
+  still push, but only a file's owner can delete it. Override with the
+  `perms.sticky` / `perms.allow_other` config keys, and audit later with
+  [`dt remote perms`](#dt-remote-perms)
 - Sets up SSH remote accessible from external platforms via `dvc remote add -d`
 - Creates a local remote override for efficient transfers within the same system
 - Maintains portability by keeping local remote configuration workspace-specific
@@ -194,7 +201,7 @@ else's push fails.
 dt remote perms                     # Report on the default remote
 dt remote perms --all               # Report across every remote
 dt remote perms --fix               # Repair what you own
-dt remote perms --all --fix --sticky
+dt remote perms --all --fix         # ...across the whole remote root
 ```
 
 | Option | Description |
@@ -204,8 +211,8 @@ dt remote perms --all --fix --sticky
 | `--all` | Every remote under `remote.root` |
 | `--root PATH` | Remote root for `--all` |
 | `--fix` | Apply the policy. Without this, only reports. |
-| `--sticky` / `--no-sticky` | Require the sticky bit (default: `perms.sticky` config, else off) |
-| `--allow-other` / `--no-other` | World read/execute, `2775` vs `2770` (default: `perms.allow_other` config, else on) |
+| `--sticky` / `--no-sticky` | Require the sticky bit (default: on, or the `perms.sticky` config) |
+| `--allow-other` / `--no-other` | Permit world read/execute (default: off, or the `perms.allow_other` config) |
 | `-j, --jobs N` | Concurrent stat workers (default: 8) |
 | `--json` / `-v` | Machine-readable output / list every directory |
 
@@ -213,18 +220,25 @@ dt remote perms --all --fix --sticky
 
 | Mode | Meaning |
 |------|---------|
-| `2775` | setgid + group write + world read (default) |
-| `3775` | ...plus sticky |
-| `2770` | as above, no access for others (`--no-other`) |
-| `3770` | sticky and no others |
+| **`3770`** | **setgid + group write + sticky, no access for others (default)** |
+| `2770` | as above without sticky (`--no-sticky`) |
+| `3775` | sticky, world read/execute permitted (`--allow-other`) |
+| `2775` | neither |
 
-setgid keeps the group on newly created entries. Only *missing* bits count as
-deviations — a directory that is more permissive in some unrelated respect is
-left alone.
+setgid keeps the group on newly created entries.
+
+Only *missing* bits count as deviations. A directory that is **more restrictive**
+than the policy is left alone — so `--allow-other` tolerates world-readable
+directories, it never grants world access to one that lacks it. Loosening
+permissions is not something a repair tool should do silently.
+
+`dt remote init` and `dt cache init` create directories under this same policy,
+resolved from the same config keys, so a store cannot be created under one
+policy and audited under another.
 
 ### The sticky bit
 
-`--sticky` adds `+t`, which on a directory means a file may be removed or
+Sticky is **on by default**. It adds `+t`, which on a directory means a file may be removed or
 renamed only by **the file's owner, the directory's owner, or root**. Everyone
 with group write can still create files and push — only deletion is restricted.
 This is the mechanism `/tmp` uses, and it works on Lustre.
@@ -272,6 +286,21 @@ so `--fix` often succeeds at that part even on someone else's remote — and sin
 you created it, you own it and the mode sticks.
 
 The exit status is non-zero if anything could not be fixed.
+
+### Layouts
+
+Both DVC layouts are handled, detected from what is actually present rather
+than from a declared version, so a store partway through a migration needs no
+special-casing:
+
+- **v3** — prefixes under `files/md5/`. Expected to hold all 256, since that is
+  what `dt remote init` pre-creates.
+- **v2** — prefixes at the store root, alongside `files/`, `runs/` and the
+  verify ledger. Checked, but *not* expected to be complete: a v2 root
+  legitimately holds only the prefixes in use. This also means v2 stores do not
+  get the pre-creation protection, so their prefixes are created by DVC under
+  whoever's umask.
+- **Mixed** — both, checked together.
 
 ### Two kinds of gap
 

@@ -53,24 +53,44 @@ def resolve_remote_path(
     return Path(root) / project_name
 
 
-def init_remote_structure(remote_dir: Path, verbose: bool = True) -> None:
+def init_remote_structure(
+    remote_dir: Path,
+    verbose: bool = True,
+    sticky: Optional[bool] = None,
+    allow_other: Optional[bool] = None,
+) -> None:
     """Initialize the remote directory structure with proper permissions.
-    
-    Creates the files/md5 subdirectories (00-ff) required by DVC
-    with group write permissions for shared access.
-    
+
+    Creates all 256 files/md5 subdirectories (00-ff) required by DVC, group
+    writable and setgid so the whole group can push, and by default sticky so
+    that only a file's owner can delete it. Creation is unaffected by the
+    sticky bit -- everyone can still write.
+
     Args:
         remote_dir: Path to the remote directory
         verbose: Print progress messages
+        sticky: Override the configured sticky policy
+        allow_other: Override the configured world-access policy
     """
+    mode = utils.shared_dir_mode(sticky=sticky, allow_other=allow_other)
+
     if verbose:
-        print(f"Initializing remote structure at {remote_dir}")
-    
+        print(f"Initializing remote structure at {remote_dir} "
+              f"(mode {oct(mode)})")
+
     remote_dir.mkdir(parents=True, exist_ok=True)
-    utils.set_group_writable(remote_dir)
-    
+    failed = 0 if utils.set_group_writable(remote_dir, mode=mode) else 1
+
     # Create files/md5 structure with 00-ff subdirectories
-    utils.create_md5_subdirs(remote_dir, verbose=verbose)
+    failed += utils.create_md5_subdirs(remote_dir, verbose=verbose, mode=mode)
+
+    if failed and verbose:
+        # chmod needs ownership, so this is what happens when re-initialising
+        # somebody else's remote. Silence here would leave a store that looks
+        # set up but is not.
+        print(f"  warning: could not set the mode on {failed} director"
+              f"{'ies' if failed != 1 else 'y'} (chmod requires ownership; "
+              f"ask the owner to run: dt remote perms --fix)")
 
 
 def configure_dvc_remote(

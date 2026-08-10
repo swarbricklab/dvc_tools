@@ -12,10 +12,16 @@ setgid. Two things erode that:
 
 Either way the damage is silent until somebody else's push fails.
 
-Optionally the sticky bit can be requested as well. On a directory it means a
+By default the directories also get the sticky bit. On a directory it means a
 file may be removed or renamed only by the file's owner, the directory's owner,
 or root -- so everyone can still create objects and push, but nobody can delete
-another user's data by accident. Creation is unaffected.
+another user's data by accident. Creation is unaffected. World access is off by
+default too, so shared research data is not readable outside the owning group.
+
+Only *missing* bits count as deviations, so a directory more restrictive than
+the policy is left alone: ``--allow-other`` tolerates world-readable
+directories but never grants world access to one that lacks it. Loosening
+permissions is not something a repair tool should do silently.
 
 One asymmetry drives the whole design: ``unlink`` is governed by write
 permission on the containing *directory*, but ``chmod`` is governed by
@@ -47,7 +53,17 @@ KIND_REMOTE = 'remote'
 KIND_CACHE = 'cache'
 
 
-def wanted_mode(sticky: bool = False, allow_other: bool = True) -> int:
+# Defaults. Sticky is on so that everyone can push but nobody can delete
+# another user's data by accident, and world access is off so shared research
+# data is not readable outside the owning group.
+DEFAULT_STICKY = True
+DEFAULT_ALLOW_OTHER = False
+
+
+def wanted_mode(
+    sticky: bool = DEFAULT_STICKY,
+    allow_other: bool = DEFAULT_ALLOW_OTHER,
+) -> int:
     """The directory mode implied by a policy."""
     if allow_other:
         return MODE_SHARED_STICKY if sticky else MODE_SHARED
@@ -109,7 +125,7 @@ class PermsReport:
     root: Path
     kind: str
     name: str = ''
-    wanted: int = MODE_SHARED
+    wanted: int = MODE_PRIVATE_STICKY
     dirs_checked: int = 0
     findings: List[DirFinding] = field(default_factory=list)
     missing: List[MissingPrefix] = field(default_factory=list)
@@ -233,11 +249,19 @@ def _prefix_bases(root: Path, kind: str) -> List[Tuple[Path, bool]]:
     v3 = root / 'files' / 'md5'
     if v3.is_dir():
         bases.append((v3, True))
-    if any((root / p).is_dir() for p in EXPECTED_PREFIXES[:4]):
+
+    # v2 keeps prefixes at the top level. Detect by intersecting what is
+    # actually there with the expected names -- probing a fixed handful would
+    # miss a sparse store whose only prefixes happen to sort late.
+    try:
+        present = {e.name for e in os.scandir(root) if e.is_dir()}
+    except OSError:
+        present = set()
+    if present & set(EXPECTED_PREFIXES):
         bases.append((root, False))
-    runs = root / 'runs'
-    if runs.is_dir():
-        bases.append((runs, kind == KIND_CACHE))
+
+    if 'runs' in present:
+        bases.append((root / 'runs', kind == KIND_CACHE))
     return bases
 
 
@@ -245,8 +269,8 @@ def scan(
     root: Path,
     kind: str = KIND_REMOTE,
     name: str = '',
-    sticky: bool = False,
-    allow_other: bool = True,
+    sticky: bool = DEFAULT_STICKY,
+    allow_other: bool = DEFAULT_ALLOW_OTHER,
     jobs: int = 8,
 ) -> PermsReport:
     """Inspect a cache or remote against the directory policy.
@@ -284,6 +308,8 @@ def scan(
     if (root / 'files').is_dir():
         targets.append(root / 'files')
     targets.extend(b for b, _full in bases)
+    # A v2 root is both the store root and a prefix base, so drop the repeat.
+    targets = list(dict.fromkeys(targets))
 
     existing: List[Path] = []
     for base, expect_full_set in bases:
@@ -376,8 +402,8 @@ def check(
     root: Path,
     kind: str = KIND_REMOTE,
     name: str = '',
-    sticky: bool = False,
-    allow_other: bool = True,
+    sticky: bool = DEFAULT_STICKY,
+    allow_other: bool = DEFAULT_ALLOW_OTHER,
     do_fix: bool = False,
     jobs: int = 8,
     verbose: bool = False,

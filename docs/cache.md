@@ -20,8 +20,14 @@ dt cache init [options] [project_name]
 
 ### What it does
 
-- Creates the external cache directory structure
-- Sets group read/write permissions to allow team collaboration
+- Creates the external cache directory structure — all 256 blob prefix
+  directories and the run cache up front, so DVC never creates one itself
+  under the writing user's umask
+- Applies the shared-directory policy: setgid, group-writable, **sticky**, and
+  no access for users outside the group (`3770`). Sticky means everyone can
+  still write, but only a file's owner can delete it. Override with the
+  `perms.sticky` / `perms.allow_other` config keys, and audit later with
+  [`dt cache perms`](#dt-cache-perms)
 - Configures DVC to use the external cache via `dvc cache dir --local`
 - Keeps configuration local to maintain repository portability
 
@@ -231,15 +237,15 @@ Check that a shared cache's directories stay group-writable.
 ```bash
 dt cache perms                    # Report
 dt cache perms --fix              # Repair what you own
-dt cache perms --fix --sticky     # ...and restrict deletion to file owners
+dt cache perms --fix --no-sticky  # ...without restricting deletion
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--path PATH` | Check a specific cache directory |
 | `--fix` | Apply the policy. Without this, only reports. |
-| `--sticky` / `--no-sticky` | Require the sticky bit (default: `perms.sticky` config, else off) |
-| `--allow-other` / `--no-other` | World read/execute, `2775` vs `2770` |
+| `--sticky` / `--no-sticky` | Require the sticky bit (default: on, or the `perms.sticky` config) |
+| `--allow-other` / `--no-other` | Permit world read/execute (default: off) |
 | `-j, --jobs N` | Concurrent stat workers (default: 8) |
 | `--json` / `-v` | Machine-readable output / list every directory |
 

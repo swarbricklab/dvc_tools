@@ -567,9 +567,10 @@ def _run_perms(kind, do_fix, sticky, allow_other, jobs, json_output, verbose,
     # Flags are tri-state so an unset flag can fall back to the configured
     # policy; that way a site decides once instead of everyone remembering.
     if sticky is None:
-        sticky = _bool_config('perms.sticky', False)
+        sticky = _bool_config('perms.sticky', perms_mod.DEFAULT_STICKY)
     if allow_other is None:
-        allow_other = _bool_config('perms.allow_other', True)
+        allow_other = _bool_config('perms.allow_other',
+                                   perms_mod.DEFAULT_ALLOW_OTHER)
 
     try:
         if kind == perms_mod.KIND_CACHE:
@@ -714,12 +715,12 @@ def cache_clean(cache_path, min_age, do_delete, jobs, json_output, verbose):
 @click.option('--fix', 'do_fix', is_flag=True,
               help='Apply the policy. Without this, only reports.')
 @click.option('--sticky/--no-sticky', default=None,
-              help='Also require the sticky bit, so only a file\'s owner can '
-                   'delete it (creation is unaffected). Default: the '
-                   'perms.sticky config, else off.')
+              help='Require the sticky bit, so only a file\'s owner can '
+                   'delete it (creation is unaffected). Default: on, or the '
+                   'perms.sticky config.')
 @click.option('--allow-other/--no-other', 'allow_other', default=None,
               help='Permit read access for users outside the group (2775 vs '
-                   '2770). Default: the perms.allow_other config, else on.')
+                   '2770). Default: off, or the perms.allow_other config.')
 @click.option('--jobs', '-j', type=int, default=8, show_default=True,
               help='Concurrent stat workers')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
@@ -1312,12 +1313,12 @@ def remote_move(args, quick, jobs, verbose):
 @click.option('--fix', 'do_fix', is_flag=True,
               help='Apply the policy. Without this, only reports.')
 @click.option('--sticky/--no-sticky', default=None,
-              help='Also require the sticky bit, so only a file\'s owner can '
-                   'delete it (creation is unaffected). Default: the '
-                   'perms.sticky config, else off.')
+              help='Require the sticky bit, so only a file\'s owner can '
+                   'delete it (creation is unaffected). Default: on, or the '
+                   'perms.sticky config.')
 @click.option('--allow-other/--no-other', 'allow_other', default=None,
               help='Permit read access for users outside the group (2775 vs '
-                   '2770). Default: the perms.allow_other config, else on.')
+                   '2770). Default: off, or the perms.allow_other config.')
 @click.option('--jobs', '-j', type=int, default=8, show_default=True,
               help='Concurrent stat workers')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')

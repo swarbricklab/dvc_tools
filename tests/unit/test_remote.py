@@ -3,6 +3,8 @@
 Tests remote storage management functionality.
 """
 
+import os
+
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -77,14 +79,39 @@ class TestInitRemoteStructure:
                 assert remote_dir.exists()
 
     def test_calls_set_group_writable(self, tmp_path):
-        """Test calls set_group_writable on remote dir."""
+        """Test applies the shared-directory mode to the remote dir."""
+        from dt import perms
+
         remote_dir = tmp_path / "remote"
-        
+
         with patch("dt.remote.utils.set_group_writable") as mock_sgw:
-            with patch("dt.remote.utils.create_md5_subdirs"):
+            with patch("dt.remote.utils.create_md5_subdirs", return_value=0):
                 init_remote_structure(remote_dir, verbose=False)
-                
-                mock_sgw.assert_called_once_with(remote_dir)
+
+                # The mode is passed explicitly so init and `dt remote perms`
+                # cannot drift apart.
+                mock_sgw.assert_called_once_with(
+                    remote_dir, mode=perms.wanted_mode()
+                )
+
+    def test_sticky_and_group_write_by_default(self, tmp_path):
+        """Everyone can push; only a file's owner can delete it."""
+        import stat as _stat
+
+        remote_dir = tmp_path / "remote"
+        init_remote_structure(remote_dir, verbose=False)
+
+        mode = _stat.S_IMODE(os.stat(remote_dir / "files" / "md5" / "00").st_mode)
+        assert mode & _stat.S_IWGRP, "group must be able to push"
+        assert mode & _stat.S_ISVTX, "only owners should delete"
+        assert mode & _stat.S_ISGID
+        assert not mode & (_stat.S_IROTH | _stat.S_IWOTH | _stat.S_IXOTH)
+
+    def test_pre_creates_all_prefixes(self, tmp_path):
+        """Pre-creation is what stops DVC making them under its own umask."""
+        remote_dir = tmp_path / "remote"
+        init_remote_structure(remote_dir, verbose=False)
+        assert len(list((remote_dir / "files" / "md5").iterdir())) == 256
 
     def test_creates_md5_subdirs(self, tmp_path):
         """Test creates files/md5 subdirectory structure."""
