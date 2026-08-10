@@ -314,11 +314,13 @@ class TestReporting:
                                    sticky=False)
         assert 'All directories match' in out
 
-    def test_summary_mentions_sticky_flag_when_requested(self, tmp_path):
+    def test_summary_omits_policy_flags(self, tmp_path):
+        """The owner's own run picks up the same defaults and config."""
         root = _mkstore(tmp_path / 's', n_prefixes=4, mode=0o2770)
         report = perms.scan(root, sticky=True)
         out = perms.format_summary([report], fixed_mode=False, sticky=True)
-        assert '--sticky' in out
+        assert 'dt remote perms --all --fix' in out
+        assert '--sticky' not in out
 
     def test_json_shape(self, tmp_path):
         root = _mkstore(tmp_path / 's', n_prefixes=4, mode=0o2750)

@@ -585,8 +585,8 @@ def format_summary(
             lines.append(f"  {owner:<12} {count:>5} director"
                          f"{'ies' if count != 1 else 'y '}{marker}")
         if not fixed_mode:
-            flag = ' --sticky' if sticky else ''
+            # No policy flags: the same defaults and config apply to their run.
             lines.append('')
-            lines.append(f"Each owner: dt remote perms --all --fix{flag}")
+            lines.append("Each owner: dt remote perms --all --fix")
 
     return "\n".join(lines)

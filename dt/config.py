@@ -217,10 +217,8 @@ def get_str_list(key: str, default: Optional[List[str]] = None) -> List[str]:
     (it is the default used when creating something new).
 
     Scopes override rather than merge: the highest-precedence scope that
-    defines the key supplies the whole list. Contrast :func:`get_list_value`,
-    which merges a key's entries across every scope and tags each with its
-    origin -- useful for display, wrong for a search path where you must be
-    able to drop an inherited entry.
+    defines the key supplies the whole list. Merging instead would make an
+    inherited entry impossible to drop.
 
     Args:
         key: Dot-separated key path (e.g. 'remote.root')
@@ -335,42 +333,6 @@ def list_config_with_sources() -> List[tuple]:
     
     return sorted(results.values())
 
-
-def get_list_value(key: str) -> List[tuple]:
-    """Get a list configuration value, merged across all scopes.
-    
-    Returns list items with their source scope for display purposes.
-    Items from higher precedence scopes appear first.
-    Duplicates are removed (keeping highest precedence).
-    
-    Args:
-        key: Dot-separated key path (e.g., 'cache.alt')
-        
-    Returns:
-        List of (item, scope) tuples
-    """
-    seen = set()
-    results = []
-    
-    for scope in SCOPES:  # highest precedence first
-        scope_data = load_scope_config(scope)
-        
-        # Navigate to the key
-        current = scope_data
-        for part in key.split('.'):
-            if isinstance(current, dict) and part in current:
-                current = current[part]
-            else:
-                current = None
-                break
-        
-        if isinstance(current, list):
-            for item in current:
-                if item not in seen:
-                    seen.add(item)
-                    results.append((item, scope))
-    
-    return results
 
 
 def add_list_value(key: str, value: str, scope: str = 'local') -> bool:
