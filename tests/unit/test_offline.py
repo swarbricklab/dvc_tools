@@ -33,21 +33,31 @@ from dt.errors import OfflineError
 class TestGetDtRoot:
     """Tests for the get_dt_root function."""
 
-    def test_returns_dt_directory_when_exists(self, tmp_path):
+    def test_returns_dt_directory_when_exists(self, tmp_path, monkeypatch):
         """Test returns .dt directory when it exists."""
         dt_dir = tmp_path / ".dt"
         dt_dir.mkdir()
-        
-        with patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = get_dt_root()
-            
-            assert result == dt_dir
+        monkeypatch.chdir(tmp_path)
 
-    def test_raises_error_when_dt_not_exists(self, tmp_path):
+        assert get_dt_root() == dt_dir
+
+    def test_found_from_subdirectory(self, tmp_path, monkeypatch):
+        """.dt is resolved at the project root, not the current directory."""
+        (tmp_path / ".dvc").mkdir()
+        dt_dir = tmp_path / ".dt"
+        dt_dir.mkdir()
+        subdir = tmp_path / "analysis" / "nested"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+
+        assert get_dt_root() == dt_dir
+
+    def test_raises_error_when_dt_not_exists(self, tmp_path, monkeypatch):
         """Test OfflineError raised when .dt doesn't exist."""
-        with patch("pathlib.Path.cwd", return_value=tmp_path):
-            with pytest.raises(OfflineError, match="Not in a dt-initialized directory"):
-                get_dt_root()
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(OfflineError, match="Not in a dt-initialized directory"):
+            get_dt_root()
 
 
 # =============================================================================
@@ -57,15 +67,13 @@ class TestGetDtRoot:
 class TestGetTmpDir:
     """Tests for the get_tmp_dir function."""
 
-    def test_returns_tmp_clones_path(self, tmp_path):
+    def test_returns_tmp_clones_path(self, tmp_path, monkeypatch):
         """Test returns .dt/tmp/clones path."""
         dt_dir = tmp_path / ".dt"
         dt_dir.mkdir()
-        
-        with patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = get_tmp_dir()
-            
-            assert result == dt_dir / "tmp" / "clones"
+        monkeypatch.chdir(tmp_path)
+
+        assert get_tmp_dir() == dt_dir / "tmp" / "clones"
 
 
 # =============================================================================

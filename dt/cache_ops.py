@@ -4,11 +4,12 @@ Shared utilities for copying/linking files into the DVC cache.
 Uses the DVC-preferred order: reflink → hardlink → symlink → copy.
 """
 
+import errno
+import fcntl
 import os
 import shutil
-import subprocess
 from pathlib import Path
-from typing import Literal, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple
 
 LinkType = Literal['reflink', 'hardlink', 'symlink', 'copy', 'skipped', 'failed']
 CacheType = Literal['reflink', 'hardlink', 'symlink', 'copy']
@@ -17,16 +18,62 @@ CacheType = Literal['reflink', 'hardlink', 'symlink', 'copy']
 VALID_CACHE_TYPES = ('reflink', 'hardlink', 'symlink', 'copy')
 
 
+# Linux FICLONE ioctl: _IOW(0x94, 9, int). This is what `cp --reflink` uses.
+_FICLONE = 0x40049409
+
+# Reflink support is a property of the filesystem, so probe each one once.
+# Lustre and NFS -- the filesystems this runs on in anger -- have no CoW
+# support, and without this every single file would pay for a doomed attempt.
+_reflink_supported: Dict[int, bool] = {}
+
+
 def _try_reflink(source: Path, dest: Path) -> bool:
-    """Try to create a reflink (copy-on-write)."""
-    try:
-        result = subprocess.run(
-            ['cp', '--reflink=only', str(source), str(dest)],
-            capture_output=True,
-        )
-        return result.returncode == 0
-    except (OSError, FileNotFoundError):
+    """Try to create a reflink (copy-on-write clone).
+
+    Issues FICLONE directly rather than shelling out to ``cp``. The old
+    implementation passed ``--reflink=only``, which GNU coreutils rejects
+    (it accepts only auto/always/never), so reflinking never once succeeded --
+    it just forked a process per file to earn a usage error.
+    """
+    # cp would happily clobber an existing destination; link_file promises not
+    # to. Also cheap insurance, since we create dest with O_EXCL below.
+    if dest.exists():
         return False
+
+    try:
+        device = dest.parent.stat().st_dev
+    except OSError:
+        return False
+    if _reflink_supported.get(device) is False:
+        return False
+
+    try:
+        src_fd = os.open(source, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        try:
+            dest_fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except OSError:
+            return False
+        try:
+            fcntl.ioctl(dest_fd, _FICLONE, src_fd)
+        except OSError as e:
+            os.close(dest_fd)
+            # Best effort: we created it, so we clean it up.
+            try:
+                os.unlink(dest)
+            except OSError:
+                pass
+            # EOPNOTSUPP/EXDEV mean the filesystem cannot do this, ever.
+            if e.errno in (errno.EOPNOTSUPP, errno.ENOTTY, errno.EXDEV):
+                _reflink_supported[device] = False
+            return False
+        os.close(dest_fd)
+        _reflink_supported[device] = True
+        return True
+    finally:
+        os.close(src_fd)
 
 
 def _try_hardlink(source: Path, dest: Path) -> bool:
@@ -49,6 +96,15 @@ def _try_symlink(source: Path, dest: Path) -> bool:
 
 def _try_copy(source: Path, dest: Path) -> bool:
     """Try to copy the file."""
+    # Unlike link(2)/symlink(2), shutil.copy2 does not fail on an existing
+    # destination -- it truncates and rewrites it in place, and with it every
+    # hardlink to that inode, including the shared remote object the cache
+    # entry was linked from. So this is the one primitive that needs an
+    # explicit existence check to honour link_file's skip-if-present contract.
+    # The stat only costs anything on the copy fallback, which a new file
+    # never reaches.
+    if dest.exists():
+        return False
     try:
         shutil.copy2(source, dest)
         return True

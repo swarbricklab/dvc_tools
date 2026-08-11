@@ -52,10 +52,19 @@ requires_git = pytest.mark.skipif(
     reason="git not installed"
 )
 
-requires_network = pytest.mark.skipif(
-    os.environ.get('DT_TEST_OFFLINE'),
-    reason="Network tests disabled (DT_TEST_OFFLINE set)"
-)
+def requires_network(item):
+    """Skip when DT_TEST_OFFLINE is set, and tag with the requires_network marker.
+
+    The marker matters: without it these are ordinary tests as far as pytest is
+    concerned, and the documented ``-m "not requires_network"`` selects nothing
+    -- so the "offline" run still spends minutes cloning from GitHub.
+    """
+    item = pytest.mark.requires_network(item)
+    return pytest.mark.skipif(
+        os.environ.get('DT_TEST_OFFLINE'),
+        reason="Network tests disabled (DT_TEST_OFFLINE set)",
+    )(item)
+
 
 requires_qxub = pytest.mark.skipif(
     shutil.which('qxub') is None,

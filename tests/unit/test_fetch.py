@@ -24,6 +24,17 @@ from dt import import_data
 from dt import utils
 
 
+def _init_git_repo(path):
+    """Make ``path`` a real git repo so ``dvc.repo.Repo()`` can open it."""
+    run = lambda *a: subprocess.run(
+        ['git', *a], cwd=str(path), capture_output=True, check=True
+    )
+    run('init', '-q')
+    run('config', 'user.email', 'test@example.com')
+    run('config', 'user.name', 'Test')
+    return path
+
+
 # =============================================================================
 # Stage Categorization Tests
 # =============================================================================
@@ -612,7 +623,17 @@ class TestCollectHashesFromStage:
 
 class TestFetchFromPlan:
     """Tests for fetch_from_plan function."""
-    
+
+    @pytest.fixture(autouse=True)
+    def _in_dvc_project(self, tmp_path, monkeypatch):
+        """fetch_from_plan resolves the primary cache via ``Repo()``."""
+        project = tmp_path / 'project'
+        project.mkdir()
+        (project / '.dvc').mkdir()
+        _init_git_repo(project)
+        monkeypatch.chdir(project)
+        return project
+
     def test_empty_plan_returns_empty(self):
         """Empty plan returns empty results."""
         plan = fetch.FetchPlan()
@@ -651,21 +672,43 @@ class TestFetchFromPlan:
         assert '✗ b.dvc' in out
 
     def test_no_source_stages_use_dvc_fetch_with_network(self):
-        """Stages in no_source use dvc fetch with --network."""
+        """Non-import stages in no_source use dvc fetch with --network."""
         mock_stage = MagicMock()
         mock_stage.addressing = 'data.dvc'
-        
+        mock_stage.is_repo_import = False
+
         plan = fetch.FetchPlan()
         plan.no_source = [mock_stage]
-        
+
         with patch('dt.fetch._run_dvc_fetch', return_value=(True, 'Fetched')) as mock_fetch:
             results = fetch.fetch_from_plan(plan, network=True)
-        
+
         assert mock_fetch.called
         assert len(results) == 1
         target, success, msg = results[0]
         assert success is True
-    
+
+    def test_no_source_repo_imports_use_repo_import_fetch(self):
+        """Repo imports in no_source take the import path, not plain dvc fetch."""
+        mock_stage = MagicMock()
+        mock_stage.addressing = 'imported.dvc'
+        mock_stage.is_repo_import = True
+
+        plan = fetch.FetchPlan()
+        plan.no_source = [mock_stage]
+
+        with patch('dt.fetch._run_dvc_fetch') as mock_dvc_fetch:
+            with patch(
+                'dt.fetch._run_repo_import_network_fetch',
+                return_value=(True, 'Fetched'),
+            ) as mock_import_fetch:
+                results = fetch.fetch_from_plan(plan, network=True)
+
+        assert mock_import_fetch.called
+        assert not mock_dvc_fetch.called
+        assert results == [('imported.dvc', True, 'Fetched')]
+
+
     def test_url_imports_call_fetch_url_import_stage(self):
         """URL imports are processed via _fetch_url_import_stage when network=True."""
         mock_stage = MagicMock()
@@ -917,11 +960,12 @@ class TestFetch:
         project = tmp_path / 'project'
         project.mkdir()
         (project / '.dvc').mkdir()
-        
+        _init_git_repo(project)
+
         # Create cache
         cache = tmp_path / 'cache' / 'files' / 'md5'
         cache.mkdir(parents=True)
-        
+
         monkeypatch.chdir(project)
         yield project, tmp_path / 'cache'
     
@@ -1245,6 +1289,8 @@ class TestRunRepoImportNetworkFetch:
         import_info = {'url': 'git@github.com:org/repo.git', 'rev': 'deadbeef', 'path': 'data.csv'}
 
         with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('dt.fetch._resolve_primary_cache_base',
+                   return_value=str(tmp_path / 'cache')), \
              patch('dt.fetch._run_dvc_fetch',
                    return_value=(False, 'dvc fetch failed: not in remote')), \
              patch('dt.fetch._recover_import_via_source_clone',
@@ -1483,7 +1529,8 @@ class TestFetchWithUrlImport:
         project = tmp_path / 'project'
         project.mkdir()
         (project / '.dvc').mkdir()
-        
+        _init_git_repo(project)
+
         monkeypatch.chdir(project)
         return project
     

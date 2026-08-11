@@ -881,19 +881,31 @@ def find_dvc_root(start: Optional[Path] = None) -> Optional[Path]:
 
 
 def find_git_root(start: Optional[Path] = None) -> Optional[Path]:
-    """Find the git repository root using DVC internals.
-    
+    """Find the git repository root by walking up for ``.git``.
+
+    This used to construct a ``dvc.repo.Repo`` and read ``repo.scm.root_dir``,
+    which had two problems. It opened the repo's state database -- on a shared
+    network filesystem that costs hundreds of milliseconds, and every
+    ``cfg.get_value()`` call goes through here. And because ``Repo()`` requires
+    a ``.dvc`` directory, it returned None for a plain git repository, so this
+    did not do what its name says.
+
     Args:
         start: Starting path for the search. Defaults to cwd.
-        
+
     Returns:
         Path to the git root, or None if not in a git repository.
     """
     try:
-        repo = Repo(root_dir=str(start) if start else None)
-        return Path(repo.scm.root_dir)
-    except Exception:
+        current = Path(start).resolve() if start else Path.cwd().resolve()
+    except OSError:
         return None
+
+    for candidate in (current, *current.parents):
+        # A directory in a normal clone; a file in a worktree or submodule.
+        if (candidate / '.git').exists():
+            return candidate
+    return None
 
 
 def find_project_root(start: Optional[Path] = None) -> Path:
