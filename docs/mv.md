@@ -8,6 +8,9 @@ Move or rename DVC-tracked files, preserving import metadata.
 dt mv <src> <dst> [options]
 ```
 
+`<src>` may be either the tracked data path (`data/raw.csv`) or its `.dvc` file
+(`data/raw.csv.dvc`) — both resolve to the same stage. It must exist on disk.
+
 ## What it does
 
 Runs `dvc mv` but fixes a long-standing bug where import `.dvc` files lose their `deps` section when moved. This section contains critical metadata about the import source (repository URL, revision, path).

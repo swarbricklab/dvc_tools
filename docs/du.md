@@ -37,11 +37,11 @@ dt du
 # Human-readable output
 dt du -h
 
-# Output (two columns by default):
+# Output (two columns by default, sorted by the CACHED column):
 # CACHED  EXPECTED   PATH
-#   44K      44K    models/v1.pkl
-#   12M      12M    data/train.csv
-#    0       5.0G    data/images/
+#      0      5.0G   data/images/
+#    44K       44K   models/v1.pkl
+#    12M       12M   data/train.csv
 ```
 
 ### Path prefixes
@@ -92,16 +92,17 @@ dt du --expected -h
 
 ## Output Format
 
-By default, shows both cached and expected sizes with a header:
+By default, shows both cached and expected sizes with a header. Rows are sorted
+ascending by the **cached** column, so anything not present locally sorts first:
 
 ```
 CACHED  EXPECTED   PATH
-  44K      44K    models/v1.pkl
-  12M      12M    data/train.csv
-   0       5.0G    data/images/
+     0      5.0G   data/images/
+   44K       44K   models/v1.pkl
+   12M       12M   data/train.csv
 ```
 
-With `--cached` or `--expected`, shows single column (sorted by size, largest last):
+With `--cached` or `--expected`, shows a single column, sorted by that column (largest last):
 
 ```
    44K    models/v1.pkl
@@ -109,7 +110,8 @@ With `--cached` or `--expected`, shows single column (sorted by size, largest la
   5.0G    data/images/
 ```
 
-With `--inodes`:
+`--inodes` swaps byte counts for file counts, keeping the same column layout —
+two columns by default, one with `--cached`/`--expected`:
 
 ```
        1   models/v1.pkl
@@ -119,7 +121,7 @@ With `--inodes`:
 
 ## Warnings
 
-When files are missing size metadata (showing 0 expected size), a warning is displayed:
+When files are missing size metadata (showing 0 expected size), a warning is printed to stderr. It is only emitted in the modes that show the expected column — default and `--expected`, not `--cached`:
 
 ```
 Warning: 3 file(s) have no size metadata. Run 'dt update' to populate.
@@ -134,7 +136,7 @@ Run `dt update` on the relevant `.dvc` files to populate the size metadata from 
 - Sizes are read from DVC metadata (`.dvc` files and `.dir` manifests)
 - `--cached` mode checks which files are actually present in the local cache
 - `--expected` mode reports the full size regardless of cache state
-- Output is sorted by size ascending (like `du | sort -n`)
+- Output is sorted by size ascending (like `du | sort -n`); in the default two-column mode the sort key is the cached size
 - Uses the same size formatting as DVC itself
 
 ## Related Commands

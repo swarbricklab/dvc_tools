@@ -9,9 +9,11 @@ YAML config format::
     hosts:
       gadi-dm.nci.org.au:
         username: jr9959
-        password: secret       # optional — only used by ssh-copy-id
       github.com:
         # forge — no username needed
+
+Do not put passwords in this file. Nothing reads them: where a password
+is genuinely needed, ``ssh-copy-id`` prompts for it interactively.
 """
 
 import getpass
@@ -56,7 +58,6 @@ from .ssh import (
 class HostConfig:
     """Per-host settings from the YAML config file."""
     username: Optional[str] = None
-    password: Optional[str] = None
 
 
 def _load_config(config_path: Path) -> Dict[str, HostConfig]:
@@ -87,7 +88,6 @@ def _load_config(config_path: Path) -> Dict[str, HostConfig]:
         elif isinstance(values, dict):
             result[str(host)] = HostConfig(
                 username=values.get('username'),
-                password=values.get('password'),
             )
         else:
             raise AuthError(

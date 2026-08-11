@@ -699,3 +699,42 @@ class TestCheckRemoteRefFreshness:
 
 
 # Run with: pytest tests/test_utils.py -v
+
+
+class TestCacheRootFromOdbPath:
+    """Tests for cache_root_from_odb_path / get_cache_root.
+
+    ``get_cache_dir()`` returns DVC's odb path, which under the v3 layout
+    ends in ``files/md5``. Anything handing a location back to DVC needs the
+    root above that, or the layout gets appended twice.
+    """
+
+    def test_strips_files_md5_suffix(self):
+        assert utils.cache_root_from_odb_path(
+            Path('/g/data/a56/dvc/cache/files/md5')
+        ) == Path('/g/data/a56/dvc/cache')
+
+    def test_leaves_bare_root_alone(self):
+        assert utils.cache_root_from_odb_path(
+            Path('/g/data/a56/dvc/cache')
+        ) == Path('/g/data/a56/dvc/cache')
+
+    def test_does_not_strip_partial_match(self):
+        """`md5` without a `files` parent is a real directory name."""
+        assert utils.cache_root_from_odb_path(
+            Path('/some/where/md5')
+        ) == Path('/some/where/md5')
+
+    def test_accepts_str(self):
+        assert utils.cache_root_from_odb_path(
+            '/cache/files/md5'
+        ) == Path('/cache')
+
+    def test_get_cache_root_strips(self):
+        with patch.object(utils, 'get_cache_dir',
+                          return_value=Path('/cache/files/md5')):
+            assert utils.get_cache_root() == Path('/cache')
+
+    def test_get_cache_root_none_outside_repo(self):
+        with patch.object(utils, 'get_cache_dir', return_value=None):
+            assert utils.get_cache_root() is None

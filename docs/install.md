@@ -27,6 +27,8 @@ delegate to `dt hook run <name>`:
 .git/hooks/
 ├── pre-commit       →  dt hook run pre-commit "$@"
 ├── post-checkout    →  dt hook run post-checkout "$@"
+├── post-merge       →  dt hook run post-merge "$@"
+├── post-rewrite     →  dt hook run post-rewrite "$@"
 └── pre-push         →  dt hook run pre-push "$@"
 ```
 
@@ -40,6 +42,8 @@ git config so `.dvc` file conflicts are resolved automatically.
 | `pre-commit` | `dvc-status` | sync | Runs `dvc status` to warn about uncommitted DVC changes |
 | `pre-commit` | `large-files` | sync | Rejects staged files larger than `max_size` (default 1 MB) |
 | `post-checkout` | `dvc-checkout` | sync | Relinks DVC-tracked files after a branch switch — **local-only by default** (skips file checkouts and rebases) |
+| `post-merge` | `dvc-checkout` | sync | Same reconcile after `git merge` |
+| `post-rewrite` | `dvc-checkout` | sync | Same reconcile after `git rebase` / `git commit --amend` |
 | `pre-push` | `dvc-push` | remind | Warns about unpushed DVC data without blocking the git push (see [`dvc-push` modes](#dvc-push-modes)) |
 
 These defaults are **baked into `dt`**, not written to a config file.
@@ -56,8 +60,8 @@ explicitly.
 
 ### `dvc-checkout` is local-only by default
 
-After a branch switch, `dvc-checkout` runs `dt pull` to relink the
-workspace, but with **`network: false`** by default: it uses only local
+After a branch switch, merge, or rewrite, `dvc-checkout` runs `dt pull` to
+relink the workspace, but with **`network: false`** by default: it uses only local
 sources (the local cache plus any locally-mounted remote, e.g. the shared
 cache on HPC). Data that isn't already available is **reported, not
 downloaded**.
@@ -75,7 +79,30 @@ pre-0.12.5 behaviour), set:
 dt config set hooks.post-checkout.checks.dvc-checkout.network true
 ```
 
+`dvc-checkout` is registered separately on `post-checkout`, `post-merge`
+and `post-rewrite`, so set `network` on each hook you want it to apply to.
+
 Run an explicit `dt pull` any time to fetch missing data over the network.
+
+### `dvc-checkout` safety gates
+
+Reconciling the workspace against an incoming `dvc.lock` can delete large
+amounts of data, so `dvc-checkout` refuses to run (and prints why, without
+failing the git operation) when either of these holds:
+
+- **Subset drop** — the incoming `dvc.lock` records a strict subset of the
+  outs the outgoing one had. The dropped paths are listed.
+- **Behind upstream** — the current branch is behind its configured
+  `@{upstream}`. No fetch is performed; this is a local snapshot only.
+
+Set `DT_HOOK_FORCE=1` in the environment to bypass both gates for a single
+git operation.
+
+The hook also skips entirely when: the `post-checkout` flag says it was a
+file checkout, `prev == new` (e.g. `git checkout -b` at the current tip),
+or a rebase is in progress (`post-rewrite` picks it up once the rebase
+finishes). When it does reconcile, it prints an added/modified/deleted
+summary and lists deleted paths, so a large deletion is never silent.
 
 ## Commands
 
@@ -123,29 +150,40 @@ Displays every configured check for every hook, showing:
 
 - Check name
 - Mode (`sync` or `async`)
-- Config scope it comes from (local, project, user, system)
+- Where the setting comes from — `default` for the built-in defaults, or the
+  config scope that overrode them (local, project, user, system)
 - Extra settings (`max_size`, external `command`)
 - Whether it is disabled
 
-Example output:
+Example output on a repo with no `hooks` config of its own — everything
+comes from the built-in defaults:
 
 ```
 pre-commit:
-  dvc-status           sync   (local)
-  large-files          sync   (local)  max_size=1MB
+  dvc-status           sync   (default)
+  large-files          sync   (default)  max_size=1MB
 
 post-checkout:
-  dvc-checkout         sync   (local)
+  dvc-checkout         sync   (default)
+
+post-merge:
+  dvc-checkout         sync   (default)
+
+post-rewrite:
+  dvc-checkout         sync   (default)
 
 pre-push:
-  dvc-push             remind (local)
+  dvc-push             remind (default)
 ```
 
 ### dt hook run
 
 ```bash
-dt hook run <hook-name> [ARGS...]
+dt hook run <hook-name> [ARGS...] [-v]
 ```
+
+`<hook-name>` is one of `pre-commit`, `post-checkout`, `post-merge`,
+`post-rewrite`, `pre-push`.
 
 Runs all enabled checks for the named hook.  This is what the git hook
 scripts call—you rarely invoke it directly, but it can be useful for
@@ -174,7 +212,8 @@ dt hook check large-files [--max-size SIZE] [-v]
 
 Stand-alone invocation of the built-in large-file guard.  Scans
 `git diff --cached` for files exceeding `SIZE` (default `1MB`).
-Files with `.dvc` extension are excluded.
+Files with a `.dvc` extension and files named `.gitignore` are excluded,
+as are staged deletions.
 
 ```bash
 dt hook check large-files --max-size 100MB
@@ -192,7 +231,8 @@ checks on HPC systems where login-node time is limited.
 
 1. `dt hook run` encounters a check with `mode: async`.
 2. It builds a worker command: `dt hook run-check <hook> <check> --worker`.
-3. The command is submitted via `hpc.build_qxub_command()`.
+3. The command is submitted via `hpc.build_qxub_command()`. For `dvc-push`,
+   `--internet` is added when no locally-mounted remote is available.
 4. The git operation continues without waiting.
 5. On the compute node, `dt hook run-check --worker` runs the check and
    saves the result as JSON in `.dt/hook-results/`.
@@ -213,17 +253,21 @@ inline and writes the result to `.dt/hook-results/`.
 ### dt hook results
 
 ```bash
-dt hook results [-n LIMIT]
+dt hook results [-n LIMIT] [--all]
 dt hook results --clear [--days N]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `-n, --limit N` | Show at most N results (default 20) |
+| `--all` | Show all results, not just unread ones |
 | `--clear` | Remove result files |
 | `--days N` | With `--clear`, only remove results older than N days |
 
-Displays recent async check results, most recent first:
+By default only **unread** results are shown — those newer than the
+`.last-read` sentinel in `.dt/hook-results/`, which is touched every time
+you run `dt hook results`. Hooks print a reminder when unread results are
+waiting. Results are listed most recent first:
 
 ```
 ✓ 2026-03-11 14:32:01  pre-commit/dvc-status
@@ -264,9 +308,18 @@ hooks:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | bool | `true` | Whether the check runs |
-| `mode` | string | `sync` | `sync` (blocks git) or `async` (qxub) |
+| `mode` | string | `sync` | `sync` (blocks git), `async` (qxub), or `off` (skip). `dvc-push` accepts more — see [`dvc-push` modes](#dvc-push-modes) |
 | `command` | string | — | Shell command for external checks |
 | `max_size` | string | `1MB` | For `large-files` check only |
+| `network` | bool | `false` | For `dvc-checkout` check only — allow fetching missing data from the remote |
+
+There is also a top-level `hooks.verbosity` key (not per-check) controlling
+how much hook output you see: `quiet`, `normal` (default), or `verbose`.
+`dt hook run -v` forces `verbose` regardless of the config value.
+
+```bash
+dt config set hooks.verbosity quiet
+```
 
 ### Built-in checks
 
@@ -274,8 +327,9 @@ hooks:
 |------|------|-------------|
 | `dvc-status` | pre-commit | Runs `dvc status` via `dt status` |
 | `large-files` | pre-commit | Rejects staged files exceeding `max_size` |
-| `dvc-checkout` | post-checkout | Runs `dvc checkout` (skips file checkouts and rebases) |
+| `dvc-checkout` | post-checkout, post-merge, post-rewrite | Reconciles the workspace via `dt pull` (skips file checkouts and in-progress rebases; see [safety gates](#dvc-checkout-safety-gates)) |
 | `dvc-push` | pre-push | Reminds about / prompts for / performs `dt push` — see [`dvc-push` modes](#dvc-push-modes) |
+| `index-sync` | any | Pulls then pushes the site cache index. Not enabled by default; a no-op unless `index.auto_sync` is configured |
 
 #### `dvc-push` modes
 
@@ -298,6 +352,13 @@ dt config set hooks.pre-push.checks.dvc-push.mode prompt
 `remind` is the default because inline pushes from a pre-push hook can
 be very slow on HPC login nodes and surprise users with long blocking
 operations. The reminder is a single fast status check.
+
+When the push does run (`sync`, `prompt`-confirmed, or on the compute node
+for `async`) it prefers a locally-mounted remote, and retries if DVC's
+workspace lock is held by another process — up to 12 retries over roughly
+9 minutes. This matters most for `async`, where the job runs later while
+you keep working in the same checkout. Any other `dvc push` failure fails
+immediately.
 
 ### External checks
 
@@ -370,7 +431,8 @@ hooks:
 | Feature | `dvc install` | `dt install` |
 |---------|---------------|--------------|
 | pre-commit hook | `dvc status` | Configurable checks (dvc-status, large-files, custom) |
-| post-checkout hook | `dvc checkout` | Configurable (dvc-checkout, custom) |
+| post-checkout hook | `dvc checkout` | Configurable (dvc-checkout, custom), with safety gates |
+| post-merge / post-rewrite hooks | — | ✓ Reconcile after `git merge` / `git rebase` |
 | pre-push hook | `dvc push` | Configurable: `remind` / `prompt` / `sync` / `async` / `off` |
 | Merge driver | ✓ `.dvc` conflict resolution | ✓ Same driver |
 | Large file guard | — | ✓ Built-in `large-files` check |

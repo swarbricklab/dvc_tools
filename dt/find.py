@@ -36,12 +36,12 @@ def find_by_hash(
         
     Returns:
         List of matches, each containing:
-            - path: Workspace path to the file
+            - path: Workspace path, relative to the repo root
             - hash: Full MD5 hash
-            - dvc_file: Path to .dvc file (if show_dvc_file)
+            - dvc_file: Path to .dvc file, repo-relative (if show_dvc_file)
             - dir_hash: Parent .dir hash (if show_dir_file and file is nested)
-            - cache_path: Full path in cache (if show_cache_path)
-            
+            - cache_path: Full path in cache, absolute (if show_cache_path)
+
     Raises:
         FindError: If hash is invalid or search fails
     """
@@ -55,7 +55,20 @@ def find_by_hash(
         repo = Repo()
     except Exception as e:
         raise FindError(f"Not in a DVC repository: {e}")
-    
+
+    # DVC hands back absolute filesystem paths. Report them relative to the
+    # repo root instead: it is what the user typed, it is what every other dt
+    # command prints, and it means `dt find ... | xargs dt history` works.
+    # Cache paths stay absolute -- they are outside the repo.
+    repo_root = Path(repo.root_dir)
+
+    def _rel(p) -> str:
+        try:
+            return str(Path(p).relative_to(repo_root))
+        except ValueError:
+            # Outside the repo (external output): absolute is the honest answer.
+            return str(p)
+
     results = []
     cache_dir = get_cache_dir()
     
@@ -64,8 +77,8 @@ def find_by_hash(
             continue
         
         out_hash = out.hash_info.value.replace('.dir', '').lower()
-        workspace_path = str(out.fs_path)
-        dvc_file = str(out.stage.path) if out.stage else None
+        workspace_path = _rel(out.fs_path)
+        dvc_file = _rel(out.stage.path) if out.stage else None
         
         # Check if this output matches
         if out_hash.startswith(search_hash) or search_hash.startswith(out_hash):
@@ -92,8 +105,8 @@ def find_by_hash(
                         item_hash = hash_info.value.lower()
                         if item_hash.startswith(search_hash) or search_hash.startswith(item_hash):
                             relpath = '/'.join(key)
-                            full_path = str(Path(out.fs_path) / relpath)
-                            
+                            full_path = _rel(Path(out.fs_path) / relpath)
+
                             result = {
                                 'path': full_path,
                                 'hash': hash_info.value,

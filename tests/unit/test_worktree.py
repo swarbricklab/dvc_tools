@@ -282,3 +282,40 @@ class TestRemove:
             
             captured = capsys.readouterr()
             assert "Removing worktree" in captured.out
+
+
+class TestAddCachePath:
+    """The worktree's cache must be set to the cache *root*.
+
+    Regression: add() used utils.get_cache_dir(), which returns the odb path
+    (``<root>/files/md5``). `dvc cache dir` appends the layout itself, so the
+    worktree resolved its cache to ``<root>/files/md5/files/md5`` -- pointing
+    at nothing, and silently re-downloading everything.
+    """
+
+    def _run_add(self, tmp_path, odb_path):
+        worktree_path = tmp_path / "wt"
+        captured = []
+
+        def capture(cmd, **kwargs):
+            captured.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("dt.worktree.utils.get_cache_dir", return_value=odb_path):
+            with patch("subprocess.run", side_effect=capture):
+                add(str(worktree_path), branch="main")
+        return captured
+
+    def test_passes_cache_root_not_odb_path(self, tmp_path):
+        captured = self._run_add(tmp_path, Path("/cache/files/md5"))
+
+        cache_cmds = [c for c in captured if c[:3] == ['dvc', 'cache', 'dir']]
+        assert cache_cmds, f"no `dvc cache dir` call in {captured}"
+        assert cache_cmds[0][-1] == "/cache"
+        assert "files/md5" not in cache_cmds[0][-1]
+
+    def test_root_without_suffix_passed_through(self, tmp_path):
+        captured = self._run_add(tmp_path, Path("/cache"))
+
+        cache_cmds = [c for c in captured if c[:3] == ['dvc', 'cache', 'dir']]
+        assert cache_cmds[0][-1] == "/cache"

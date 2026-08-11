@@ -542,6 +542,9 @@ def scan_extras(
 # Helpers: tar / hashing
 # --------------------------------------------------------------------------- #
 
+# Walltime for a single stage worker. See _archive_qxub_config.
+DEFAULT_STAGE_WALLTIME = '04:00:00'
+
 _COMPRESSION_TAR_FLAGS = {
     'none': [],
     'gzip': ['-z'],
@@ -735,9 +738,13 @@ def _archive_qxub_config() -> Dict[str, str]:
     archive-specific keys are unset, so users with an existing qxub
     config can still override per-call.
     """
+    # A stage worker tars one md5 prefix, so it is far shorter-lived than a
+    # generic dt job; 4h asks the scheduler for less and starts sooner. This
+    # is deliberately below the 10h generic default -- set
+    # `archive.qxub_walltime` if your prefixes are unusually large.
     walltime_raw = (
         cfg.get_value('archive.qxub_walltime')
-        or cfg.get_value('qxub.walltime', '04:00:00')
+        or cfg.get_value('qxub.walltime', DEFAULT_STAGE_WALLTIME)
     )
     return {
         'env':      str(cfg.get_value('archive.qxub_env')
@@ -1308,7 +1315,7 @@ def deposit_archive(
 ) -> CreateResult:
     """Upload staged inner tarballs to the backend folder.
 
-    Reads ``.dvc/archives/<name>.yaml`` (written by :func:`stage_archive`),
+    Reads ``.dt/archives/<name>.yaml`` (written by :func:`stage_archive`),
     uploads each ``<prefix>.tar[.ext]`` to ``<backend_dir>/<filename>``
     in parallel, then uploads a copy of the manifest as
     ``<backend_dir>/<name>.manifest.yaml`` last as the completion
@@ -1560,7 +1567,8 @@ def create_archive(
 # --------------------------------------------------------------------------- #
 
 def list_archives(repo_root: Optional[Path] = None) -> List[ArchiveManifest]:
-    """Return all manifests under ``.dvc/archives/``."""
+    """Return all manifests under ``.dt/archives/`` (and legacy
+    ``.dvc/archives/``)."""
     return list_manifests(repo_root=repo_root)
 
 
@@ -2065,7 +2073,7 @@ def destroy_archive(
     Args:
         name: Archive name.
         yes: Skip the interactive confirmation prompt.
-        keep_manifest: Don't delete ``.dvc/archives/<name>.yaml`` or
+        keep_manifest: Don't delete ``.dt/archives/<name>.yaml`` or
             the registry entry — useful if you want to retry deposit
             after wiping the backend copy.
         backend_override: Inject a backend (used by tests).
@@ -2091,7 +2099,7 @@ def destroy_archive(
             + (
                 ""
                 if keep_manifest
-                else f"  - 1 local manifest (.dvc/archives/{name}.yaml)\n"
+                else f"  - 1 local manifest (.dt/archives/{name}.yaml)\n"
                      f"  - 1 central register entry (if configured)\n"
             )
             + "\n"

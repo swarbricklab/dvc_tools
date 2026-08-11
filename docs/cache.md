@@ -12,6 +12,10 @@ Sets up an external shared cache with proper permissions for group collaboration
 dt cache init [options] [project_name]
 ```
 
+### Arguments
+
+- `[project_name]`: Optional project name, equivalent to `--name` (`--name` wins if both are given)
+
 ### Options
 
 - `--name <project_name>`: Override project name (defaults to current directory name)
@@ -30,6 +34,11 @@ dt cache init [options] [project_name]
   [`dt cache perms`](#dt-cache-perms)
 - Configures DVC to use the external cache via `dvc cache dir --local`
 - Keeps configuration local to maintain repository portability
+
+If the cache directory already exists, it is reused as-is: the structure is
+**not** re-created and permissions are **not** re-applied. Use
+[`dt cache perms --fix`](#dt-cache-perms) to bring an existing cache back to
+policy.
 
 ### Examples
 
@@ -56,7 +65,7 @@ The cache location is determined by (in order of precedence):
 1. **`--cache-path`** - Complete path override (absolute or relative to current directory)
 2. **Constructed path** - `${cache_root}/${project_name}` where:
    - **cache_root**: `--cache-root` argument OR `cache.root` config value
-   - **project_name**: `--name` argument OR current directory name
+   - **project_name**: `--name` argument OR the positional argument OR current directory name
 
 **Default behavior** (no options): Uses `${cache.root config}/${current directory name}`
 
@@ -93,6 +102,10 @@ The workspace files are **not** affected. Users can manipulate workspace files d
 ### Safety Check
 
 By default, `dt cache rm` **refuses to delete files that are not in the remote**. This prevents accidental data loss for files that haven't been pushed yet.
+
+The check is all-or-nothing: if *any* file in the resolved target set is missing from the remote, **nothing at all is deleted** — the command reports the offending files and stops. It does not delete the pushed ones and skip the rest.
+
+The check is also deliberately conservative: if the remote cannot be reached, or DVC's internals cannot be queried, every file is treated as *not* in the remote and the command blocks. So `dt cache rm` will refuse to run offline unless you pass `--force`.
 
 If you want to delete such files anyway (e.g., cleaning up a mistaken `dvc add`), use `--force`:
 
@@ -155,7 +168,7 @@ dt cache validate [options] [targets...]
 
 ### Arguments
 
-- `[targets]`: Optional paths, `.dvc` files, or directories to validate. Without targets, validates all tracked files.
+- `[targets]`: Optional paths, `.dvc` files, or directories to validate. Without targets, validates **every blob in the cache** — including blobs no longer referenced by the workspace — rather than only the currently tracked files.
 
 ### Options
 
@@ -164,16 +177,20 @@ dt cache validate [options] [targets...]
 | `--fix` | Delete corrupted files (they can be re-fetched with `dt pull`) |
 | `-v`, `--verbose` | Show detailed progress for each file |
 | `--json` | Output results as JSON |
-| `--no-progress` | Suppress progress bar |
+| `--no-progress` | Disable the progress counter |
 
 ### What it does
 
-1. Resolves targets to find all DVC-tracked files
-2. For each file in the cache:
+1. Builds the file list — from the given targets, or by walking the whole cache when no targets are given (`.tmp` files are skipped)
+2. For each file:
    - Computes the actual MD5 hash
    - Compares against the expected hash (from the cache filename)
    - Reports mismatches as corrupted files
 3. With `--fix`, deletes corrupted files
+
+Validation without `--fix` is read-only and takes no lock; `--fix` takes the
+workspace lock before it deletes anything. The command exits non-zero if
+corruption was found and `--fix` was not given.
 
 ### Examples
 
@@ -211,16 +228,30 @@ The `--fix` option only deletes the corrupted individual files. You must use `dt
 ### Understanding the Output
 
 ```
-Validating 150 cache files...
-  ✓ 148 valid
-  ✗ 2 corrupted
+$ dt cache validate data/
+Validating 150/150...
+Validated 150 files:
+  ✓ Valid: 148
+  ✗ Corrupted: 2
 
 Corrupted files:
-  abc123... (expected: abc123, actual: def456)
-  789xyz... (expected: 789xyz, actual: 000000)
+  data/train.csv
+  data/images/0042.tif
 
-Affected .dir manifests: 1
-  Run 'dt pull --force' to re-fetch affected directories
+Run with --fix to delete corrupted files, then 'dt pull' to re-fetch.
+```
+
+Corrupted entries are named by workspace path only when targets were given.
+A whole-cache run has no workspace path to attribute a blob to, so it lists
+hashes instead. Expected/actual hashes are printed per file with `-v`. After `--fix`, the
+summary instead reports how many files were deleted, and — if any of them lived
+inside a tracked directory — points you at `dt pull --force`:
+
+```
+Fixed: deleted 2 corrupted file(s)
+
+1 file(s) were inside directories.
+Run 'dt pull --force' to re-fetch those directories.
 ```
 
 ### Use Cases
@@ -245,7 +276,7 @@ dt cache perms --fix --no-sticky  # ...without restricting deletion
 | `--path PATH` | Check a specific cache directory |
 | `--fix` | Apply the policy. Without this, only reports. |
 | `--sticky` / `--no-sticky` | Require the sticky bit (default: on, or the `perms.sticky` config) |
-| `--allow-other` / `--no-other` | Permit world read/execute (default: off) |
+| `--allow-other` / `--no-other` | Permit world read/execute (default: off, or the `perms.allow_other` config) |
 | `-j, --jobs N` | Concurrent stat workers (default: 8) |
 | `--json` / `-v` | Machine-readable output / list every directory |
 
@@ -276,7 +307,7 @@ dt cache clean --path /path/to/cache --json
 | Option | Description |
 |--------|-------------|
 | `--path PATH` | Clean a specific cache directory |
-| `--min-age DAYS` | Only remove files older than this (default: 7) |
+| `--min-age DAYS` | Only remove files older than this (default: 7, or the `clean.min_age_days` config) |
 | `--delete` | Actually remove the files. Without this, only reports. |
 | `-j, --jobs N` | Concurrent prefix scanners (default: 8) |
 | `--json` / `-v` | Machine-readable output / list every file |
@@ -294,6 +325,6 @@ quota everyone shares.
 - [`dt init`](init.md) - Initialize projects with cache setup
 - [`dt fetch`](fetch.md) - Fetch imports from local caches
 - [`dt import`](import.md) - Import data from other repositories
-- [`dt remote init`](remote.md#init) - Set up remote storage
+- [`dt remote init`](remote.md#dt-remote-init) - Set up remote storage
 - [`dt tmp`](tmp.md) - Manage temporary repository clones
 - [`dt config`](config.md) - Configure cache settings

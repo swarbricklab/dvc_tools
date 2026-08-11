@@ -49,7 +49,7 @@ purely local. Quick reference:
 | `prune` | `copyq` | `gdata/<proj>+massdata/<proj>` (+ source-remote flag) | Re-verifies first (so needs MDSS), then deletes the on-disk source |
 | `destroy` | `copyq` | `gdata/<proj>+massdata/<proj>` | Deletes inner tars + sidecar from MDSS |
 | `list` | login node | — | Reads local `.dt/archives/` (and `.dvc/archives/` for legacy) |
-| `registry list` / `registry sync` | login node | path holding the register dir | Reads YAML files |
+| `registry list` / `registry sync` | login node | path holding the register dir | Plain YAML file IO: `list` reads the register, `sync` reads manifests and rewrites register entries |
 
 Notes:
 
@@ -95,6 +95,11 @@ completion sentinel:
   └── <NAME>.manifest.yaml   ← completion sentinel
 ```
 
+The `.zst` suffix above assumes `--compress zstd`; with the default
+`--compress none` the inner tars are plain `00.tar` … `ff.tar`, and
+with `gzip` they are `00.tar.gz` … The manifest records the exact
+filename for each prefix either way.
+
 This replaces the previous "one giant outer tar" design. Per-file
 uploads can run in parallel, partial uploads survive walltime
 boundaries (deposit is resumable), MDSS doesn't have to hold a
@@ -131,9 +136,10 @@ If `NAME` is omitted, it defaults to `<remote-dir-name>-<YYYY-MM-DD>`.
 | `--compress` | `archive.compress` or `none` | `none`, `gzip`, or `zstd`. |
 | `--source-layout` | `auto` | `auto` / `dvc-v2` / `dvc-v3` / `dvc-mixed`. Default inspects the remote. |
 | `--url` | `git remote get-url origin` of the project | Git URL to record in the manifest. |
-| `--dry-run` | — | Plan and report sizes without uploading. |
+| `--dry-run` | — | Plan and report sizes without creating tarballs or uploading. |
 | `--force` | — | Overwrite existing manifest/staging, ignore low-disk warnings. |
 | `--resume` | — | Reuse staging, skipping prefixes/files with valid sentinels. |
+| `--via-qxub` | — | Dispatch the stage phase as one qxub job per prefix (see [`stage`](#dt-remote-archive-stage-name)). |
 | `--keep-staging` | — | Keep the staging directory after upload. |
 
 `create` warns about — but does **not** archive — files in the source
@@ -165,13 +171,16 @@ running inline:
 dt remote archive stage neochemo-2026-05 --via-qxub
 ```
 
-Each worker is a single-CPU job invoking `dt remote archive
-_build-prefix <NAME> <PREFIX>` on a compute node; the orchestrator
+Each worker is a single-CPU job invoking the internal
+`dt remote archive _build-prefix <NAME> <PREFIX>` subcommand (hidden;
+never run it by hand) on a compute node; the orchestrator
 waits via `qxub monitor`, then assembles the manifest from the
 sentinels every worker leaves in staging. The 256 prefixes give you
 natural multi-node parallelism, bounded only by your PBS queue's
-concurrency limit. qxub config (queue, walltime, mem) is read from
-`qxub.*` keys — see [config.md](config.md).
+concurrency limit. Worker qxub settings (env, queue, walltime, mem)
+come from the `archive.qxub_*` keys, falling back to the generic
+`qxub.*` keys when those are unset — see
+[Configuration](#configuration) and [config.md](config.md).
 
 ### `dt remote archive deposit <NAME>`
 
@@ -306,11 +315,15 @@ Refuses to run unless:
 
 1. The archive verifies (sidecar present + every inner tar present at
    expected size). `--force` never bypasses this.
-2. There are no files in the source remote outside `files/md5/`
+2. There are no files in the source remote outside the DVC blob layout
+   recorded in the manifest — `files/md5/` for `dvc-v3`, the top-level
+   `00` … `ff` prefix dirs for `dvc-v2`, both for `dvc-mixed`
    (extras). `--force` skips this check.
 
-When both conditions are met, deletes `<source-remote>/files/md5/` and
-reports the bytes freed. `--yes` skips the interactive confirmation.
+When both conditions are met, deletes those same blob directories
+(`<source-remote>/files/md5/` for a v3 remote, the top-level hex prefix
+dirs for a v2 remote, both for a mixed one) and reports the bytes
+freed. `--yes` skips the interactive confirmation.
 
 ## Parallelism
 
@@ -419,19 +432,25 @@ The first PR ships:
 Adding a backend means subclassing the `ArchiveBackend` protocol in
 [dt/archive/backends.py](../dt/archive/backends.py) and calling
 `register_backend('<name>', <Cls>)`. The protocol is small: `put_file`,
-`get_file`, `exists`, `stat`, `list_dir`.
+`get_file`, `delete_file`, `exists`, `stat`, `list_dir`, `rmdir`.
 
 ## Manifest
 
 `.dt/archives/<name>.yaml` is a small YAML document (schema version 2)
 recording:
 
-- `backend_dir` — folder path on the backend.
+- `backend` / `backend_dir` — backend name and folder path on it.
 - `layout: folder-per-prefix` — one inner tar per md5 prefix.
-- `contents.inner_tars` — one row per inner tar with filename, size,
-  sha256 and object count.
-- Provenance: git ref + git url, dt version, who created it, when.
-- The list of extras present at archive time (informational).
+- `source_layout` — `dvc-v3` / `dvc-v2` / `dvc-mixed` (see
+  [Source DVC layouts](#source-dvc-layouts)).
+- `source_remote` — the on-disk remote directory that was archived.
+- `contents` — `total_objects`, `total_bytes`, `compression`, and
+  `inner_tars`: a mapping of prefix key → `{filename, size_bytes,
+  sha256, n_objects}`.
+- Provenance: `git_ref` + `git_url`, `dt_version`, `created_by`,
+  `created_at`.
+- `extras_at_archive_time` — the files present outside the blob layout
+  at archive time, as `{path, size}` rows (informational).
 
 Commit it alongside the rest of the project so `list`, `verify`, and
 `restore` work without backend access. A copy of the same manifest is
@@ -476,6 +495,8 @@ Commands that notice the signpost:
 | `dt pull` | **Refuses** with the same message — keeps `dvc pull` from timing out against an empty remote. |
 | `dt status` | Prints the signpost message before delegating to `dvc status`, but doesn't refuse. |
 | `dt doctor` | Reports an `archived_remotes` check failure with a suggested `dt remote archive restore` command. |
+| `dt remote status` | Reports the remote as archived (backend, backend dir, archive name, pruned-at, layout) instead of scanning an empty blob tree; cross-references the central register for verification state when configured. |
+| `dt remote verify` | **Refuses** — there are no blobs left on disk to verify. |
 | `dt remote archive restore` | **Removes** the signpost on full restore (since the data is back). Partial restores leave it. |
 
 The signpost is the *only* on-disk artefact of an archived remote
@@ -513,6 +534,7 @@ If `archive.registry_path` is unset, register hooks are silent no-ops.
 | `archive.backend_root` | `dt-archive` | Base path on the backend. |
 | `archive.stage_jobs` | `min(PBS_NCPUS or nproc, 8)` | Parallel workers for `stage`. |
 | `archive.deposit_jobs` | `4` | Parallel workers for `deposit`. MDSS-politeness ceiling. |
+| `archive.scan_jobs` | `32` | Threads for the preflight remote scan (`stat()` per object). Metadata-bound, not CPU-bound, so it can fan out wider than `stage_jobs`. |
 | `archive.compress` | `none` | Default compression for inner tars. DVC blobs are usually already-compressed; gzip saves ~10% at hours of CPU cost. Set to `zstd` for genuinely compressible data. |
 | `archive.registry_path` | — (off) | Central register directory (team-shared OK). |
 | `archive.qxub_queue` | `normal` (fallback `qxub.queue`) | PBS queue for `--via-qxub` stage workers. *Not* `copyq` — workers need CPU. |

@@ -7,6 +7,12 @@
 2. Is the cache being populated correctly?
 3. Does `dvc checkout` work with the populated cache?
 
+Before working through this, rule out the simplest cause: if the failure only
+happens inside a batch job, the node probably has no outbound network and the
+fetch is failing on a lookup that needs one (imports resolve by cloning their
+source repo). That case is handled by [`dt offline`](offline.md), not by the
+link-type debugging below.
+
 ## Quick Debug Commands
 
 ### 1. Check filesystem types
@@ -16,8 +22,12 @@
 df -T /scratch/$PROJECT /g/data/$PROJECT 2>/dev/null || df /scratch/$PROJECT /g/data/$PROJECT
 
 # Are they the same filesystem? (hardlinks won't work across filesystems)
-stat -f %d /scratch/$PROJECT /g/data/$PROJECT 2>/dev/null || stat -c %d /scratch/$PROJECT /g/data/$PROJECT
+# %d is the device number; identical values mean the same filesystem.
+stat -c %d /scratch/$PROJECT /g/data/$PROJECT
 ```
+
+Note: on Linux, `stat -f` is *filesystem* stat and its `%d` means something
+else entirely (free inodes), so use `stat -c` here.
 
 ### 2. Test link types manually
 
@@ -30,7 +40,9 @@ mkdir -p "$(dirname $REMOTE_FILE)" "$(dirname $CACHE_FILE)"
 echo "test content" > "$REMOTE_FILE"
 
 # Test reflink (usually not supported on Lustre)
-cp --reflink=only "$REMOTE_FILE" "$CACHE_FILE.reflink" 2>&1
+# Use --reflink=always: GNU cp only accepts auto/always/never, so
+# --reflink=only fails with "invalid argument" regardless of the filesystem.
+cp --reflink=always "$REMOTE_FILE" "$CACHE_FILE.reflink" 2>&1
 echo "Reflink: $?"
 
 # Test hardlink
@@ -106,6 +118,9 @@ find "$CACHE_DIR" -type l -exec sh -c 'echo "{}"; ls -la "{}"; test -e "{}" && e
 
 ### 6. Trace exactly what populate_cache_file does
 
+`populate_cache_file()` lives in `dt/cache_ops.py`; it tries reflink →
+hardlink → symlink → copy in that order unless `--cache-type` pins one.
+
 ```python
 # Run this Python snippet in the repo directory
 import os
@@ -124,7 +139,7 @@ dest.parent.mkdir(parents=True, exist_ok=True)
 
 # Reflink
 import subprocess
-result = subprocess.run(['cp', '--reflink=only', str(source), str(dest)], capture_output=True)
+result = subprocess.run(['cp', '--reflink=always', str(source), str(dest)], capture_output=True)
 print(f"Reflink: {'OK' if result.returncode == 0 else result.stderr.decode()}")
 if dest.exists(): dest.unlink()
 

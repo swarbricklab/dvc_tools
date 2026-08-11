@@ -301,3 +301,58 @@ class TestFormatHistory:
         # Message should be truncated to 40 chars
         assert long_message not in output
         assert "A" * 40 in output
+
+
+class TestHistoryLimit:
+    """`-n N` must return the N most recent versions.
+
+    Regression: the collection loop walks oldest->newest (a version is only
+    recognisable as a *change* against the hash before it) and used to break
+    once it had N results. That returned the file's N **oldest** versions and
+    then reversed them, so they were presented as the most recent.
+    """
+
+    def _history_with_limit(self, limit):
+        # get_candidate_commits yields newest-first, as `git log` does.
+        commits = ["c5", "c4", "c3", "c2", "c1"]
+        hashes = {c: f"hash{i}" for i, c in enumerate(commits, start=1)}
+
+        with patch("dt.history.offline_status", return_value={"enabled": True}):
+            with patch("dt.history.Repo", return_value=MagicMock()):
+                with patch("dt.history.get_candidate_commits",
+                           return_value=commits):
+                    with patch("dt.history.get_hash_at_rev") as mock_hash:
+                        mock_hash.side_effect = (
+                            lambda path, commit, repo=None: hashes.get(commit))
+                        with patch("dt.history.get_commit_info") as mock_info:
+                            mock_info.side_effect = lambda c: {
+                                "hash": f"{c}full", "short_hash": c,
+                                "date": "2026-01-01", "message": "m",
+                                "author": "A",
+                            }
+                            return history("/path/to/file.csv", limit=limit)
+
+    def test_returns_newest_not_oldest(self):
+        results = self._history_with_limit(2)
+
+        assert len(results) == 2
+        # c5 is the newest commit; c1 the oldest.
+        assert [r["short_commit"] for r in results] == ["c5", "c4"]
+        assert "c1" not in [r["short_commit"] for r in results]
+
+    def test_newest_first_ordering_preserved(self):
+        results = self._history_with_limit(3)
+
+        assert [r["short_commit"] for r in results] == ["c5", "c4", "c3"]
+
+    def test_no_limit_returns_all_newest_first(self):
+        results = self._history_with_limit(None)
+
+        assert [r["short_commit"] for r in results] == [
+            "c5", "c4", "c3", "c2", "c1"]
+
+    def test_limit_larger_than_history(self):
+        results = self._history_with_limit(99)
+
+        assert len(results) == 5
+        assert results[0]["short_commit"] == "c5"

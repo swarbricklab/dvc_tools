@@ -1,7 +1,12 @@
 """Temporary repository clone management for DVC Tools.
 
-Manages sparse clones of remote repositories in .dt/tmp/clones/ for accessing
-their DVC configuration without a full checkout.
+Manages clones of remote repositories in .dt/tmp/clones/ for accessing their
+DVC configuration and history without checking out any data.
+
+These were sparse clones once, limited to .dvc/ and *.dvc files. They are now
+full clones: dvc.yaml resolution and `dvc diff` against an arbitrary revision
+both need more of the tree than a sparse checkout carries. No DVC-tracked data
+is downloaded either way.
 """
 
 import re

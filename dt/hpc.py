@@ -39,17 +39,27 @@ def require_qxub() -> None:
         )
 
 
+# Workers submitted through here move bytes -- `dt push` shipping cache
+# objects to a remote -- so they belong on the data-mover queue. Compute-bound
+# callers deliberately default elsewhere: see DEFAULT_COMPUTE_QUEUE in
+# dvc_utils, which serves the same `qxub.queue` key with a different fallback.
+DEFAULT_TRANSFER_QUEUE = 'copyq'
+DEFAULT_ENV = 'dt'
+DEFAULT_WALLTIME = '10:00:00'
+DEFAULT_MEM = '4GB'
+
+
 def get_qxub_config() -> dict:
     """Get qxub configuration from dt config.
-    
+
     Returns:
         Dictionary with qxub settings.
     """
     return {
-        'env': cfg.get_value('qxub.env', 'dt'),
-        'queue': cfg.get_value('qxub.queue', 'copyq'),
-        'walltime': cfg.get_value('qxub.walltime', '10:00:00'),
-        'mem': cfg.get_value('qxub.mem', '4GB'),
+        'env': cfg.get_value('qxub.env', DEFAULT_ENV),
+        'queue': cfg.get_value('qxub.queue', DEFAULT_TRANSFER_QUEUE),
+        'walltime': cfg.get_value('qxub.walltime', DEFAULT_WALLTIME),
+        'mem': cfg.get_value('qxub.mem', DEFAULT_MEM),
     }
 
 

@@ -23,7 +23,8 @@ dt migrate [options] [targets...]
 
 - `--dry`: Show what would change without modifying files
 - `-v`, `--verbose`: Print detailed progress (hash changes per file)
-- `--cache-root <path>`: Override cache root directory (auto-detected if omitted)
+- `--cache-root <path>`: Override cache root directory (auto-detected if omitted; the path must exist)
+- `--find-v2`: List the v2 `.dvc` files without migrating anything (honours `targets`)
 
 ### Targets
 
@@ -57,6 +58,9 @@ dt migrate
 
 # Preview changes without modifying files
 dt migrate --dry
+
+# List the v2 .dvc files without changing anything
+dt migrate --find-v2
 
 # Migrate a single file with verbose output
 dt migrate data.csv.dvc -v
