@@ -244,6 +244,47 @@ class TestCloneRepository:
                     no_hooks=True,
                 )
 
+    def test_existing_destination_rejected(self, tmp_path, monkeypatch):
+        """An existing target directory is refused rather than clobbered."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'testrepo').mkdir()
+        (tmp_path / 'testrepo' / 'keep.txt').write_text('mine')
+
+        with patch.object(cfg, 'get_value', return_value='testowner'):
+            with pytest.raises(CloneError, match="Destination path 'testrepo' already exists"):
+                clone.clone_repository(
+                    'git@github.com:org/testrepo.git',
+                    verbose=False,
+                    no_auth=True,
+                    no_hooks=True,
+                )
+
+        # Nothing was removed on the refusal path.
+        assert (tmp_path / 'testrepo' / 'keep.txt').exists()
+
+    def test_overwrite_removes_existing_destination(self, tmp_path, monkeypatch):
+        """--overwrite clears the target directory before cloning."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'testrepo').mkdir()
+        (tmp_path / 'testrepo' / 'stale.txt').write_text('old')
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
+                        clone.clone_repository(
+                            'git@github.com:org/testrepo.git',
+                            overwrite=True,
+                            verbose=False,
+                            no_auth=True,
+                            no_hooks=True,
+                        )
+
+        assert not (tmp_path / 'testrepo' / 'stale.txt').exists()
+
     def test_clone_into_current_dir_rejects_overwrite(self, tmp_path, monkeypatch):
         """Refuses destructive --overwrite when destination is '.'."""
         monkeypatch.chdir(tmp_path)
@@ -266,7 +307,6 @@ class TestCloneAuthSetup:
     def test_auth_setup_runs_by_default(self, tmp_path, monkeypatch):
         """auth_setup is called when no_auth is False (default)."""
         monkeypatch.chdir(tmp_path)
-        (tmp_path / 'testrepo').mkdir()
 
         mock_subprocess = MagicMock()
         mock_subprocess.returncode = 0
@@ -289,7 +329,35 @@ class TestCloneAuthSetup:
                                     verbose=False,
                                 )
 
-        mock_auth.assert_called_once_with(verbose=False)
+        mock_auth.assert_called_once_with(username=None, verbose=False)
+
+    def test_username_forwarded_to_auth_setup(self, tmp_path, monkeypatch):
+        """The --username given to clone reaches auth_setup."""
+        monkeypatch.chdir(tmp_path)
+
+        mock_subprocess = MagicMock()
+        mock_subprocess.returncode = 0
+
+        mock_report = MagicMock()
+        mock_report.ssh_results = []
+        mock_report.credentials_installed = {}
+        mock_report.skipped_ssh = True
+        mock_report.skipped_credentials = True
+        mock_report.errors = []
+
+        with patch('subprocess.run', return_value=mock_subprocess):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache'):
+                    with patch('dt.clone.remote_mod.configure_local_override', return_value='/fake'):
+                        with patch('dt.clone.install_mod.install', return_value=[]):
+                            with patch('dt.clone.auth_setup_mod.auth_setup', return_value=mock_report) as mock_auth:
+                                clone.clone_repository(
+                                    'git@github.com:org/testrepo.git',
+                                    username='ab1234',
+                                    verbose=False,
+                                )
+
+        mock_auth.assert_called_once_with(username='ab1234', verbose=False)
 
     def test_no_auth_skips_setup(self, tmp_path, monkeypatch):
         """auth_setup is not called when no_auth is True."""
@@ -315,7 +383,6 @@ class TestCloneAuthSetup:
     def test_auth_setup_failure_does_not_abort_clone(self, tmp_path, monkeypatch):
         """Clone succeeds even if auth_setup raises an exception."""
         monkeypatch.chdir(tmp_path)
-        (tmp_path / 'testrepo').mkdir()
 
         mock_subprocess = MagicMock()
         mock_subprocess.returncode = 0
@@ -340,7 +407,6 @@ class TestCloneHooksAndRemote:
     def test_hooks_installed_by_default(self, tmp_path, monkeypatch):
         """install() is called when no_hooks is False (default)."""
         monkeypatch.chdir(tmp_path)
-        (tmp_path / 'testrepo').mkdir()
 
         mock_subprocess = MagicMock()
         mock_subprocess.returncode = 0

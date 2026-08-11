@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration.conftest import rewrite_tracked
+
 
 # =============================================================================
 # Fixtures
@@ -32,7 +34,7 @@ def dvc_repo_with_versions(dvc_repo_with_files, monkeypatch):
     
     # Modify the data file
     data_file = repo / 'data.csv'
-    data_file.write_text('id,value\n1,100\n2,250\n3,300\n')  # Changed 200 to 250
+    rewrite_tracked(data_file, 'id,value\n1,100\n2,250\n3,300\n')  # Changed 200 to 250
     
     # Re-add to DVC
     subprocess.run(['dvc', 'add', 'data.csv'], check=True, capture_output=True)
@@ -85,7 +87,7 @@ class TestDiffBasic:
         
         # Modify file in workspace (not committed)
         data_file = repo / 'data.csv'
-        data_file.write_text('id,value\n1,999\n2,200\n3,300\n')
+        rewrite_tracked(data_file, 'id,value\n1,999\n2,200\n3,300\n')
         
         result = subprocess.run(
             ['dt', 'diff', 'data.csv'],

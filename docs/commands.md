@@ -390,7 +390,7 @@ Show DVC pipeline and stage status.
 dt status [--imports] [-v] [-- DVC_OPTIONS...]
 ```
 
-Wraps `dvc status` with automatic index sync. Pass `--imports` to also check import freshness via `dt update --status`. Unknown options are passed through to `dvc status`. [Full documentation →](install.md#dt-status)
+Wraps `dvc status`. Pulls the index archive first if `index.auto_sync` is on (off by default). Pass `--imports` to also check import freshness via `dt update --status`. Unknown options are passed through to `dvc status`. [Full documentation →](install.md#dt-status)
 
 ---
 

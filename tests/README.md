@@ -9,7 +9,7 @@ tests/
     conftest.py              # Shared pytest configuration and fixtures
     README.md                # This file
     
-    unit/                    # Fast, mocked tests (582 tests)
+    unit/                    # Mostly-mocked tests (~1880 tests)
         conftest.py          # Unit-specific fixtures
         test_*.py            # Unit test modules
         unit_tests.md        # Unit test checklist
@@ -54,13 +54,19 @@ pytest -m "not integration"
 
 # Only tests that don't require network
 pytest -m "not requires_network"
+
+# Same, but via the environment variable the network tests also honour
+DT_TEST_OFFLINE=1 pytest tests/
 ```
+
+The full integration suite takes about an hour here, most of it spawning real
+`dvc` subprocesses. Skipping the network tests cuts out the GitHub clones.
 
 ## Test Categories
 
 ### Unit Tests (`tests/unit/`)
 
-- **Fast**: Run in < 20 seconds total
+- **Fast**: A few minutes total, versus about an hour for integration
 - **Isolated**: Use mocked dependencies
 - **No external requirements**: Don't need DVC/git installed
 - **High coverage**: Test internal functions in isolation
@@ -97,6 +103,11 @@ See [integration/integration_tests.md](integration/integration_tests.md) for the
 
 ### Unit Fixtures (`tests/unit/conftest.py`)
 
+- `isolate_from_working_repo` - **autouse**; chdirs every unit test to a neutral
+  temp directory. Most of `dt` resolves the project root from the working
+  directory, so without this a test that forgets to chdir silently reads the
+  real `dvc_tools` checkout — and opens its DVC state database on shared
+  storage. Tests that need a project still chdir into their own fixture.
 - `mock_dvc_repo` - Mock DVC repo structure
 - `sample_dvc_files` - Sample .dvc files
 - `cache_structure` - DVC cache directory
@@ -112,6 +123,10 @@ See [integration/integration_tests.md](integration/integration_tests.md) for the
 - `dvc_repo_with_remote` - DVC repo with local remote
 - `dt_test_fixtures_clone` - Clone of test fixtures repo
 - `run_dt` - Function to run dt commands
+- `rewrite_tracked(path, text)` - Helper (not a fixture). Use it instead of
+  `path.write_text()` on a DVC-tracked file: under `cache.type=hardlink,symlink`
+  the workspace file is a read-only link into the cache, so writing through it
+  fails — and if it were writable, it would corrupt the shared cache object.
 
 ## Test Data Repositories
 

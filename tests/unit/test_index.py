@@ -88,24 +88,21 @@ class TestGetIndexPaths:
                 local, mirror = get_index_paths()
                 
                 assert isinstance(local, Path)
-                assert isinstance(mirror, str)  # mirror can be cloud URL
+                assert isinstance(mirror, Path)
                 assert str(local) == "/tmp/dvc-cache/abc123"
-                assert "abc123" in mirror
-    
-    def test_returns_cloud_mirror_path(self):
-        """Test returns cloud URLs as strings."""
+                assert str(mirror) == "/mirror/root/repo/abc123"
+
+    def test_rejects_cloud_mirror_root(self):
+        """Cloud mirror roots are refused with a clear error."""
         mock_doctor_output = MagicMock()
         mock_doctor_output.returncode = 0
         mock_doctor_output.stdout = "site_cache_dir /tmp/dvc-cache/abc123\n"
-        
-        with patch("dt.index.cfg.get_value", return_value="gs://my-bucket/index-mirror"):
-            with patch("subprocess.run", return_value=mock_doctor_output):
-                local, mirror = get_index_paths()
-                
-                assert isinstance(local, Path)
-                assert isinstance(mirror, str)
-                assert mirror.startswith("gs://")
-                assert "abc123" in mirror
+
+        for url in ("gs://my-bucket/index-mirror", "s3://my-bucket/index-mirror"):
+            with patch("dt.index.cfg.get_value", return_value=url):
+                with patch("subprocess.run", return_value=mock_doctor_output):
+                    with pytest.raises(IndexNotConfigured, match="no longer supported"):
+                        get_index_paths()
 
 
 # =============================================================================
@@ -159,11 +156,11 @@ class TestIsAutoSyncEnabled:
             result = is_auto_sync_enabled()
             assert result is False
 
-    def test_returns_default_true_when_not_configured(self):
-        """Test returns default True when not configured."""
+    def test_returns_default_false_when_not_configured(self):
+        """Defaults to off: implicit index sync was removed, so callers opt in."""
         with patch("dt.index.cfg.get_value", side_effect=lambda key, default=None: default):
             result = is_auto_sync_enabled()
-            assert result is True
+            assert result is False
 
 
 # =============================================================================

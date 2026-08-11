@@ -16,13 +16,14 @@ from tests.conftest import requires_dvc, requires_git
 # Helper Functions
 # =============================================================================
 
-def run_dt(*args, cwd=None, check=True):
+def run_dt(*args, cwd=None, check=True, env=None):
     """Run dt command and return result."""
     result = subprocess.run(
         ['dt', *args],
         capture_output=True,
         text=True,
         cwd=cwd,
+        env=env,
     )
     if check and result.returncode != 0:
         raise subprocess.CalledProcessError(
@@ -244,14 +245,45 @@ class TestInitOwnerTeamOptions:
         if 'gh repo create' in result.stdout:
             assert '--team=analysts' in result.stdout
 
-    def test_init_without_team_omits_team_option(self, isolated_dir):
-        """Init without --team does not include team in suggestion."""
+    def test_init_without_team_omits_team_option(self, isolated_dir, tmp_path):
+        """Init without --team and without a configured team omits the option.
+
+        ``--team`` falls back to the ``team`` config key, so this has to run
+        against an empty config -- otherwise it just reports whatever team the
+        developer happens to have set.
+        """
+        empty_config = tmp_path / 'empty-config'
+        empty_config.mkdir()
+        env = {
+            **os.environ,
+            'XDG_CONFIG_HOME': str(empty_config),
+            'XDG_CONFIG_DIRS': str(empty_config),
+        }
+
         result = run_dt('init', '--owner', 'myorg',
-                       '--no-cache', '--no-remote', cwd=isolated_dir)
-        
+                       '--no-cache', '--no-remote', cwd=isolated_dir, env=env)
+
         assert result.returncode == 0
         if 'gh repo create' in result.stdout:
             assert '--team=' not in result.stdout
+
+    def test_init_team_falls_back_to_config(self, isolated_dir, tmp_path):
+        """With no --team, the configured team is used."""
+        config_home = tmp_path / 'config-home'
+        (config_home / 'dt').mkdir(parents=True)
+        (config_home / 'dt' / 'config.yaml').write_text('team: configured-team\n')
+        env = {
+            **os.environ,
+            'XDG_CONFIG_HOME': str(config_home),
+            'XDG_CONFIG_DIRS': str(tmp_path / 'no-such-dir'),
+        }
+
+        result = run_dt('init', '--owner', 'myorg',
+                       '--no-cache', '--no-remote', cwd=isolated_dir, env=env)
+
+        assert result.returncode == 0
+        if 'gh repo create' in result.stdout:
+            assert '--team=configured-team' in result.stdout
 
 
 # =============================================================================

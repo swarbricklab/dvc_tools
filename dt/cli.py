@@ -5732,8 +5732,9 @@ def hook_check_large_files(max_size, verbose):
 def status(ctx, imports, verbose):
     """Show DVC pipeline and stage status.
 
-    Wraps ``dvc status`` with automatic index sync. Reports changed
-    deps, outs, and missing cache entries.
+    Wraps ``dvc status``. Reports changed deps, outs, and missing cache
+    entries. Pulls the index archive first only if ``index.auto_sync`` is
+    enabled (off by default).
 
     Use --imports to additionally check if imports are stale.
 

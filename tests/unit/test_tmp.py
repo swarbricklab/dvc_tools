@@ -95,8 +95,8 @@ class TestGetRepoId:
 class TestCloneRepo:
     """Tests for clone_repo function."""
     
-    def test_creates_full_shallow_clone(self, tmp_path, monkeypatch):
-        """Creates full shallow clone with correct git commands."""
+    def test_creates_full_clone(self, tmp_path, monkeypatch):
+        """Creates a full clone -- not shallow, not sparse."""
         monkeypatch.chdir(tmp_path)
 
         mock_result = MagicMock()
@@ -117,10 +117,12 @@ class TestCloneRepo:
         
         assert result == tmp_path / '.dt' / 'tmp' / 'clones' / 'github.com' / 'swarbricklab' / 'dt-test-registry'
         
-        # Verify git clone was called with --depth (shallow) but full checkout
+        # Full history, so `dvc diff` can compare against any locked revision.
+        # Shallowness survives only as an incremental `git fetch --depth 1`.
         clone_cmd = calls[0]
         assert clone_cmd[0:2] == ['git', 'clone']
-        assert '--depth' in clone_cmd
+        assert '--depth' not in clone_cmd
+        assert '--single-branch' not in clone_cmd
         # No longer using sparse checkout
         assert '--no-checkout' not in clone_cmd
     

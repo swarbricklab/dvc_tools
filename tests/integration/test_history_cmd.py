@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration.conftest import rewrite_tracked
+
 
 # =============================================================================
 # Fixtures
@@ -24,7 +26,7 @@ def dvc_repo_with_history(dvc_repo_with_files, monkeypatch):
     
     # Modify the data file and create a new version
     data_file = repo / 'data.csv'
-    data_file.write_text('id,value\n1,100\n2,200\n3,300\n4,400\n')
+    rewrite_tracked(data_file, 'id,value\n1,100\n2,200\n3,300\n4,400\n')
     
     # Re-add to DVC (creates new hash)
     subprocess.run(['dvc', 'add', 'data.csv'], check=True, capture_output=True)
@@ -35,7 +37,7 @@ def dvc_repo_with_history(dvc_repo_with_files, monkeypatch):
     )
     
     # Create a third version
-    data_file.write_text('id,value\n1,100\n2,200\n3,300\n4,400\n5,500\n')
+    rewrite_tracked(data_file, 'id,value\n1,100\n2,200\n3,300\n4,400\n5,500\n')
     subprocess.run(['dvc', 'add', 'data.csv'], check=True, capture_output=True)
     subprocess.run(['git', 'add', '.'], check=True, capture_output=True)
     subprocess.run(

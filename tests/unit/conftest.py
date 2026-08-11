@@ -10,6 +10,34 @@ from unittest.mock import MagicMock
 
 
 # =============================================================================
+# Isolation
+# =============================================================================
+
+@pytest.fixture(autouse=True)
+def isolate_from_working_repo(tmp_path_factory, monkeypatch):
+    """Run every unit test outside the dvc_tools checkout.
+
+    Anything that reads config -- and that is most of ``dt`` -- resolves the
+    project root from the current directory, so a test that forgets to chdir
+    silently picks up the real repo. That made assertions pass or fail based on
+    the developer's working tree, and worse, opened the repo's DVC state
+    database on shared Lustre storage, which SIGBUSes the whole run.
+
+    Tests that want a project still chdir into their own fixture; this only
+    changes where the ones that don't end up.
+    """
+    neutral = tmp_path_factory.mktemp('cwd')
+    monkeypatch.chdir(neutral)
+
+    # Both XDG scopes, not just the user one: sites here ship a system-wide
+    # dt config via XDG_CONFIG_DIRS, so leaving it set means unit tests read
+    # real values for team, cache.root and friends.
+    empty = tmp_path_factory.mktemp('xdg')
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(empty))
+    monkeypatch.setenv('XDG_CONFIG_DIRS', str(empty))
+
+
+# =============================================================================
 # Mock DVC Repository Fixtures
 # =============================================================================
 

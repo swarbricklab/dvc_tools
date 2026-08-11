@@ -5,7 +5,6 @@ They create real git/DVC repositories for end-to-end testing.
 """
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,24 +15,13 @@ import pytest
 # Skip Conditions
 # =============================================================================
 
-requires_dvc = pytest.mark.skipif(
-    shutil.which('dvc') is None,
-    reason="DVC not installed"
-)
-
-requires_git = pytest.mark.skipif(
-    shutil.which('git') is None,
-    reason="git not installed"
-)
-
-requires_network = pytest.mark.skipif(
-    os.environ.get('DT_TEST_OFFLINE'),
-    reason="Network tests disabled (DT_TEST_OFFLINE set)"
-)
-
-requires_qxub = pytest.mark.skipif(
-    shutil.which('qxub') is None,
-    reason="qxub not available (HPC environment only)"
+# Re-exported so tests can import them from either conftest. They used to be
+# defined twice, which meant a fix to one copy silently missed half the suite.
+from tests.conftest import (  # noqa: F401
+    requires_dvc,
+    requires_git,
+    requires_network,
+    requires_qxub,
 )
 
 
@@ -104,6 +92,23 @@ def dvc_repo(git_repo_with_commits):
     )
     
     return git_repo_with_commits
+
+
+def rewrite_tracked(path, text):
+    """Replace the contents of a DVC-tracked file.
+
+    Under ``cache.type = hardlink,symlink`` -- which is what the shared site
+    config here sets -- a tracked file in the workspace is a read-only link
+    into the cache, so writing through it raises PermissionError. Were it
+    writable, writing through would be worse still: it would rewrite the cache
+    object every other copy of that hash is linked to. Replacing the link is
+    correct under every cache type.
+    """
+    path = Path(path)
+    if path.exists() or path.is_symlink():
+        path.unlink()
+    path.write_text(text)
+    return path
 
 
 @pytest.fixture

@@ -598,26 +598,9 @@ class TestFetchRegular:
 class TestFetchOptions:
     """Test fetch command options."""
 
-    def test_fetch_no_index_sync(self, cloned_test_fixtures):
-        """Fetch with --no-index-sync skips index sync but still populates cache."""
-        repo = cloned_test_fixtures['path']
-        cache = cloned_test_fixtures['cache']
-        
-        # Clear cache to verify fetch works
-        if cache.exists():
-            shutil.rmtree(cache)
-        cache.mkdir()
-        
-        result = run_dt('fetch', '--no-index-sync', 'imported/file.csv.dvc',
-                       cwd=repo, check=False)
-        
-        # Flag should be recognized (no error about unknown option)
-        assert '--no-index-sync' not in result.stderr
-        assert result.returncode == 0, f"Fetch with --no-index-sync failed: {result.stderr}"
-        
-        # Cache should still be populated even with --no-index-sync
-        cache_files = [f for f in cache.rglob('*') if f.is_file()]
-        assert len(cache_files) > 0, "Cache should be populated despite --no-index-sync flag"
+    # Removed: test_fetch_no_index_sync. No command syncs the index implicitly
+    # any more, so --no-index-sync is gone; because `dt fetch` passes unknown
+    # options through to dvc, the old test could only ever pass vacuously.
 
     def test_fetch_network_flag_recognized(self, cloned_test_fixtures):
         """Fetch with --network flag is recognized."""

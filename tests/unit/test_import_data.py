@@ -288,7 +288,9 @@ class TestImportNoDownload:
             path="data/processed",
         )
 
-        mock_gitignore.assert_called_once_with("/processed")
+        mock_gitignore.assert_called_once_with(
+            "/processed", gitignore_path=tmp_path / ".gitignore"
+        )
 
     @patch.object(utils, 'check_dvc', side_effect=utils.DependencyError("no dvc"))
     def test_raises_if_dvc_not_installed(self, mock_check):
