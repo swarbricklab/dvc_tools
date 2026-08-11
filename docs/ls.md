@@ -52,16 +52,21 @@ data/results.csv
 **Long format** (`-l`): Type indicator and size
 ```
 -        26  test_file.txt
-d       1.5M  data_dir
+d     1.50M  data_dir
 ```
 
 Type indicators:
 - `-` = file
 - `d` = directory
 
-**With hash** (`--show-hash`):
+**With hash** (`--show-hash`): adds a hash column. On its own it replaces the
+default listing; combine with `-l` for type and size as well.
 ```
--        26  1a7086969032ca102f45a74c9fac2fa3  test_file.txt
+$ dt ls --show-hash
+    1a7086969032ca102f45a74c9fac2fa3  test_file.txt
+
+$ dt ls -l --show-hash
+-        26      1a7086969032ca102f45a74c9fac2fa3  test_file.txt
 ```
 
 ## Examples
@@ -92,7 +97,8 @@ dt ls --max-size 100K            # Files <= 100KB
 dt ls --min-size 1G --max-size 10G   # Between 1GB and 10GB
 ```
 
-Size units: `K` (kilobytes), `M` (megabytes), `G` (gigabytes), `T` (terabytes)
+Size units are binary: `K` = 1024 bytes, `M` = 1024², `G` = 1024³, `T` = 1024⁴.
+A bare number is interpreted as bytes.
 
 ### Filtering by type
 
@@ -140,7 +146,7 @@ dt ls --files | wc -l
 dt ls -R | grep train
 
 # Process with xargs
-dt ls --pattern "*.csv" | xargs -I {} dt summary {}
+dt ls --pattern "*.csv" | xargs -I {} dt history {}
 
 # JSON to jq
 dt ls --json | jq '.[] | select(.size > 1000000) | .path'
@@ -188,4 +194,4 @@ Fields:
 
 - [`dt find`](find.md) - Reverse lookup: find path by hash
 - [`dt du`](du.md) - Disk usage of DVC-tracked files
-- [`dt summary`](summary.md) - Summarize a .dvc file
+- [`dt summary`](summary.md) - Write a project file tree and pipeline DAG to `docs/`

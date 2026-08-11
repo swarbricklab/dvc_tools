@@ -23,10 +23,12 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `add.max_threads` | Maximum threads for checksum computation | `192` |
 | `add.mem_per_thread` | GB of RAM per thread for `dt add` | `1` |
 | `qxub.env` | Conda environment for parallel workers | `dt` |
-| `qxub.queue` | PBS queue for parallel jobs | `copyq` |
+| `qxub.queue` | PBS queue for parallel jobs (default depends on the caller — see below) | `copyq` |
 | `qxub.walltime` | Maximum runtime for parallel jobs | `10:00:00` |
 | `qxub.mem` | Memory allocation for parallel jobs | `4GB` |
-| `deps.cache_dir` | Directory for the [org-wide import index](deps.md#dt-deps-index); set to a shared path so a whole lab reuses one scan | `/g/data/a56/dvc-tools/repo-deps` |
+| `deps.cache_dir` | Directory for the [org-wide import index](deps.md#dt-deps-index); set to a shared path so a whole lab reuses one scan. Defaults to a per-user cache dir (`~/.cache/dvc-tools/repo-deps` on Linux) | `/g/data/a56/dvc-tools/repo-deps` |
+| `hooks.verbosity` | Output level for [git hooks](install.md#configuration): `quiet`, `normal`, `verbose` (default `normal`) | `quiet` |
+| `hooks.<hook>.checks.<check>.*` | Per-check overrides for git hooks (`enabled`, `mode`, `max_size`, …). See [dt install](install.md#configuration) | `hooks.pre-commit.checks.large-files.max_size` |
 | `perms.sticky` | Whether shared dirs get the sticky bit, restricting deletion to file owners (creation is unaffected). Default `true`. Used by `dt remote/cache init` and `perms` | `false` |
 | `perms.allow_other` | Whether shared dirs permit world read/execute (`3775` vs `3770`). Default `false` | `true` |
 | `clean.min_age_days` | Age threshold for [`dt remote clean`](remote.md#dt-remote-clean) / [`dt cache clean`](cache.md#dt-cache-clean) (default: 7) | `14` |
@@ -36,7 +38,23 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `auth.aws_identity` | AWS IAM ARN | `arn:aws:iam::123:user/alice` |
 | `auth.slack_webhook` | Slack incoming-webhook URL for [`dt auth request --send`](auth.md#dt-auth-request) | `https://hooks.slack.com/services/...` |
 | `auth.admin_email` | Admin email address for [`dt auth request --send email`](auth.md#dt-auth-request) | `admin@example.com` |
+| `secrets.backend` | Secret-manager backend for [`dt auth credentials`](auth.md#dt-auth-credentials); only `gcp` is implemented | `gcp` |
+| `secrets.gcp.project` | GCP project holding the secrets (required when `secrets.backend` is `gcp`) | `my-gcp-project` |
+| `secrets.prefix` | Prefix for secret names (default `dvc-remote-`) | `dvc-remote-` |
+| `secrets.gcp.locations` | Region(s) for new GCP secrets; unset means GCP automatic (global) replication | `australia-southeast1` |
+| `secrets.default_endpointurl` | Fallback S3 endpoint for [`dt auth credentials configure-remotes`](auth.md#dt-auth-credentials-configure-remotes) when `--endpoint` is omitted | `https://<account>.r2.cloudflarestorage.com` |
 | `summary.output_dir` | Output directory for [summary files](summary.md) | `docs` |
+| `archive.staging_dir` | Local staging directory for [`dt remote archive`](archive.md#configuration) inner tarballs (no default — required) | `/scratch/a56/jr9959/dt-archive` |
+| `archive.backend_root` | Base path on the archive backend (default `dt-archive`) | `dt-archive` |
+| `archive.registry_path` | Central archive register directory; unset disables registration | `/g/data/a56/dt-archives/registry` |
+| `archive.stage_jobs` | Parallel workers for `archive stage` (default `min(PBS_NCPUS or nproc, 8)`) | `8` |
+| `archive.deposit_jobs` | Parallel upload workers for `archive deposit` (default `4`) | `4` |
+| `archive.scan_jobs` | Threads for the preflight remote scan (default `32`) | `32` |
+| `archive.compress` | Compression for inner tarballs: `none` (default), `gzip`, `zstd` | `zstd` |
+| `archive.qxub_env` | Conda env for `--via-qxub` archive workers; falls back to `qxub.env` | `dt` |
+| `archive.qxub_queue` | PBS queue for archive workers (default `normal` — *not* `copyq`); falls back to `qxub.queue` | `normal` |
+| `archive.qxub_walltime` | Walltime per archive worker (default `04:00:00`); falls back to `qxub.walltime` | `04:00:00` |
+| `archive.qxub_mem` | Memory per archive worker (default `4GB`); falls back to `qxub.mem` | `4GB` |
 
 ## Option Details
 
@@ -128,7 +146,7 @@ Master switch. Set to `false` to make `dt init` and `dt clone` skip `core.site_c
 
 ### `index.mirror_root`
 
-Root directory for the shared index archive. The actual archive path is `{mirror_root}/{repo_hash}/`. Must be a local or networked filesystem path — `gs://` / `s3://` are not supported.
+Root directory for the shared index archive. The actual archive path is `{mirror_root}/repo/{repo_hash}/`, where `repo_hash` is the basename of the repo's DVC `site_cache_dir`. Must be a local or networked filesystem path — `gs://` / `s3://` are not supported.
 
 ```bash
 dt config set index.mirror_root /g/data/<project>/dvc/index-archive
@@ -139,7 +157,9 @@ dt config set index.mirror_root /g/data/<project>/dvc/index-archive
 **Default:** `false`
 
 When `true`, `dt status` pulls the index archive before running, and the
-pre-commit hook's index-sync step pulls then pushes it. Off by default: the
+`index-sync` hook check pulls then pushes it. (That check is not one of the
+built-in defaults — enable it too, e.g.
+`dt config set hooks.pre-commit.checks.index-sync.enabled true`.) Off by default: the
 implicit sync raced concurrent `dvc` invocations and added latency to commands
 that did not need it. Run `dt index pull|push` explicitly instead.
 
@@ -170,7 +190,7 @@ dt config set index.retry_interval 10
 
 ## qxub Options
 
-These options configure parallel push/pull operations via [qxub](https://github.com/swarbricklab/qxub).
+These options configure the jobs `dt` submits via [qxub](https://github.com/swarbricklab/qxub): `dt push --workers`, `dt add`, and (via the `archive.qxub_*` fallbacks) `dt remote archive stage --via-qxub`.
 
 ### `qxub.env`
 
@@ -184,9 +204,13 @@ dt config set qxub.env myenv
 
 ### `qxub.queue`
 
-**Default:** `copyq`
+**Default:** `copyq` for `dt push` workers; `normal` for `dt add` jobs
 
-The PBS queue for submitting parallel jobs. Use a queue with network access to cloud storage if pushing/pulling to S3, GCS, etc.
+The PBS queue for submitting parallel jobs. Transfer work defaults to `copyq`
+(a data-mover queue with network access to cloud storage); checksum work
+defaults to `normal`, which has the CPUs. Setting this key overrides both.
+`dt remote archive` has its own `archive.qxub_queue` key, also defaulting to
+`normal`.
 
 ```bash
 # Use the copy queue (has network access)
@@ -255,10 +279,12 @@ dt config set --user qxub.queue copyq
 dt config set --user qxub.walltime 10:00:00
 dt config set --user qxub.mem 4GB
 
-# Now parallel push/pull will use these settings
+# Now distributed push will use these settings
 dt push -w 16
-dt pull -w 16
 ```
+
+`dt pull` has no `--workers` flag; it pulls in-process. The `qxub.*` settings
+apply to `dt push -w` and to `dt add` jobs submitted via qxub.
 
 ## auth Options
 
@@ -342,6 +368,44 @@ The `--out` flag on `dt summary` overrides this setting.
 
 ## secrets Options
 
+These configure the secret manager backing [`dt auth credentials`](auth.md#dt-auth-credentials).
+
+### `secrets.backend`
+
+**Default:** _unset_ (credential commands error out until it is set)
+
+Which secret manager to use. Only `gcp` (Google Secret Manager) is
+implemented; `aws` is planned.
+
+```bash
+dt config set secrets.backend gcp
+dt config set secrets.gcp.project my-gcp-project
+```
+
+### `secrets.gcp.project`
+
+**Default:** _unset_ (required when `secrets.backend` is `gcp`)
+
+The GCP project that holds the secrets.
+
+### `secrets.prefix`
+
+**Default:** `dvc-remote-`
+
+Prefix applied to secret names, so one project can host secrets for several
+tools without collisions.
+
+### `secrets.default_endpointurl`
+
+**Default:** _unset_
+
+Fallback S3 endpoint URL used by `dt auth credentials configure-remotes` when
+`--endpoint` is not passed. With neither set, the command errors.
+
+```bash
+dt config set secrets.default_endpointurl https://<account>.r2.cloudflarestorage.com
+```
+
 ### `secrets.gcp.locations`
 
 **Default:** _unset_ (GCP automatic/global replication)
@@ -363,12 +427,36 @@ dt config set secrets.gcp.locations australia-southeast1
 dt config set secrets.gcp.locations australia-southeast1,australia-southeast2
 ```
 
+## archive Options
+
+The `archive.*` keys configure [`dt remote archive`](archive.md). They are
+listed in the table above; see [Configuration](archive.md#configuration) in the
+archive reference for the full discussion of each.
+
+## hooks Options
+
+`hooks.verbosity` sets git-hook output to `quiet`, `normal` (default), or
+`verbose`; `dt hook run -v` forces verbose regardless.
+
+Individual checks are configured under
+`hooks.<hook-name>.checks.<check-name>.<setting>` — for example:
+
+```bash
+dt config set hooks.pre-commit.checks.large-files.max_size 10MB
+dt config set hooks.pre-push.checks.dvc-push.mode prompt
+```
+
+Built-in defaults live in the code, so hooks work without any config file;
+configured scopes override the defaults per leaf. See
+[dt install](install.md#configuration) for the check names and settings.
+
 ## See also
 
 - [dt config](config.md) - Set and get configuration values
 - [Configuration Scopes](config_scopes.md) - Understanding scope hierarchy
 - [dt add](add.md) - Add files with parallel checksums
 - [dt push](push.md) - Push with parallel support
-- [dt pull](pull.md) - Pull with parallel support
+- [dt install](install.md) - Git hooks and their checks
+- [dt remote archive](archive.md) - Cold-storage archiving
 - [dt summary](summary.md) - Generate project documentation
 

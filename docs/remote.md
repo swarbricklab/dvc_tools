@@ -12,10 +12,14 @@ Sets up remote storage for the project with both SSH and local access methods.
 dt remote init [options] [project_name]
 ```
 
+### Arguments
+
+- `[project_name]`: Optional project name, equivalent to `--name` (`--name` wins if both are given)
+
 ### Options
 
 - `--name <project_name>`: Override project name (defaults to current directory name)
-- `--remote-root <path>`: Override remote root directory (defaults to `remote.root` config value)
+- `--remote-root <path>`: Override remote root directory (defaults to the first `remote.root` config entry)
 - `--remote-path <path>`: Override complete remote path (absolute or relative to current directory)
 
 ### What it does
@@ -28,9 +32,15 @@ dt remote init [options] [project_name]
   still push, but only a file's owner can delete it. Override with the
   `perms.sticky` / `perms.allow_other` config keys, and audit later with
   [`dt remote perms`](#dt-remote-perms)
-- Sets up SSH remote accessible from external platforms via `dvc remote add -d`
+- Sets up an SSH remote accessible from external platforms via `dvc remote add -d`
+  (only when `ssh.host` is configured)
 - Creates a local remote override for efficient transfers within the same system
 - Maintains portability by keeping local remote configuration workspace-specific
+
+If the remote directory already exists, it is reused as-is: the structure is
+**not** re-created and permissions are **not** re-applied. Use
+[`dt remote perms --fix`](#dt-remote-perms) to bring an existing remote back to
+policy.
 
 ### Examples
 
@@ -56,18 +66,25 @@ The remote location is determined by (in order of precedence):
 
 1. **`--remote-path`** - Complete path override (absolute or relative to current directory)
 2. **Constructed path** - `${remote_root}/${project_name}` where:
-   - **remote_root**: `--remote-root` argument OR `remote.root` config value
-   - **project_name**: `--name` argument OR current directory name
+   - **remote_root**: `--remote-root` argument OR the first `remote.root` config entry
+   - **project_name**: `--name` argument OR the positional argument OR current directory name
 
 **Default behavior** (no options): Uses `${remote.root config}/${current directory name}`
 
 ### Remote Configuration
 
-Two remotes are configured:
+Up to two remotes are configured:
 
-- **Official remote**: Named after the platform (e.g., "nci"), accessible via SSH from anywhere
-- **Local remote**: Named "local", provides direct filesystem access within the same platform
-- SSH host determined by `ssh.host` config item (typically `gadi-dm.nci.org.au` on NCI)
+- **SSH remote**: named after the project (the `--name` value, or the remote
+  directory's basename), written to `.dvc/config` as the default remote and
+  reachable from anywhere. The host comes from the `ssh.host` config item
+  (typically `gadi-dm.nci.org.au` on NCI). **If `ssh.host` is not set, this
+  remote is not created at all** and only the local remote is configured.
+- **Local remote**: named `local`, written to `.dvc/config.local` (so it stays
+  out of git) and made the default there, giving direct filesystem access
+  within the same platform.
+
+An existing remote name is left as-is rather than being overwritten.
 
 ## dt remote list
 
@@ -76,14 +93,26 @@ List DVC remotes from a repository (local or remote).
 ### Usage
 
 ```bash
-dt remote list [repository] [--owner <owner>]
+dt remote list [repository] [--owner <owner>] [--all]
 ```
+
+### Options
+
+- `--owner <owner>`: Override the GitHub owner for short names
+- `--all`: Show remotes from all config scopes, including local overrides
+
+By default only remotes defined in the shared project config (`.dvc/config`)
+are listed. The `local` remote written by [`dt remote init`](#dt-remote-init)
+lives in `.dvc/config.local`, so it appears only with `--all`.
 
 ### Examples
 
 ```bash
-# List remotes from current repository
+# List remotes from current repository (project scope)
 dt remote list
+
+# Include local overrides from .dvc/config.local
+dt remote list --all
 
 # List remotes from a remote repository
 dt remote list git@github.com:myorg/otherproject.git
@@ -95,11 +124,17 @@ dt remote list otherproject --owner myorg
 ### Output
 
 ```
-storage    ssh://gadi-dm.nci.org.au/g/data/a56/dvc/neochemo (default)
-local      /g/data/a56/dvc/neochemo [local]
+$ dt remote list
+storage (default): ssh://gadi-dm.nci.org.au/g/data/a56/dvc/neochemo
+
+$ dt remote list --all
+storage: ssh://gadi-dm.nci.org.au/g/data/a56/dvc/neochemo
+local (default): /g/data/a56/dvc/neochemo
 ```
 
-The `[local]` marker indicates paths accessible on the local filesystem.
+The `(default)` marker is `core.remote` **as read in the same scopes as the
+listing**. That is why it moves: in project scope the SSH remote is the default,
+but once `.dvc/config.local` is included, its `local` override wins.
 
 ## dt remote verify
 
@@ -127,7 +162,9 @@ full re-hash and `--no-ledger` disables the ledger entirely.
 Every scan writes its bad/incomplete findings to `<remote>/.dt-verify/bad.json`,
 so the last scan's results survive between runs and feed `--recheck` and
 `dt remote quarantine`. Overwriting on each scan naturally prunes blobs that now
-pass.
+pass. The write is best-effort: on a remote where `.dt-verify/` cannot be
+created it is skipped, and `--recheck` / `dt remote quarantine` then need an
+explicit `--recheck-report` / `--from-report`.
 
 ### `--status` — instant status, no hashing
 
@@ -303,7 +340,8 @@ Creating a *missing* prefix directory only needs write permission on its parent,
 so `--fix` often succeeds at that part even on someone else's remote — and since
 you created it, you own it and the mode sticks.
 
-The exit status is non-zero if anything could not be fixed.
+With `--fix`, the exit status is non-zero if any deviating directory could not
+be repaired. A plain report always exits zero, however much it found.
 
 ### Layouts
 
@@ -327,6 +365,11 @@ usually a remote nobody has pushed to yet. That's reported as
 `prefix directories not pre-created`, distinct from a store that has **some**
 and reports `N of 256 prefix directories missing`, which means it has drifted.
 Only the second is a sign that something went wrong.
+
+`--fix` treats both the same way: it creates the whole 256 for a never-pre-created
+store, exactly as `dt remote init` would have. Creating directories is the one
+repair that does not need ownership, so this generally succeeds — and it is
+additive, never destructive.
 
 ## dt remote clean
 
@@ -361,7 +404,7 @@ dt remote clean --path /g/data/.../remote --json
 | `--path PATH` | Clean a specific remote directory |
 | `--all` | Every remote under `remote.root` |
 | `--root PATH` | Remote root for `--all`; repeatable, replaces the configured list |
-| `--min-age DAYS` | Only remove files older than this (default: 7) |
+| `--min-age DAYS` | Only remove files older than this (default: 7, or the `clean.min_age_days` config) |
 | `--delete` | Actually remove the files. Without this, only reports. |
 | `-j, --jobs N` | Concurrent prefix scanners (default: 8) |
 | `--json` / `-v` | Machine-readable output / list every file |
@@ -399,8 +442,11 @@ of the file — so on a group-writable remote, any group member can clear anothe
 user's abandoned uploads.
 
 Two things do block it: a directory that is not group-writable (only its owner
-can clean it, regardless of who owns the files inside), and the sticky bit
-(which restricts removal to each file's own owner).
+can clean it, regardless of who owns the files inside), and [the sticky
+bit](#the-sticky-bit) (which restricts removal to the file's owner, the
+directory's owner, or root). Since `dt remote init` sets sticky by default,
+expect to be able to clear only your own abandoned uploads on a remote you do
+not own.
 
 Rather than guessing in advance — a pre-flight check would both race and misread
 ACLs — the command attempts each removal and reports what failed, grouped by the
@@ -413,7 +459,8 @@ directory that blocked it, since that is what has to change:
       files owned by: cd5678 2, ef9012 1
 ```
 
-The exit status is non-zero if any removal failed.
+With `--delete`, the exit status is non-zero if any removal failed. A plain
+report always exits zero.
 
 ### Scope
 
@@ -442,7 +489,7 @@ dt remote archive destroy <name>   # delete an archive copy from the backend (do
 ## Related Commands
 
 - [`dt init`](init.md) - Initialize projects with remote setup
-- [`dt cache init`](cache.md#init) - Set up local cache
+- [`dt cache init`](cache.md#dt-cache-init) - Set up local cache
 - [`dt fetch`](fetch.md) - Fetch imports from local caches
 - [`dt config`](config.md) - Configure remote settings
 - [`dt remote archive`](archive.md) - Archive a remote to cold storage

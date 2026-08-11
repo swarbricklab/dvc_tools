@@ -30,7 +30,7 @@ Discover every storage endpoint the current project relies on.
 ### Usage
 
 ```bash
-dt auth list [--type TYPE] [--repo URL] [--json]
+dt auth list [--type TYPE] [--repo URL] [--json] [-v]
 ```
 
 ### Options
@@ -40,6 +40,7 @@ dt auth list [--type TYPE] [--repo URL] [--json]
 | `--type TYPE` | Filter to a specific endpoint type: `filesystem`, `ssh`, `s3`, `gs`, `http`, `git` |
 | `--repo URL` | Discover endpoints for a remote repository (cloned to a temp dir). Accepts a full URL or a short name (resolved via the `owner` config key, same as `dt clone`). |
 | `--json` | Output as JSON array |
+| `-v, --verbose` | Show discovery progress |
 
 The `--type` flag can be repeated to include multiple types:
 
@@ -61,11 +62,15 @@ dt auth list --repo neochemo
 
 | Source | What is discovered |
 |--------|--------------------|
-| DVC config | Configured remotes (SSH, local, S3, GCS, …) |
+| DVC config | Remotes defined in the *project* scope, i.e. the committed `.dvc/config` (SSH, local, S3, GCS, …) |
 | `.dvc` files (`deps.repo.url`) | Source repositories used by `dvc import` |
 | Import source remotes | Remotes of each source repo (via tmp clone) |
-| dt config | `cache.root`, `remote.root`, `ssh.host` |
-| Git config | `origin` and other git remote URLs |
+| DVC cache dir | The configured DVC cache root; falls back to `cache.root` from dt config if DVC has no cache dir set |
+| dt config | `remote.root` (joined with the project name) |
+| Git config | `origin` and other git remote *fetch* URLs |
+
+`ssh.host` is not itself a discovered endpoint, but it does feed the
+local-host equivalence test described [below](#local-host-equivalence-for-ssh-remotes).
 
 ### How import remotes are discovered
 
@@ -110,7 +115,7 @@ Endpoints for project 'my-project':
 dt auth list --json
 ```
 
-Returns a JSON array of endpoint objects, each with `type`, `url`, `source` (where it was discovered), and optional `local_path` (for SSH remotes on the local host).
+Returns a JSON array of endpoint objects, each with `type`, `url`, `source` (where it was discovered), optional `local_path` (for SSH remotes on the local host), and optional `children` (endpoints discovered *through* this one, e.g. the DVC remotes of an import source repo).
 
 ---
 
@@ -178,7 +183,7 @@ Test whether the current user can actually access each discovered endpoint.
 ### Usage
 
 ```bash
-dt auth check [--type TYPE] [--repo URL] [--verbose] [--user USERNAME] [--json]
+dt auth check [--type TYPE] [--repo URL] [-v] [--user USERNAME] [--json]
 ```
 
 ### Options
@@ -187,9 +192,12 @@ dt auth check [--type TYPE] [--repo URL] [--verbose] [--user USERNAME] [--json]
 |--------|-------------|
 | `--type TYPE` | Only check specific endpoint type(s): `filesystem`, `ssh`, `s3`, `gs`, `http`, `git` |
 | `--repo URL` | Check endpoints for a remote repository (cloned to a temp dir). Accepts a full URL or a short name. |
-| `--verbose` | Show per-subdirectory detail for filesystem checks |
+| `-v, --verbose` | Show per-subdirectory detail for filesystem checks |
 | `--user USERNAME` | Check access from another user's perspective (admin use) |
 | `--json` | Output as JSON |
+
+The command exits non-zero if any endpoint check *fails*, so it can be used
+as a gate in scripts. Warnings and skips do not affect the exit code.
 
 ```bash
 # Only check filesystem access (cache and remote directories)
@@ -221,6 +229,22 @@ When filesystem subdirectories fail the access check, `dt auth check` shows the 
 
 ### Checks by endpoint type
 
+#### DVC remotes (tried first)
+
+For an endpoint that came from a DVC remote of *this* project, the check is
+made through DVC's own storage layer first: it initialises the remote's
+object database and lists it. This exercises exactly the credentials and
+config DVC itself would use, so it catches problems the generic per-type
+probes below would miss.
+
+A remote that initialises and is reachable but has no objects yet — the
+normal state of a freshly created S3/R2 bucket — is reported as a warning
+("reachable but empty"), not a failure.
+
+If DVC is unavailable or cannot open the repo, the check falls back to the
+per-type probes below. Remotes discovered *through* an import source repo
+always use the per-type probes.
+
 #### Filesystem (`/path/to/...`)
 
 - Verify the root path exists
@@ -233,7 +257,9 @@ This catches the common case where the cache root is accessible but individual p
 #### SSH remotes
 
 - **Local-host equivalence**: if the SSH host is on the same platform (using the same `is_local_host` logic as `dt fetch`), check the *local filesystem path* directly — including the subdirectory walk described above
-- **Remote SSH**: attempt `ssh -T -o BatchMode=yes -o ConnectTimeout=5 <host>` to verify the connection works. If it fails, suggest checking SSH key forwarding (`ssh-add -l`) rather than key existence, since keys are often forwarded from a laptop to HPC
+- **Remote SSH**: a two-part check.
+  1. *Connectivity* — `ssh -T -o BatchMode=yes -o ConnectTimeout=5 <host>`. If it fails, suggest checking SSH key forwarding (`ssh-add -l`) rather than key existence, since keys are often forwarded from a laptop to HPC
+  2. *Remote directory* — if the URL has a path component, `ssh <host> test -d <path> -a -r <path>`. A path that does not exist at all is a **warning** (expected for a brand-new remote); a path that exists but is not a readable directory is a **failure**, hinting at missing project/group membership
 
 #### S3-compatible storage (`s3://...`)
 
@@ -259,7 +285,7 @@ If no `endpointurl` is configured in DVC, falls back to the default AWS endpoint
 
 #### HTTP(S) URLs
 
-- `curl -sf --head <url>` — verify the URL is reachable
+- `curl -sf --head --max-time 10 <url>` — verify the URL is reachable
 
 ### Output
 
@@ -364,14 +390,14 @@ dt auth request [--type TYPE] [--repo URL] [--format text|markdown|json] [--send
 | `--format` | Output format: `text` (default), `markdown`, or `json` |
 | `--send` | Send the request. Omit the value to auto-detect (Slack → email), or specify `slack` or `email` explicitly. |
 
-Runs `dt auth check` internally (respecting `--type` filters), collects failures, and produces a template that can be sent to an administrator or pasted into a support ticket.
+Runs `dt auth check` internally (respecting `--type` filters), collects every endpoint that failed *or* warned, and produces a template that can be sent to an administrator or pasted into a support ticket. If everything is accessible the output says so instead.
 
 The request automatically includes the user's **identities** (NCI username, GitHub user, GitHub teams, GCP email, AWS identity) so admins know which accounts to grant access to. Identities are gathered from config and auto-detection (same as `dt auth whoami`).
 
 With `--send`, the request is delivered directly:
 
 - **Slack** — Posts to an incoming-webhook URL configured via `auth.slack_webhook`.
-- **Email** — Pipes the text-format request to the local `mail` command, addressed to `auth.admin_email`.
+- **Email** — Sends the text-format request to `auth.admin_email` via the local `sendmail -t`, falling back to the `mail` command if `sendmail` is not on `PATH`. If neither exists the command errors and suggests Slack instead.
 
 Auto-detect (`--send` with no argument) tries Slack first, then email.
 
@@ -404,14 +430,14 @@ The following resources are not accessible:
      Required: read access (at minimum)
      Suggested fix: configure aws credentials for the R2 endpoint
 
+Platform: gadi-dm.nci.org.au
+dt version: 0.17.0
+Date: 2026-02-12
+
 Identities:
   NCI username: jsmith
   GitHub user: jsmith-gh
   GitHub teams: org/data-team
-
-Platform: gadi-dm.nci.org.au
-dt version: 0.2.0
-Date: 2026-02-12
 ```
 
 ```bash
@@ -487,8 +513,8 @@ dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [-v]
 
 | Option | Description |
 |--------|-------------|
-| `-u, --username USERNAME` | Default SSH username for remote hosts |
-| `--config FILE` | YAML config file with per-host usernames/passwords (enables non-interactive mode) |
+| `-u, --username USERNAME` | Default SSH username for remote hosts (default: the `username` dt config key) |
+| `--config FILE` | YAML config file with per-host usernames (must exist) |
 | `--ssh-config FILE` | SSH config file path (default: `~/.ssh/config`) |
 | `-v, --verbose` | Show detailed progress |
 
@@ -496,14 +522,24 @@ dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [-v]
 
 `dt auth setup` discovers all endpoints the project uses (same as `dt auth list`), then:
 
-1. **SSH / git endpoints** — generates an SSH key pair (if none exists), writes `~/.ssh/config` stanzas for each host, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts or `gh ssh-key add` for GitHub/GitLab)
+1. **SSH / git endpoints** — reuses an existing key (`~/.ssh/id_ed25519`, `id_rsa`, or `id_ecdsa`) or generates a passphrase-less `~/.ssh/id_ed25519` pair, appends a `Host` stanza to `~/.ssh/config` for any host that doesn't already have one, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts, `gh ssh-key add` for `github.com`, `glab ssh-key add` for `gitlab.com`)
 2. **S3 endpoints** — fetches credentials from the configured secret manager and installs them as a profile in `~/.aws/credentials` / `~/.aws/config` (one profile per repo, named after the repo)
 
+If S3 endpoints exist but there is no active GCP authentication, the
+credential step is skipped with an error telling you to run
+`gcloud auth login`; SSH setup still runs.
+
 Username resolution priority (per host):
-1. YAML config file (`--config`)
-2. CLI flag (`-u / --username`)
-3. Username embedded in the remote URL
-4. Interactive prompt (skipped when `--config` is provided)
+1. `git`, for known forge hosts (`github.com`, `gitlab.com`) — these never prompt
+2. YAML config file (`--config`)
+3. CLI flag `-u / --username`, which itself defaults to the `username` config key
+4. Username embedded in the remote URL
+5. Interactive prompt
+
+Note that `--config` does **not** by itself suppress prompting: a host that
+appears in no config entry, has no `-u` default and no username in its URL
+is still prompted for. For a fully non-interactive run, make sure every
+non-forge host is covered by the config file or `-u`.
 
 ### YAML config file
 
@@ -513,10 +549,14 @@ For non-interactive operation, provide a `--config` YAML file:
 hosts:
   gadi-dm.nci.org.au:
     username: jr9959
-    password: secret       # optional — only used by ssh-copy-id
   github.com:
     # forge host — no username needed
 ```
+
+> **Do not put passwords in this file.** A `password:` key is parsed but is
+> not used by anything; `ssh-copy-id` prompts for the password
+> interactively. Writing one here only leaves a plaintext credential on
+> disk.
 
 ### Examples
 
@@ -594,7 +634,7 @@ for multiple distinct (key_id, secret) pairs, install fails loudly.
 | `dt auth credentials uninstall` | Remove the profile and any legacy global creds |
 | `dt auth credentials configure-remotes` | Add `endpointurl` + `profile` to `.dvc/config` (maintainer) |
 | `dt auth credentials migrate [REPO]` | Convert legacy DVC-INI secrets to AWS-INI and reinstall |
-| `dt auth credentials set REPO` | Upload a new secret to the backend (admin) |
+| `dt auth credentials set REPO` | Upload a new secret to the backend (admin). Reads the AWS-INI content from `--file FILE`, or from stdin if `--file` is omitted |
 
 ### Secret format
 
@@ -653,7 +693,10 @@ If `--endpoint` is omitted, falls back to `secrets.default_endpointurl` from
 
 For secrets stored in the legacy DVC-INI format, fetches the current secret,
 rebuilds it as AWS-INI keyed by the repo name, re-uploads it to the backend,
-and installs it as an AWS profile. Use `--dry-run` to preview.
+and installs it as an AWS profile. Secrets that are already AWS-INI are
+simply installed. Either way it finishes by stripping the legacy credential
+keys from the DVC global config for the project's S3 remotes. Use
+`--dry-run` to preview.
 
 ### Secret manager configuration
 
@@ -666,11 +709,20 @@ secrets:
   default_endpointurl: https://...  # used by configure-remotes if --endpoint omitted
   gcp:
     project: my-gcp-project
+    locations: australia-southeast1  # optional; see below
 ```
+
+`secrets.gcp.locations` is a comma-separated list of regions. Leave it unset
+to use GCP's default automatic (global) replication. Set it to switch new
+secrets to user-managed replication in those regions — required under a
+`gcp.resourceLocations` org policy that forbids creating secrets in
+`global`.
 
 ### Security
 
-- `~/.aws/credentials` is written with `600` permissions (owner only)
+- `~/.aws/credentials` and `~/.aws/config` are written with `600` permissions
+  (owner only). Both honour the standard `AWS_SHARED_CREDENTIALS_FILE` /
+  `AWS_CONFIG_FILE` environment overrides.
 - Endpoint is in the *committed* `.dvc/config` (it is non-secret); secret keys
   never leave `~/.aws/credentials`
 - Requires GCP authentication via `gcloud auth login` or service account to

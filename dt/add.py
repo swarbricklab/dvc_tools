@@ -8,7 +8,7 @@ import math
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from . import config as cfg
 from . import dvc_utils
@@ -19,6 +19,58 @@ from .errors import AddError
 DEFAULT_MAX_THREADS = dvc_utils.DEFAULT_MAX_THREADS
 DEFAULT_MEM_PER_THREAD = dvc_utils.DEFAULT_MEM_PER_THREAD
 THREADS_PER_CPU = dvc_utils.THREADS_PER_CPU
+
+
+# ``dvc add`` options that consume the following token as their value. Every
+# other option is a flag, so the token after it is a target rather than an
+# argument. Kept explicit because we have to re-split what click hands us as
+# one undifferentiated list -- see split_dvc_args.
+DVC_ADD_VALUE_OPTS = frozenset({
+    '-o', '--out',
+    '-r', '--remote',
+    '--remote-jobs',
+})
+
+
+def split_dvc_args(tokens: List[str]) -> Tuple[List[str], List[str]]:
+    """Split raw CLI tokens into target paths and ``dvc add`` pass-through args.
+
+    click cannot do this for us. With ``ignore_unknown_options`` a variadic
+    argument swallows unknown options *and* their values, leaving ``ctx.args``
+    empty, so by the time we see the tokens they are one flat list.
+
+    Args:
+        tokens: Raw tokens as click collected them, in order.
+
+    Returns:
+        ``(targets, dvc_args)``, each preserving the original order.
+    """
+    targets: List[str] = []
+    dvc_args: List[str] = []
+
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+
+        # Everything after `--` is a target, even if it looks like an option.
+        if token == '--':
+            targets.extend(tokens[i + 1:])
+            break
+
+        # A bare '-' is a path (stdin convention), not an option.
+        if token.startswith('-') and token != '-':
+            dvc_args.append(token)
+            # `--out=x` carries its value; `--out x` needs the next token too.
+            if '=' not in token and token in DVC_ADD_VALUE_OPTS:
+                if i + 1 < len(tokens):
+                    dvc_args.append(tokens[i + 1])
+                    i += 1
+        else:
+            targets.append(token)
+
+        i += 1
+
+    return targets, dvc_args
 
 
 def check_qxub() -> bool:

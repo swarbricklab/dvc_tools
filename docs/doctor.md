@@ -20,10 +20,13 @@ dt doctor -v        # Verbose output, includes dvc doctor
 | Git | Git is installed and accessible |
 | DVC | DVC is installed and accessible |
 | GitHub CLI | `gh` is available (optional, enables some features) |
-| SSH key | SSH key exists in `~/.ssh/` |
+| SSH key | A public key exists in `~/.ssh/` (`id_ed25519`, `id_rsa`, `id_ecdsa` or `id_dsa`) |
 | GitHub SSH | Can connect to `git@github.com` |
-| Cache root | `cache.root` is configured and accessible |
-| Remote root | `remote.root` is configured and accessible |
+| Cache root | `cache.root` is configured, exists and is writable |
+| Remote root | Every `remote.root` entry exists; the first one (where new remotes are created) is writable |
+| Archived remotes | No configured DVC remote has been archived (carries an `ARCHIVED.yaml` signpost) |
+| Git repo | The current directory is inside a git repository |
+| DVC repo | The current directory is inside a DVC repository |
 
 ### Verbose-only checks
 
@@ -32,7 +35,7 @@ access, endpoint discovery):
 
 | Check | What it verifies |
 |-------|------------------|
-| Network | Internet connectivity (e.g. `github.com` reachable) |
+| Network | Internet connectivity (TCP connect to `8.8.8.8:53`, then `1.1.1.1:53`) |
 | Local remote | A DVC local remote is configured |
 | Auth access | All discovered storage endpoints are accessible (runs `dt auth check` internally) |
 
@@ -49,8 +52,11 @@ DVC Tools version: 0.1.0
 ✓ GitHub SSH connection works
 ✓ Cache root accessible (/g/data/a56/dvc_cache)
 ✓ Remote root accessible (/g/data/a56/dvc_remote)
+✓ No archived remotes detected
+✓ In git repository (/scratch/a56/me/my-project)
+✓ In DVC repository (/scratch/a56/me/my-project)
 
-All 7 checks passed.
+All 10 checks passed.
 ```
 
 With issues:
@@ -69,8 +75,13 @@ DVC Tools version: 0.1.0
   See: https://docs.github.com/en/authentication/connecting-to-github-with-ssh
 ✗ Cache root not configured
   Run: dt config set cache.root /path/to/cache
+✗ Remote root not configured
+  Run: dt config set remote.root /path/to/remote
+✓ No archived remotes detected
+✓ In git repository (/scratch/a56/me/my-project)
+✓ In DVC repository (/scratch/a56/me/my-project)
 
-3 passed, 4 failed.
+5 passed, 5 failed.
 ```
 
 ## Verbose Mode
@@ -85,7 +96,7 @@ DVC Tools version: 0.4.2
 ...
 ✓ Auth access: all 4 endpoint(s) accessible
 
-All 12 checks passed.
+All 13 checks passed.
 
 --- Configuration (with sources) ---
 user    owner=myorg

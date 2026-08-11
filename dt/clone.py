@@ -75,6 +75,7 @@ def clone_repository(
     path: Optional[str] = None,
     owner: Optional[str] = None,
     username: Optional[str] = None,
+    no_init: bool = False,
     no_submodules: bool = False,
     cache_name: Optional[str] = None,
     remote_name: Optional[str] = None,
@@ -96,6 +97,8 @@ def clone_repository(
         path: Target directory (defaults to repo name)
         owner: GitHub owner for short names
         username: Default SSH username passed to auth setup
+        no_init: Skip the project configuration steps -- cache, site cache
+            and remote. Hooks and auth are governed by no_hooks/no_auth.
         no_submodules: Skip cloning submodules
         cache_name: Override cache directory name
         remote_name: Override remote directory name
@@ -189,19 +192,20 @@ def clone_repository(
     utils.ensure_dt_gitignore(target_dir)
 
     # Set up cache using the cache module
-    try:
-        cache_mod.init_cache(
-            name=cache_name,
-            repo_path=target_dir,
-            verbose=verbose,
-        )
-    except cache_mod.CacheError as e:
-        if verbose:
-            print(f"Warning: {e}")
+    if not no_init:
+        try:
+            cache_mod.init_cache(
+                name=cache_name,
+                repo_path=target_dir,
+                verbose=verbose,
+            )
+        except cache_mod.CacheError as e:
+            if verbose:
+                print(f"Warning: {e}")
 
     # Configure DVC site_cache_dir on shared storage so concurrent jobs
     # on different nodes share the same index.
-    if not no_site_cache:
+    if not no_init and not no_site_cache:
         try:
             site_cache_mod.init_site_cache(
                 name=cache_name,
@@ -217,24 +221,25 @@ def clone_repository(
     # Set up local remote for HPC shared filesystem access.
     # Prefer deriving the local path from the repo's existing .dvc/config
     # remotes, rather than inventing a path from remote.root.
-    try:
-        local_path = remote_mod.configure_local_override(
-            repo_path=target_dir,
-            verbose=verbose,
-        )
-        if local_path is None:
-            remotes = remote_mod.list_remotes(target_dir, project_only=True)
-            if not remotes:
-                if verbose:
-                    print("  Falling back to remote.root-based remote init")
-                remote_mod.init_remote(
-                    name=remote_name,
-                    repo_path=target_dir,
-                    verbose=verbose,
-                )
-    except remote_mod.RemoteError as e:
-        if verbose:
-            print(f"Warning: Remote setup skipped: {e}")
+    if not no_init:
+        try:
+            local_path = remote_mod.configure_local_override(
+                repo_path=target_dir,
+                verbose=verbose,
+            )
+            if local_path is None:
+                remotes = remote_mod.list_remotes(target_dir, project_only=True)
+                if not remotes:
+                    if verbose:
+                        print("  Falling back to remote.root-based remote init")
+                    remote_mod.init_remote(
+                        name=remote_name,
+                        repo_path=target_dir,
+                        verbose=verbose,
+                    )
+        except remote_mod.RemoteError as e:
+            if verbose:
+                print(f"Warning: Remote setup skipped: {e}")
 
     # Install git hooks and DVC merge driver
     if not no_hooks:

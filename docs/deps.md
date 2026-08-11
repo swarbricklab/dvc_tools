@@ -23,8 +23,10 @@ import. A repo with thousands of imports usually draws on only a handful of
 sources, and it is those connections — not the individual files — that this
 command is about.
 
-This is the first piece of the repo-level dependency graph; recursive traversal
-and downstream (org-wide) discovery build on the same scanner.
+This is the direct, one-hop view. Recursive traversal
+([`dt deps graph`](#dt-deps-graph)) and org-wide downstream discovery
+([`dt deps index`](#dt-deps-index) / [`dt deps downstream`](#dt-deps-downstream))
+build on the same scanner.
 
 ## Where imports live
 
@@ -175,6 +177,7 @@ dt deps list --json
   "edges": [
     {
       "source": "github.com/swarbricklab/metadata",
+      "source_url": "git@github.com:Swarbricklab/metadata.git",
       "target": "github.com/swarbricklab/bcarc_portal",
       "n_imports": 1,
       "revs": ["9b0730c70709fb8d73b0a142ea27250821a3e1ac"],
@@ -205,7 +208,9 @@ reused, so re-runs are far faster than the first.
 | `--mode head\|pinned` | Which revision of each source repo to scan (default: `head`) |
 | `--format text\|mermaid\|dot\|json` | Output format (default: `text`) |
 | `-o, --output FILE` | Write to a file instead of stdout |
-| `--all-branches` | Scan all branches of the root repo |
+| `--all-branches` | Scan all branches of the root repo (sources are always read at one rev) |
+| `--downstream` | Also include repos that import FROM this one (needs `dt deps index` to have been run) |
+| `--org ORG` | Org whose index to use for `--downstream` (default: configured `owner`) |
 | `--include-paths` | Show example import paths (text only) |
 | `-j, --jobs N` | Concurrent clone/scan workers (default: 4) |
 | `--no-refresh` | Use cached clones without fetching |
@@ -330,8 +335,13 @@ was determined.
 
 | What | Where | Size |
 |------|-------|------|
-| The index (JSON) | `~/.cache/dvc-tools/repo-deps/<host>/<org>/`, or `deps.cache_dir` | small |
+| The index (JSON) | `<cache-root>/<host>/<org>/` | small |
 | The clones | the current project's `.dt/tmp/clones/` | large |
+
+`<cache-root>` is `deps.cache_dir` when set, otherwise the platform user cache
+directory for `dvc-tools` plus `repo-deps` — `~/.cache/dvc-tools/repo-deps` on
+Linux. Each org gets `index.json` (the repo manifest) plus one JSON file per
+repo under `edges/`.
 
 The split is deliberate: on HPC, home directories are quota-constrained, so bulk
 data stays on the project filesystem where `dt tmp clean` can reclaim it, while
@@ -358,6 +368,7 @@ clobber each other, and all writes are atomic (temp file + rename).
 | `--show` | Summarise the cache without refreshing |
 | `--clear` | Delete the cached index |
 | `--json` | Output as JSON |
+| `-v, --verbose` | Print progress |
 
 `--limit` reports how many repos it left unscanned rather than silently
 truncating, so a partial index never reads as a complete one.
@@ -389,12 +400,15 @@ Show which repositories import **from** a given repo — the ones that break if
 you move or delete data in it.
 
 Reads the cached index, so `dt deps index` must have been run first. The query
-itself does no cloning and no network access.
+itself does no cloning and no network access; pass `--refresh` to rebuild the
+index first. The index is looked up per org — `--org` defaults to the
+configured `owner`.
 
 ```bash
 dt deps downstream                                  # consumers of this repo
 dt deps downstream swarbricklab/references          # of another repo
 dt deps downstream --depth 1                        # direct consumers only
+dt deps downstream --org swarbricklab --refresh     # refresh, then query
 dt deps downstream --format mermaid -o consumers.md
 ```
 
@@ -437,6 +451,10 @@ dt deps graph --downstream --org swarbricklab
 # dt deps gaps
 
 Report repositories the graph could not resolve.
+
+This builds the same upstream graph as `dt deps graph` and prints only the gap
+report, so it clones just as `graph` does and shares its `--depth`, `-j/--jobs`,
+`--no-refresh` and `--owner` options. Add `--json` for machine-readable output.
 
 Access across an org is usually uneven, so a dependency graph is routinely
 incomplete. Unreachable repos are always kept as nodes — an incomplete graph

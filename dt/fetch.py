@@ -1713,7 +1713,7 @@ def _recover_import_via_source_clone(
 ) -> Tuple[bool, str]:
     """Non-mutating recovery of a pinned import from its SOURCE repo.
 
-    Uses the source repo's own clone in ``.dt/tmp`` (checked out at
+    Uses the source repo's own clone in ``.dt/tmp/clones/`` (checked out at
     ``rev_lock``): we point the clone's DVC cache at *this* project's primary
     cache and run ``dvc fetch`` inside the clone. DVC then pulls the pinned
     objects from the *source* repo's own remote straight into our cache. This

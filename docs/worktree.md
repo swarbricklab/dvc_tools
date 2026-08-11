@@ -26,12 +26,22 @@ dt worktree add <path> [options]
 - `--branch <name>`: Checkout an existing branch
 - `-v, --verbose`: Show detailed progress
 
+One of `--branch` or `--new-branch` is required; `dt worktree add <path>` on its
+own is rejected.
+
 ### What it does
 
 1. Gets the current DVC cache path from the main repository
 2. Creates the git worktree at the specified path
 3. Configures DVC in the new worktree to use the same cache
 4. Initializes git submodules recursively
+
+A worktree is a project root in its own right: it has a `.git` file, so `dt`
+treats it as the root and reads and writes `.dt/` inside the worktree. The
+project-scope config `.dt/config.yaml` is tracked by git, so it comes along
+with the checkout; the local-scope `.dt/config.local.yaml` is not tracked and
+does **not** carry over. If you rely on local-scope settings, set them again in
+the worktree with `dt config set --local ...`.
 
 ### Examples
 

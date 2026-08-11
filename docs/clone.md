@@ -19,7 +19,8 @@ dt clone [options] <repository> [path]
 ## Options
 
 - `--owner <name>`: Override the GitHub owner for short names
-- `--no-init`: Skip running `dt init` after cloning
+- `-u, --username <name>`: Default SSH username passed to auth setup (defaults to the `username` config value)
+- `--no-init`: Skip the project configuration steps — cache, site cache and remote. Hooks and auth are controlled separately by `--no-hooks` and `--no-auth`
 - `--no-submodules`: Skip cloning git submodules
 - `--cache-name <name>`: Override cache directory name (defaults to repository name)
 - `--remote-name <name>`: Override remote directory name (defaults to repository name)
@@ -63,12 +64,15 @@ The command automatically detects whether you've provided a full URL or a short 
 
 This operation includes the following steps:
 
-1. **Git Clone**: Clones the repository using `git clone`
-2. **Submodule Initialization**: Recursively clones all git submodules and their submodules
-3. **Cache Configuration**: Sets up the shared external cache directory
-4. **Remote Setup**: Configures a local filesystem remote for efficient HPC shared access
-5. **Git Hooks**: Installs pre-commit, post-checkout, and pre-push hooks plus the DVC merge driver (use `--no-hooks` to skip)
-6. **Auth Setup**: Runs `dt auth setup` to configure SSH keys and S3 credentials (use `--no-auth` to skip)
+1. **Git Clone**: Clones the repository using `git clone` (`--depth 1` with `--shallow`)
+2. **Revision Checkout**: Checks out `--rev`, if given
+3. **Submodule Initialization**: Recursively clones all git submodules and their submodules (use `--no-submodules` to skip)
+4. **Cache Configuration**: Sets up the shared external cache directory
+5. **Site Cache**: Configures `core.site_cache_dir` on shared storage (use `--no-site-cache` to skip; also skipped when no site cache root is configured)
+6. **Remote Setup**: Configures a local filesystem remote for efficient HPC shared access, derived from the repo's existing DVC remotes where possible
+7. **Git Hooks**: Installs the `pre-commit`, `post-checkout`, `post-merge`, `post-rewrite` and `pre-push` hooks plus the DVC merge driver (use `--no-hooks` to skip)
+8. **Auth Setup**: Runs `dt auth setup` to configure SSH keys and S3 credentials (use `--no-auth` to skip)
+9. **Pull**: Runs `dt pull` if `--pull` was given
 
 ## Examples
 
@@ -100,7 +104,7 @@ dt clone git@github.com:myorg/my-analysis.git
 # Clone to a specific directory
 dt clone git@github.com:myorg/my-analysis.git my-local-copy
 
-# Clone without automatic initialization (manual setup later)
+# Clone without cache/remote configuration (set it up manually later)
 dt clone --no-init git@github.com:myorg/my-analysis.git
 
 # Clone with custom cache name
@@ -200,7 +204,7 @@ After cloning, the workspace is automatically configured for the current platfor
 
 - **Cache**: Points to shared external cache directory
 
-The cloned repository's existing DVC remote configuration is preserved. Use `dt remote init` if you need to set up local remote overrides.
+The cloned repository's existing `.dvc/config` remote configuration is preserved: clone only adds a `local` default remote in `.dvc/config.local`, derived from the first project remote whose URL resolves to a local filesystem path. If no such remote exists, run `dt remote init` to create one from `remote.root`.
 
 ## Manual Setup After Clone
 
@@ -221,6 +225,6 @@ dt pull
 ## Related Commands
 
 - [`dt init`](init.md) - Initialize new DVC projects
-- [`dt cache init`](cache.md#init) - Cache setup
-- [`dt remote init`](remote.md#init) - Remote storage setup
+- [`dt cache init`](cache.md#dt-cache-init) - Cache setup
+- [`dt remote init`](remote.md#dt-remote-init) - Remote storage setup
 - [`dt config`](config.md) - Configuration management

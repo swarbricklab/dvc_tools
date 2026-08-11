@@ -267,3 +267,68 @@ class TestFormatResults:
         
         assert "cache:" in output
         assert "/cache/files/md5/ab/cd1234" in output
+
+
+class TestFindReturnsRelativePaths:
+    """Paths must be reported relative to the repo root.
+
+    DVC hands back absolute filesystem paths. Emitting those made the
+    documented pipelines (`dt find <hash> | xargs dt history`) fail, since
+    every other dt command speaks repo-relative paths.
+    """
+
+    def _out(self, fs_path, dvc_path, value="abcd1234567890abcdef1234567890ab"):
+        out = MagicMock()
+        out.hash_info = MagicMock()
+        out.hash_info.value = value
+        out.hash_info.isdir = False
+        out.fs_path = fs_path
+        out.stage = MagicMock()
+        out.stage.path = dvc_path
+        return out
+
+    def _find(self, out, root="/repo", **kwargs):
+        with patch("dt.find.Repo") as mock_repo:
+            repo_instance = MagicMock()
+            repo_instance.index.outs = [out]
+            repo_instance.root_dir = root
+            mock_repo.return_value = repo_instance
+            with patch("dt.find.get_cache_dir", return_value=None):
+                return find_by_hash("abcd1234", **kwargs)
+
+    def test_workspace_path_is_relative(self):
+        results = self._find(
+            self._out("/repo/data/processed/results.csv",
+                      "/repo/data/processed/results.csv.dvc"))
+
+        assert len(results) == 1
+        assert results[0]["path"] == "data/processed/results.csv"
+        assert not results[0]["path"].startswith("/")
+
+    def test_dvc_file_path_is_relative(self):
+        results = self._find(
+            self._out("/repo/data/results.csv", "/repo/data/results.csv.dvc"),
+            show_dvc_file=True)
+
+        assert results[0]["dvc_file"] == "data/results.csv.dvc"
+
+    def test_output_outside_repo_stays_absolute(self):
+        """An external output genuinely has no repo-relative form."""
+        results = self._find(
+            self._out("/elsewhere/data.csv", "/repo/data.csv.dvc"))
+
+        assert results[0]["path"] == "/elsewhere/data.csv"
+
+    def test_cache_path_stays_absolute(self):
+        """The cache lives outside the repo, so it is not relativised."""
+        out = self._out("/repo/data.csv", "/repo/data.csv.dvc")
+        with patch("dt.find.Repo") as mock_repo:
+            repo_instance = MagicMock()
+            repo_instance.index.outs = [out]
+            repo_instance.root_dir = "/repo"
+            mock_repo.return_value = repo_instance
+            with patch("dt.find.get_cache_dir",
+                       return_value=Path("/cache/files/md5")):
+                results = find_by_hash("abcd1234", show_cache_path=True)
+
+        assert results[0]["cache_path"].startswith("/cache")

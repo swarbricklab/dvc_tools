@@ -2,7 +2,7 @@
 
 A lightweight, optional directory of YAML files — one per archive
 recorded across all projects on the host (or team-shared storage).
-The per-project manifest under ``.dvc/archives/<name>.yaml`` remains
+The per-project manifest under ``.dt/archives/<name>.yaml`` remains
 canonical; the register is a derived index that lets you ask "what
 archives exist?" without scanning every repo.
 

@@ -16,16 +16,22 @@ the workspace.
 1. **Shared `site_cache_dir`** — point DVC's per-repo index at shared
    storage (e.g. `/scratch/<project>/dvc/site/<repo>`) so every node
    mounting the same workspace sees the same index live. This is the
-   recommended default and is configured automatically by
-   [`dt init`](init.md) / [`dt clone`](clone.md). See
+   recommended setup, and [`dt init`](init.md) / [`dt clone`](clone.md)
+   configure it for you **once `site_cache.root` is set** (without it
+   they silently leave DVC's default in place). See
    [`dt index set`](#dt-index-set) to configure an existing repo.
 
 2. **Archive mirror** — `dt index push|pull` snapshot the live index to
    a long-lived archive directory via the SQLite online-backup API and
    merge entries back in with `INSERT OR IGNORE`. Use this when you
    want a durable, off-node copy of the index (e.g. for backup, or to
-   seed a new shared `site_cache_dir`). Archiving is **explicit only** —
-   it is never triggered automatically by other `dt` commands.
+   seed a new shared `site_cache_dir`). Archiving is **explicit by
+   default** — no other `dt` command touches the archive unless you opt
+   in with `index.auto_sync` (see [Automatic sync](#automatic-sync)).
+
+Separately, `dt` keeps a small **cache index** (a different thing: a
+per-cache list of which OIDs exist, used to make `dt fetch` skip already
+cached objects). It is managed by [`dt index cache`](#dt-index-cache).
 
 ### How the mirror transport works
 
@@ -50,8 +56,8 @@ DVC operations are in flight, do not require a global lock across
 nodes, and never lose existing rows in the destination.
 
 > **Cloud mirrors are no longer supported.** Use a shared local
-> filesystem (Lustre, NFS, GPFS, etc.) for `index.mirror_root`. The
-> `dvc-tools[gcs]` / `dvc-tools[s3]` extras have been removed.
+> filesystem (Lustre, NFS, GPFS, etc.) for `index.mirror_root`; a
+> `gs://`, `gcs://` or `s3://` value is rejected outright.
 
 ## Configuration
 
@@ -69,7 +75,25 @@ dt config set index.mirror_root /g/data/<project>/dvc/index-archive
 # Lock tuning for the archive mirror
 dt config set index.lock_timeout 120      # seconds (default: 120)
 dt config set index.retry_interval 5      # seconds (default: 5)
+
+# Opt in to automatic archive sync (default: false)
+dt config set index.auto_sync true
 ```
+
+### Automatic sync
+
+`index.auto_sync` is **off by default**, and while it is off nothing syncs
+the archive except an explicit `dt index push` / `dt index pull`.
+
+Turning it on enables exactly two integration points:
+
+- [`dt status`](commands.md#dt-status) runs `dt index pull` before
+  `dvc status` and `dt index push` after it.
+- The `index-sync` hook check (not enabled by `dt install` by default)
+  runs a pull then a push.
+
+Both treat sync failures as warnings, so a missing or locked mirror never
+fails the surrounding command.
 
 ### Lustre / parallel filesystems
 
@@ -181,6 +205,27 @@ DVC's default index-building process reads and hashes every file in the cache, w
 
 Use `dt cache validate` separately if you need to verify checksum integrity. The build command assumes cache filenames are correct.
 
+### dt index cache
+
+Manage the **cache index** — a lightweight SQLite database recording which
+OIDs exist in the DVC cache, so `dt fetch` can skip already-cached objects
+without a `stat()` per file (expensive on network filesystems). It lives at
+`<cache_root>/.dt/cache.db/` and is shared by every repo using that cache.
+
+This is a separate thing from the `site_cache_dir` index and the archive
+mirror above; `dt index push|pull` do not touch it.
+
+```bash
+dt index cache status          # Path, existence, entry count
+dt index cache rebuild         # Clear and rescan the cache tree (prompts)
+dt index cache rebuild --yes   # Skip the confirmation prompt
+dt index cache rebuild -v      # Verbose
+dt index cache rebuild -q      # Quiet
+```
+
+Rebuild after modifying the cache by hand or running `dvc gc`, since the
+index is advisory and can go stale in either direction.
+
 ### dt index status
 
 Show site_cache_dir and mirror configuration.
@@ -188,15 +233,22 @@ Show site_cache_dir and mirror configuration.
 ```bash
 dt index status
 # Output:
+# Site cache (core.site_cache_dir):
+#   Configured: /scratch/a56/jr9959/dvc/site/my-repo
+#   Exists:     yes
+#
 # Index configuration:
-#   site_cache_dir: /scratch/a56/jr9959/dvc/site/my-repo
-#   Local index:    /scratch/a56/jr9959/dvc/site/my-repo/repo/<sha>/...
-#   Mirror:         /g/data/a56/dvc/index-archive/<sha>/...
+#   Local:  /scratch/a56/jr9959/dvc/site/my-repo/repo/<sha>/...
+#   Mirror: /g/data/a56/dvc/index-archive/<sha>/...
 #
 # Status:
-#   Local exists:   yes
-#   Mirror exists:  yes
+#   Local exists:  yes
+#   Mirror exists: yes
 ```
+
+If `index.mirror_root` is unset, `dt index status` still reports the site
+cache, then prints `Index mirror not configured` with the `dt config set`
+line to fix it.
 
 ## Locking
 
@@ -235,8 +287,11 @@ inside `dt add`/`dt fetch`/`dt pull`:
 - Move your mirror to a shared local filesystem and update
   `index.mirror_root`.
 - Run `dt index push|pull` explicitly when you want to archive or
-  restore. There is no longer a `--no-index-sync` flag because no
-  command syncs the index implicitly.
+  restore. There is no longer a `--no-index-sync` flag: implicit
+  syncing is off unless you opt back in with `index.auto_sync`
+  (see [Automatic sync](#automatic-sync)), and even then it is limited
+  to `dt status` and the `index-sync` hook check — `dt add`, `dt fetch`
+  and `dt pull` never touch the archive.
 - Consider switching to a shared `site_cache_dir` (`dt index set`) so
   every node sees the same live index and the archive becomes a
   pure backup, not the primary sharing mechanism.
