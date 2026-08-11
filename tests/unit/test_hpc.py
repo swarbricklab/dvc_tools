@@ -246,8 +246,9 @@ class TestSubmitWorkers:
             
             assert job_ids == []
 
-    def test_submits_jobs_for_workers_with_files(self, tmp_path):
+    def test_submits_jobs_for_workers_with_files(self, tmp_path, monkeypatch):
         """Test that jobs are submitted for workers with files."""
+        monkeypatch.chdir(tmp_path)
         manifest_dir = tmp_path / "manifest"
         manifest_dir.mkdir()
         
@@ -264,10 +265,9 @@ class TestSubmitWorkers:
                         stdout="12345.pbs\n",
                         stderr="",
                     )
-                    
-                    with patch("pathlib.Path.cwd", return_value=tmp_path):
-                        job_ids = submit_workers(manifest_dir, 1, "push", verbose=False)
-                    
+
+                    job_ids = submit_workers(manifest_dir, 1, "push", verbose=False)
+
                     assert job_ids == ["12345.pbs"]
 
 
@@ -332,31 +332,45 @@ class TestMonitorJobs:
 class TestGetTransferDir:
     """Tests for the get_transfer_dir function."""
 
-    def test_returns_push_directory(self, tmp_path):
+    def test_returns_push_directory(self, tmp_path, monkeypatch):
         """Test returns correct path for push operation."""
-        with patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = get_transfer_dir("push")
-            
-            assert result == tmp_path / ".dt" / "tmp" / "push"
-            assert result.exists()
+        monkeypatch.chdir(tmp_path)
 
-    def test_returns_pull_directory(self, tmp_path):
+        result = get_transfer_dir("push")
+
+        assert result == tmp_path / ".dt" / "tmp" / "push"
+        assert result.exists()
+
+    def test_returns_pull_directory(self, tmp_path, monkeypatch):
         """Test returns correct path for pull operation."""
-        with patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = get_transfer_dir("pull")
-            
-            assert result == tmp_path / ".dt" / "tmp" / "pull"
-            assert result.exists()
+        monkeypatch.chdir(tmp_path)
 
-    def test_creates_directory_if_not_exists(self, tmp_path):
+        result = get_transfer_dir("pull")
+
+        assert result == tmp_path / ".dt" / "tmp" / "pull"
+        assert result.exists()
+
+    def test_creates_directory_if_not_exists(self, tmp_path, monkeypatch):
         """Test that directory is created if it doesn't exist."""
-        with patch("pathlib.Path.cwd", return_value=tmp_path):
-            transfer_dir = tmp_path / ".dt" / "tmp" / "push"
-            assert not transfer_dir.exists()
-            
-            result = get_transfer_dir("push")
-            
-            assert result.exists()
+        monkeypatch.chdir(tmp_path)
+        transfer_dir = tmp_path / ".dt" / "tmp" / "push"
+        assert not transfer_dir.exists()
+
+        result = get_transfer_dir("push")
+
+        assert result == transfer_dir
+        assert result.exists()
+
+    def test_anchored_at_project_root_not_cwd(self, tmp_path, monkeypatch):
+        """The transfer dir follows the project root, not the working directory."""
+        (tmp_path / ".dvc").mkdir()
+        subdir = tmp_path / "analysis" / "nested"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+
+        result = get_transfer_dir("push")
+
+        assert result == tmp_path / ".dt" / "tmp" / "push"
 
 
 # =============================================================================

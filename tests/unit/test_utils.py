@@ -370,41 +370,99 @@ class TestFindDvcRoot:
 
 class TestFindGitRoot:
     """Tests for find_git_root function."""
-    
+
     def test_returns_none_outside_git_repo(self, tmp_path, monkeypatch):
         """Returns None when not in a git repository."""
         monkeypatch.chdir(tmp_path)
         result = utils.find_git_root()
         assert result is None
-    
-    @pytest.mark.skipif(not shutil.which('git'), reason="git not installed")
+
     def test_finds_root_in_git_repo(self, tmp_path, monkeypatch):
-        """Finds root when in a git repository."""
+        """Finds the root of a plain git repository -- no DVC required.
+
+        This used to go through ``dvc.repo.Repo``, which needs a ``.dvc``
+        directory, so it returned None here. The old assertion accepted
+        ``None or tmp_path`` and therefore never noticed.
+        """
+        (tmp_path / '.git').mkdir()
         monkeypatch.chdir(tmp_path)
-        subprocess.run(['git', 'init'], capture_output=True)
-        
-        # find_git_root uses DVC internals which need DVC repo
-        # This test may return None without DVC
-        result = utils.find_git_root()
-        # Accept either the path or None (if DVC not available)
-        assert result is None or result == tmp_path
+
+        assert utils.find_git_root() == tmp_path.resolve()
+
+    def test_finds_root_from_subdirectory(self, tmp_path, monkeypatch):
+        """Walks up from a nested working directory."""
+        (tmp_path / '.git').mkdir()
+        nested = tmp_path / 'a' / 'b' / 'c'
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        assert utils.find_git_root() == tmp_path.resolve()
+
+    def test_accepts_git_file_for_worktrees(self, tmp_path, monkeypatch):
+        """A worktree or submodule has .git as a file, not a directory."""
+        (tmp_path / '.git').write_text('gitdir: /elsewhere/.git/worktrees/wt\n')
+        monkeypatch.chdir(tmp_path)
+
+        assert utils.find_git_root() == tmp_path.resolve()
+
+    def test_honours_start_argument(self, tmp_path):
+        """Searches from `start` rather than the working directory."""
+        repo = tmp_path / 'repo'
+        (repo / 'sub').mkdir(parents=True)
+        (repo / '.git').mkdir()
+
+        assert utils.find_git_root(start=repo / 'sub') == repo.resolve()
+
+    def test_does_not_open_a_dvc_repo(self, tmp_path, monkeypatch):
+        """Locating the git root must not construct a dvc.repo.Repo.
+
+        Doing so opened the repo's state database, which on shared network
+        storage cost hundreds of milliseconds on a path that every single
+        config lookup goes through.
+        """
+        (tmp_path / '.git').mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        with patch.object(utils, 'Repo') as mock_repo:
+            assert utils.find_git_root() == tmp_path.resolve()
+
+        mock_repo.assert_not_called()
 
 
 class TestFindProjectRoot:
     """Tests for find_project_root function."""
-    
+
     def test_returns_cwd_as_fallback(self, tmp_path, monkeypatch):
         """Returns cwd when no git/DVC root found."""
         monkeypatch.chdir(tmp_path)
-        
+
         result = utils.find_project_root()
-        
+
         assert result == tmp_path
-    
+
     def test_uses_start_path(self, tmp_path):
         """Uses provided start path."""
         result = utils.find_project_root(start=tmp_path)
         assert result == tmp_path
+
+    def test_prefers_git_root_over_dvc_root(self, tmp_path, monkeypatch):
+        """Documented order: git root first, then DVC root, then cwd."""
+        (tmp_path / '.git').mkdir()
+        nested = tmp_path / 'analysis'
+        nested.mkdir()
+        (nested / '.dvc').mkdir()
+        monkeypatch.chdir(nested)
+
+        assert utils.find_project_root() == tmp_path.resolve()
+
+    def test_falls_back_to_dvc_root_without_git(self, tmp_path, monkeypatch):
+        """A DVC project outside git still resolves to the DVC root."""
+        (tmp_path / '.dvc').mkdir()
+        nested = tmp_path / 'analysis'
+        nested.mkdir()
+        monkeypatch.chdir(nested)
+
+        assert utils.find_project_root() == tmp_path
 
 
 # =============================================================================

@@ -17,6 +17,7 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `site_cache.root` | Root directory for shared DVC [`site_cache_dir`](index.md) | `/g/data/a56/dvc/site` |
 | `site_cache.enabled` | Whether `dt init`/`dt clone` configure `core.site_cache_dir` | `true` |
 | `index.mirror_root` | Root directory for the [index archive](index.md) | `/g/data/a56/dvc/index-archive` |
+| `index.auto_sync` | Sync the index archive from `dt status` and the pre-commit hook | `false` |
 | `index.lock_timeout` | Seconds to wait for `local.lock` / `mirror.lock` | `120` |
 | `index.retry_interval` | Initial retry interval for locks | `5` |
 | `add.max_threads` | Maximum threads for checksum computation | `192` |
@@ -131,6 +132,19 @@ Root directory for the shared index archive. The actual archive path is `{mirror
 
 ```bash
 dt config set index.mirror_root /g/data/<project>/dvc/index-archive
+```
+
+### `index.auto_sync`
+
+**Default:** `false`
+
+When `true`, `dt status` pulls the index archive before running, and the
+pre-commit hook's index-sync step pulls then pushes it. Off by default: the
+implicit sync raced concurrent `dvc` invocations and added latency to commands
+that did not need it. Run `dt index pull|push` explicitly instead.
+
+```bash
+dt config set index.auto_sync true
 ```
 
 ### `index.lock_timeout`

@@ -132,15 +132,11 @@ class TestDataStatusViaQxub:
     @patch('dt.data_status.dvc_utils.submit_via_qxub', return_value=None)
     @patch('dt.data_status.cfg.get_value', return_value='192')
     @patch('dt.data_status.dvc_utils.check_qxub', return_value=True)
-    def test_no_index_sync_flag_in_worker_cmd(self, mock_qxub, mock_cfg, mock_submit):
-        data_status_via_qxub(no_index_sync=True)
-        call_kwargs = mock_submit.call_args[1]
-        assert '--no-index-sync' in call_kwargs['worker_cmd']
+    def test_no_index_sync_option_is_gone(self, mock_qxub, mock_cfg, mock_submit):
+        """No command syncs the index implicitly, so there is nothing to opt out of."""
+        with pytest.raises(TypeError):
+            data_status_via_qxub(no_index_sync=True)
 
-    @patch('dt.data_status.dvc_utils.submit_via_qxub', return_value=None)
-    @patch('dt.data_status.cfg.get_value', return_value='192')
-    @patch('dt.data_status.dvc_utils.check_qxub', return_value=True)
-    def test_no_index_sync_flag_absent_by_default(self, mock_qxub, mock_cfg, mock_submit):
         data_status_via_qxub()
         call_kwargs = mock_submit.call_args[1]
         assert '--no-index-sync' not in call_kwargs['worker_cmd']
