@@ -53,7 +53,7 @@ dt add data/ results/ models/
 # Use up to 24 threads
 dt add -t 24 data/
 
-# Use maximum threads for very large directories
+# Request 96 threads for a very large directory
 dt add -t 96 huge_dataset/
 ```
 
@@ -69,16 +69,16 @@ dt add --no-wait data/
 ### Passing DVC Options
 
 ```bash
-# Add with a custom .dvc filename
-dt add --file custom.dvc data/
+# Add with a custom output path
+dt add -o data_copy/ data/
 
-# Add to a specific target location  
+# Transfer straight to the remote instead of the local cache
 dt add --to-remote data/
 ```
 
 ## Configuration
 
-The following options can be set in `.dt/config`:
+The following options can be set in `.dt/config.yaml`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -115,7 +115,7 @@ Example: With 192 threads and 1 GB per thread, the job requests 48 CPUs and 192 
 2. **Execution Phase** (compute node):
    - Sets `core.checksum_jobs` to thread count (local scope)
    - Runs `dvc add` on all targets
-   - Unsets the config after completion
+   - Unsets the config afterwards, restoring any pre-existing value
 
 3. **Result**:
    - `.dvc` files are created for each target
@@ -137,9 +137,10 @@ Common errors and solutions:
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| "qxub is not available" | qxub not in PATH | Load appropriate module |
+| "qxub not found. Install from ..." | qxub not in PATH | Load appropriate module or install [qxub](https://github.com/swarbricklab/qxub) |
 | "Not in a DVC repository" | No .dvc directory | Run `dvc init` first |
 | Target not found | Invalid path | Check file/directory exists |
+| "Thread count N exceeds maximum M" | `-t` above `add.max_threads` | Lower `-t`, or raise `add.max_threads` |
 
 ## Related Commands
 

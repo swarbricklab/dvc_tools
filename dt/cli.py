@@ -103,7 +103,8 @@ def init(name, owner, team, cache_root, remote_root, site_cache_root, site_cache
 @click.argument('path', required=False)
 @click.option('--owner', help='Override the GitHub owner for short names')
 @click.option('--username', '-u', default=lambda: cfg.get_value('username'), help='Default SSH username for auth setup (default: username from config)')
-@click.option('--no-init', is_flag=True, help='Skip running dt init after cloning')
+@click.option('--no-init', is_flag=True,
+              help='Skip cache, site-cache and remote setup after cloning')
 @click.option('--no-submodules', is_flag=True, help='Skip cloning git submodules')
 @click.option('--cache-name', help='Override cache directory name')
 @click.option('--remote-name', help='Override remote directory name')
@@ -146,6 +147,7 @@ def clone(repository, path, owner, username, no_init, no_submodules, cache_name,
             path=path,
             owner=owner,
             username=username,
+            no_init=no_init,
             no_submodules=no_submodules,
             cache_name=cache_name,
             remote_name=remote_name,
@@ -1596,10 +1598,10 @@ def remote_archive():
     """Archive DVC remotes to cold storage (e.g. NCI MDSS).
 
     Tars the contents of a DVC remote's ``files/md5/`` tree in parallel
-    (one inner tarball per md5 prefix), wraps them in a single outer
-    tar, and ships the result to a pluggable archival backend. A
-    manifest is committed under ``.dvc/archives/`` so verify, restore
-    and prune can work without contacting the backend first.
+    (one inner tarball per md5 prefix) and ships them to a pluggable
+    archival backend, folder-per-archive. A manifest is committed under
+    ``.dt/archives/`` so verify, restore and prune can work without
+    contacting the backend first.
 
     \b
     Typical workflow:
@@ -1672,7 +1674,7 @@ def _default_name(source_remote: Path) -> str:
               type=click.Choice(['none', 'gzip', 'zstd']),
               default=None,
               help='Compression for inner tarballs '
-                   '(default: archive.compress or zstd).')
+                   '(default: archive.compress or none).')
 @click.option('--source-layout',
               type=click.Choice(['auto', 'dvc-v2', 'dvc-v3', 'dvc-mixed']),
               default='auto',
@@ -1704,7 +1706,7 @@ def remote_archive_create(name, source, backend, backend_dir, backend_path,
     NAME is the identifier for this archive instance. It becomes:
 
     \b
-      - the manifest filename:   .dvc/archives/<NAME>.yaml
+      - the manifest filename:   .dt/archives/<NAME>.yaml
       - the default backend dir: <archive.backend_root>/<remote-dir>/<NAME>/
       - the handle for follow-up:  dt remote archive verify <NAME>
                                     dt remote archive restore <NAME> --to ...
@@ -1795,7 +1797,7 @@ def remote_archive_create(name, source, backend, backend_dir, backend_path,
 @click.option('--compress',
               type=click.Choice(['none', 'gzip', 'zstd']),
               default=None,
-              help='Compression (default: archive.compress or zstd).')
+              help='Compression (default: archive.compress or none).')
 @click.option('--source-layout',
               type=click.Choice(['auto', 'dvc-v2', 'dvc-v3', 'dvc-mixed']),
               default='auto',
@@ -1925,10 +1927,10 @@ def remote_archive_deposit(name, staging_dir, jobs, dry_run, resume,
 
 @remote_archive.command('list')
 def remote_archive_list():
-    """List archives recorded under ``.dvc/archives/``."""
+    """List archives recorded under ``.dt/archives/``."""
     manifests = archive_ops.list_archives()
     if not manifests:
-        click.echo("No archives found under .dvc/archives/.")
+        click.echo("No archives found under .dt/archives/.")
         return
     name_w = max(len(m.archive_name) for m in manifests)
     name_w = max(name_w, len('NAME'))
@@ -2031,7 +2033,7 @@ def remote_archive_registry():
     A registry directory configured by ``archive.registry_path`` collects
     one YAML per archive (per project) so you can query "what archives
     exist?" without scanning every repo. Per-project manifests under
-    ``.dvc/archives/`` remain the source of truth.
+    ``.dt/archives/`` remain the source of truth.
     """
     pass
 
@@ -2085,7 +2087,7 @@ def remote_archive_registry_list():
 @click.option('--root', 'roots', multiple=True, type=click.Path(),
               required=True,
               help='Project root to scan (may be repeated). Each root\'s '
-                   '.dvc/archives/*.yaml manifests are read and the '
+                   '.dt/archives/*.yaml manifests are read and the '
                    'register is updated to match.')
 def remote_archive_registry_sync(roots):
     """Rebuild register entries from the manifests under listed roots."""
@@ -3330,12 +3332,22 @@ def find(hash, dvc_file, dir_file, cache_path, no_expand, json_output, verbose):
 @click.pass_context
 def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
     """Push DVC-tracked files to remotes.
-    
+
+    \b
+    Usage:
+        dt push [OPTIONS] [TARGETS]...
+
+    Targets are optional; with none, everything is pushed. They do not
+    appear in the usage line above because unrecognised arguments are
+    forwarded to `dvc push` verbatim rather than parsed here.
+
     Without --workers: pushes to all project-configured remotes sequentially.
     With --workers N: distributes push across N compute nodes via qxub.
     
-    The parallel mode partitions files by hash prefix, ensuring no conflicts
-    between workers. Each worker calls DVC's internal push directly.
+    The parallel mode partitions files by size, using greedy LPT bin-packing
+    so each worker gets a comparable share of the bytes. Partitions are
+    disjoint, so workers never conflict. Each worker calls DVC's internal
+    push directly.
     
     \b
     Examples:
@@ -3481,7 +3493,7 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
     ignore_unknown_options=True,
     allow_extra_args=True,
 ))
-@click.argument('targets', nargs=-1, type=click.Path(exists=True), required=True)
+@click.argument('targets', nargs=-1, type=click.UNPROCESSED, required=True)
 @click.option('-t', '--threads', type=int, default=None,
               help='Number of threads for checksum computation (default: 192).')
 @click.option('--no-wait', is_flag=True,
@@ -3499,27 +3511,45 @@ def add(ctx, targets, threads, no_wait, verbose, worker):
     
     \b
     Options:
-        --threads/-t N    Use N threads for checksums (default: 48)
+        --threads/-t N    Use N threads for checksums (default: 192)
         --no-wait         Don't wait for job to complete
-    
+
     \b
     Examples:
-        dt add data/                      # Add directory (48 threads)
+        dt add data/                      # Add directory (192 threads)
         dt add -t 24 large_file.csv       # Use 24 threads
         dt add --no-wait data/            # Submit and exit immediately
-    
+        dt add --no-commit data/          # Pass --no-commit to dvc add
+
     \b
     Configuration:
-        add.max_threads     Maximum threads allowed (default: 48)
-        add.mem_per_thread  GB of RAM per thread (default: 4)
-    
-    All other options are passed through to `dvc add`.
+        add.max_threads     Maximum threads allowed (default: 192)
+        add.mem_per_thread  GB of RAM per thread (default: 1)
+
+    All other options are passed through to `dvc add`. Use `--` to add a
+    target whose name begins with a dash.
     Run `dvc add --help` for additional options.
     """
     try:
-        # Extract dvc_args from extra args (options only)
-        dvc_args = [arg for arg in ctx.args if arg.startswith('-')]
-        
+        # click hands us options and paths as one flat list: a variadic
+        # argument under ignore_unknown_options consumes everything and
+        # leaves ctx.args empty, so we do the splitting ourselves.
+        targets, dvc_args = add_mod.split_dvc_args(list(targets))
+
+        if not targets:
+            raise click.UsageError(
+                "No targets given. Specify at least one file or directory "
+                "to add."
+            )
+
+        # click.Path(exists=True) used to cover this, but it cannot be used
+        # on an argument that also receives pass-through options.
+        missing = [t for t in targets if not Path(t).exists()]
+        if missing:
+            raise click.UsageError(
+                "Path does not exist: " + ", ".join(missing)
+            )
+
         if worker:
             # Running on compute node - execute dvc add directly.
             # No workspace lock: add shells out to `dvc add` which acquires
@@ -4001,8 +4031,9 @@ def tmp():
 @click.option('--no-refresh', is_flag=True, help='Use cached clone without refreshing')
 def tmp_clone(repository, owner, no_refresh):
     """Clone a repository into .dt/tmp/clones/.
-    
-    Creates a sparse clone with only .dvc/ directory checked out.
+
+    Clones the git history but no DVC-tracked data, so the repository's
+    DVC configuration and revisions are available cheaply.
     If the clone already exists, it is refreshed by default.
     
     \b
@@ -4445,7 +4476,7 @@ def offline():
         
         # Later, refresh clones if needed
         dt offline disable
-        dt tmp refresh --all
+        dt tmp clone source-repo
         dt offline enable
     """
     pass
@@ -5443,10 +5474,11 @@ def migrate(targets, dry, verbose, cache_root, find_v2):
 def install(force, verbose):
     """Install git hooks and DVC merge driver.
 
-    Writes hook scripts to .git/hooks/ that delegate to ``dt hook run``.
-    Also sets up the DVC merge driver for automatic .dvc file conflict
-    resolution, and writes sensible default check configuration to the
-    project config.
+    Writes hook scripts to .git/hooks/ that delegate to ``dt hook run``,
+    and sets up the DVC merge driver for automatic .dvc file conflict
+    resolution. No check configuration is written: the defaults are
+    built in, so hooks work out of the box. Override them per-check with
+    ``dt config set hooks.<hook>.checks.<check>.<setting>``.
 
     \b
     Hooks installed:

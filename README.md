@@ -11,11 +11,11 @@ pip install git+ssh://git@github.com/swarbricklab/dvc_tools.git
 ## Quick Start
 
 ```bash
-# Create a new DVC project
+# Create a new DVC project (name defaults to the directory name)
 mkdir my-analysis && cd my-analysis
-dt init my-analysis
+dt init
 
-# Or clone an existing project  
+# Or clone an existing project
 dt clone git@github.com:myorg/existing-project.git
 
 # Check configuration
@@ -24,13 +24,13 @@ dt doctor
 
 ## Commands
 
-The `dt` command provides subcommands for managing DVC projects:
+The `dt` command provides subcommands for managing DVC projects. The most commonly used ones:
 
 ```bash
 dt init       # Initialize a new DVC project with cache and remote
 dt clone      # Clone an existing DVC project with local configuration
 dt add        # Add files to DVC tracking via compute node
-dt fetch      # Fetch import files into cache from local sources
+dt fetch      # Fetch DVC-tracked files into the primary cache from local sources
 dt pull       # Pull DVC-tracked files, handling imports automatically
 dt push       # Push files to all configured remotes
 dt import     # Import data from other repositories using local caches

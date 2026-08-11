@@ -14,8 +14,11 @@ Creates summary documentation files by wrapping DVC commands:
 
 - **tree.txt** - File listing via `dvc list --tree --dvc-only .`
 - **dag.md** - Pipeline DAG via `dvc dag --md` (mermaid format)
+- **repo-dag.md** - Graph of imports *between* repos (opt-in, see `--repo-dag`)
 
-By default, both files are generated in the `docs/` directory.
+By default, `tree.txt` and `dag.md` are generated in the `docs/` directory.
+`repo-dag.md` is opt-in because it clones every upstream repo, whereas the
+other two are local-only and fast.
 
 ## Options
 
@@ -24,6 +27,8 @@ By default, both files are generated in the `docs/` directory.
 | `-o, --out <dir>` | Output directory (default: docs/) |
 | `--tree-only` | Generate only tree.txt |
 | `--dag-only` | Generate only dag.md |
+| `--repo-dag` | Also generate repo-dag.md (clones upstream repos, so much slower) |
+| `--repo-dag-depth N` | Maximum depth for repo-dag.md (default: unlimited) |
 
 ## Configuration
 
@@ -50,6 +55,12 @@ dt summary --tree-only
 
 # Generate only the pipeline DAG
 dt summary --dag-only
+
+# Also generate the cross-repo import graph
+dt summary --repo-dag
+
+# Limit how far upstream the repo graph is expanded
+dt summary --repo-dag --repo-dag-depth 2
 
 # Output to current directory
 dt summary -o .

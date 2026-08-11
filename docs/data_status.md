@@ -14,18 +14,19 @@ For quick local checks (e.g. small projects on a login node), use
 ## Usage
 
 ```bash
-dt data status [OPTIONS] [-- DVC_OPTIONS...]
+dt data status [OPTIONS] [DVC_OPTIONS...] [TARGETS...]
 ```
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `-t, --threads N` | Number of threads for checksum computation |
+| `-t, --threads N` | Number of threads for checksum computation (default: `add.max_threads`, i.e. 192) |
 | `--no-wait` | Submit job and exit without waiting for completion |
 | `-v, --verbose` | Show detailed progress |
 
-All other options are passed through to `dvc data status`.
+All other options — and any positional targets — are passed through to
+`dvc data status`.
 
 ### DVC pass-through options
 
@@ -36,6 +37,7 @@ All other options are passed through to `dvc data status`.
 | `--unchanged` | Show unmodified DVC-tracked files |
 | `--untracked-files [no\|all]` | Show untracked files |
 | `--not-in-remote` | Show files missing from remote |
+| `-r, --remote NAME` | Remote to check (only with `--not-in-remote`) |
 | `--no-remote-refresh` | Use cached remote index (skip remote check) |
 
 ## Examples
@@ -51,6 +53,9 @@ dt data status --granular
 
 # JSON output
 dt data status --json
+
+# Limit the scope to one path
+dt data status data/
 ```
 
 ### Controlling threads

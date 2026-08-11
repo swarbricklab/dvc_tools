@@ -21,13 +21,21 @@ Rebuilt `.dir` files are automatically pushed to the source remote so others don
 
 ## Smart Revision Detection
 
-When `--rev` is not specified, `dt update` intelligently determines the best revision to use:
+When `--rev` is not specified, `dt update` compares the locked revision
+(`deps.repo.rev_lock`) against the source repository's HEAD and decides what is
+safe to do:
 
-- If the .dvc file has a `rev_lock`, uses that (rebuilds at the currently locked revision)
-- If the .dvc file has a `rev` field (branch/tag), updates to the latest HEAD of that ref
-- Otherwise, updates to the default branch HEAD
+- **HEAD equals the locked rev** — refreshes the `.dir` at that revision.
+- **HEAD moved, but the imported data is unchanged** — advances `rev_lock` to
+  HEAD. This is a metadata-only upgrade; no data is re-downloaded.
+- **HEAD moved and the data changed** — stops without touching anything and
+  prints your options (`--force`, `--rebuild`, or `--rev <rev>`).
+- **The imported path moved upstream** — the new path is detected by hash and
+  the `.dvc` file is repointed at it.
 
-This means running `dt update` without `--rev` will **not** accidentally update to the latest version—it respects the locked revision.
+So `dt update` never silently pulls *different data*, but it will roll the lock
+forward when the content is provably identical. Use `--rebuild` if you want to
+stay pinned to the locked revision without consulting HEAD at all.
 
 ## Arguments
 
@@ -39,10 +47,12 @@ This means running `dt update` without `--rev` will **not** accidentally update 
 
 | Option | Description |
 |--------|-------------|
-| `--rev TEXT` | Git revision (commit, branch, tag) to update to. |
-| `--rebuild` | Fix .dir at locked rev even if upstream data has changed (warns but continues). |
-| `--no-download` | Rebuild .dir file only, do not download data. |
-| `--dry-run`, `--status` | Show what would be updated without making changes. Useful for checking import status. |
+| `--rev TEXT` | Git revision (commit, branch, tag) to update to. If omitted, see [Smart Revision Detection](#smart-revision-detection). |
+| `--rebuild` | Rebuild .dir at the locked rev, skipping change detection entirely. |
+| `--force` | Update to HEAD even when the upstream data has changed. |
+| `--no-download` | Rebuild the .dir file only; skip the follow-up `dt fetch`. |
+| `--dry-run`, `--dry` | Show what would be done without making changes. |
+| `--status` | Print a status summary for all imports (implies `--dry-run`). |
 | `-v, --verbose` | Show detailed progress. |
 
 ## Use Cases
@@ -52,10 +62,11 @@ This means running `dt update` without `--rev` will **not** accidentally update 
 When `dt fetch` fails because a `.dir` manifest is missing from the remote:
 
 ```bash
-dt update data/external.dvc
+dt update --rebuild data/external.dvc
 ```
 
-This rebuilds the `.dir` at the currently locked revision without changing any data.
+`--rebuild` rebuilds the `.dir` at the currently locked revision and never
+consults upstream HEAD, so the version you are pinned to cannot change.
 
 ### 2. Check import status
 
@@ -82,6 +93,13 @@ dt update --rev v1.2.0
 dt update --rev abc1234
 ```
 
+If you just want to accept whatever is at HEAD after `dt update` has stopped to
+warn you that the data changed:
+
+```bash
+dt update --force data/shared.csv.dvc
+```
+
 ### 4. Fix .dir when upstream has changed
 
 When the `.dir` is missing AND upstream data has changed, but you want to stay at your current version:
@@ -90,7 +108,9 @@ When the `.dir` is missing AND upstream data has changed, but you want to stay a
 dt update --rebuild data/external.dvc
 ```
 
-This warns about upstream changes but rebuilds the `.dir` at the locked revision.
+`--rebuild` skips change detection altogether, so it rebuilds the `.dir` at the
+locked revision regardless of what has happened upstream. Use `--status` first
+if you want to see what changed.
 
 ### 5. Update without downloading
 
@@ -123,26 +143,27 @@ dt fetch imported/dir.dvc
 # Option 1: Use dt fetch --update (automatic recovery)
 dt fetch --update imported/dir.dvc
 
-# Option 2: Run dt update manually then fetch
-dt update imported/dir.dvc
+# Option 2: Rebuild at the locked rev, then fetch
+dt update --rebuild imported/dir.dvc
 dt fetch imported/dir.dvc
 
-# Option 3: If upstream has changed but you want to stay at locked rev
-dt update --rebuild imported/dir.dvc
+# Option 3: Let dt update decide (rolls the lock forward if data is unchanged)
+dt update imported/dir.dvc
 ```
 
 ## How it works
 
 1. **Find import files**: If no targets specified, finds all .dvc files with a `deps.repo` section (imports)
-2. **Determine revision**: Uses `--rev` if specified, otherwise uses the locked revision (`rev_lock`) from the .dvc file
-3. **Clone source repo**: Clones the source repository at the target revision (cached in `.dt/tmp/`)
+2. **Determine revision**: Uses `--rev` if specified, otherwise applies [Smart Revision Detection](#smart-revision-detection) (or the locked revision with `--rebuild`)
+3. **Clone source repo**: Clones/refreshes the source repository (cached in `.dt/tmp/clones/`)
 4. **Query source**: Gets the file listing, hashes, and sizes from the source repository using `dvc list --json --show-hash --size --recursive`
 5. **Rebuild .dir**: For directories, rebuilds the `.dir` manifest file from the file listing
 6. **Update .dvc file**: Updates the .dvc file with the new hash, `size`, and `nfiles` metadata
 7. **Push .dir**: Pushes the `.dir` file to the source remote so others don't have this issue
-8. **Fetch data**: Downloads the data files to the local cache
-9. **Checkout**: Checks out files from cache to the workspace
-10. **Sync index**: If index mirror is configured, syncs after update
+8. **Fetch data**: Runs `dt fetch` on the updated targets to populate the local cache (skipped with `--no-download`)
+
+`dt update` does not check files out into the workspace — run `dvc checkout`
+afterwards if you need the workspace copies linked.
 
 ## Metadata population
 

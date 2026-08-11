@@ -5,6 +5,7 @@ View and modify configuration settings for the `dt` tool.
 ## Usage
 
 ```bash
+dt config                   # List all effective values, each tagged with its scope
 dt config list              # View all configuration
 dt config get <key>         # View specific setting
 dt config set <key> <value> # Set configuration (project scope by default)
@@ -22,6 +23,9 @@ dt config set --project <key> <value> # Shared repo settings (default)
 dt config set --user <key> <value>    # Personal defaults
 dt config set --system <key> <value>  # Team defaults
 ```
+
+The same flags work on `add`, `remove`, `unset`, `list`, and `path`. Only one
+scope flag may be given at a time.
 
 ## Quick Start
 

@@ -18,6 +18,14 @@ from . import config as cfg
 # Node specs: 48 CPUs, 192 GB RAM, 4 threads per CPU = 192 max threads
 DEFAULT_MAX_THREADS = 192
 DEFAULT_MEM_PER_THREAD = 1  # GB (192 GB / 192 threads)
+
+# Jobs submitted from here are compute-bound (parallel checksumming for
+# `dt add` / `dt data status`), so they default to the compute queue rather
+# than the data-mover queue that hpc.DEFAULT_TRANSFER_QUEUE uses. Both read
+# the same `qxub.queue` config key; only the fallback differs.
+DEFAULT_COMPUTE_QUEUE = 'normal'
+DEFAULT_ENV = 'dt'
+DEFAULT_WALLTIME = '10:00:00'
 THREADS_PER_CPU = 4  # How many checksum jobs per CPU
 
 
@@ -214,9 +222,9 @@ def submit_via_qxub(
         threads, file_count=file_count, config_prefix=config_prefix,
     )
 
-    conda_env = cfg.get_value('qxub.env', 'dt')
-    queue = cfg.get_value('qxub.queue', 'normal')
-    walltime = cfg.get_value('qxub.walltime', '10:00:00')
+    conda_env = cfg.get_value('qxub.env', DEFAULT_ENV)
+    queue = cfg.get_value('qxub.queue', DEFAULT_COMPUTE_QUEUE)
+    walltime = cfg.get_value('qxub.walltime', DEFAULT_WALLTIME)
 
     cmd: List[str] = [
         'qxub', 'exec',

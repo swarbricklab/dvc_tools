@@ -40,9 +40,11 @@ def add(
     """
     worktree_path = Path(path).resolve()
     
-    # Get current DVC cache before creating worktree
+    # Get current DVC cache before creating worktree. This has to be the
+    # cache *root*: it is handed straight to `dvc cache dir`, which appends
+    # the files/md5 layout itself. Passing the odb path would nest it twice.
     try:
-        cache_dir = utils.get_cache_dir()
+        cache_dir = utils.get_cache_root()
     except Exception:
         cache_dir = None
     

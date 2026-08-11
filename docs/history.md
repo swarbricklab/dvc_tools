@@ -30,6 +30,7 @@ Use with `dt diff` to examine the actual content changes between versions.
 ```bash
 $ dt history data.csv
 COMMIT     DATE          HASH              MESSAGE
+------------------------------------------------------------
 a1b2c3d    2026-01-15    d41d8cd98f00b204  Add initial dataset
 e5f6g7h    2026-01-20    098f6bcd4621d373  Update with Q4 data
 i9j0k1l    2026-02-01    5d41402abc4b2a76  Fix missing values
@@ -51,9 +52,10 @@ $ dt history data.csv --since "1 month ago"
 
 ```bash
 $ dt history data.csv -v
-COMMIT        DATE          AUTHOR              HASH                                MESSAGE
-a1b2c3d       2026-01-15    John Doe            d41d8cd98f00b204e9800998ecf8427e    Add initial dataset
-e5f6g7h       2026-01-20    Jane Smith          098f6bcd4621d373cade4e832627b4f6    Update with Q4 data
+COMMIT        DATE          AUTHOR                HASH                                MESSAGE
+----------------------------------------------------------------------------------------------------
+a1b2c3d       2026-01-15    John Doe              d41d8cd98f00b204e9800998ecf8427e    Add initial dataset
+e5f6g7h       2026-01-20    Jane Smith            098f6bcd4621d373cade4e832627b4f6    Update with Q4 data
 ```
 
 ### JSON output for scripting
@@ -107,7 +109,9 @@ dt diff model_weights.h5 --old <good_commit> --new <bad_commit>
 
 Uses DVC's `_collect_indexes` with a reused Repo object for fast hash lookups (~0.05s per revision vs 0.32s for CLI calls).
 
-For repositories with imports, automatically enables offline mode to avoid slow network operations.
+Offline mode is enabled for the duration of the command (and restored to its
+previous state afterwards) so that repositories containing imports don't stall
+on network operations.
 
 ## Supported Tracking Mechanisms
 

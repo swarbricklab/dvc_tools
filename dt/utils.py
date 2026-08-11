@@ -114,6 +114,42 @@ def get_cache_dir() -> Optional[Path]:
         return None
 
 
+def cache_root_from_odb_path(path: Path) -> Path:
+    """Strip the ``files/md5`` suffix from a DVC odb path.
+
+    ``get_cache_dir()`` returns DVC's object-database path, which under the
+    v3 layout ends in ``files/md5``. Anything that hands a cache location
+    back to DVC -- ``dvc cache dir``, or our own helpers that re-append the
+    layout -- needs the root instead, or the path ends up doubled.
+
+    Args:
+        path: An odb path, with or without the suffix.
+
+    Returns:
+        The cache root. Returned unchanged if the suffix isn't present.
+    """
+    path = Path(path)
+    if path.name == 'md5' and path.parent.name == 'files':
+        return path.parent.parent
+    return path
+
+
+def get_cache_root() -> Optional[Path]:
+    """Get the primary DVC cache root directory.
+
+    Like :func:`get_cache_dir`, but returns the root that DVC's
+    ``cache.dir`` config expects rather than the ``files/md5`` level
+    underneath it.
+
+    Returns:
+        Path to the cache root, or None if not in a DVC repo.
+    """
+    cache_dir = get_cache_dir()
+    if cache_dir is None:
+        return None
+    return cache_root_from_odb_path(cache_dir)
+
+
 def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
     """Convert a file hash to its cache file path.
     

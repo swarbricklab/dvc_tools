@@ -304,3 +304,102 @@ class TestAddViaQxub:
         # Find --threads in command and check it's 1 (single file)
         cmd_str = ' '.join(captured_cmd)
         assert '--threads 1' in cmd_str
+
+
+class TestSplitDvcArgs:
+    """Tests for split_dvc_args.
+
+    ``dt add`` promises to forward unrecognised options to ``dvc add``. click
+    cannot do that split for us: under ``ignore_unknown_options`` a variadic
+    argument swallows unknown options *and* their values, leaving ``ctx.args``
+    empty. These tests pin the hand-rolled replacement.
+    """
+
+    def test_bare_targets(self):
+        assert add.split_dvc_args(['data/']) == (['data/'], [])
+
+    def test_flag_before_target(self):
+        assert add.split_dvc_args(['--to-remote', 'data/']) == (
+            ['data/'], ['--to-remote'])
+
+    def test_flag_after_target(self):
+        assert add.split_dvc_args(['data/', '--no-commit']) == (
+            ['data/'], ['--no-commit'])
+
+    def test_value_option_keeps_its_value(self):
+        """The old implementation dropped option values, turning `-o out/`
+        into a bare `-o` and making dvc add fail on a missing argument."""
+        assert add.split_dvc_args(['-o', 'out/', 'data/']) == (
+            ['data/'], ['-o', 'out/'])
+
+    def test_equals_form_is_self_contained(self):
+        assert add.split_dvc_args(['--out=out/', 'data/']) == (
+            ['data/'], ['--out=out/'])
+
+    def test_value_option_value_is_not_mistaken_for_target(self):
+        targets, dvc_args = add.split_dvc_args(['-r', 'nci', 'data/'])
+        assert targets == ['data/']
+        assert 'nci' not in targets
+        assert dvc_args == ['-r', 'nci']
+
+    def test_multiple_targets_and_options(self):
+        assert add.split_dvc_args(
+            ['-r', 'nci', '--to-remote', 'a', 'b']
+        ) == (['a', 'b'], ['-r', 'nci', '--to-remote'])
+
+    def test_double_dash_forces_target(self):
+        """A path starting with a dash is reachable via `--`."""
+        assert add.split_dvc_args(['--', '-weird-name']) == (
+            ['-weird-name'], [])
+
+    def test_bare_dash_is_a_target(self):
+        assert add.split_dvc_args(['-']) == (['-'], [])
+
+    def test_remote_jobs_takes_a_value(self):
+        assert add.split_dvc_args(['--remote-jobs', '8', 'data/']) == (
+            ['data/'], ['--remote-jobs', '8'])
+
+
+class TestAddCliPassthrough:
+    """`dt add` must accept dvc options end-to-end.
+
+    Regression: `targets` was declared `click.Path(exists=True)`, so click
+    routed every unknown option into it and the path check rejected it --
+    `dt add --to-remote data/` died with "Path '--to-remote' does not exist".
+    """
+
+    def _invoke(self, tmp_path, argv):
+        from click.testing import CliRunner
+        from dt.cli import cli
+
+        (tmp_path / 'data').mkdir()
+        with patch('dt.add.add_via_qxub', return_value=['1']) as mock_qxub:
+            result = CliRunner().invoke(
+                cli, ['add', *argv], catch_exceptions=False)
+        return result, mock_qxub
+
+    @pytest.mark.parametrize('argv,expected_dvc_args', [
+        (['--to-remote', 'data'], ['--to-remote']),
+        (['--no-commit', 'data'], ['--no-commit']),
+        (['-o', 'out/', 'data'], ['-o', 'out/']),
+        (['data'], None),
+    ])
+    def test_options_reach_dvc_add(self, tmp_path, monkeypatch,
+                                   argv, expected_dvc_args):
+        monkeypatch.chdir(tmp_path)
+        result, mock_qxub = self._invoke(tmp_path, argv)
+
+        assert result.exit_code == 0, result.output
+        assert mock_qxub.call_args.kwargs['targets'] == ['data']
+        assert mock_qxub.call_args.kwargs['dvc_args'] == expected_dvc_args
+
+    def test_missing_target_still_rejected(self, tmp_path, monkeypatch):
+        """Dropping click.Path(exists=True) must not lose the existence check."""
+        from click.testing import CliRunner
+        from dt.cli import cli
+
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(cli, ['add', 'nonexistent'])
+
+        assert result.exit_code != 0
+        assert 'does not exist' in result.output

@@ -10,6 +10,9 @@ dt diff [paths...] [options]
 
 # Content view - what changed inside a file?
 dt diff <path> --content [options]
+
+# Direct comparison - what differs between two workspace files?
+dt diff <path-a> <path-b> --content [options]
 ```
 
 ## Description
@@ -27,10 +30,16 @@ The tree view is designed for large diffs (thousands of files) and automatically
 |--------|-------------|
 | `--old REV` | The older revision to compare (default: HEAD) |
 | `--new REV` | The newer revision to compare (default: workspace) |
-| `--content` | Show content diff of a single file (requires one path) |
+| `--content` | Show a content diff (one path = revision mode, two paths = direct comparison) |
 | `--level N` | Tree depth: number or "auto" to fit GH comment (default: auto) |
 | `-o, --output FORMAT` | Output format: `terminal`, `json`, `html`, `md`, `table`, `csv` |
 | `-v, --verbose` | Show detailed progress |
+| `--list-handlers` | List the registered content-diff handlers and exit |
+| `--summary` | (`--content` only) Brief statistics / key changes only |
+| `--granular` | (`--content` only) Exhaustive diff with full detail |
+
+`--summary` and `--granular` are mutually exclusive; omit both for the standard
+content diff.
 
 ## Output Formats
 
@@ -89,22 +98,23 @@ dt diff --level 3
 ### Example Output
 
 ```
+$ dt diff --level 2
 Changes (HEAD → workspace): 4238 added, 12 modified, 3 deleted
 
-├── data/ (+4238, ~12, -3)
-│   ├── sc/cellranger/ (+4123)
-│   │   ├── annotation/ (+36 files)
-│   │   ├── bam/count/captures/ (+24 files)
-│   │   ├── count/
-│   │   │   ├── filtered/ (+33 files)
-│   │   │   └── predemux/ (+33 files)
-│   │   └── ... (+4012)
-│   └── processed/ (~12, -3)
-│       ├── [~] samples.csv
-│       └── ... (~11, -3)
+├── data/ (+4123, ~12, -3)
+│   ├── [~] samples.csv
+│   ├── processed/ (~11, -3)
+│   │   ... (~11, -3)
+│   └── sc/ (+4123)
+│       ... (+4123)
 └── models/ (+115)
-    └── ... (+115)
+    └── checkpoints/ (+115)
+        ... (+115)
 ```
+
+Every path component is its own level in the tree, and a directory deeper than
+`--level` is replaced wholesale by a `...` line carrying its counts. Changed
+files are shown as `[<symbol>] name`, and are listed before subdirectories.
 
 Legend:
 - `+` Added
@@ -118,7 +128,8 @@ By default, `--level auto` automatically collapses the tree to fit within ~60k c
 
 ## Content View (`--content`)
 
-Shows what changed *inside* a specific file. Requires exactly one path.
+Shows what changed *inside* a file. Takes either one path (compare that path
+across revisions) or two paths (compare two workspace files directly).
 
 ### Examples
 
@@ -129,8 +140,24 @@ dt diff data.csv --content
 # Compare to older revision
 dt diff data.csv --content --old HEAD~1
 
+# Counts only / exhaustive detail
+dt diff data.csv --content --summary
+dt diff data.csv --content --granular
+
 # HTML output for sharing
 dt diff data.csv --content --old v1.0 --new v2.0 -o html > changes.html
+
+# Compare two workspace files directly (--old/--new are not allowed here)
+dt diff old.csv new.csv --content
+```
+
+### Handlers
+
+Content diffing is handled by format-specific plugins, with a fallback for
+anything unrecognised. To see what is registered:
+
+```bash
+dt diff --list-handlers
 ```
 
 ### Supported Formats
@@ -139,16 +166,28 @@ dt diff data.csv --content --old v1.0 --new v2.0 -o html > changes.html
 
 Uses [daff](https://github.com/paulfitz/daff) for tabular diffing:
 
+The output is daff's own diff format, whose first column is a row marker:
+`@@` header, blank for unchanged, `+++` added, `---` deleted, `->` modified
+(with modified cells written as `old->new`).
+
 ```bash
 $ dt diff samples.csv --content --old HEAD~1
 @@,sample_id,value,status
-  ,S001,42,active
-+ ,S002,38,active
-- ,S003,45,inactive
-→ ,S004,50→52,pending→active
+,S001,42,active
++++,S002,38,active
+---,S003,45,inactive
+->,S004,50->52,pending->active
 ```
 
-Install daff: `pip install daff`
+With `--summary` you get counts instead:
+
+```bash
+$ dt diff samples.csv --content --old HEAD~1 --summary
+CSV diff summary: 1 row(s) added, 1 row(s) deleted, 1 row(s) modified
+```
+
+Install daff: `pip install daff`. Handled extensions: `.csv`, `.tsv`, `.tab`,
+`.txt`.
 
 #### Other Formats
 
@@ -166,7 +205,7 @@ The tree view is designed for CI workflows:
 # .github/workflows/dvc-diff.yml
 - name: Show DVC changes
   run: |
-    dt diff --old ${{ github.event.before }} --new ${{ github.sha }} > diff.md
+    dt diff -o md --old ${{ github.event.before }} --new ${{ github.sha }} > diff.md
     echo "::notice::$(cat diff.md)"
 ```
 
@@ -202,3 +241,4 @@ Error: daff not found. Install with: pip install daff
 
 - [dt history](history.md) - Show version history of files
 - [dt fetch](fetch.md) - Fetch files into cache
+- [dt find](find.md) - Reverse lookup: find the path for a hash

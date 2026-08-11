@@ -1493,3 +1493,46 @@ class TestSignpost:
         # Partial restore: signpost is still accurate ("most data still
         # archived"), so it must not be removed.
         assert (remote / signpost_mod.SIGNPOST_FILENAME).is_file()
+
+
+class TestManifestCompressionDefault:
+    """A manifest with no compression field must read as 'none'.
+
+    Regression: the dataclass and the from-dict fallback both defaulted to
+    'zstd', which disagreed with operations.default_compression() ('none')
+    and with the registry's own fallback. Restore passes the value straight
+    to tar, so guessing zstd on a plain tar makes extraction fail outright,
+    whereas 'none' yields a bare `tar -xf` that auto-detects either way.
+    """
+
+    def test_dataclass_default_matches_default_compression(self):
+        assert manifest_mod.ArchiveManifest.__dataclass_fields__[
+            'compression'].default == ops.default_compression()
+
+    def test_dataclass_default_is_none(self):
+        assert manifest_mod.ArchiveManifest.__dataclass_fields__[
+            'compression'].default == 'none'
+
+    def test_from_dict_without_compression_field(self):
+        data = {
+            'archive_name': 'a1',
+            'source_remote': 'nci',
+            'backend': 'local',
+            'backend_dir': '/tmp/a1',
+            'contents': {'total_objects': 1, 'total_bytes': 10},
+        }
+        loaded = manifest_mod.ArchiveManifest.from_dict(data)
+
+        assert loaded.compression == 'none'
+
+    def test_explicit_compression_still_honoured(self):
+        data = {
+            'archive_name': 'a1',
+            'source_remote': 'nci',
+            'backend': 'local',
+            'backend_dir': '/tmp/a1',
+            'contents': {'compression': 'zstd'},
+        }
+        loaded = manifest_mod.ArchiveManifest.from_dict(data)
+
+        assert loaded.compression == 'zstd'

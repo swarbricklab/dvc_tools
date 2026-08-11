@@ -1,6 +1,6 @@
 """Archive manifest: schema, load/dump, and discovery.
 
-A manifest is a YAML file committed to ``.dvc/archives/<name>.yaml`` that
+A manifest is a YAML file committed to ``.dt/archives/<name>.yaml`` that
 records everything we need to verify and restore an archive without
 contacting the storage backend. Each manifest describes one archived
 DVC remote.
@@ -140,7 +140,10 @@ class ArchiveManifest:
     # Contents
     total_objects: int = 0
     total_bytes: int = 0
-    compression: str = 'zstd'
+    # Matches operations.default_compression(). Also the safe fallback for a
+    # manifest that predates the field: it yields a bare `tar -xf`, which
+    # auto-detects, where guessing zstd would fail outright on a plain tar.
+    compression: str = 'none'
     inner_tars: Dict[str, InnerTar] = field(default_factory=dict)
     extras_at_archive_time: List[ExtraFile] = field(default_factory=list)
 
@@ -218,7 +221,7 @@ class ArchiveManifest:
             source_layout=data.get('source_layout', LAYOUT_DVC_V3),
             total_objects=int(contents.get('total_objects', 0)),
             total_bytes=int(contents.get('total_bytes', 0)),
-            compression=contents.get('compression', 'zstd'),
+            compression=contents.get('compression', 'none'),
             inner_tars={
                 prefix: InnerTar(
                     filename=row['filename'],
@@ -247,7 +250,7 @@ def now_iso() -> str:
 
 
 def save_manifest(manifest: ArchiveManifest, repo_root: Optional[Path] = None) -> Path:
-    """Write ``manifest`` to ``.dvc/archives/<name>.yaml``.
+    """Write ``manifest`` to ``.dt/archives/<name>.yaml``.
 
     Returns the path written to. Does NOT git-add — let the caller decide.
     """

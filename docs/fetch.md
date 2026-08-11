@@ -17,10 +17,14 @@ For **import `.dvc` files** (created by `dvc import`), `dt fetch` automatically:
 2. Finds a locally-accessible cache from the source repo's remotes
 3. Creates symlinks in the primary cache pointing to the source files
 
-For **URL import `.dvc` files** (created by `dvc import-url`), `dt fetch`:
+For **URL import `.dvc` files** (created by `dvc import-url`), `dt fetch` needs
+`--network` (the source is always remote). With `--network` it:
 1. Uses `dvc update` to re-download data from the source URL
 2. If the source has changed, the .dvc file is updated with the new hash
 3. Data is cached locally after download
+
+Without `--network`, URL imports whose outputs are not already cached are
+reported as `URL import requires network (use --network)`.
 
 For **regular `.dvc` files** (created by `dvc add`), `dt fetch`:
 1. Checks if there's a locally-accessible remote (same filesystem)
@@ -34,7 +38,7 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | Option | Description |
 |--------|-------------|
 | `-v, --verbose` | Show detailed progress messages |
-| `--update` | Recover from .dir failures by rebuilding manifests with `dt update` |
+| `--update` | Allow the mutating import re-resolution path (`dvc update`, which rewrites the `.dvc` file) and `.dir` manifest rebuild for imports that cannot be fetched otherwise |
 | `--force` | Force re-fetch even if .dir exists in cache (ensures all child files are fetched) |
 | `--network` | Fall back to `dvc fetch` (network) if local remote not available |
 | `--dry` | Show stage categorization without fetching (for troubleshooting) |
@@ -117,7 +121,7 @@ Note: `--remote` and `--source` are mutually exclusive.
 
 ### Force Mode
 
-The `--force` option ensures all child files of directory imports are fetched, even if the `.dir` manifest file already exists in the destination cache.
+The `--force` option bypasses the cache index, so every requested hash is re-checked against the source rather than assumed present. In particular it ensures all child files of directory imports are fetched, even if the `.dir` manifest file already exists in the destination cache.
 
 ```bash
 # Force re-fetch to ensure all child files are present
@@ -147,11 +151,11 @@ dt fetch --dir-only data/large_dataset.dvc
 This is useful when:
 - You need `dt du` or `dt diff` to work without pulling all the data
 - You want to inspect what files a directory contains before fetching everything
+- You're on a slow or metered connection and only need metadata
 
 Both DVC v2 (legacy) and v3 (current) remote cache layouts are handled
 automatically — `.dir` manifests will be located regardless of which DVC
 version was used to push them.
-- You're on a slow or metered connection and only need metadata
 
 ### Cache Link Type
 
@@ -232,7 +236,7 @@ dt fetch -v data.txt.dvc
 dt fetch data.txt.dvc
 
 # Output:
-# ✗ data.txt.dvc: No local remote available (use --network to fetch)
+# ✗ data.txt.dvc: No local source (use --network)
 
 # Use --network to fall back to dvc fetch
 dt fetch --network data.txt.dvc
@@ -243,11 +247,11 @@ dt fetch --network data.txt.dvc
 
 ## Handling URL Imports
 
-For `.dvc` files created by `dvc import-url` (external URLs like S3, HTTP, local paths), `dt fetch` re-downloads from the source:
+For `.dvc` files created by `dvc import-url` (external URLs like S3, HTTP, local paths), `dt fetch --network` re-downloads from the source:
 
 ```bash
 # This .dvc file was created by: dvc import-url s3://bucket/data.csv
-dt fetch -v data.csv.dvc
+dt fetch -v --network data.csv.dvc
 
 # Output:
 # Fetching URL import: data.csv.dvc
@@ -256,13 +260,13 @@ dt fetch -v data.csv.dvc
 # ✓ data.csv.dvc: Fetched from s3://bucket/data.csv
 
 # If the source has changed, the .dvc file is updated
-dt fetch -v data.csv.dvc
+dt fetch -v --network data.csv.dvc
 
 # Output:
 # ✓ data.csv.dvc: Updated from s3://bucket/data.csv
 ```
 
-**Note**: URL imports are typically not pushed to remote storage, so `dvc fetch` wouldn't find them. `dt fetch` automatically detects these and uses `dvc update` to re-download from the source URL.
+**Note**: URL imports are typically not pushed to remote storage, so `dvc fetch` wouldn't find them. `dt fetch` detects these and uses `dvc update` to re-download from the source URL — but only when `--network` is given, since the source is by definition remote. (`dt pull` enables the network by default, so `dt pull` handles URL imports without an extra flag.)
 
 ## Recovering from .dir Failures
 
@@ -295,13 +299,15 @@ The `--update` flag calls `dt update` with the locked revision to rebuild the `.
 
 ## How it works
 
-1. **For repo import files** (from `dvc import`): `dt fetch` clones the source repository (cached in `.dt/tmp/`) to access its DVC configuration, finds a locally-accessible remote, and creates symlinks in the primary cache.
+1. **For repo import files** (from `dvc import`): `dt fetch` clones the source repository (cached in `.dt/tmp/clones/`) to access its DVC configuration, finds a locally-accessible remote, and creates links in the primary cache.
 
-2. **For URL import files** (from `dvc import-url`): `dt fetch` runs `dvc update` to re-download from the source URL (S3, HTTP, local path, etc.). If the source has changed, the .dvc file is updated.
+2. **For URL import files** (from `dvc import-url`): with `--network`, `dt fetch` runs `dvc update` to re-download from the source URL (S3, HTTP, local path, etc.). If the source has changed, the .dvc file is updated.
 
-3. **For regular files** (from `dvc add`): `dt fetch` checks if any configured remote is accessible on the local filesystem (either a local path or SSH to the current host). If found, it creates symlinks. Otherwise, it suggests using `--network`.
+3. **For regular files** (from `dvc add`): `dt fetch` checks if any configured remote is accessible on the local filesystem (either a local path or SSH to the current host). If found, it creates links. Otherwise, it suggests using `--network`.
 
-The fetch creates **symlinks** (or reflinks if supported) rather than copies, so files appear in your cache without using additional disk space.
+Unless `--cache-type` forces one method, linking is attempted in the order
+**reflink → hardlink → symlink → copy**, so in the common case files appear in
+your cache without using additional disk space.
 
 ## Workflow: Fetch + Checkout
 
@@ -338,3 +344,4 @@ dvc checkout data/dataset.csv.dvc
 - [dt import](import.md) - Import data from other repositories
 - [dt cache](cache.md) - Manage the cache
 - [dt tmp](tmp.md) - Manage temporary repository clones
+- [dt offline](offline.md) - Redirect Git URLs to local clones so imports resolve on compute nodes without internet

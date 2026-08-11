@@ -649,7 +649,8 @@ def validate_cache(
     Args:
         targets: Optional list of workspace paths to validate.
                  If None, validates all files in cache.
-        fix: If True, delete corrupted files (and their parent .dir)
+        fix: If True, delete corrupted files. Parent .dir manifests are
+             only reported, not deleted.
         verbose: Print progress for each file
         progress: Show progress counter
         

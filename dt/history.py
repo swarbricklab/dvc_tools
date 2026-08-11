@@ -95,13 +95,19 @@ def history(
                     'hash': file_hash,
                 })
                 prev_hash = file_hash
-                
-                if limit and len(results) >= limit:
-                    break
-        
-        # Reverse to show newest first
+
+        # Reverse to show newest first, then truncate.
+        #
+        # The truncation cannot happen inside the loop. That walks oldest to
+        # newest -- it has to, since a version is only recognisable as a
+        # *change* against the hash before it -- so stopping at `limit`
+        # results would return the file's N oldest versions and label them
+        # the most recent. Collect the whole sampled window, then take from
+        # the newest end.
         results.reverse()
-        
+        if limit:
+            results = results[:limit]
+
         if not results:
             raise HistoryError(f"'{path}' has no DVC-tracked history")
         

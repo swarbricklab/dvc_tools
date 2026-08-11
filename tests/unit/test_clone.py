@@ -520,3 +520,68 @@ class TestCloneHooksAndRemote:
                         )
 
         assert result == Path('testrepo')
+
+
+class TestCloneNoInit:
+    """`--no-init` must actually skip project configuration.
+
+    Regression: the option was declared on the command and bound to a
+    parameter, but never forwarded to clone_repository() -- which had no such
+    parameter at all. It parsed and silently did nothing.
+    """
+
+    def _clone(self, tmp_path, monkeypatch, **kwargs):
+        monkeypatch.chdir(tmp_path)
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+
+        with patch('subprocess.run', return_value=mock_proc):
+            with patch.object(cfg, 'get_value', return_value='testowner'):
+                with patch('dt.clone.cache_mod.init_cache') as m_cache:
+                    with patch('dt.clone.site_cache_mod.init_site_cache') as m_site:
+                        with patch('dt.clone.remote_mod.configure_local_override',
+                                   return_value='/fake') as m_remote:
+                            clone.clone_repository(
+                                'git@github.com:org/testrepo.git',
+                                verbose=False, no_auth=True, no_hooks=True,
+                                **kwargs,
+                            )
+        return m_cache, m_site, m_remote
+
+    def test_no_init_skips_cache_site_and_remote(self, tmp_path, monkeypatch):
+        m_cache, m_site, m_remote = self._clone(
+            tmp_path, monkeypatch, no_init=True)
+
+        m_cache.assert_not_called()
+        m_site.assert_not_called()
+        m_remote.assert_not_called()
+
+    def test_default_still_configures_everything(self, tmp_path, monkeypatch):
+        m_cache, m_site, m_remote = self._clone(tmp_path, monkeypatch)
+
+        m_cache.assert_called_once()
+        m_site.assert_called_once()
+        m_remote.assert_called_once()
+
+    def test_cli_forwards_no_init(self, tmp_path, monkeypatch):
+        """The CLI flag must reach clone_repository()."""
+        from click.testing import CliRunner
+        from dt.cli import cli
+
+        monkeypatch.chdir(tmp_path)
+        with patch('dt.clone.clone_repository',
+                   return_value=tmp_path) as mock_clone:
+            CliRunner().invoke(cli, ['clone', '--no-init', 'org/repo'])
+
+        assert mock_clone.call_args.kwargs['no_init'] is True
+
+    def test_cli_defaults_no_init_false(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+        from dt.cli import cli
+
+        monkeypatch.chdir(tmp_path)
+        with patch('dt.clone.clone_repository',
+                   return_value=tmp_path) as mock_clone:
+            CliRunner().invoke(cli, ['clone', 'org/repo'])
+
+        assert mock_clone.call_args.kwargs['no_init'] is False

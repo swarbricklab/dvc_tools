@@ -10,7 +10,7 @@ After running `dt init`, your project will have:
 my-project/
 ├── .git/                 # Git repository
 ├── .dt/                  # DVC Tools configuration
-│   └── .gitignore        # Ignores config.local.yaml and tmp/
+│   └── .gitignore        # Ignores config.local.yaml, tmp/ and hook-results/
 ├── .dvc/                 # DVC configuration
 │   ├── config            # DVC settings (tracked)
 │   ├── config.local      # Local DVC settings (not tracked)
@@ -30,6 +30,7 @@ dt init [options]
 
 - `--name <name>`: Override the project name (defaults to current directory name)
 - `--owner <owner>`: Override the GitHub owner (user or organization)
+- `--team <team>`: GitHub team for access, used in the suggested `gh repo create` command (only valid if the owner is an org)
 - `--cache-root <path>`: Override the cache root directory (defaults to config value)
 - `--remote-root <path>`: Override the remote root directory (defaults to config value)
 - `--site-cache-root <path>`: Override the DVC `site_cache_dir` root (combined with the project name). Falls back to the `site_cache.root` config value.
@@ -53,18 +54,24 @@ When `site_cache.root` is configured (or `--site-cache-root` is given),
 one live index. See [`dt index`](index.md) for the full model and for
 how to configure or migrate the path after the fact.
 
+Resolution order is `--site-cache-path` (full path), then
+`--site-cache-root`/`site_cache.root` combined with the project name.
+If none of these is set the step is skipped and DVC's default applies.
+`site_cache.enabled: false` in any config scope is a master switch that
+disables the step regardless of the other settings.
+
 ## What it does
 
 The `dt init` command orchestrates the following initialization steps:
 
 1. **Git Setup**: Initializes git repository with `git init`
 2. **DVC Setup**: Initializes DVC with `dvc init`
-3. **DVC Tools Directory**: Creates `.dt/.gitignore` to ignore `config.local.yaml` and `tmp/`
-4. **Site Cache**: Sets `core.site_cache_dir` to `<site_cache.root>/<project-name>` (skipped if `site_cache.root` is unset and no `--site-cache-*` flag is given, or with `--no-site-cache`)
+3. **Site Cache**: Sets `core.site_cache_dir` to `<site_cache.root>/<project-name>` (skipped with `--no-site-cache`, with `--no-dvc`, when `site_cache.enabled` is `false`, or when `site_cache.root` is unset and no `--site-cache-*` flag is given)
+4. **DVC Tools Directory**: Creates `.dt/.gitignore` to ignore `config.local.yaml`, `tmp/` and `hook-results/`
 5. **Cache Setup**: Runs `dt cache init` to configure shared external cache
 6. **Remote Setup**: Runs `dt remote init` to set up remote storage
-7. **Git Hooks**: Runs `dt install` to set up git hooks and the DVC merge driver
-8. **GitHub Check**: Checks for GitHub remote and suggests `gh repo create` if missing
+7. **Git Hooks**: Runs `dt install` to set up git hooks and the DVC merge driver (skipped with `--no-dvc`)
+8. **GitHub Check**: Checks for a GitHub remote and suggests `gh repo create` if missing (skipped with `--no-git`)
 
 Each cache and remote step can also be run independently for testing or incremental setup.
 
@@ -79,11 +86,12 @@ mkdir my-analysis && cd my-analysis
 # Initialize everything at once
 dt init
 
-# This is equivalent to running:
-# dt git init
-# dt dvc init
-# dt cache init 
+# This is roughly equivalent to running:
+# git init
+# dvc init
+# dt cache init
 # dt remote init
+# dt install
 ```
 
 ## Incremental Setup
@@ -108,10 +116,10 @@ dt remote init
 
 The project will be configured with:
 
-- **Git remote**: Linked to GitHub repository
+- **Git remote**: `init` does not create one; it checks for an `origin` remote and prints a `gh repo create` command if there isn't one
 - **DVC cache**: Points to shared external cache directory
 - **DVC remotes**: 
-  - SSH remote for external access
+  - SSH remote for external access (only when `ssh.host` is configured)
   - Local remote for efficient internal transfers
 - **Permissions**: Proper group permissions for team collaboration
 - **Hooks**: git commands will be linked to dvc commands via git hooks
@@ -119,7 +127,7 @@ The project will be configured with:
 ## Related Commands
 
 - [`dt add`](add.md) - Add files to DVC tracking
-- [`dt cache init`](cache.md#init) - Cache setup
-- [`dt remote init`](remote.md#init) - Remote storage setup
+- [`dt cache init`](cache.md#dt-cache-init) - Cache setup
+- [`dt remote init`](remote.md#dt-remote-init) - Remote storage setup
 - [`dt index`](index.md) - Manage `core.site_cache_dir` and the optional archive mirror
 - [`dt config`](config.md) - Configuration management

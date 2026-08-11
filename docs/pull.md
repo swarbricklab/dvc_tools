@@ -10,27 +10,33 @@ dt pull [options] [targets...]
 
 ## What it does
 
-A smart pull that handles both regular DVC files and imports:
+`dt pull` is simply **`dt fetch` + `dvc checkout`**:
 
-1. **Resolve targets** to their tracking `.dvc` files
-2. **Separate imports**: Targets tracked by `.dvc` files with `deps.repo` are handled via `dt fetch` + `dvc checkout`
-3. **Pull remaining**: Other targets are pulled via `dvc pull` (or parallel workers)
+1. **Fetch phase**: runs [`dt fetch`](fetch.md) over the targets, which categorises
+   every stage (repo import / URL import / regular) and populates the primary
+   cache — via local symlinks where a source cache or local remote is
+   accessible, and via the network otherwise.
+2. **Checkout phase**: runs `dvc checkout` to link the cached objects into the
+   workspace.
 
 This enables pulling data from repositories that were imported with `dvc import`, even when you don't have direct access to their remote storage.
+
+Unlike `dt fetch` (where `--network` is opt-in), `dt pull` has network access
+**enabled by default**; use `--no-network` to restrict it to locally-accessible
+sources.
 
 ## Options
 
 | Option | Description |
 |--------|-------------|
-| `--dry`, `--dry-run` | Show what would be pulled without actually pulling |
-| `-v`, `--verbose` | Show detailed progress (with `--dry`, lists all files) |
-| `-w N`, `--workers N` | Distribute pull across N compute nodes via qxub |
-| `-r NAME`, `--remote NAME` | Pull from specific remote |
-| `-f`, `--force` | Delete `.dir` manifests before pulling to force re-fetch |
-| `--update` | Rebuild `.dir` files and update `.dvc` hashes if mismatched |
-| `--no-wait` | Submit worker jobs and exit without waiting for completion |
+| `-f`, `--force` | Delete `.dir` manifests before pulling to force re-fetch (also passes `--force` to `dvc checkout`) |
+| `--dry`, `--dry-run` | Show the stage categorisation without fetching or checking out |
+| `-v`, `--verbose` | Show detailed progress (with `--dry`, lists every stage) |
+| `--update` | Permit the mutating import re-resolution path (`dvc update`, which rewrites the `.dvc` file) and `.dir` manifest rebuild for imports that cannot be pulled otherwise |
+| `--network` / `--no-network` | Enable/disable network access for fetching. Default: enabled |
 
-All other options are passed through to `dvc pull`. See `dvc pull --help` for available options.
+`dt pull` does not forward unrecognised options to `dvc pull` — the flags above
+are the complete set.
 
 ## Examples
 
@@ -55,77 +61,61 @@ dt pull --force data/
 
 ### Dry run
 
-Preview what would be pulled without actually transferring:
+Preview what would be pulled without actually transferring. `--dry` prints the
+stage categorisation produced by the fetch phase and skips the checkout:
 
 ```bash
-# Summary view - shows imports and regular files separately
+# Summary view - stages grouped by category and source
 dt pull --dry
 # Output:
-# Imports to fetch (2):
-#   data/external.dvc → dt fetch data/external.dvc
-#   models/pretrained.dvc → dt fetch models/pretrained.dvc
-# Would pull 15 regular file(s), 850.0 MB
+# Stage categorization (17 total):
+# URL imports: 1
+# Repo imports: 2
+#     projectA: 2 (✓ local)
+# Regular stages: 14 (✓ local via 'nci')
 
-# Detailed list with file paths
+# Detailed list, naming every stage
 dt pull --dry -v
 # Output:
-# Imports to fetch (2):
-#   ...
-# Regular files to pull (15 files, 850.0 MB):
-#   data/processed.csv  (abc123...)
-#   models/output.pkl   (def456...)
-#   ...
-
-# Preview worker distribution
-dt pull --dry -w 8
-# Output:
-# Imports to fetch (2):
-#   ...
-# Would pull 15 regular file(s), 850.0 MB
-# 
-# With 8 workers:
-#   Worker 0: 2 file(s)
-#   Worker 3: 3 file(s)
-#   ...
+# Stage categorization (17 total):
+# URL imports: 1
+#     data/external.csv.dvc
+# Repo imports: 2
+#     projectA: 2 (✓ local)
+#         data/dataset.dvc
+#         models/pretrained.dvc
+# Regular stages: 14 (✓ local via 'nci')
+#     data/processed.csv.dvc
+#     ...
 ```
-
-### Parallel pull with qxub
-
-For large datasets, distribute the pull across multiple compute nodes:
-
-```bash
-# Pull using 16 parallel workers
-dt pull --workers 16
-
-# Pull from specific remote with workers
-dt pull -w 8 -r myremote
-
-# Submit jobs and exit without waiting
-dt pull -w 16 --no-wait
-```
-
-> **Note:** Imports are always handled first (via `dt fetch` + `dvc checkout`) before parallel workers are submitted for regular files.
 
 ## Target Resolution
 
-Each target is resolved to its tracking `.dvc` file:
+Targets are resolved by DVC's own target view, the same mechanism `dvc pull`
+uses. Any of these forms work:
 
-| Target | Resolves to |
-|--------|-------------|
-| `data.dvc` | `data.dvc` |
-| `data/` | `data.dvc` (if exists) |
-| `data/subdir/file.txt` | `data.dvc` (parent dir tracking) |
-| `models/output.pkl` | None (if tracked by `dvc.yaml`) |
+| Target | Meaning |
+|--------|---------|
+| `data.dvc` | The stage in that `.dvc` file |
+| `data/` | The `.dvc` file tracking that directory |
+| `data/subdir/file.txt` | The stage whose output covers that path |
+| `transform` | A pipeline stage name from `dvc.yaml` |
+| `models/output.pkl` | A pipeline output (resolved to its `dvc.yaml` stage) |
 
-If the resolved `.dvc` file has a `deps.repo` section (indicating an import), the target is handled via `dt fetch` + `dvc checkout`. Otherwise, it's passed to `dvc pull`.
+With no targets at all, every stage in the repo is collected.
+
+Stages are then categorised by the fetch phase: `.dvc` files with a `deps.repo`
+section are repo imports (grouped by source repository), other imports — those
+from `dvc import-url` — are URL imports, and everything else is a regular stage.
 
 ## How it works
 
-### Step 1: Resolve targets
+### Step 1: Collect stages
 
-Without targets, scans for all `.dvc` files. With targets, resolves each to its tracking `.dvc` file (if any).
+Without targets, collects every stage in the repo. With targets, resolves each
+one through DVC's target view (see [Target Resolution](#target-resolution)).
 
-### Step 2: Separate imports from regular files
+### Step 2: Categorise stages
 
 Each `.dvc` file is checked for a `deps` section with a `repo` key:
 
@@ -142,12 +132,10 @@ outs:
 
 ### Step 3: Handle imports
 
-For targets tracked by import `.dvc` files, runs `dt fetch` which:
-- Clones the source repository (sparsely)
+For targets tracked by import `.dvc` files, `dt fetch`:
+- Clones the source repository into `.dt/tmp/clones/`
 - Finds a locally-accessible cache
 - Creates symlinks in the primary cache
-
-Then runs `dvc checkout` to link files from cache to workspace.
 
 For a **pinned import** (e.g. one created with `dt import --rev`) whose data is
 not in this repo's own remote, `dt pull` recovers it **non-mutatingly** from the
@@ -157,34 +145,17 @@ the pinned objects are pulled from the source's own remote without rewriting
 your `.dvc` file. Only if that also fails does `dt pull` report an error and
 suggest `--update` (which re-resolves and rewrites the `.dvc`).
 
-### Step 4: Pull remaining data
+### Step 4: Fetch regular stages
 
-Runs `dvc pull` for targets not tracked by imports, fetching from configured remotes.
+Regular stages are populated from a locally-accessible remote by symlink where
+possible. When that is not possible and network access is enabled (the default),
+`dt fetch` falls back to `dvc fetch` for those stages.
 
-With `--workers N`, this step uses parallel workers via qxub instead of a single `dvc pull`.
+### Step 5: Checkout
 
-## Parallel mode details
-
-When using `--workers N`, regular files (not imports) are pulled using distributed workers:
-
-1. **Handle imports first**: All imports are fetched via `dt fetch` and checked out
-2. **Build manifest**: Enumerate regular files to pull using DVC internals
-3. **Partition by hash**: Files are assigned to workers based on their MD5 hash prefix
-4. **Submit jobs**: Each worker is submitted via `qxub exec`
-5. **Monitor**: Wait for all jobs to complete (unless `--no-wait`)
-
-### qxub configuration
-
-The parallel mode uses these configuration options (set via `dt config`):
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `qxub.env` | `dt` | Conda environment name for workers |
-| `qxub.queue` | `copyq` | PBS queue for job submission |
-| `qxub.walltime` | `10:00:00` | Maximum job runtime |
-| `qxub.mem` | `4GB` | Memory allocation per worker |
-
-See [Configuration Options](config_options.md) for details.
+Finally `dvc checkout` links the cached objects into the workspace (with
+`--force` when `dt pull --force` was used). A checkout failure is reported but
+does not undo the fetch — you can re-run `dvc checkout` manually to see details.
 
 ## Comparison with dvc pull
 
@@ -192,9 +163,9 @@ See [Configuration Options](config_options.md) for details.
 |---------|-----------|-----------|
 | Regular files | ✓ | ✓ |
 | Import files | Requires source remote access | Uses local cache via `dt fetch` |
-| Parallel workers | `--jobs` (threads) | `--workers` (distributed nodes) |
-| dvc.yaml outputs | ✓ | ✓ (passed through) |
-| Network access | Required for imports | Not required if cache accessible |
+| Pinned imports missing from this remote | Fails | Recovered non-mutatingly from the source repo's remote |
+| dvc.yaml outputs | ✓ | ✓ |
+| Network access | Required for imports | Not required if a local cache/remote is accessible |
 
 ## Typical workflow
 
@@ -211,8 +182,8 @@ dt pull --dry -v
 # Pull all data including imports
 dt pull -v
 
-# For large datasets, use parallel workers
-dt pull -w 16
+# Only use locally-accessible sources (no network)
+dt pull --no-network
 ```
 
 ## Force mode
@@ -247,5 +218,6 @@ Without `--force`, DVC would see the `.dir` manifest and assume all files are pr
 - [dt cache validate](cache.md#dt-cache-validate) - Validate cache integrity
 - [dt fetch](fetch.md) - Fetch imports from local caches
 - [dt import](import.md) - Import data from other repositories
+- [dt offline](offline.md) - Make imports resolvable on compute nodes without internet
 - [dt push](push.md) - Push to all remotes (with parallel support)
-- [Configuration Options](config_options.md) - qxub settings
+- [Configuration Options](config_options.md) - `cache.*`, `remote.*` and `index.*` settings
