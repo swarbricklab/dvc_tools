@@ -7,7 +7,6 @@ Unlike dvc import, this does not require network access to the remote storage.
 Instead, it uses locally-accessible cache paths.
 """
 
-import csv
 import hashlib
 import json
 import os
@@ -1234,34 +1233,21 @@ def import_from_csv(
     Raises:
         ImportError: If the CSV file cannot be read or has no 'path' column.
     """
-    csv_file = Path(csv_path)
-    if not csv_file.exists():
-        raise ImportError(f"CSV file not found: {csv_path}")
-
-    with open(csv_file, newline='') as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames is None or 'path' not in reader.fieldnames:
-            raise ImportError(
-                f"CSV file must have a 'path' column. "
-                f"Found columns: {reader.fieldnames}"
-            )
-        rows = list(reader)
-
-    if not rows:
-        raise ImportError(f"CSV file is empty: {csv_path}")
+    # Shared with ``dt get --csv`` so the two agree on the CSV contract.
+    try:
+        targets = utils.read_csv_targets(csv_path, 'path', out)
+    except ValueError as e:
+        raise ImportError(str(e))
 
     results: List[Tuple[str, bool, str]] = []
 
-    for i, row in enumerate(rows, 1):
-        row_path = row.get('path', '').strip()
+    for i, (row_path, row_out) in enumerate(targets, 1):
         if not row_path:
             results.append(('(empty)', False, 'Missing path'))
             continue
 
-        row_out = row.get('output', '').strip() or out
-
         if verbose:
-            label = f"[{i}/{len(rows)}]"
+            label = f"[{i}/{len(targets)}]"
             print(f"\n{label} Importing {row_path}" + (f" -> {row_out}" if row_out else ""))
 
         try:
