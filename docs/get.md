@@ -60,6 +60,12 @@ dt get my-registry --csv samples.csv --filter 'wts_lib=' -o fastqs/
 
 Each row reports `✓`/`✗` with a summary, and the command exits non-zero if any row failed.
 
+### How `--jobs` is spent
+
+Rows are resolved concurrently, then **every file from every row is placed through a single pool** of `--jobs` workers. The budget covers the transfer as a whole rather than being re-divided per row.
+
+This matters when rows are small. A sample directory of two fastqs would, under per-row batching, leave six of eight workers idle for the whole row; flattening keeps them all fed across the 164 files of an 82-sample manifest. Reporting is still per row and still in CSV order.
+
 ### Filters
 
 `--filter` is repeatable and the expressions are ANDed:
@@ -95,7 +101,7 @@ dt get my-registry data/ref.fa --link hardlink,copy -o ./
 - `--csv <file>`: Fetch every path listed in a CSV file
 - `--path-col <name>`: CSV column holding the source path (default: `path`)
 - `--filter <expr>`: Select rows, e.g. `--filter 'wts_lib='`. Repeatable, ANDed.
-- `-j, --jobs <n>`: Parallel workers (default: 8)
+- `-j, --jobs <n>`: Parallel workers (default: 8). In `--csv` mode the budget spans the whole transfer, not each row — see below.
 - `--link <types>`: Link type(s), comma-separated. Defaults to DVC `cache.type` if set.
 - `--no-refresh`: Skip refreshing the temp clone (for offline use)
 - `-f, --force`: Overwrite existing output files

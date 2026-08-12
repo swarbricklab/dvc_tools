@@ -456,12 +456,62 @@ class TestGetFromCsv:
         with patch.object(get_mod, 'resolve_link_types', return_value=['copy']), \
              patch.object(get_mod, 'list_source_files',
                           return_value=[{'relpath': 'f', 'md5': 'a' * 32, 'size': 1}]), \
-             patch.object(get_mod, 'materialise', return_value=[('f', True, 'copy')]):
+             patch.object(get_mod, '_place_all',
+                          side_effect=lambda tasks, *a, **k: [('f', True, 'copy')] * len(tasks)):
             results = get_mod.get_from_csv(csv_file, 'myrepo', out='out/')
 
         assert stub_source.call_count == 1
         assert len(results) == 3
         assert all(ok for _, ok, _ in results)
+
+    def test_places_every_row_through_one_pool(self, tmp_path, stub_source, monkeypatch):
+        """Fan out across rows, not within them.
+
+        Batching per row would idle most workers on rows with few files, and a
+        row is often a sample directory holding two fastqs.
+        """
+        monkeypatch.chdir(tmp_path)
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/one\nd/two\nd/three\n')
+
+        with patch.object(get_mod, 'resolve_link_types', return_value=['copy']), \
+             patch.object(get_mod, 'list_source_files',
+                          return_value=[
+                              {'relpath': 'R1', 'md5': 'a' * 32, 'size': 1},
+                              {'relpath': 'R2', 'md5': 'b' * 32, 'size': 1},
+                          ]), \
+             patch.object(get_mod, '_place_all',
+                          side_effect=lambda tasks, *a, **k:
+                              [(str(i), True, 'copy') for i in range(len(tasks))]) as place:
+            get_mod.get_from_csv(csv_file, 'myrepo', out='out/')
+
+        # One call carrying all 3 rows x 2 files, not three calls of two.
+        assert place.call_count == 1
+        assert len(place.call_args[0][0]) == 6
+
+    def test_row_results_stay_in_csv_order(self, tmp_path, stub_source, monkeypatch):
+        """Parallel placement must not scramble which row got which outcome."""
+        monkeypatch.chdir(tmp_path)
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/one\nd/two\nd/three\n')
+
+        counts = {'d/one': 1, 'd/two': 3, 'd/three': 2}
+
+        def listing(source, path, rev=None):
+            return [
+                {'relpath': f'f{i}', 'md5': f'{i:032x}', 'size': 1}
+                for i in range(counts[path])
+            ]
+
+        with patch.object(get_mod, 'resolve_link_types', return_value=['copy']), \
+             patch.object(get_mod, 'list_source_files', side_effect=listing), \
+             patch.object(get_mod, '_place_all',
+                          side_effect=lambda tasks, *a, **k:
+                              [('f', True, 'copy')] * len(tasks)):
+            results = get_mod.get_from_csv(csv_file, 'myrepo', out='out/')
+
+        assert [r[0] for r in results] == ['d/one', 'd/two', 'd/three']
+        assert '1 file ->' in results[0][2]
+        assert '3 files ->' in results[1][2]
+        assert '2 files ->' in results[2][2]
 
     def test_row_failure_does_not_stop_the_batch(self, tmp_path, stub_source, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -474,7 +524,8 @@ class TestGetFromCsv:
 
         with patch.object(get_mod, 'resolve_link_types', return_value=['copy']), \
              patch.object(get_mod, 'list_source_files', side_effect=listing), \
-             patch.object(get_mod, 'materialise', return_value=[('f', True, 'copy')]):
+             patch.object(get_mod, '_place_all',
+                          side_effect=lambda tasks, *a, **k: [('f', True, 'copy')] * len(tasks)):
             results = get_mod.get_from_csv(csv_file, 'myrepo', out='out/')
 
         assert results[0] == ('d/bad', False, 'not tracked')
@@ -487,8 +538,11 @@ class TestGetFromCsv:
 
         with patch.object(get_mod, 'resolve_link_types', return_value=['copy']), \
              patch.object(get_mod, 'list_source_files',
-                          return_value=[{'relpath': 'f', 'md5': 'a' * 32, 'size': 1}]), \
-             patch.object(get_mod, 'materialise',
+                          return_value=[
+                              {'relpath': 'a', 'md5': 'a' * 32, 'size': 1},
+                              {'relpath': 'b', 'md5': 'b' * 32, 'size': 1},
+                          ]), \
+             patch.object(get_mod, '_place_all',
                           return_value=[('a', True, 'copy'), ('b', False, 'gone')]):
             results = get_mod.get_from_csv(csv_file, 'myrepo', out='out/')
 

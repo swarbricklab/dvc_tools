@@ -190,6 +190,28 @@ def _place_one(
     return relpath, False, last
 
 
+def _place_all(
+    tasks: Sequence[Tuple[Path, Dict[str, object]]],
+    cache_root: Path,
+    link_types: Sequence[str],
+    jobs: int,
+    force: bool,
+) -> List[Tuple[str, bool, str]]:
+    """Place ``(dest_root, entry)`` pairs through one pool, preserving order.
+
+    Taking a flat task list rather than one call per destination is what lets
+    the CSV path spend its whole worker budget on the job as a whole. Batching
+    per row instead would idle most workers on rows with few files -- and a row
+    is often a sample directory holding two fastqs.
+    """
+    def place(task):
+        dest_root, entry = task
+        return _place_one(entry, cache_root, dest_root, link_types, force)
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        return list(pool.map(place, tasks))
+
+
 def materialise(
     entries: List[Dict[str, object]],
     cache_root: Path,
@@ -212,12 +234,8 @@ def materialise(
         List of (relpath, success, message) tuples.
     """
     dest_root.mkdir(parents=True, exist_ok=True)
-
-    def place(entry):
-        return _place_one(entry, cache_root, dest_root, link_types, force)
-
-    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-        return list(pool.map(place, entries))
+    tasks = [(dest_root, entry) for entry in entries]
+    return _place_all(tasks, cache_root, link_types, jobs, force)
 
 
 def _resolve_source(
@@ -334,33 +352,54 @@ def get_from_csv(
     clone, cache_root = _resolve_source(repository, owner, rev, refresh, verbose)
     link_types = resolve_link_types(link)
 
-    results: List[Tuple[str, bool, str]] = []
-    for i, (row_path, row_out) in enumerate(targets, 1):
+    # Phase 1: resolve every row to a file listing. Each row costs a `dvc list`
+    # subprocess, so run them concurrently too -- on a long manifest the
+    # resolves alone are otherwise a serial prologue to all the real work.
+    def resolve(target):
+        row_path, row_out = target
         if not row_path:
-            results.append(('(empty)', False, f'Missing {path_col}'))
-            continue
-
-        if verbose:
-            print(f"\n[{i}/{len(targets)}] {row_path}")
-
+            return None, None, f'Missing {path_col}'
         try:
             entries = list_source_files(clone, row_path, rev=rev)
-            dest_root = _dest_for(row_out, row_path)
-            placed = materialise(
-                entries, cache_root, dest_root, link_types, jobs, force
-            )
-            written, failed = _tally(placed, verbose)
-            if failed:
-                results.append((
-                    row_path, False, f'{written} written, {failed} failed'
-                ))
-            else:
-                plural = '' if written == 1 else 's'
-                results.append((
-                    row_path, True, f'{written} file{plural} -> {dest_root}'
-                ))
         except GetError as e:
-            results.append((row_path, False, str(e)))
+            return None, None, str(e)
+        return _dest_for(row_out, row_path), entries, None
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        resolved = list(pool.map(resolve, targets))
+
+    # Phase 2: place every file from every row through a single pool, so the
+    # worker budget goes to the transfer as a whole rather than being re-divided
+    # per row. Spans let each row's outcome be recovered from the flat results.
+    tasks: List[Tuple[Path, Dict[str, object]]] = []
+    spans: Dict[int, Tuple[Path, int, int]] = {}
+    for i, (dest_root, entries, _) in enumerate(resolved):
+        if entries is None:
+            continue
+        start = len(tasks)
+        tasks.extend((dest_root, entry) for entry in entries)
+        spans[i] = (dest_root, start, len(tasks))
+
+    if verbose and tasks:
+        print(f"Placing {len(tasks)} files from {len(spans)} rows "
+              f"across {max(1, jobs)} workers")
+
+    placed = _place_all(tasks, cache_root, link_types, jobs, force)
+
+    # Phase 3: attribute the flat results back to their rows, in CSV order.
+    results: List[Tuple[str, bool, str]] = []
+    for i, (target, (_, entries, error)) in enumerate(zip(targets, resolved)):
+        row_path = target[0]
+        if entries is None:
+            results.append((row_path or '(empty)', False, error))
+            continue
+        dest_root, start, end = spans[i]
+        written, failed = _tally(placed[start:end], verbose)
+        if failed:
+            results.append((row_path, False, f'{written} written, {failed} failed'))
+        else:
+            plural = '' if written == 1 else 's'
+            results.append((row_path, True, f'{written} file{plural} -> {dest_root}'))
 
     return results
 
