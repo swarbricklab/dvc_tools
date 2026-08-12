@@ -205,20 +205,73 @@ def list_source_files(
     return files
 
 
+def verify_file(dest: Path, md5: str) -> bool:
+    """Does the file on disk hash to the value DVC recorded for it?"""
+    try:
+        return utils.md5_file(dest) == md5
+    except OSError:
+        return False
+
+
+def decide(
+    dest: Path,
+    md5: str,
+    force: bool,
+    resume: bool,
+    check: bool,
+) -> Tuple[str, str]:
+    """Decide what to do with one destination file. Returns (action, message).
+
+    Action is ``fetch``, ``skip``, or ``bad``. Shared by the local and remote
+    paths so a resumed download behaves identically whichever way the bytes
+    arrive.
+
+    The combination that matters is ``--resume`` without ``--check``: a
+    transfer interrupted mid-file leaves a *truncated* file behind, and by size
+    or existence alone it is indistinguishable from a complete one. Resuming
+    over it silently keeps the corruption. That is why ``--check`` exists.
+    """
+    if not dest.exists():
+        return 'fetch', 'missing'
+
+    if force:
+        return 'fetch', 're-fetching'
+
+    if check:
+        if verify_file(dest, md5):
+            return 'skip', 'verified'
+        # A file that fails its checksum is worse than a missing one, because
+        # nothing else will ever look at it again. Replace it when resuming;
+        # report it when only checking.
+        return ('fetch', 'checksum mismatch, re-fetching') if resume \
+            else ('bad', 'CHECKSUM MISMATCH')
+
+    if resume:
+        return 'skip', 'already present'
+
+    return 'skip', 'exists (use -f to overwrite)'
+
+
 def _place_one(
     entry: Dict[str, object],
     cache_root: Path,
     dest_root: Path,
     link_types: Sequence[str],
     force: bool,
+    resume: bool = False,
+    check: bool = False,
 ) -> Tuple[str, bool, str]:
     """Materialise a single object. Returns (relpath, ok, message)."""
     relpath = str(entry['relpath'])
     md5 = str(entry['md5'])
     dest = dest_root / relpath
 
-    if dest.exists() and not force:
-        return relpath, True, 'exists (use -f to overwrite)'
+    action, note = decide(dest, md5, force, resume, check)
+    if action == 'skip':
+        return relpath, True, note
+    if action == 'bad':
+        return relpath, False, note
+    force = force or dest.exists()
 
     source = cache_ops.find_source_file(md5, cache_root)
     if source is None:
@@ -254,6 +307,8 @@ def _place_all(
     link_types: Sequence[str],
     jobs: int,
     force: bool,
+    resume: bool = False,
+    check: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Place ``(dest_root, entry)`` pairs through one pool, preserving order.
 
@@ -264,7 +319,9 @@ def _place_all(
     """
     def place(task):
         dest_root, entry = task
-        return _place_one(entry, cache_root, dest_root, link_types, force)
+        return _place_one(
+            entry, cache_root, dest_root, link_types, force, resume, check
+        )
 
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
         return list(pool.map(place, tasks))
@@ -277,6 +334,8 @@ def materialise(
     link_types: Sequence[str],
     jobs: int = 8,
     force: bool = False,
+    resume: bool = False,
+    check: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Place every entry under *dest_root*, in parallel.
 
@@ -293,7 +352,7 @@ def materialise(
     """
     dest_root.mkdir(parents=True, exist_ok=True)
     tasks = [(dest_root, entry) for entry in entries]
-    return _place_all(tasks, cache_root, link_types, jobs, force)
+    return _place_all(tasks, cache_root, link_types, jobs, force, resume, check)
 
 
 def fetch_via_remote(
@@ -303,6 +362,8 @@ def fetch_via_remote(
     rev: Optional[str] = None,
     jobs: int = 8,
     force: bool = False,
+    resume: bool = False,
+    check: bool = False,
 ) -> Tuple[int, str]:
     """Download a path over the network, for machines with no local cache.
 
@@ -326,25 +387,58 @@ def fetch_via_remote(
     Raises:
         GetError: If the download fails.
     """
-    if dest_root.exists() and not force:
-        existing = sum(1 for p in dest_root.rglob('*') if p.is_file())
-        return existing, 'exists (use -f to overwrite)'
+    entries = list_source_files(clone, path, rev=rev)
 
-    dest_root.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ['dvc', 'get', str(clone), path, '--out', str(dest_root), '--jobs', str(jobs)]
-    if rev:
-        cmd += ['--rev', rev]
-    if force:
-        cmd.append('--force')
+    written = skipped = 0
+    problems: List[str] = []
+    for entry in entries:
+        relpath = str(entry['relpath'])
+        md5 = str(entry['md5'])
+        dest = dest_root / relpath
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise GetError(f"Download failed for {path}: {_dvc_error_detail(result)}")
+        action, note = decide(dest, md5, force, resume, check)
+        if action == 'skip':
+            skipped += 1
+            continue
+        if action == 'bad':
+            problems.append(f'{relpath}: {note}')
+            continue
 
-    written = sum(1 for p in dest_root.rglob('*') if p.is_file())
-    if not written:
-        raise GetError(f"Download produced no files for {path}")
-    return written, 'downloaded'
+        # Fetch this one file rather than the whole path. That is the
+        # difference between resuming a 358 GiB transfer and restarting it.
+        source_path = f'{path}/{relpath}' if relpath != '.' else path
+        if dest.exists():
+            try:
+                dest.unlink()
+            except OSError as e:
+                problems.append(f'{relpath}: could not replace: {e}')
+                continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = ['dvc', 'get', str(clone), source_path,
+               '--out', str(dest), '--jobs', str(jobs)]
+        if rev:
+            cmd += ['--rev', rev]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            problems.append(f'{relpath}: {_dvc_error_detail(result)}')
+            continue
+        if not dest.exists():
+            problems.append(f'{relpath}: download produced no file')
+            continue
+        if check and not verify_file(dest, md5):
+            problems.append(f'{relpath}: CHECKSUM MISMATCH after download')
+            continue
+        written += 1
+
+    if problems:
+        raise GetError('; '.join(problems[:3]) +
+                       (f' (+{len(problems) - 3} more)' if len(problems) > 3 else ''))
+
+    note = f'{written} downloaded'
+    if skipped:
+        note += f', {skipped} already present'
+    return written + skipped, note
 
 
 def _resolve_source(
@@ -390,6 +484,8 @@ def get_data(
     link: Optional[str] = None,
     refresh: bool = True,
     allow_remote: bool = True,
+    resume: bool = False,
+    check: bool = False,
     verbose: bool = False,
 ) -> Tuple[int, int]:
     """Materialise a single path from a source repository.
@@ -418,12 +514,16 @@ def get_data(
     dest_root = _dest_for(out, path)
 
     if cache_root is None:
-        written, _ = fetch_via_remote(clone, path, dest_root, rev, jobs, force)
+        written, _ = fetch_via_remote(
+            clone, path, dest_root, rev, jobs, force, resume, check
+        )
         return written, 0
 
     link_types = resolve_link_types(link)
     entries = list_source_files(clone, path, rev=rev)
-    results = materialise(entries, cache_root, dest_root, link_types, jobs, force)
+    results = materialise(
+        entries, cache_root, dest_root, link_types, jobs, force, resume, check
+    )
     return _tally(results, verbose)
 
 
@@ -440,6 +540,8 @@ def get_from_csv(
     filters: Optional[List[str]] = None,
     refresh: bool = True,
     allow_remote: bool = True,
+    resume: bool = False,
+    check: bool = False,
     verbose: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Materialise every path listed in a CSV, resolving the source once.
@@ -480,7 +582,9 @@ def get_from_csv(
     )
 
     if cache_root is None:
-        return _download_rows(clone, targets, path_col, rev, jobs, force, verbose)
+        return _download_rows(
+            clone, targets, path_col, rev, jobs, force, resume, check, verbose
+        )
 
     link_types = resolve_link_types(link)
 
@@ -526,7 +630,7 @@ def get_from_csv(
         print(f"Placing {len(tasks)} files from {rows} row{'' if rows == 1 else 's'} "
               f"across {max(1, jobs)} workers")
 
-    placed = _place_all(tasks, cache_root, link_types, jobs, force)
+    placed = _place_all(tasks, cache_root, link_types, jobs, force, resume, check)
 
     # Phase 3: attribute the flat results back to their rows, in CSV order.
     results: List[Tuple[str, bool, str]] = []
@@ -553,6 +657,8 @@ def _download_rows(
     rev: Optional[str],
     jobs: int,
     force: bool,
+    resume: bool,
+    check: bool,
     verbose: bool,
 ) -> List[Tuple[str, bool, str]]:
     """Batch path for machines with no local cache.
@@ -572,7 +678,7 @@ def _download_rows(
             print(f"[{i}/{len(targets)}] downloading {row_path} -> {dest_root}")
         try:
             written, note = fetch_via_remote(
-                clone, row_path, dest_root, rev, jobs, force
+                clone, row_path, dest_root, rev, jobs, force, resume, check
             )
             plural = '' if written == 1 else 's'
             results.append((

@@ -787,30 +787,37 @@ class TestRemoteFallback:
         """Passing the clone keeps resolve-once: DVC won't re-clone a local path."""
         clone = tmp_path / 'clone'
         dest = tmp_path / 'out'
+        entries = [{'relpath': 'R1.fq', 'md5': 'a' * 32, 'size': 1}]
 
         def fake_run(cmd, **kwargs):
-            dest.mkdir(parents=True, exist_ok=True)
-            (dest / 'R1.fq').write_text('x')
+            out = Path(cmd[cmd.index('--out') + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text('x')
             return MagicMock(returncode=0, stdout='', stderr='')
 
-        with patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
+        with patch.object(get_mod, 'list_source_files', return_value=entries), \
+             patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
             written, note = get_mod.fetch_via_remote(clone, 'data/fq/S1', dest, jobs=4)
 
         cmd = run.call_args[0][0]
         assert cmd[:2] == ['dvc', 'get']
         assert cmd[2] == str(clone)
+        assert 'data/fq/S1/R1.fq' in cmd
         assert '--jobs' in cmd and '4' in cmd
-        assert written == 1 and note == 'downloaded'
+        assert written == 1 and 'downloaded' in note
 
     def test_passes_rev_through(self, tmp_path):
         dest = tmp_path / 'out'
+        entries = [{'relpath': 'f', 'md5': 'a' * 32, 'size': 1}]
 
         def fake_run(cmd, **kwargs):
-            dest.mkdir(parents=True, exist_ok=True)
-            (dest / 'f').write_text('x')
+            out = Path(cmd[cmd.index('--out') + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text('x')
             return MagicMock(returncode=0, stdout='', stderr='')
 
-        with patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
+        with patch.object(get_mod, 'list_source_files', return_value=entries), \
+             patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
             get_mod.fetch_via_remote(tmp_path / 'c', 'p', dest, rev='v1.0')
 
         assert ['--rev', 'v1.0'] == run.call_args[0][0][-2:]
@@ -830,9 +837,11 @@ class TestRemoteFallback:
 
     def test_silent_no_op_download_is_a_failure(self, tmp_path):
         """dvc get exiting 0 having written nothing must not read as success."""
-        with patch.object(get_mod.subprocess, 'run',
+        entries = [{'relpath': 'f', 'md5': 'a' * 32, 'size': 1}]
+        with patch.object(get_mod, 'list_source_files', return_value=entries), \
+             patch.object(get_mod.subprocess, 'run',
                           return_value=MagicMock(returncode=0, stdout='', stderr='')):
-            with pytest.raises(GetError, match='produced no files'):
+            with pytest.raises(GetError, match='produced no file'):
                 get_mod.fetch_via_remote(tmp_path / 'c', 'p', tmp_path / 'o')
 
     def test_csv_batch_downloads_every_row(self, tmp_path, monkeypatch):
@@ -853,7 +862,7 @@ class TestRemoteFallback:
         monkeypatch.chdir(tmp_path)
         csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/bad\nd/good\n')
 
-        def fetch(clone, path, dest, rev=None, jobs=8, force=False):
+        def fetch(clone, path, dest, *args, **kwargs):
             if path == 'd/bad':
                 raise GetError('not in remote')
             return 1, 'downloaded'
@@ -865,3 +874,227 @@ class TestRemoteFallback:
 
         assert results[0] == ('d/bad', False, 'not in remote')
         assert results[1][1] is True
+
+
+# =============================================================================
+# --resume and --check
+# =============================================================================
+
+class TestDecide:
+    """The skip/fetch/bad decision, shared by the local and remote paths."""
+
+    def _f(self, tmp_path, content=b'data'):
+        p = tmp_path / 'f.bin'
+        p.write_bytes(content)
+        return p, utils.md5_file(p)
+
+    def test_missing_file_is_fetched(self, tmp_path):
+        assert get_mod.decide(tmp_path / 'nope', 'a' * 32, False, False, False) \
+            == ('fetch', 'missing')
+
+    def test_existing_is_skipped_by_default(self, tmp_path):
+        f, md5 = self._f(tmp_path)
+        action, note = get_mod.decide(f, md5, False, False, False)
+        assert action == 'skip'
+        assert 'use -f' in note
+
+    def test_force_refetches(self, tmp_path):
+        f, md5 = self._f(tmp_path)
+        assert get_mod.decide(f, md5, True, False, False)[0] == 'fetch'
+
+    def test_resume_skips_present(self, tmp_path):
+        f, md5 = self._f(tmp_path)
+        assert get_mod.decide(f, md5, False, True, False) == ('skip', 'already present')
+
+    def test_check_passes_a_good_file(self, tmp_path):
+        f, md5 = self._f(tmp_path)
+        assert get_mod.decide(f, md5, False, False, True) == ('skip', 'verified')
+
+    def test_check_alone_reports_a_bad_file(self, tmp_path):
+        f, _ = self._f(tmp_path)
+        action, note = get_mod.decide(f, 'b' * 32, False, False, True)
+        assert action == 'bad'
+        assert 'MISMATCH' in note
+
+    def test_resume_plus_check_refetches_a_bad_file(self, tmp_path):
+        """The pairing that matters.
+
+        An interrupted transfer leaves a truncated file. By existence alone it
+        is indistinguishable from a complete one, so --resume would keep the
+        corruption forever. --check is what catches it.
+        """
+        f, _ = self._f(tmp_path)
+        action, note = get_mod.decide(f, 'b' * 32, False, True, True)
+        assert action == 'fetch'
+        assert 'mismatch' in note.lower()
+
+    def test_truncated_file_is_caught(self, tmp_path):
+        """Concretely: the real failure mode of an interrupted download."""
+        full = tmp_path / 'full.bin'
+        full.write_bytes(b'x' * 10000)
+        good_md5 = utils.md5_file(full)
+
+        truncated = tmp_path / 'truncated.bin'
+        truncated.write_bytes(b'x' * 4000)
+
+        # Resume alone keeps it; resume+check replaces it.
+        assert get_mod.decide(truncated, good_md5, False, True, False)[0] == 'skip'
+        assert get_mod.decide(truncated, good_md5, False, True, True)[0] == 'fetch'
+
+
+class TestVerifyFile:
+    def test_matches(self, tmp_path):
+        f = tmp_path / 'f'
+        f.write_bytes(b'hello')
+        assert get_mod.verify_file(f, utils.md5_file(f)) is True
+
+    def test_mismatch(self, tmp_path):
+        f = tmp_path / 'f'
+        f.write_bytes(b'hello')
+        assert get_mod.verify_file(f, 'a' * 32) is False
+
+    def test_unreadable_is_not_a_crash(self, tmp_path):
+        assert get_mod.verify_file(tmp_path / 'nope', 'a' * 32) is False
+
+
+class TestResumeOnLocalPath:
+    """--resume / --check through materialise()."""
+
+    def test_resume_skips_and_still_reports_success(self, tmp_path):
+        cache = tmp_path / 'cache'
+        md5 = '2' * 32
+        _seed_cache(cache, md5, b'payload')
+        dest = tmp_path / 'out'
+        dest.mkdir()
+        (dest / 'f.txt').write_bytes(b'payload')
+
+        results = get_mod.materialise(
+            [{'relpath': 'f.txt', 'md5': md5, 'size': 7}],
+            cache, dest, ['copy'], jobs=1, resume=True,
+        )
+        assert results == [('f.txt', True, 'already present')]
+
+    def test_check_flags_a_corrupt_existing_file(self, tmp_path):
+        cache = tmp_path / 'cache'
+        md5 = '3' * 32
+        _seed_cache(cache, md5, b'payload')
+        dest = tmp_path / 'out'
+        dest.mkdir()
+        (dest / 'f.txt').write_bytes(b'WRONG')
+
+        results = get_mod.materialise(
+            [{'relpath': 'f.txt', 'md5': md5, 'size': 7}],
+            cache, dest, ['copy'], jobs=1, check=True,
+        )
+        assert results[0][1] is False
+        assert 'MISMATCH' in results[0][2]
+
+    def test_resume_and_check_repairs_a_corrupt_file(self, tmp_path):
+        cache = tmp_path / 'cache'
+        payload = b'the real bytes'
+        md5 = utils.md5_bytes(payload)
+        _seed_cache(cache, md5, payload)
+        dest = tmp_path / 'out'
+        dest.mkdir()
+        (dest / 'f.txt').write_bytes(b'truncated')
+
+        results = get_mod.materialise(
+            [{'relpath': 'f.txt', 'md5': md5, 'size': len(payload)}],
+            cache, dest, ['copy'], jobs=1, resume=True, check=True,
+        )
+        assert results[0][1] is True
+        assert (dest / 'f.txt').read_bytes() == payload
+
+    def test_check_verifies_a_correct_existing_file(self, tmp_path):
+        """--check standalone validates a finished download."""
+        cache = tmp_path / 'cache'
+        payload = b'good bytes'
+        md5 = utils.md5_bytes(payload)
+        _seed_cache(cache, md5, payload)
+        dest = tmp_path / 'out'
+        dest.mkdir()
+        (dest / 'f.txt').write_bytes(payload)
+
+        results = get_mod.materialise(
+            [{'relpath': 'f.txt', 'md5': md5, 'size': len(payload)}],
+            cache, dest, ['copy'], jobs=1, check=True,
+        )
+        assert results == [('f.txt', True, 'verified')]
+
+
+class TestResumeOnRemotePath:
+    """The path that matters most: 358 GiB over the network."""
+
+    def test_only_missing_files_are_downloaded(self, tmp_path):
+        clone = tmp_path / 'clone'
+        dest = tmp_path / 'out'
+        dest.mkdir()
+        (dest / 'R1.fq').write_bytes(b'already here')
+
+        entries = [
+            {'relpath': 'R1.fq', 'md5': utils.md5_bytes(b'already here'), 'size': 12},
+            {'relpath': 'R2.fq', 'md5': 'c' * 32, 'size': 5},
+        ]
+
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[cmd.index('--out') + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b'fetched')
+            return MagicMock(returncode=0, stdout='', stderr='')
+
+        with patch.object(get_mod, 'list_source_files', return_value=entries), \
+             patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
+            total, note = get_mod.fetch_via_remote(
+                clone, 'data/fq/S1', dest, resume=True
+            )
+
+        assert run.call_count == 1
+        assert 'data/fq/S1/R2.fq' in run.call_args[0][0]
+        assert total == 2
+        assert 'already present' in note
+
+    def test_partial_directory_is_no_longer_skipped_wholesale(self, tmp_path):
+        """The bug --resume exists to fix.
+
+        The remote path used to skip on `dest_root.exists()`, so a row
+        interrupted midway was reported as complete on the next run.
+        """
+        clone = tmp_path / 'clone'
+        dest = tmp_path / 'out'
+        dest.mkdir()
+        (dest / 'R1.fq').write_bytes(b'a')
+
+        entries = [
+            {'relpath': 'R1.fq', 'md5': utils.md5_bytes(b'a'), 'size': 1},
+            {'relpath': 'R2.fq', 'md5': 'd' * 32, 'size': 1},
+            {'relpath': 'R3.fq', 'md5': 'e' * 32, 'size': 1},
+        ]
+
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[cmd.index('--out') + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b'z')
+            return MagicMock(returncode=0, stdout='', stderr='')
+
+        with patch.object(get_mod, 'list_source_files', return_value=entries), \
+             patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
+            total, _ = get_mod.fetch_via_remote(clone, 'p', dest, resume=True)
+
+        assert run.call_count == 2
+        assert total == 3
+
+    def test_checksum_failure_after_download_is_reported(self, tmp_path):
+        clone = tmp_path / 'clone'
+        dest = tmp_path / 'out'
+        entries = [{'relpath': 'R1.fq', 'md5': 'f' * 32, 'size': 1}]
+
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[cmd.index('--out') + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b'wrong bytes')
+            return MagicMock(returncode=0, stdout='', stderr='')
+
+        with patch.object(get_mod, 'list_source_files', return_value=entries), \
+             patch.object(get_mod.subprocess, 'run', side_effect=fake_run):
+            with pytest.raises(GetError, match='CHECKSUM MISMATCH after download'):
+                get_mod.fetch_via_remote(clone, 'p', dest, check=True)
