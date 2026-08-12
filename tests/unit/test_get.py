@@ -702,13 +702,22 @@ class TestGetData:
 
         assert (written, failed) == (1, 1)
 
-    def test_no_local_cache_is_a_clear_error(self, tmp_path, monkeypatch):
+    def test_no_local_cache_downloads_instead_of_failing(self, tmp_path, monkeypatch):
+        """The off-system case: no mount, so fetch over the network.
+
+        This used to be a hard error, which meant dt get could not be run by
+        the very people it was built for.
+        """
         monkeypatch.chdir(tmp_path)
         with patch.object(get_mod.tmp_mod, 'clone_repo', return_value=tmp_path), \
              patch.object(get_mod.remote_mod, 'find_local_remote_from_repo',
-                          return_value=None):
-            with pytest.raises(GetError, match='No locally-accessible cache'):
-                get_mod.get_data('myrepo', 'data/x')
+                          return_value=None), \
+             patch.object(get_mod, 'fetch_via_remote',
+                          return_value=(3, 'downloaded')) as fetch:
+            written, failed = get_mod.get_data('myrepo', 'data/x', out='out/')
+
+        assert (written, failed) == (3, 0)
+        assert fetch.call_count == 1
 
 
 # =============================================================================
@@ -731,3 +740,128 @@ class TestNoTrackingFiles:
 
         assert list(dest.rglob('*.dvc')) == []
         assert not (dest / '.gitignore').exists()
+
+
+# =============================================================================
+# Remote fallback (the off-NCI collaborator path)
+# =============================================================================
+
+class TestRemoteFallback:
+    """dt get on a machine with no filesystem access to any cache.
+
+    This is the case the command exists for -- someone on a different system
+    entirely -- and the one it used to refuse outright.
+    """
+
+    def test_no_local_cache_falls_back_instead_of_failing(self, tmp_path):
+        with patch.object(get_mod.tmp_mod, 'clone_repo', return_value=tmp_path), \
+             patch.object(get_mod.remote_mod, 'find_local_remote_from_repo',
+                          return_value=None):
+            clone, cache_root = get_mod._resolve_source(
+                'myrepo', None, None, False, False
+            )
+
+        assert clone == tmp_path
+        assert cache_root is None
+
+    def test_local_cache_still_preferred(self, tmp_path):
+        with patch.object(get_mod.tmp_mod, 'clone_repo', return_value=tmp_path), \
+             patch.object(get_mod.remote_mod, 'find_local_remote_from_repo',
+                          return_value=('nci', '/g/data/cache')):
+            _, cache_root = get_mod._resolve_source(
+                'myrepo', None, None, False, False
+            )
+
+        assert cache_root == Path('/g/data/cache')
+
+    def test_opting_out_restores_the_hard_error(self, tmp_path):
+        with patch.object(get_mod.tmp_mod, 'clone_repo', return_value=tmp_path), \
+             patch.object(get_mod.remote_mod, 'find_local_remote_from_repo',
+                          return_value=None):
+            with pytest.raises(GetError, match='no-remote-fallback'):
+                get_mod._resolve_source(
+                    'myrepo', None, None, False, False, allow_remote=False
+                )
+
+    def test_hands_the_local_clone_to_dvc_get(self, tmp_path):
+        """Passing the clone keeps resolve-once: DVC won't re-clone a local path."""
+        clone = tmp_path / 'clone'
+        dest = tmp_path / 'out'
+
+        def fake_run(cmd, **kwargs):
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / 'R1.fq').write_text('x')
+            return MagicMock(returncode=0, stdout='', stderr='')
+
+        with patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
+            written, note = get_mod.fetch_via_remote(clone, 'data/fq/S1', dest, jobs=4)
+
+        cmd = run.call_args[0][0]
+        assert cmd[:2] == ['dvc', 'get']
+        assert cmd[2] == str(clone)
+        assert '--jobs' in cmd and '4' in cmd
+        assert written == 1 and note == 'downloaded'
+
+    def test_passes_rev_through(self, tmp_path):
+        dest = tmp_path / 'out'
+
+        def fake_run(cmd, **kwargs):
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / 'f').write_text('x')
+            return MagicMock(returncode=0, stdout='', stderr='')
+
+        with patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
+            get_mod.fetch_via_remote(tmp_path / 'c', 'p', dest, rev='v1.0')
+
+        assert ['--rev', 'v1.0'] == run.call_args[0][0][-2:]
+
+    def test_download_failure_is_reported(self, tmp_path):
+        failed = MagicMock(
+            returncode=1, stdout='',
+            stderr='ERROR: unable to find remote\n\nHaving any troubles? '
+                   'Hit us up at https://dvc.org/support\n',
+        )
+        with patch.object(get_mod.subprocess, 'run', return_value=failed):
+            with pytest.raises(GetError) as excinfo:
+                get_mod.fetch_via_remote(tmp_path / 'c', 'p', tmp_path / 'o')
+
+        assert 'unable to find remote' in str(excinfo.value)
+        assert 'dvc.org/support' not in str(excinfo.value)
+
+    def test_silent_no_op_download_is_a_failure(self, tmp_path):
+        """dvc get exiting 0 having written nothing must not read as success."""
+        with patch.object(get_mod.subprocess, 'run',
+                          return_value=MagicMock(returncode=0, stdout='', stderr='')):
+            with pytest.raises(GetError, match='produced no files'):
+                get_mod.fetch_via_remote(tmp_path / 'c', 'p', tmp_path / 'o')
+
+    def test_csv_batch_downloads_every_row(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/one\nd/two\n')
+
+        with patch.object(get_mod, '_resolve_source',
+                          return_value=(tmp_path / 'clone', None)), \
+             patch.object(get_mod, 'fetch_via_remote',
+                          return_value=(2, 'downloaded')) as fetch:
+            results = get_mod.get_from_csv(csv_file, 'myrepo', out='out/')
+
+        assert fetch.call_count == 2
+        assert all(ok for _, ok, _ in results)
+        assert '2 files' in results[0][2]
+
+    def test_csv_batch_reports_a_failed_row(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/bad\nd/good\n')
+
+        def fetch(clone, path, dest, rev=None, jobs=8, force=False):
+            if path == 'd/bad':
+                raise GetError('not in remote')
+            return 1, 'downloaded'
+
+        with patch.object(get_mod, '_resolve_source',
+                          return_value=(tmp_path / 'clone', None)), \
+             patch.object(get_mod, 'fetch_via_remote', side_effect=fetch):
+            results = get_mod.get_from_csv(csv_file, 'myrepo', out='out/')
+
+        assert results[0] == ('d/bad', False, 'not in remote')
+        assert results[1][1] is True

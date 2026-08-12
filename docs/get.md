@@ -16,7 +16,7 @@ dt get <repository> --csv <file> [options]
 That is the point. It exists for handing a subset of a dataset to someone outside the group who is running their own pipeline and does not want our tracking files.
 
 1. Clones the source repository once to read its DVC configuration
-2. Finds a locally-accessible cache from the source repo's remotes
+2. Looks for a cache reachable on this filesystem; if there is none, downloads from the source's remote instead (see [Two paths](#two-paths-local-cache-or-the-network))
 3. Resolves each path with `dvc list`, which works for a subpath *inside* a tracked directory
 4. Places the objects at their destinations, in parallel
 
@@ -61,6 +61,8 @@ dt get my-registry --csv samples.csv --filter 'wts_lib=' -o fastqs/
 Each row reports `✓`/`✗` with a summary, and the command exits non-zero if any row failed.
 
 ### How `--jobs` is spent
+
+This describes the local-cache path; on the download path see [Two paths](#two-paths-local-cache-or-the-network).
 
 Rows are resolved concurrently, then **every file from every row is placed through a single pool** of `--jobs` workers. The budget covers the transfer as a whole rather than being re-divided per row.
 
@@ -110,6 +112,7 @@ dt get my-registry data/ref.fa --link hardlink,copy -o ./
 - `-j, --jobs <n>`: Parallel workers (default: 8). In `--csv` mode the budget spans the whole transfer, not each row — see below.
 - `--link <types>`: Link type(s), comma-separated. Defaults to DVC `cache.type` if set.
 - `--no-refresh`: Skip refreshing the temp clone (for offline use)
+- `--no-remote-fallback`: Fail instead of downloading when no local cache is reachable
 - `-f, --force`: Overwrite existing output files
 - `-v, --verbose`: Show detailed progress
 
@@ -132,9 +135,19 @@ dt get bcarc-wts --csv paths.csv --path-col fq_dir --filter 'wts_lib=' -o fastqs
 dt get my-registry data/fq/AF013-A --link copy -o fastqs/
 ```
 
-## Requirements
+## Two paths: local cache, or the network
 
-`dt get` copies from storage this machine can already reach. If the source data lives only in a remote you have no mount for, it will say so — use `dvc get` for that case.
+`dt get` picks automatically.
+
+**If a cache is reachable on this filesystem** — the normal case inside NCI — it links or copies straight out of it. Fast, and no network involved.
+
+**If not** — the normal case for anyone on a different system — it downloads from whichever remote the source repository configures (object storage, typically). This is what lets someone outside the group run `dt get` at all: they need credentials for that remote, but no shared filesystem and no DVC tracking in their own project.
+
+The download path still clones the source only once: the local clone is handed to `dvc get` as the repository, so DVC has no reason to re-fetch the git metadata per row. Subpaths inside a tracked directory work the same way on both paths.
+
+Rows download one at a time rather than fanned out, because the network is the bottleneck and `--jobs` already parallelises within a row.
+
+Use `--no-remote-fallback` to make a missing local cache a hard error instead — useful when you expect the fast path and want to know if you didn't get it.
 
 ## See also
 

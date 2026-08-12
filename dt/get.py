@@ -296,27 +296,87 @@ def materialise(
     return _place_all(tasks, cache_root, link_types, jobs, force)
 
 
+def fetch_via_remote(
+    clone: Path,
+    path: str,
+    dest_root: Path,
+    rev: Optional[str] = None,
+    jobs: int = 8,
+    force: bool = False,
+) -> Tuple[int, str]:
+    """Download a path over the network, for machines with no local cache.
+
+    Hands the *local clone* to ``dvc get`` as the repository. That keeps the
+    resolve-once property -- DVC does not re-clone a path it can already read --
+    while letting it pull the objects from whichever remote the source repo
+    configures (object storage, typically). Subpaths inside a tracked directory
+    work here for the same reason they do locally.
+
+    Args:
+        clone: Local clone of the source repository.
+        path: Path within the repository.
+        dest_root: Directory to download into.
+        rev: Git revision to resolve against.
+        jobs: Parallel download threads, passed to ``dvc get``.
+        force: Overwrite an existing destination.
+
+    Returns:
+        (files_written, message).
+
+    Raises:
+        GetError: If the download fails.
+    """
+    if dest_root.exists() and not force:
+        existing = sum(1 for p in dest_root.rglob('*') if p.is_file())
+        return existing, 'exists (use -f to overwrite)'
+
+    dest_root.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ['dvc', 'get', str(clone), path, '--out', str(dest_root), '--jobs', str(jobs)]
+    if rev:
+        cmd += ['--rev', rev]
+    if force:
+        cmd.append('--force')
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise GetError(f"Download failed for {path}: {_dvc_error_detail(result)}")
+
+    written = sum(1 for p in dest_root.rglob('*') if p.is_file())
+    if not written:
+        raise GetError(f"Download produced no files for {path}")
+    return written, 'downloaded'
+
+
 def _resolve_source(
     repository: str,
     owner: Optional[str],
     rev: Optional[str],
     refresh: bool,
     verbose: bool,
-) -> Tuple[Path, Path]:
-    """Clone the source once and locate its cache. Returns (clone, cache_root)."""
+    allow_remote: bool = True,
+) -> Tuple[Path, Optional[Path]]:
+    """Clone the source once and locate its cache.
+
+    Returns ``(clone, cache_root)``, where *cache_root* is None when no cache is
+    reachable on this filesystem -- the normal situation for anyone outside our
+    setup, and the case the remote fallback exists for.
+    """
     clone = tmp_mod.clone_repo(
         repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
     )
 
     found = remote_mod.find_local_remote_from_repo(repository, owner=owner)
-    if not found:
+    if found:
+        return clone, Path(found[1])
+
+    if not allow_remote:
         raise GetError(
-            f"No locally-accessible cache or remote found for {repository}. "
-            f"dt get copies from storage this machine can already reach; if the "
-            f"data is only in a remote you have no mount for, use dvc get."
+            f"No locally-accessible cache or remote found for {repository}, and "
+            f"--no-remote-fallback was given."
         )
-    _, cache_path = found
-    return clone, Path(cache_path)
+    if verbose:
+        print("No locally-accessible cache; downloading from the source's remote")
+    return clone, None
 
 
 def get_data(
@@ -329,6 +389,7 @@ def get_data(
     force: bool = False,
     link: Optional[str] = None,
     refresh: bool = True,
+    allow_remote: bool = True,
     verbose: bool = False,
 ) -> Tuple[int, int]:
     """Materialise a single path from a source repository.
@@ -351,10 +412,16 @@ def get_data(
     Raises:
         GetError: If the source cannot be resolved.
     """
-    clone, cache_root = _resolve_source(repository, owner, rev, refresh, verbose)
-    link_types = resolve_link_types(link)
+    clone, cache_root = _resolve_source(
+        repository, owner, rev, refresh, verbose, allow_remote
+    )
     dest_root = _dest_for(out, path)
 
+    if cache_root is None:
+        written, _ = fetch_via_remote(clone, path, dest_root, rev, jobs, force)
+        return written, 0
+
+    link_types = resolve_link_types(link)
     entries = list_source_files(clone, path, rev=rev)
     results = materialise(entries, cache_root, dest_root, link_types, jobs, force)
     return _tally(results, verbose)
@@ -372,6 +439,7 @@ def get_from_csv(
     path_col: str = 'path',
     filters: Optional[List[str]] = None,
     refresh: bool = True,
+    allow_remote: bool = True,
     verbose: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Materialise every path listed in a CSV, resolving the source once.
@@ -407,7 +475,13 @@ def get_from_csv(
             + (f" with filter(s): {', '.join(filters)}" if filters else "")
         )
 
-    clone, cache_root = _resolve_source(repository, owner, rev, refresh, verbose)
+    clone, cache_root = _resolve_source(
+        repository, owner, rev, refresh, verbose, allow_remote
+    )
+
+    if cache_root is None:
+        return _download_rows(clone, targets, path_col, rev, jobs, force, verbose)
+
     link_types = resolve_link_types(link)
 
     # Phase 1: resolve every row to a file listing. Each row costs a `dvc list`
@@ -469,6 +543,43 @@ def get_from_csv(
             plural = '' if written == 1 else 's'
             results.append((row_path, True, f'{written} file{plural} -> {dest_root}'))
 
+    return results
+
+
+def _download_rows(
+    clone: Path,
+    targets: Sequence[Tuple[str, Optional[str]]],
+    path_col: str,
+    rev: Optional[str],
+    jobs: int,
+    force: bool,
+    verbose: bool,
+) -> List[Tuple[str, bool, str]]:
+    """Batch path for machines with no local cache.
+
+    Rows run one at a time rather than fanned out. The bottleneck here is the
+    network, which ``dvc get -j`` already saturates from within a single row,
+    and concurrent ``dvc get`` against one clone would contend on its SQLite
+    state db -- the same lock that broke the local path.
+    """
+    results: List[Tuple[str, bool, str]] = []
+    for i, (row_path, row_out) in enumerate(targets, 1):
+        if not row_path:
+            results.append(('(empty)', False, f'Missing {path_col}'))
+            continue
+        dest_root = _dest_for(row_out, row_path)
+        if verbose:
+            print(f"[{i}/{len(targets)}] downloading {row_path} -> {dest_root}")
+        try:
+            written, note = fetch_via_remote(
+                clone, row_path, dest_root, rev, jobs, force
+            )
+            plural = '' if written == 1 else 's'
+            results.append((
+                row_path, True, f'{written} file{plural} -> {dest_root} ({note})'
+            ))
+        except GetError as e:
+            results.append((row_path, False, str(e)))
     return results
 
 

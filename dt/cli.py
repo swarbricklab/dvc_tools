@@ -4252,10 +4252,11 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('-j', '--jobs', type=int, default=8, show_default=True, help='Parallel workers')
 @click.option('--link', default=None, help='Link type(s) to use, comma-separated (reflink, hardlink, symlink, copy). Defaults to DVC cache.type if set.')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing the temp clone (for offline use)')
+@click.option('--remote-fallback/--no-remote-fallback', default=True, help='If no local cache is reachable, download from the source repo\'s remote (default: enabled).')
 @click.option('-f', '--force', is_flag=True, help='Overwrite existing output files')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
-            jobs, link, no_refresh, force, verbose):
+            jobs, link, no_refresh, remote_fallback, force, verbose):
     """Download DVC-tracked data without creating tracking files.
 
     Wraps the idea of ``dvc get``: materialises data from a source repository
@@ -4300,6 +4301,7 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
                 path_col=path_col,
                 filters=list(filters),
                 refresh=not no_refresh,
+                allow_remote=remote_fallback,
                 verbose=verbose,
             )
         except get_mod.GetError as e:
@@ -4322,6 +4324,7 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
             force=force,
             link=link,
             refresh=not no_refresh,
+            allow_remote=remote_fallback,
             verbose=verbose,
         )
     except get_mod.GetError as e:
