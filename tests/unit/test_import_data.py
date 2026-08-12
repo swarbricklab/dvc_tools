@@ -815,3 +815,117 @@ class TestCreateDvcFile:
         assert 'size' not in out
         assert 'nfiles' not in out
         assert out['hash'] == 'md5'
+
+
+# =============================================================================
+# create_dir_file -- shared, content-addressed caches (#175)
+# =============================================================================
+
+class TestCreateDirFileSkipsExisting:
+    """.dir objects are content-addressed, so an existing one is already right.
+
+    Rewriting it is impossible in a shared registry: those are setgid+sticky, so
+    one member cannot overwrite an object another member wrote first, and the
+    import died with EACCES on exactly the sections a colleague had imported
+    already.
+    """
+
+    ENTRIES = [
+        {'md5': 'a' * 32, 'relpath': 'one.txt'},
+        {'md5': 'b' * 32, 'relpath': 'two.txt'},
+    ]
+
+    def _dir_path(self, cache, dir_hash):
+        return Path(cache) / 'files' / 'md5' / dir_hash[:2] / f"{dir_hash[2:]}.dir"
+
+    def test_writes_when_absent(self, tmp_path):
+        dir_hash, size = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+
+        target = self._dir_path(tmp_path, dir_hash.replace('.dir', ''))
+        assert target.exists()
+        assert target.stat().st_size == size
+
+    def test_is_content_addressed(self, tmp_path):
+        """Same entries must always yield the same object name."""
+        first, _ = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+        second, _ = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+        assert first == second
+
+    def test_does_not_rewrite_an_existing_object(self, tmp_path):
+        """The fix: an existing object is left completely alone."""
+        dir_hash, _ = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+        target = self._dir_path(tmp_path, dir_hash.replace('.dir', ''))
+        before = target.stat().st_mtime_ns
+
+        with patch.object(Path, 'write_bytes') as write:
+            again, _ = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+
+        write.assert_not_called()
+        assert again == dir_hash
+        assert target.stat().st_mtime_ns == before
+
+    def test_read_only_object_no_longer_fails(self, tmp_path):
+        """Reproduces #175: another user's object, unwritable by us."""
+        dir_hash, expected_size = import_mod.create_dir_file(
+            self.ENTRIES, str(tmp_path)
+        )
+        target = self._dir_path(tmp_path, dir_hash.replace('.dir', ''))
+        # Simulate a colleague's object in a sticky shared registry.
+        target.chmod(0o444)
+        target.parent.chmod(0o555)
+
+        try:
+            again, size = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+        finally:
+            target.parent.chmod(0o755)
+            target.chmod(0o644)
+
+        assert again == dir_hash
+        assert size == expected_size
+
+    def test_a_genuine_write_failure_still_raises(self, tmp_path):
+        """Skipping must not swallow errors for objects that are really absent."""
+        with patch.object(Path, 'write_bytes',
+                          side_effect=PermissionError('nope')):
+            with pytest.raises(ImportError, match='Failed to write .dir file'):
+                import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+
+    def test_loses_a_write_race_gracefully(self, tmp_path):
+        """Concurrent --csv imports into one registry both target the same object.
+
+        If another writer lands between our existence check and our write, the
+        content is identical, so an object that now exists is success.
+        """
+        real_exists = Path.exists
+        state = {'calls': 0}
+
+        def exists_then_appears(self):
+            # Absent on the pre-write check, present once the write has failed.
+            if self.name.endswith('.dir'):
+                state['calls'] += 1
+                return state['calls'] > 1
+            return real_exists(self)
+
+        with patch.object(Path, 'exists', exists_then_appears), \
+             patch.object(Path, 'write_bytes',
+                          side_effect=PermissionError('raced')):
+            dir_hash, size = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+
+        assert dir_hash.endswith('.dir')
+        assert size > 0
+
+    def test_warns_when_an_existing_object_looks_truncated(self, tmp_path, capsys):
+        """A truncated .dir keeps its name, so it still looks like the right object."""
+        dir_hash, _ = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+        target = self._dir_path(tmp_path, dir_hash.replace('.dir', ''))
+        target.write_bytes(b'[')
+
+        import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+
+        assert 'truncated' in capsys.readouterr().err
+
+    def test_silent_when_the_existing_object_is_intact(self, tmp_path, capsys):
+        import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+        capsys.readouterr()
+        import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
+        assert capsys.readouterr().err == ''

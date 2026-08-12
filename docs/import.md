@@ -104,6 +104,21 @@ dvc checkout      # Standard checkout works
 
 `dt import` now delegates to `dvc import` in this case. If that fails, it usually means network/auth access to the source remote is unavailable.
 
+### "Permission denied" writing a `.dir` file into a shared registry
+
+Fixed. Cache objects are content-addressed — the filename *is* the md5 of the
+content — so an object that already exists is by definition the one being
+written. `dt import` now skips the write instead of rewriting it.
+
+This used to fail on shared registries, which are `setgid` and sticky: one
+member cannot overwrite an object another member wrote first. The symptom was
+an import that succeeded for the sections you had imported yourself and failed
+for the ones a colleague imported first, which made it look intermittent.
+
+If you see a warning that a cached `.dir` is smaller than expected, that is a
+different problem — the existing object looks truncated, and data referencing
+it may fetch incompletely. Report it rather than working around it.
+
 ### Files not found in cache
 
 The source data may not have been pushed to the remote. Check with:
