@@ -20,6 +20,7 @@ of 412 samples without transferring the other 330.
 
 import json
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -79,9 +80,67 @@ def resolve_link_types(link: Optional[str] = None) -> List[str]:
         return list(DEFAULT_LINK_TYPES)
 
     # cache.type is a preference list, not a single value (ours is
-    # "hardlink,symlink"), so honour every entry in order.
-    types = [t.strip() for t in configured.split(',') if t.strip() in VALID_LINK_TYPES]
-    return types or list(DEFAULT_LINK_TYPES)
+    # "hardlink,symlink"), so honour every entry in order -- except symlink.
+    #
+    # A symlink is right for a workspace, whose whole point is to stay attached
+    # to the cache, and wrong for a hand-off, which has to stand alone. It is
+    # also the most dangerous entry to honour blindly: linking across
+    # filesystems (/scratch to /g/data here) fails EXDEV at hardlink and lands
+    # on symlink, which "succeeds" having moved no bytes at all. The result
+    # reports N fetched, then rsyncs to the recipient as dangling pointers.
+    # Ask for it with --link symlink if you genuinely want it.
+    types = [
+        t.strip() for t in configured.split(',')
+        if t.strip() in VALID_LINK_TYPES and t.strip() != 'symlink'
+    ]
+    if not types:
+        return list(DEFAULT_LINK_TYPES)
+    # Whatever the config prefers, copy has to terminate the chain: a
+    # config of just "hardlink" would otherwise fail outright across filesystems.
+    if 'copy' not in types:
+        types.append('copy')
+    return types
+
+
+def _dvc_error_detail(result: subprocess.CompletedProcess) -> str:
+    """Pull the real error out of DVC's stderr.
+
+    DVC signs off with "Having any troubles? Hit us up at ..." on its own line,
+    so taking the last line of stderr reports the support footer and throws the
+    actual message away. Prefer the ERROR: line.
+    """
+    lines = [
+        line.strip()
+        for line in (result.stderr or result.stdout or '').strip().splitlines()
+        if line.strip() and 'dvc.org/support' not in line
+    ]
+    if not lines:
+        return 'unknown error'
+    for line in lines:
+        if line.startswith('ERROR:'):
+            return line[len('ERROR:'):].strip()
+    return lines[0]
+
+
+def _run_dvc_list(cmd: List[str], attempts: int = 4) -> subprocess.CompletedProcess:
+    """Run a ``dvc list``, retrying while its state database is locked.
+
+    DVC keeps a SQLite state db inside the repo it is reading. Several `dvc
+    list` processes against the same clone contend on it, and on a *cold* clone
+    -- where the db does not exist yet and they all try to create it -- that
+    reliably fails one of them with "database is locked".
+    """
+    delay = 0.5
+    for attempt in range(attempts):
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return result
+        if 'database is locked' not in (result.stderr or ''):
+            return result
+        if attempt < attempts - 1:
+            time.sleep(delay)
+            delay *= 2
+    return result
 
 
 def list_source_files(
@@ -111,10 +170,9 @@ def list_source_files(
     if rev:
         cmd += ['--rev', rev]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_dvc_list(cmd)
     if result.returncode != 0:
-        message = (result.stderr or result.stdout).strip().splitlines()
-        detail = message[-1] if message else 'unknown error'
+        detail = _dvc_error_detail(result)
         # DVC reports the miss against our internal clone directory, which is
         # noise to the reader -- they asked for a path in a repository, not in
         # .dt/tmp/clones/<mangled-url>/.
@@ -238,27 +296,87 @@ def materialise(
     return _place_all(tasks, cache_root, link_types, jobs, force)
 
 
+def fetch_via_remote(
+    clone: Path,
+    path: str,
+    dest_root: Path,
+    rev: Optional[str] = None,
+    jobs: int = 8,
+    force: bool = False,
+) -> Tuple[int, str]:
+    """Download a path over the network, for machines with no local cache.
+
+    Hands the *local clone* to ``dvc get`` as the repository. That keeps the
+    resolve-once property -- DVC does not re-clone a path it can already read --
+    while letting it pull the objects from whichever remote the source repo
+    configures (object storage, typically). Subpaths inside a tracked directory
+    work here for the same reason they do locally.
+
+    Args:
+        clone: Local clone of the source repository.
+        path: Path within the repository.
+        dest_root: Directory to download into.
+        rev: Git revision to resolve against.
+        jobs: Parallel download threads, passed to ``dvc get``.
+        force: Overwrite an existing destination.
+
+    Returns:
+        (files_written, message).
+
+    Raises:
+        GetError: If the download fails.
+    """
+    if dest_root.exists() and not force:
+        existing = sum(1 for p in dest_root.rglob('*') if p.is_file())
+        return existing, 'exists (use -f to overwrite)'
+
+    dest_root.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ['dvc', 'get', str(clone), path, '--out', str(dest_root), '--jobs', str(jobs)]
+    if rev:
+        cmd += ['--rev', rev]
+    if force:
+        cmd.append('--force')
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise GetError(f"Download failed for {path}: {_dvc_error_detail(result)}")
+
+    written = sum(1 for p in dest_root.rglob('*') if p.is_file())
+    if not written:
+        raise GetError(f"Download produced no files for {path}")
+    return written, 'downloaded'
+
+
 def _resolve_source(
     repository: str,
     owner: Optional[str],
     rev: Optional[str],
     refresh: bool,
     verbose: bool,
-) -> Tuple[Path, Path]:
-    """Clone the source once and locate its cache. Returns (clone, cache_root)."""
+    allow_remote: bool = True,
+) -> Tuple[Path, Optional[Path]]:
+    """Clone the source once and locate its cache.
+
+    Returns ``(clone, cache_root)``, where *cache_root* is None when no cache is
+    reachable on this filesystem -- the normal situation for anyone outside our
+    setup, and the case the remote fallback exists for.
+    """
     clone = tmp_mod.clone_repo(
         repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
     )
 
     found = remote_mod.find_local_remote_from_repo(repository, owner=owner)
-    if not found:
+    if found:
+        return clone, Path(found[1])
+
+    if not allow_remote:
         raise GetError(
-            f"No locally-accessible cache or remote found for {repository}. "
-            f"dt get copies from storage this machine can already reach; if the "
-            f"data is only in a remote you have no mount for, use dvc get."
+            f"No locally-accessible cache or remote found for {repository}, and "
+            f"--no-remote-fallback was given."
         )
-    _, cache_path = found
-    return clone, Path(cache_path)
+    if verbose:
+        print("No locally-accessible cache; downloading from the source's remote")
+    return clone, None
 
 
 def get_data(
@@ -271,6 +389,7 @@ def get_data(
     force: bool = False,
     link: Optional[str] = None,
     refresh: bool = True,
+    allow_remote: bool = True,
     verbose: bool = False,
 ) -> Tuple[int, int]:
     """Materialise a single path from a source repository.
@@ -293,10 +412,16 @@ def get_data(
     Raises:
         GetError: If the source cannot be resolved.
     """
-    clone, cache_root = _resolve_source(repository, owner, rev, refresh, verbose)
-    link_types = resolve_link_types(link)
+    clone, cache_root = _resolve_source(
+        repository, owner, rev, refresh, verbose, allow_remote
+    )
     dest_root = _dest_for(out, path)
 
+    if cache_root is None:
+        written, _ = fetch_via_remote(clone, path, dest_root, rev, jobs, force)
+        return written, 0
+
+    link_types = resolve_link_types(link)
     entries = list_source_files(clone, path, rev=rev)
     results = materialise(entries, cache_root, dest_root, link_types, jobs, force)
     return _tally(results, verbose)
@@ -314,6 +439,7 @@ def get_from_csv(
     path_col: str = 'path',
     filters: Optional[List[str]] = None,
     refresh: bool = True,
+    allow_remote: bool = True,
     verbose: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Materialise every path listed in a CSV, resolving the source once.
@@ -349,12 +475,18 @@ def get_from_csv(
             + (f" with filter(s): {', '.join(filters)}" if filters else "")
         )
 
-    clone, cache_root = _resolve_source(repository, owner, rev, refresh, verbose)
+    clone, cache_root = _resolve_source(
+        repository, owner, rev, refresh, verbose, allow_remote
+    )
+
+    if cache_root is None:
+        return _download_rows(clone, targets, path_col, rev, jobs, force, verbose)
+
     link_types = resolve_link_types(link)
 
     # Phase 1: resolve every row to a file listing. Each row costs a `dvc list`
-    # subprocess, so run them concurrently too -- on a long manifest the
-    # resolves alone are otherwise a serial prologue to all the real work.
+    # subprocess, so run them concurrently -- on a long manifest the resolves
+    # alone are otherwise a serial prologue to all the real work.
     def resolve(target):
         row_path, row_out = target
         if not row_path:
@@ -365,8 +497,17 @@ def get_from_csv(
             return None, None, str(e)
         return _dest_for(row_out, row_path), entries, None
 
-    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-        resolved = list(pool.map(resolve, targets))
+    # ...but resolve the first row on its own first. DVC keeps a SQLite state db
+    # inside the clone, and on a freshly-cloned repo it does not exist yet; fan
+    # out immediately and the workers race to create it, which fails all but one
+    # with "database is locked". One serial call builds it, after which
+    # concurrent readers are fine.
+    resolved = []
+    if targets:
+        resolved.append(resolve(targets[0]))
+    if len(targets) > 1:
+        with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+            resolved.extend(pool.map(resolve, targets[1:]))
 
     # Phase 2: place every file from every row through a single pool, so the
     # worker budget goes to the transfer as a whole rather than being re-divided
@@ -381,7 +522,8 @@ def get_from_csv(
         spans[i] = (dest_root, start, len(tasks))
 
     if verbose and tasks:
-        print(f"Placing {len(tasks)} files from {len(spans)} rows "
+        rows = len(spans)
+        print(f"Placing {len(tasks)} files from {rows} row{'' if rows == 1 else 's'} "
               f"across {max(1, jobs)} workers")
 
     placed = _place_all(tasks, cache_root, link_types, jobs, force)
@@ -401,6 +543,43 @@ def get_from_csv(
             plural = '' if written == 1 else 's'
             results.append((row_path, True, f'{written} file{plural} -> {dest_root}'))
 
+    return results
+
+
+def _download_rows(
+    clone: Path,
+    targets: Sequence[Tuple[str, Optional[str]]],
+    path_col: str,
+    rev: Optional[str],
+    jobs: int,
+    force: bool,
+    verbose: bool,
+) -> List[Tuple[str, bool, str]]:
+    """Batch path for machines with no local cache.
+
+    Rows run one at a time rather than fanned out. The bottleneck here is the
+    network, which ``dvc get -j`` already saturates from within a single row,
+    and concurrent ``dvc get`` against one clone would contend on its SQLite
+    state db -- the same lock that broke the local path.
+    """
+    results: List[Tuple[str, bool, str]] = []
+    for i, (row_path, row_out) in enumerate(targets, 1):
+        if not row_path:
+            results.append(('(empty)', False, f'Missing {path_col}'))
+            continue
+        dest_root = _dest_for(row_out, row_path)
+        if verbose:
+            print(f"[{i}/{len(targets)}] downloading {row_path} -> {dest_root}")
+        try:
+            written, note = fetch_via_remote(
+                clone, row_path, dest_root, rev, jobs, force
+            )
+            plural = '' if written == 1 else 's'
+            results.append((
+                row_path, True, f'{written} file{plural} -> {dest_root} ({note})'
+            ))
+        except GetError as e:
+            results.append((row_path, False, str(e)))
     return results
 
 
