@@ -77,6 +77,11 @@ class FindError(DTError):
     pass
 
 
+class GetError(DTError):
+    """Error during get operations."""
+    pass
+
+
 class HistoryError(DTError):
     """Error during history operations."""
     pass
