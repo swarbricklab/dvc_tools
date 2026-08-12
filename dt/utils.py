@@ -3,6 +3,7 @@
 Common functions used across multiple modules.
 """
 
+import csv
 import hashlib
 import os
 import shutil
@@ -1439,3 +1440,119 @@ def recompute_dvc_md5(dvc_data: Dict[str, Any]) -> Dict[str, Any]:
         del d['wdir']
     dvc_data['md5'] = dict_md5(d, exclude=_DVC_MD5_EXCLUDE_FIELDS)
     return dvc_data
+
+
+# =============================================================================
+# CSV target lists
+# =============================================================================
+
+def parse_row_filters(exprs: Optional[List[str]]) -> List[Tuple[str, str, bool]]:
+    """Parse ``--filter`` expressions into ``(column, value, negate)`` triples.
+
+    Accepts ``COL=VALUE`` and ``COL!=VALUE``. An empty *VALUE* matches an empty
+    or absent cell, which is how you select on "this column wasn't filled in"
+    -- the common case when a spreadsheet column marks an exception rather than
+    a value.
+
+    Args:
+        exprs: Raw ``--filter`` strings, or None.
+
+    Returns:
+        List of (column, value, negate) triples, ANDed together by the caller.
+
+    Raises:
+        ValueError: If an expression has no ``=``.
+    """
+    parsed: List[Tuple[str, str, bool]] = []
+    for expr in exprs or []:
+        if '!=' in expr:
+            column, value = expr.split('!=', 1)
+            negate = True
+        elif '=' in expr:
+            column, value = expr.split('=', 1)
+            negate = False
+        else:
+            raise ValueError(
+                f"Invalid filter {expr!r}: expected COL=VALUE or COL!=VALUE"
+            )
+        column = column.strip()
+        if not column:
+            raise ValueError(f"Invalid filter {expr!r}: empty column name")
+        parsed.append((column, value.strip(), negate))
+    return parsed
+
+
+def row_matches(row: Dict[str, str], filters: List[Tuple[str, str, bool]]) -> bool:
+    """Test a CSV row against parsed filters, ANDed together."""
+    for column, value, negate in filters:
+        cell = (row.get(column) or '').strip()
+        if (cell == value) == negate:
+            return False
+    return True
+
+
+def read_csv_targets(
+    csv_path: str,
+    path_col: str = 'path',
+    out: Optional[str] = None,
+    filters: Optional[List[str]] = None,
+) -> List[Tuple[str, Optional[str]]]:
+    """Read a batch target list from a CSV file.
+
+    Shared by ``dt import --csv`` and ``dt get --csv`` so the two agree on the
+    contract: one column names the source path, an optional ``output`` column
+    overrides the destination per row, and ``--filter`` narrows the selection.
+
+    Rows whose path cell is empty are returned with an empty path so the caller
+    can report them as failures rather than silently dropping them -- a silently
+    skipped row in a 400-row manifest is very hard to notice.
+
+    Args:
+        csv_path: Path to the CSV file.
+        path_col: Column holding the source path.
+        out: Fallback destination when a row has no ``output`` cell.
+        filters: ``COL=VALUE`` / ``COL!=VALUE`` expressions, ANDed.
+
+    Returns:
+        List of (path, output) pairs in file order.
+
+    Raises:
+        ValueError: If the file is missing, empty, lacks *path_col*, or a
+            filter names a column the CSV does not have.
+    """
+    csv_file = Path(csv_path)
+    if not csv_file.exists():
+        raise ValueError(f"CSV file not found: {csv_path}")
+
+    with open(csv_file, newline='') as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        if fieldnames is None or path_col not in fieldnames:
+            raise ValueError(
+                f"CSV file must have a {path_col!r} column. "
+                f"Found columns: {fieldnames}"
+            )
+        rows = list(reader)
+
+    if not rows:
+        raise ValueError(f"CSV file is empty: {csv_path}")
+
+    parsed = parse_row_filters(filters)
+    # Catch a mistyped filter column now. Otherwise every row silently fails to
+    # match and the run reports "0 rows selected", which reads like the data is
+    # wrong rather than the flag.
+    unknown = [c for c, _, _ in parsed if c not in fieldnames]
+    if unknown:
+        raise ValueError(
+            f"Filter column(s) not in CSV: {', '.join(sorted(set(unknown)))}. "
+            f"Found columns: {fieldnames}"
+        )
+
+    targets: List[Tuple[str, Optional[str]]] = []
+    for row in rows:
+        if not row_matches(row, parsed):
+            continue
+        row_path = (row.get(path_col) or '').strip()
+        row_out = (row.get('output') or '').strip() or out
+        targets.append((row_path, row_out))
+    return targets

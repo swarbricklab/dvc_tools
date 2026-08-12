@@ -41,6 +41,7 @@ from . import site_cache as site_cache_mod
 from . import update as update_mod
 from . import install as install_mod
 from . import status as status_mod
+from . import get as get_mod
 from . import utils
 from . import archive as archive_mod
 from .archive import operations as archive_ops
@@ -612,6 +613,26 @@ def cache_validate(targets, fix, verbose, json_output, no_progress):
     
     # Exit with error if corruption found and not fixed
     if corrupted and not fix:
+        raise SystemExit(1)
+
+
+def _report_rows(results, verb):
+    """Print per-row ✓/✗ status and a summary, then exit non-zero on failure.
+
+    Args:
+        results: (target, ok, message) tuples, the house convention for
+            batch operations.
+        verb: Past-tense verb for the summary line, e.g. "imported".
+    """
+    successes = sum(1 for _, ok, _ in results if ok)
+    failures = len(results) - successes
+
+    for target, ok, message in results:
+        click.echo(f"{'✓' if ok else '✗'} {target}: {message}")
+
+    click.echo(f"\n{successes} {verb}, {failures} failed")
+
+    if failures:
         raise SystemExit(1)
 
 
@@ -4171,18 +4192,8 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
                 verbose=verbose,
             )
             
-            successes = sum(1 for _, ok, _ in results if ok)
-            failures = sum(1 for _, ok, _ in results if not ok)
-            
-            for row_path, ok, msg in results:
-                status = "✓" if ok else "✗"
-                click.echo(f"{status} {row_path}: {msg}")
-            
-            click.echo(f"\n{successes} imported, {failures} failed")
-            
-            if failures:
-                raise SystemExit(1)
-                
+            _report_rows(results, "imported")
+
         except import_mod.ImportError as e:
             raise click.ClickException(str(e))
         return
@@ -4227,6 +4238,98 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
             
     except import_mod.ImportError as e:
         raise click.ClickException(str(e))
+
+
+@cli.command('get')
+@click.argument('repository')
+@click.argument('path', required=False)
+@click.option('-o', '--out', help='Destination path. With --csv, the directory rows are collected under')
+@click.option('--owner', help='Override the GitHub owner for short names')
+@click.option('--rev', default=None, help='Git revision (branch, tag, or commit) to fetch from')
+@click.option('--csv', 'csv_path', default=None, type=click.Path(exists=True), help='CSV file listing paths to fetch (requires a path column, optional "output" column)')
+@click.option('--path-col', default='path', show_default=True, help='CSV column holding the source path')
+@click.option('--filter', 'filters', multiple=True, help='Select rows: COL=VALUE or COL!=VALUE. Repeatable (ANDed). An empty VALUE matches an empty cell.')
+@click.option('-j', '--jobs', type=int, default=8, show_default=True, help='Parallel workers')
+@click.option('--link', default=None, help='Link type(s) to use, comma-separated (reflink, hardlink, symlink, copy). Defaults to DVC cache.type if set.')
+@click.option('--no-refresh', is_flag=True, help='Skip refreshing the temp clone (for offline use)')
+@click.option('-f', '--force', is_flag=True, help='Overwrite existing output files')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
+            jobs, link, no_refresh, force, verbose):
+    """Download DVC-tracked data without creating tracking files.
+
+    Wraps the idea of ``dvc get``: materialises data from a source repository
+    and writes no ``.dvc`` file, so the result is plain data with no provenance
+    and no way to ``dvc update`` it later. Use ``dt import`` instead when you
+    want to keep the link to the source.
+
+    PATH may name a subdirectory *inside* a tracked directory output, so you can
+    take part of a large dataset without transferring all of it.
+
+    \b
+    Options:
+        --csv        Fetch every path listed in a CSV file
+        --path-col   Name the CSV column holding the path (default: path)
+        --filter     Select rows, e.g. --filter 'wts_lib='
+        --link       Override the link type (default: DVC cache.type)
+
+    Unlike a loop over ``dvc get``, the source repository is cloned once and
+    every row is resolved against that clone.
+
+    \b
+    Examples:
+        dt get my-registry data/fq/AF013-A -o fastqs/
+        dt get my-registry --csv samples.csv -o fastqs/
+        dt get my-registry --csv samples.csv --path-col fq_dir -o fastqs/
+        dt get my-registry --csv samples.csv --filter 'wts_lib=' -o fastqs/
+        dt get my-registry data/ref.fa --link copy -o ./
+    """
+    if csv_path:
+        if path:
+            raise click.UsageError("Do not provide PATH when using --csv.")
+        try:
+            results = get_mod.get_from_csv(
+                csv_path=csv_path,
+                repository=repository,
+                out=out,
+                owner=owner,
+                rev=rev,
+                jobs=jobs,
+                force=force,
+                link=link,
+                path_col=path_col,
+                filters=list(filters),
+                refresh=not no_refresh,
+                verbose=verbose,
+            )
+        except get_mod.GetError as e:
+            raise click.ClickException(str(e))
+
+        _report_rows(results, "fetched")
+        return
+
+    if not path:
+        raise click.UsageError("PATH is required (unless using --csv).")
+
+    try:
+        written, failed = get_mod.get_data(
+            repository=repository,
+            path=path,
+            out=out,
+            owner=owner,
+            rev=rev,
+            jobs=jobs,
+            force=force,
+            link=link,
+            refresh=not no_refresh,
+            verbose=verbose,
+        )
+    except get_mod.GetError as e:
+        raise click.ClickException(str(e))
+
+    click.echo(f"{written} fetched, {failed} failed")
+    if failed:
+        raise SystemExit(1)
 
 
 @cli.command()

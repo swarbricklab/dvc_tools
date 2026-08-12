@@ -19,6 +19,7 @@
 | [`dt pull`](#dt-pull) | Pull DVC-tracked files, handling imports automatically |
 | [`dt push`](#dt-push) | Push DVC-tracked files to all configured remotes |
 | [`dt import`](#dt-import) | Import DVC-tracked data from other repositories |
+| [`dt get`](#dt-get) | Download DVC-tracked data without creating tracking files |
 | [`dt update`](#dt-update) | Update imported data by rebuilding `.dir` manifests |
 | [`dt summary`](#dt-summary) | Generate project documentation (tree.txt, dag.md) |
 | [`dt deps`](#dt-deps) | Inspect dependencies between repositories |
@@ -193,6 +194,19 @@ dt import <repository> <path> [-o <output>] [--no-checkout]
 ```
 
 Imports files without network storage access by using locally-accessible caches. If no locally-accessible source cache is found, it falls back to `dvc import` (disable with `--no-dvc-import-fallback`). [Full documentation →](import.md)
+
+---
+
+## dt get
+
+Download DVC-tracked data without creating tracking files.
+
+```bash
+dt get <repository> <path> [-o <output>] [--rev REV] [--link TYPES] [-j N] [-f] [-v]
+dt get <repository> --csv <file> [--path-col COL] [--filter EXPR] [-o <dir>]
+```
+
+The `dvc get` counterpart to `dt import`: materialises data and writes no `.dvc` file, for handing a subset of a dataset to someone outside the group. A path may name a subdirectory *inside* a tracked directory output, so you can take part of a large dataset without transferring all of it. With `--csv` the source is cloned once and every row resolved against that clone, rather than re-cloning per path. [Full documentation →](get.md)
 
 ---
 
