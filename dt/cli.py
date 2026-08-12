@@ -4175,6 +4175,12 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
         dt import neochemo --csv paths.csv --no-download
     """
     # --csv mode: path argument is not required
+    if force and resume:
+        raise click.UsageError(
+            "--force and --resume are contradictory: one re-fetches everything, "
+            "the other skips what is already there."
+        )
+
     if csv_path:
         if path:
             raise click.UsageError("Do not provide PATH when using --csv.")
@@ -4253,10 +4259,12 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('--link', default=None, help='Link type(s) to use, comma-separated (reflink, hardlink, symlink, copy). Defaults to DVC cache.type if set.')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing the temp clone (for offline use)')
 @click.option('--remote-fallback/--no-remote-fallback', default=True, help='If no local cache is reachable, download from the source repo\'s remote (default: enabled).')
+@click.option('--resume', is_flag=True, help='Skip files already present, so an interrupted transfer continues instead of restarting')
+@click.option('--check', is_flag=True, help='Verify existing files against their recorded checksum. With --resume, mismatches are re-fetched; alone, they are reported.')
 @click.option('-f', '--force', is_flag=True, help='Overwrite existing output files')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
-            jobs, link, no_refresh, remote_fallback, force, verbose):
+            jobs, link, no_refresh, remote_fallback, resume, check, force, verbose):
     """Download DVC-tracked data without creating tracking files.
 
     Wraps the idea of ``dvc get``: materialises data from a source repository
@@ -4285,6 +4293,12 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
         dt get my-registry --csv samples.csv --filter 'wts_lib=' -o fastqs/
         dt get my-registry data/ref.fa --link copy -o ./
     """
+    if force and resume:
+        raise click.UsageError(
+            "--force and --resume are contradictory: one re-fetches everything, "
+            "the other skips what is already there."
+        )
+
     if csv_path:
         if path:
             raise click.UsageError("Do not provide PATH when using --csv.")
@@ -4302,6 +4316,8 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
                 filters=list(filters),
                 refresh=not no_refresh,
                 allow_remote=remote_fallback,
+                resume=resume,
+                check=check,
                 verbose=verbose,
             )
         except get_mod.GetError as e:
@@ -4325,6 +4341,8 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
             link=link,
             refresh=not no_refresh,
             allow_remote=remote_fallback,
+            resume=resume,
+            check=check,
             verbose=verbose,
         )
     except get_mod.GetError as e:

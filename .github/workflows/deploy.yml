@@ -299,11 +299,39 @@ jobs:
             -- \
             bash "\$HOME/$GHCR_REMOTE_SCRIPT"
 
+      - name: Prepare Singularity cache directory on NCI
+        # absconda deploy runs `singularity pull` on a compute node as the NCI
+        # user, so the blob cache defaults to $HOME/.singularity/cache. Home on
+        # Gadi is 10 GB and the cache reached 5.6 GB of it, which failed a
+        # deploy with "disk quota exceeded" 20 minutes into the pull. Point it
+        # at /scratch instead: purges there just mean the next deploy
+        # re-downloads.
+        #
+        # Checked over SSH on the login node rather than in the PBS job, so a
+        # bad path fails in seconds instead of after the queue wait and a
+        # partial pull. /scratch is shared between login and compute nodes.
+        run: |
+          NCI_USER="${{ secrets.USER_NAME }}"
+          if [[ -z "$NCI_USER" ]]; then
+            echo "::error::USER_NAME secret is empty -- refusing to write the" \
+                 "Singularity cache to /scratch/a56//.singularity/cache" >&2
+            exit 1
+          fi
+
+          CACHE_DIR="/scratch/a56/${NCI_USER}/.singularity/cache"
+          ssh -o StrictHostKeyChecking=accept-new gadi \
+            "mkdir -p '$CACHE_DIR' && test -w '$CACHE_DIR'" \
+            || { echo "::error::Cannot create or write $CACHE_DIR on NCI." \
+                      "Check the USER_NAME secret names an account with /scratch/a56 access." >&2; exit 1; }
+
+          echo "SINGULARITY_CACHEDIR=$CACHE_DIR" >> "$GITHUB_ENV"
+
       - name: Deploy to NCI
         run: |
           IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
 
           qxub exec -v --mod absconda --mem 4GB --resources jobfs=4GB --internet \
+            --var "SINGULARITY_CACHEDIR=$SINGULARITY_CACHEDIR" \
             -- \
             absconda deploy "$IMAGE_REF" \
               --commands dt,dvc,gh,aws,daff,qxub,qxi,qxtat,qxet,qx \
