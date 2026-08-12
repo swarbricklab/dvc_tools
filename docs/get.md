@@ -78,11 +78,17 @@ Naming a column the CSV does not have is an error rather than a silent zero-row 
 
 ## Link types
 
-By default `dt get` honours DVC's `cache.type` when you are inside a repo that sets it, so on NCI it behaves like everything else here. Note `cache.type` is a preference *list* (ours is `hardlink,symlink`) and every entry is tried in order.
+By default `dt get` honours DVC's `cache.type` when you are inside a repo that sets it, so on NCI it behaves like everything else here. `cache.type` is a preference *list* (ours is `hardlink,symlink`) and every entry is tried in order.
 
-With no configuration — the normal case for someone outside our setup — it tries **reflink → hardlink → copy**. Symlink is deliberately excluded from that default: a symlink points into a cache the recipient may not be able to read, so it would appear to succeed while producing an unusable file.
+With two deliberate departures from the configured value:
 
-Off NCI the chain falls through to a real copy by itself, because hardlink fails with `EXDEV` across filesystems.
+**Symlink is never used unless you ask for it.** A symlink is right for a workspace, which is meant to stay attached to the cache, and wrong for a hand-off, which has to stand alone. It is also the most dangerous entry to inherit: linking from `/scratch` to `/g/data` fails `EXDEV` at hardlink and lands on symlink, which *succeeds having moved no bytes*. You get a confident `N fetched, 0 failed` over a directory of pointers into a cache the recipient cannot reach — and `rsync` will faithfully copy those pointers rather than the data.
+
+**Copy always terminates the chain.** A `cache.type` of just `hardlink` would otherwise fail outright across filesystems.
+
+So `hardlink,symlink` becomes `hardlink → copy`. With no configuration at all — the normal case outside our setup — it is **reflink → hardlink → copy**.
+
+If you genuinely want symlinks, `--link symlink` still does it: an explicit flag is a decision, an inherited config value is not.
 
 Override with `--link`:
 

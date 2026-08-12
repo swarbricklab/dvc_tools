@@ -7,6 +7,7 @@ inside a tracked directory is resolved, and the CSV contract shared with
 """
 
 import json
+import time
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -36,25 +37,42 @@ class TestResolveLinkTypes:
             assert get_mod.resolve_link_types() == ['reflink', 'hardlink', 'copy']
 
     def test_honours_configured_cache_type(self):
-        """A configured cache.type wins over the default."""
+        """A configured cache.type wins over the default ordering."""
         with patch.object(get_mod.subprocess, 'run') as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout='hardlink\n')
-            assert get_mod.resolve_link_types() == ['hardlink']
+            mock_run.return_value = MagicMock(returncode=0, stdout='reflink,hardlink\n')
+            assert get_mod.resolve_link_types() == ['reflink', 'hardlink', 'copy']
 
-    def test_honours_cache_type_list_in_order(self):
-        """cache.type is a preference list, not a single value.
+    def test_drops_symlink_from_configured_cache_type(self):
+        """The real bug: cache.type here is "hardlink,symlink".
 
-        Ours is "hardlink,symlink"; honouring only the first entry would mean a
-        hardlink failure aborts instead of falling through.
+        /scratch and /g/data are different filesystems, so hardlink fails EXDEV
+        and the chain lands on symlink -- which "succeeds" having moved no
+        bytes. dt get then reported "2 fetched, 0 failed" over four dangling
+        pointers into a cache the recipient cannot reach.
         """
         with patch.object(get_mod.subprocess, 'run') as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout='hardlink,symlink\n')
-            assert get_mod.resolve_link_types() == ['hardlink', 'symlink']
+            assert get_mod.resolve_link_types() == ['hardlink', 'copy']
+
+    def test_copy_always_terminates_a_configured_chain(self):
+        """A bare "hardlink" config would otherwise fail outright cross-fs."""
+        with patch.object(get_mod.subprocess, 'run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='hardlink\n')
+            assert get_mod.resolve_link_types() == ['hardlink', 'copy']
+
+    def test_symlink_only_config_falls_back_to_the_default(self):
+        with patch.object(get_mod.subprocess, 'run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='symlink\n')
+            assert get_mod.resolve_link_types() == list(get_mod.DEFAULT_LINK_TYPES)
+
+    def test_explicit_link_symlink_is_still_allowed(self):
+        """Config is a default; an explicit flag is a decision."""
+        assert get_mod.resolve_link_types('symlink') == ['symlink']
 
     def test_ignores_unknown_entries_in_config(self):
         with patch.object(get_mod.subprocess, 'run') as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout='hardlink,bogus\n')
-            assert get_mod.resolve_link_types() == ['hardlink']
+            assert get_mod.resolve_link_types() == ['hardlink', 'copy']
 
     def test_falls_back_when_config_is_all_junk(self):
         with patch.object(get_mod.subprocess, 'run') as mock_run:
@@ -146,6 +164,65 @@ class TestListSourceFiles:
 
         assert str(excinfo.value) == 'Not found in the source repository: data/nope'
         assert str(tmp_path) not in str(excinfo.value)
+
+    def test_support_footer_does_not_displace_the_real_error(self, tmp_path):
+        """DVC signs off on its own line after the error.
+
+        Taking the last line of stderr reported "Having any troubles? Hit us up
+        at ..." and threw the actual message away -- seen for real on a
+        database-is-locked failure.
+        """
+        failed = MagicMock(
+            returncode=1, stdout='',
+            stderr=(
+                'ERROR: unexpected error - database is locked\n'
+                '\n'
+                'Having any troubles? Hit us up at https://dvc.org/support, '
+                'we are always happy to help!\n'
+            ),
+        )
+        with patch.object(get_mod.subprocess, 'run', return_value=failed):
+            with pytest.raises(GetError) as excinfo:
+                get_mod.list_source_files(tmp_path, 'data/x')
+
+        assert 'database is locked' in str(excinfo.value)
+        assert 'dvc.org/support' not in str(excinfo.value)
+
+    def test_retries_while_the_state_db_is_locked(self, tmp_path):
+        """A cold clone's SQLite db is created on first read; readers contend."""
+        locked = MagicMock(
+            returncode=1, stdout='',
+            stderr='ERROR: unexpected error - database is locked\n',
+        )
+        ok = _dvc_list_json(
+            [{'path': 'f', 'md5': 'a' * 32, 'size': 1, 'isout': True, 'isdir': False}]
+        )
+        with patch.object(get_mod.subprocess, 'run', side_effect=[locked, locked, ok]), \
+             patch.object(get_mod.time, 'sleep'):
+            files = get_mod.list_source_files(tmp_path, 'data/x')
+
+        assert [f['relpath'] for f in files] == ['f']
+
+    def test_gives_up_on_a_persistent_lock(self, tmp_path):
+        locked = MagicMock(
+            returncode=1, stdout='',
+            stderr='ERROR: unexpected error - database is locked\n',
+        )
+        with patch.object(get_mod.subprocess, 'run', return_value=locked), \
+             patch.object(get_mod.time, 'sleep'):
+            with pytest.raises(GetError, match='database is locked'):
+                get_mod.list_source_files(tmp_path, 'data/x')
+
+    def test_does_not_retry_a_real_failure(self, tmp_path):
+        """Only lock contention is transient; retrying a missing path is waste."""
+        missing = MagicMock(
+            returncode=1, stdout='', stderr="ERROR: 'nope' does not exist",
+        )
+        with patch.object(get_mod.subprocess, 'run', return_value=missing) as run:
+            with pytest.raises(GetError):
+                get_mod.list_source_files(tmp_path, 'nope')
+
+        assert run.call_count == 1
 
     def test_other_errors_keep_their_detail_but_hide_the_clone(self, tmp_path):
         failed = MagicMock(
@@ -487,6 +564,36 @@ class TestGetFromCsv:
         # One call carrying all 3 rows x 2 files, not three calls of two.
         assert place.call_count == 1
         assert len(place.call_args[0][0]) == 6
+
+    def test_first_row_resolves_alone_to_warm_the_state_db(
+        self, tmp_path, stub_source, monkeypatch
+    ):
+        """Fanning out on a cold clone races to create DVC's SQLite state db.
+
+        Seen for real: two concurrent `dvc list` against a fresh clone, one
+        fails with "database is locked" every time.
+        """
+        monkeypatch.chdir(tmp_path)
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/one\nd/two\nd/three\n')
+
+        in_flight = []
+        peak = []
+
+        def listing(source, path, rev=None):
+            in_flight.append(path)
+            peak.append(len(in_flight))
+            time.sleep(0.05)
+            in_flight.remove(path)
+            return [{'relpath': 'f', 'md5': 'a' * 32, 'size': 1}]
+
+        with patch.object(get_mod, 'resolve_link_types', return_value=['copy']), \
+             patch.object(get_mod, 'list_source_files', side_effect=listing), \
+             patch.object(get_mod, '_place_all',
+                          side_effect=lambda tasks, *a, **k: [('f', True, 'copy')] * len(tasks)):
+            get_mod.get_from_csv(csv_file, 'myrepo', out='out/', jobs=8)
+
+        # The very first resolve must have had the clone to itself.
+        assert peak[0] == 1
 
     def test_row_results_stay_in_csv_order(self, tmp_path, stub_source, monkeypatch):
         """Parallel placement must not scramble which row got which outcome."""
