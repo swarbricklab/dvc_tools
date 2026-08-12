@@ -4,8 +4,8 @@ description: >
   Navigate the dvc_tools codebase to find the right module quickly.
   Use this when asked to implement, modify, or debug any `dt` command,
   or when you need to know where a feature lives before reading or editing files.
-  Also use this when adding a new module, CLI command, or exported function —
-  to look up where it fits and to update modules.json to reflect the change.
+  Also use this when adding a new module or CLI command — to look up where it
+  fits, and to regenerate modules.json so the map stays current.
 ---
 
 The structured module map for this codebase lives in `modules.json` alongside
@@ -58,11 +58,23 @@ Run these from the skill directory, or pass the full path to `modules.json`.
 
 ## Keeping `modules.json` up to date
 
-When you add a new module, CLI command, or significant exported function,
-add or update the relevant entry in `modules.json` as part of the same change.
+When you add a new module or CLI command, refresh `modules.json` as part of the
+same change.
 
-This drifts badly when left alone — it once sat six minor versions behind and
-was missing 57 commands, which is worse than useless, because the gaps are
-invisible to whoever is trusting it. If you find it stale, regenerate rather
-than patch: the `commands` array is derivable from `dt/cli.py` by resolving
-each Click callback to the module it delegates to.
+The `commands` array is generated, so don't hand-edit it — regenerate instead:
+
+```sh
+conda run -n dt python .github/skills/navigate-codebase/generate.py
+conda run -n dt python .github/skills/navigate-codebase/generate.py --check
+```
+
+`--check` writes nothing and exits non-zero when the committed file is stale.
+
+The `modules` array is different: those descriptions are written by hand and
+the generator preserves them, adding only files that appear and dropping ones
+that are gone. A new entry arrives with its module docstring as a placeholder —
+replace it with something that says *when you'd want this module*.
+
+Worth knowing why this is automated: the map was hand-kept until it sat six
+minor versions behind, describing 40 of 97 commands. The gaps were invisible,
+because every entry it did have was still correct, so it read as complete.
