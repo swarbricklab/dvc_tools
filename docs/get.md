@@ -113,6 +113,8 @@ dt get my-registry data/ref.fa --link hardlink,copy -o ./
 - `--link <types>`: Link type(s), comma-separated. Defaults to DVC `cache.type` if set.
 - `--no-refresh`: Skip refreshing the temp clone (for offline use)
 - `--no-remote-fallback`: Fail instead of downloading when no local cache is reachable
+- `--resume`: Skip files already present, continuing an interrupted transfer instead of restarting
+- `--check`: Verify existing files against their recorded checksum
 - `-f, --force`: Overwrite existing output files
 - `-v, --verbose`: Show detailed progress
 
@@ -148,6 +150,37 @@ The download path still clones the source only once: the local clone is handed t
 Rows download one at a time rather than fanned out, because the network is the bottleneck and `--jobs` already parallelises within a row.
 
 Use `--no-remote-fallback` to make a missing local cache a hard error instead — useful when you expect the fast path and want to know if you didn't get it.
+
+## Resuming and verifying
+
+A 358 GiB transfer will not always survive to the end, so `dt get` can pick up where it stopped.
+
+```bash
+# Continue an interrupted transfer: fetch only what is missing
+dt get my-registry --csv samples.csv -o fastqs/ --resume
+
+# Verify a finished download against DVC's recorded checksums
+dt get my-registry --csv samples.csv -o fastqs/ --check
+
+# Resume, re-fetching anything that fails its checksum
+dt get my-registry --csv samples.csv -o fastqs/ --resume --check
+```
+
+**Use `--resume` and `--check` together.** This is the important part. An interruption mid-file leaves a *truncated* file, and by existence — or even by size, if the writer preallocated — it is indistinguishable from a complete one. `--resume` alone will keep it forever, because it has no way to tell. `--check` hashes what is already there, so the corruption is found and replaced.
+
+The three behave differently on purpose:
+
+| Flags | Existing file that is correct | Existing file that is corrupt | Missing file |
+|---|---|---|---|
+| `--resume` | skipped | **kept, silently** | fetched |
+| `--check` | verified | reported, exit non-zero | fetched |
+| `--resume --check` | verified | re-fetched | fetched |
+
+`--check` on its own is a validation pass: it does not repair anything, it tells you whether what you have is sound and exits non-zero if not. That is what you want after handing data to someone, or after receiving it.
+
+`--force` and `--resume` are mutually exclusive — one re-fetches everything, the other skips what is present — and passing both is an error rather than a silent precedence rule.
+
+On the download path, resume works **per file**, not per directory: a sample directory that stopped halfway through resumes at the file it stopped on rather than starting the sample again.
 
 ## See also
 

@@ -845,7 +845,7 @@
     },
     {
       "file": "dt/cli.py",
-      "description": "All Click CLI commands (~5800 lines). Each command delegates immediately to its module."
+      "description": "All Click CLI commands (~5900 lines). Each command delegates immediately to its module."
     },
     {
       "file": "dt/config.py",
