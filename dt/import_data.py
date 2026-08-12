@@ -10,6 +10,7 @@ Instead, it uses locally-accessible cache paths.
 import hashlib
 import json
 import os
+import sys
 import subprocess
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
@@ -584,18 +585,55 @@ def create_dir_file(
     # Compute hash
     dir_hash = hashlib.md5(content).hexdigest()
 
-    # Write to cache
     dir_path = Path(cache_path) / 'files' / 'md5' / dir_hash[:2]
-    dir_path.mkdir(parents=True, exist_ok=True)
-
     dir_file = dir_path / f"{dir_hash[2:]}.dir"
+
+    # Cache objects are content-addressed: the filename *is* the md5 of the
+    # content, so an object that already exists is by definition the one we
+    # were about to write. Rewriting it is wasted IO at best, and impossible at
+    # worst -- shared registries are setgid and sticky, so one member cannot
+    # overwrite an object another member wrote first, and the import failed
+    # with EACCES on exactly the sections a colleague had imported before
+    # (#175). The other .dir writers in this file already guard this way.
+    if dir_file.exists():
+        _warn_if_dir_size_differs(dir_file, content)
+        return f"{dir_hash}.dir", len(content)
+
+    dir_path.mkdir(parents=True, exist_ok=True)
 
     try:
         dir_file.write_bytes(content)
-    except Exception as e:
+    except OSError as e:
+        # Another writer may have created it between the check above and here,
+        # which is normal when several imports populate one registry at once.
+        # The content is identical either way, so an object that now exists is
+        # success rather than a collision.
+        if dir_file.exists():
+            return f"{dir_hash}.dir", len(content)
         raise ImportError(f"Failed to write .dir file: {e}")
 
     return f"{dir_hash}.dir", len(content)
+
+
+def _warn_if_dir_size_differs(dir_file: Path, content: bytes) -> None:
+    """Flag an existing .dir whose size contradicts its own name.
+
+    Skipping an existing object assumes it is intact. A truncated one keeps its
+    filename, so it still looks like the object we wanted while decoding to a
+    short file list -- which surfaces later as a fetch that silently misses
+    files. The size is free to check and is enough to catch it.
+    """
+    try:
+        actual = dir_file.stat().st_size
+    except OSError:
+        return
+    if actual != len(content):
+        print(
+            f"  WARNING: {dir_file} is {actual} bytes but should be "
+            f"{len(content)}. The cached manifest looks truncated; "
+            f"data referencing it may fetch incompletely.",
+            file=sys.stderr,
+        )
 
 
 def create_dvc_file(
