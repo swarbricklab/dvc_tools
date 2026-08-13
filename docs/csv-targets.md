@@ -1,6 +1,8 @@
 # `--csv` for `dt fetch` and `dt pull`
 
-**Status:** plan / design record. Nothing implemented yet.
+**Status:** implemented in 0.22.0. Kept as the design record — why the option
+surface is two flags, why a blank cell is fatal, and what was deliberately left
+out.
 
 ## Goal
 
@@ -165,15 +167,18 @@ a shared directory in the path column — 40 rows collapsing to 3 targets.
 
 ### Error context (hazard 3)
 
-Phase 1: wrap `StageFileDoesNotExistError` at the call site when the targets
-came from a CSV, so the message says which file, which column, and how many
-rows were selected. Cheap, no new failure semantics.
+**Done.** `_csv_context` in `dt/cli.py` appends the CSV, the column, and the
+target count to `FetchError`/`PullError`, which is what
+`StageFileDoesNotExistError` surfaces as
+([fetch.py:1259-1261](dt/fetch.py#L1259-L1261)). Cheap, no new failure
+semantics — DVC still names one bad target and stops, but you now know where
+the target came from.
 
-Phase 2 (only if the batched errors prove annoying in practice): validate every
-target before dispatching and report all misses together. The tempting cheap
-version — `collect_stages(targets=None)` once, then set-membership — is *not*
-cheap: a full collect on a large repo is exactly the work that passing targets
-avoids. Note the cost before reaching for it. Don't build this speculatively.
+**Not done, deliberately:** validating every target before dispatching and
+reporting all misses together. The tempting cheap version —
+`collect_stages(targets=None)` once, then set-membership — is *not* cheap: a
+full collect on a large repo is exactly the work that passing targets avoids.
+Revisit only if one-typo-per-run proves annoying in practice.
 
 ### `dt fetch`
 
@@ -262,15 +267,17 @@ underlying function, and above all that no input produces `targets=None`. Mock
 
 Integration tests aren't needed: the underlying commands are unchanged.
 
-## Suggested sequencing
+## What shipped
 
-1. Remove `--filter` from `dt get`, and extract `_read_csv_rows` while the
-   function is already open. **After PR #178 merges.**
-2. `read_csv_target_list` + tests. Self-contained, no CLI churn.
-3. `dt pull --csv`. Strongest use case, simplest routing.
-4. `dt fetch --csv`. Nearly identical; composes with the type filters.
+Two commits on `feat/csv-target-list`, both in 0.22.0:
 
-Steps 1–2 are one PR, 3–4 another.
+1. `refactor(csv)` — removed `--filter`, extracted `_read_csv_rows`, added
+   `read_csv_target_list` with 18 tests.
+2. `feat(fetch,pull)` — `--csv`/`--path-col` on both commands, the
+   `_resolve_targets` guard, `_csv_context` provenance, 20 more tests.
+
+The sequencing constraint held: step 1 landed after PR #178 merged as `ac11d2c`,
+so the `get_cmd` and `get_from_csv` edits applied without conflict.
 
 ## Open questions
 

@@ -6,14 +6,22 @@ properties the commands rely on, above all that it can never hand back an empty
 list -- both commands read an empty target list as "operate on the whole repo".
 """
 
+from unittest.mock import patch
+
 import pytest
+from click.testing import CliRunner
 
 from dt import utils
+from dt.cli import cli
 
 
 def _write_csv(path, text):
     path.write_text(text)
     return str(path)
+
+
+def _invoke(args):
+    return CliRunner().invoke(cli, args)
 
 
 class TestReadCsvTargetList:
@@ -147,3 +155,148 @@ class TestFiltersAreGone:
         csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/a\n')
         with pytest.raises(TypeError):
             utils.read_csv_targets(csv_file, filters=['kind=wts'])
+
+
+# =============================================================================
+# CLI routing -- dt fetch --csv and dt pull --csv
+# =============================================================================
+
+class TestFetchCsvRouting:
+    """--csv builds the target list dt fetch would otherwise take from argv."""
+
+    def test_csv_targets_reach_fetch(self, tmp_path):
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/one\nd/two\n')
+        with patch('dt.fetch.fetch', return_value=[]) as m:
+            result = _invoke(['fetch', '--csv', csv_file])
+        assert result.exit_code == 0, result.output
+        assert m.call_args.kwargs['targets'] == ['d/one', 'd/two']
+
+    def test_path_col_reaches_the_other_column(self, tmp_path):
+        csv_file = _write_csv(
+            tmp_path / 'a.csv', 'sample,fq_dir\nAF013,d/fq/AF013\n'
+        )
+        with patch('dt.fetch.fetch', return_value=[]) as m:
+            _invoke(['fetch', '--csv', csv_file, '--path-col', 'fq_dir'])
+        assert m.call_args.kwargs['targets'] == ['d/fq/AF013']
+
+    def test_bare_invocation_still_means_everything(self):
+        """The one case where targets=None is correct."""
+        with patch('dt.fetch.fetch', return_value=[]) as m:
+            _invoke(['fetch'])
+        assert m.call_args.kwargs['targets'] is None
+
+    def test_positional_targets_unaffected(self):
+        with patch('dt.fetch.fetch', return_value=[]) as m:
+            _invoke(['fetch', 'data/a.dvc', 'data/b.dvc'])
+        assert m.call_args.kwargs['targets'] == ['data/a.dvc', 'data/b.dvc']
+
+    def test_csv_plus_positional_is_refused(self, tmp_path):
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/one\n')
+        with patch('dt.fetch.fetch', return_value=[]) as m:
+            result = _invoke(['fetch', '--csv', csv_file, 'data/b.dvc'])
+        assert result.exit_code == 2
+        assert 'Do not provide TARGETS' in result.output
+        m.assert_not_called()
+
+    def test_missing_csv_file_is_refused(self, tmp_path):
+        with patch('dt.fetch.fetch', return_value=[]) as m:
+            result = _invoke(['fetch', '--csv', str(tmp_path / 'nope.csv')])
+        assert result.exit_code == 2
+        m.assert_not_called()
+
+
+class TestPullCsvRouting:
+    """Same contract for dt pull."""
+
+    def test_csv_targets_reach_pull(self, tmp_path):
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/one\nd/two\n')
+        with patch('dt.pull.pull', return_value=(True, 2, 0)) as m:
+            result = _invoke(['pull', '--csv', csv_file])
+        assert result.exit_code == 0, result.output
+        assert m.call_args.kwargs['targets'] == ['d/one', 'd/two']
+
+    def test_bare_invocation_still_means_everything(self):
+        with patch('dt.pull.pull', return_value=(True, 0, 0)) as m:
+            _invoke(['pull'])
+        assert m.call_args.kwargs['targets'] is None
+
+    def test_csv_plus_positional_is_refused(self, tmp_path):
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/one\n')
+        with patch('dt.pull.pull', return_value=(True, 0, 0)) as m:
+            result = _invoke(['pull', '--csv', csv_file, 'data/b'])
+        assert result.exit_code == 2
+        m.assert_not_called()
+
+
+class TestBadCsvNeverWidensTheOperation:
+    """The failure that matters: a bad sheet must not become "everything".
+
+    Both commands read targets=None as the whole repo, so for each way a CSV
+    can be wrong, the command must refuse *without ever calling through*.
+    """
+
+    @pytest.mark.parametrize('command,target', [
+        ('fetch', 'dt.fetch.fetch'),
+        ('pull', 'dt.pull.pull'),
+    ])
+    @pytest.mark.parametrize('body,expected', [
+        ('path\n', 'CSV file is empty'),
+        ('path,name\n,foo\n', "Blank 'path' cell"),
+        ('path,name\n   ,foo\n', "Blank 'path' cell"),
+        ('name\nfoo\n', "must have a 'path' column"),
+    ])
+    def test_refused_without_calling_through(
+        self, tmp_path, command, target, body, expected
+    ):
+        csv_file = _write_csv(tmp_path / 'a.csv', body)
+        with patch(target, return_value=[]) as m:
+            result = _invoke([command, '--csv', csv_file])
+        assert result.exit_code == 2, result.output
+        assert expected in result.output
+        m.assert_not_called()
+
+
+class TestCsvProvenanceOnErrors:
+    """DVC names the first unresolvable target and stops.
+
+    Over a 400-row sheet that is one run per typo, and nothing in the message
+    says the path came from a file -- let alone which file or which column.
+    """
+
+    def test_fetch_error_names_the_csv(self, tmp_path):
+        from dt import fetch as fetch_mod
+
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path\nd/one\nd/two\n')
+        with patch('dt.fetch.fetch',
+                   side_effect=fetch_mod.FetchError("'d/one' does not exist")):
+            result = _invoke(['fetch', '--csv', csv_file])
+
+        assert result.exit_code != 0
+        assert 'does not exist' in result.output
+        assert str(csv_file) in result.output
+        assert "column 'path'" in result.output
+        assert '2 target(s)' in result.output
+
+    def test_pull_error_names_the_csv(self, tmp_path):
+        from dt import pull as pull_mod
+
+        csv_file = _write_csv(tmp_path / 'a.csv', 'fq\nd/one\n')
+        with patch('dt.pull.pull',
+                   side_effect=pull_mod.PullError("'d/one' does not exist")):
+            result = _invoke(['pull', '--csv', csv_file, '--path-col', 'fq'])
+
+        assert result.exit_code != 0
+        assert str(csv_file) in result.output
+        assert "column 'fq'" in result.output
+
+    def test_no_csv_context_without_a_csv(self):
+        """A plain `dt fetch` failure must not grow a CSV footnote."""
+        from dt import fetch as fetch_mod
+
+        with patch('dt.fetch.fetch',
+                   side_effect=fetch_mod.FetchError('boom')):
+            result = _invoke(['fetch', 'data/a.dvc'])
+
+        assert result.exit_code != 0
+        assert 'boom' in result.output
+        assert 'Targets came from' not in result.output
