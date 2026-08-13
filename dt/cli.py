@@ -42,6 +42,7 @@ from . import update as update_mod
 from . import install as install_mod
 from . import status as status_mod
 from . import get as get_mod
+from . import get_dest
 from . import utils
 from . import archive as archive_mod
 from .archive import operations as archive_ops
@@ -4273,9 +4274,16 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('--resume', is_flag=True, help='Skip files already present, so an interrupted transfer continues instead of restarting')
 @click.option('--check', is_flag=True, help='Verify existing files against their recorded checksum. With --resume, mismatches are re-fetched; alone, they are reported.')
 @click.option('-f', '--force', is_flag=True, help='Overwrite existing output files')
+@click.option('--dest-profile', default=None, help='AWS profile for an s3:// destination. Omit to use the default credential chain (e.g. an EC2 instance role).')
+@click.option('--dest-endpoint-url', default=None, help='Endpoint URL for a non-AWS S3-compatible destination')
+@click.option('--dest-region', default=None, help='Region for an s3:// destination. Required if the profile\'s region is "auto".')
+@click.option('--dest-account-id', default=None, help='Abort unless the destination credentials resolve to this AWS account. For unattended runs.')
+@click.option('--chunk-size', type=int, default=None, help='Streaming chunk size in MiB for s3:// destinations (default: 8)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
-            jobs, link, no_refresh, remote_fallback, resume, check, force, verbose):
+            jobs, link, no_refresh, remote_fallback, resume, check, force,
+            dest_profile, dest_endpoint_url, dest_region, dest_account_id,
+            chunk_size, verbose):
     """Download DVC-tracked data without creating tracking files.
 
     Wraps the idea of ``dvc get``: materialises data from a source repository
@@ -4303,12 +4311,44 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
         dt get my-registry --csv samples.csv --path-col fq_dir -o fastqs/
         dt get my-registry --csv samples.csv --filter 'wts_lib=' -o fastqs/
         dt get my-registry data/ref.fa --link copy -o ./
+        dt get my-registry data/fq/AF013-A -o s3://bucket/fastqs/ --dest-profile aws
     """
     if force and resume:
         raise click.UsageError(
             "--force and --resume are contradictory: one re-fetches everything, "
             "the other skips what is already there."
         )
+
+    to_s3 = bool(out) and get_dest.is_s3_url(out)
+
+    dest_flags = {
+        '--dest-profile': dest_profile,
+        '--dest-endpoint-url': dest_endpoint_url,
+        '--dest-region': dest_region,
+        '--dest-account-id': dest_account_id,
+    }
+    misplaced = [flag for flag, value in dest_flags.items() if value]
+    if misplaced and not to_s3:
+        raise click.UsageError(
+            f"{', '.join(misplaced)} only applies to an s3:// destination, "
+            f"but --out is {out or 'unset'}."
+        )
+
+    if to_s3 and link:
+        raise click.UsageError(
+            "--link selects a local link type (reflink/hardlink/copy) and has "
+            "no meaning for an s3:// destination, which is always a stream."
+        )
+
+    dest_config = get_dest.S3DestConfig(
+        profile=dest_profile,
+        endpoint_url=dest_endpoint_url,
+        region=dest_region,
+        account_id=dest_account_id,
+    ) if to_s3 else None
+
+    chunk_bytes = (chunk_size * 1024 * 1024) if chunk_size \
+        else get_dest.DEFAULT_CHUNK_SIZE
 
     if csv_path:
         if path:
@@ -4329,6 +4369,8 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
                 allow_remote=remote_fallback,
                 resume=resume,
                 check=check,
+                dest_config=dest_config,
+                chunk_size=chunk_bytes,
                 verbose=verbose,
             )
         except get_mod.GetError as e:
@@ -4354,6 +4396,8 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
             allow_remote=remote_fallback,
             resume=resume,
             check=check,
+            dest_config=dest_config,
+            chunk_size=chunk_bytes,
             verbose=verbose,
         )
     except get_mod.GetError as e:

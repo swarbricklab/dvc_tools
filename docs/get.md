@@ -118,6 +118,72 @@ dt get my-registry data/ref.fa --link hardlink,copy -o ./
 - `-f, --force`: Overwrite existing output files
 - `-v, --verbose`: Show detailed progress
 
+S3 destinations only (see [To an S3 bucket](#to-an-s3-bucket)):
+
+- `--dest-profile <name>`: AWS profile for the destination. Omit to use the default credential chain, e.g. an EC2 instance role.
+- `--dest-endpoint-url <url>`: Endpoint for a non-AWS S3-compatible destination
+- `--dest-region <region>`: Destination region. Required if the profile's region is `auto`.
+- `--dest-account-id <id>`: Abort unless the destination credentials resolve to this account
+- `--chunk-size <MiB>`: Streaming chunk size (default: 8)
+
+## To an S3 bucket
+
+`-o` accepts an `s3://` URL, which streams data from the source repository's **remote** straight into
+object storage without ever writing to local disk:
+
+```bash
+dt get my-registry data/fq/AF013-A -o s3://their-bucket/fastqs/ --dest-profile their-aws
+dt get my-registry --csv samples.csv -o s3://their-bucket/fastqs/ --dest-profile their-aws
+```
+
+This exists for handing data to a collaborator who works in AWS: they run this on their own instance,
+and the bytes go from our remote to their bucket without either of us provisioning scratch space for
+them.
+
+**Trailing slash matters.** There is no `is_dir()` to consult on object storage, so the slash is the
+only available signal. `s3://bucket/fastqs/` collects under `fastqs/<basename>`; `s3://bucket/fastqs`
+is used verbatim.
+
+**Credentials are separate from the source.** The source remote's credentials come from `.dvc/config`
+and `dt auth setup` as usual. `--dest-*` configures the destination only, and the two cannot collide
+— an explicit profile outranks ambient `AWS_*` environment variables, and nothing here sets them.
+
+Watch for one trap: `dt auth setup` writes profiles **named after the repository**, and those are R2
+profiles carrying `region = auto`. Passing one as `--dest-profile` aims the destination at R2 rather
+than AWS. `dt get` refuses a destination whose region resolves to `auto` unless
+`--dest-endpoint-url` is also given.
+
+**Before moving any bytes**, `dt get` resolves the destination credentials, checks the bucket, and
+writes then deletes a zero-byte probe object to confirm write permission. It prints the identity it
+will write as — always, not only under `--verbose`:
+
+```
+Destination: s3://their-bucket/fastqs/AF013-A
+Writing as:  account 123456789012 as arn:aws:iam::123456789012:user/handoff
+```
+
+Read that line. Omitting `--dest-profile` is legal so an instance role needs no configuration, which
+also means it will use whatever credentials it finds. `--dest-account-id` turns that into an
+assertion for unattended runs.
+
+**`--resume` and `--check`** work as they do locally, with one difference worth understanding. Each
+uploaded object carries its DVC md5 as metadata, and `--check` compares against that rather than
+re-hashing the stored bytes — re-hashing would mean downloading, and an ETag is not an md5 once an
+upload is multipart. So `--check` will not detect an object replaced out of band, and sees nothing
+for objects uploaded by other means.
+
+In exchange, freshly uploaded objects are verified *better* than locally: the bytes are hashed in
+flight as they stream past, so a corrupt transfer is caught during the copy rather than after it. And
+the failure `--check` exists for locally — a truncated file indistinguishable from a complete one —
+cannot happen on S3, because an interrupted multipart upload is never committed and leaves no object
+at all.
+
+One operational note for the receiving bucket: aborted multipart uploads leave orphaned parts that
+keep accruing storage charges. Add a lifecycle rule expiring incomplete multipart uploads.
+
+Not supported: `ssh://` destinations, and `--link` (there is nothing to link — an S3 destination is
+always a stream).
+
 ## Examples
 
 ```bash
