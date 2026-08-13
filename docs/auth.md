@@ -506,7 +506,7 @@ Set up SSH keys, config stanzas, and S3 credentials in one step. This is the pri
 ### Usage
 
 ```bash
-dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [-v]
+dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [--repo URL] [-v]
 ```
 
 ### Options
@@ -516,6 +516,7 @@ dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [-v]
 | `-u, --username USERNAME` | Default SSH username for remote hosts (default: the `username` dt config key) |
 | `--config FILE` | YAML config file with per-host usernames (must exist) |
 | `--ssh-config FILE` | SSH config file path (default: `~/.ssh/config`) |
+| `--repo URL` | Set up access to a remote repository instead of the current directory's project (cloned to a temp dir). Accepts a full URL or a short name. |
 | `-v, --verbose` | Show detailed progress |
 
 ### What it does
@@ -539,7 +540,35 @@ Username resolution priority (per host):
 Note that `--config` does **not** by itself suppress prompting: a host that
 appears in no config entry, has no `-u` default and no username in its URL
 is still prompted for. For a fully non-interactive run, make sure every
-non-forge host is covered by the config file or `-u`.
+non-forge host is covered by the config file or `-u` — otherwise the run
+fails with a message naming the host it could not resolve.
+
+### Setting up a repo you have not cloned
+
+`--repo` sets up access to another repository without cloning it for real.
+The repo is shallow-cloned to a temp directory purely to read its config, so
+this works from any directory, including one that is not a git repo at all:
+
+```bash
+dt auth setup --repo git@github.com:org/data-repo.git
+dt auth setup --repo data-repo        # short name, resolved via `owner`
+```
+
+This is what you want when you only intend to
+[`dt get`](get.md) files out of a repository — you need its credentials and
+SSH access, but not a working copy.
+
+Two differences from a plain `dt auth setup`:
+
+- Endpoints come from the named repo, not the current directory.
+- Credentials are installed for the repos that own those endpoints — the
+  named repo, plus any import source it draws S3-backed data from. Without
+  `--repo`, the repos are discovered from the current directory instead.
+
+If the repo has SSH remotes on hosts you have no account on (an HPC
+filesystem, say), you will still be asked for a username for them. Pass
+`-u` to answer once for all of them; the S3 credentials you actually need
+are installed either way.
 
 ### YAML config file
 
@@ -569,6 +598,9 @@ dt auth setup -u jr9959
 
 # Fully non-interactive with a config file
 dt auth setup --config hosts.yaml
+
+# Set up access to a repo you have not cloned, to `dt get` from it
+dt auth setup --repo data-repo
 
 # Verbose output
 dt auth setup -v

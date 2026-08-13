@@ -145,6 +145,8 @@ dt get my-registry data/fq/AF013-A --link copy -o fastqs/
 
 **If not** — the normal case for anyone on a different system — it downloads from whichever remote the source repository configures (object storage, typically). This is what lets someone outside the group run `dt get` at all: they need credentials for that remote, but no shared filesystem and no DVC tracking in their own project.
 
+To install those credentials without cloning the repository, run [`dt auth setup --repo <repo>`](auth.md#setting-up-a-repo-you-have-not-cloned) first.
+
 The download path still clones the source only once: the local clone is handed to `dvc get` as the repository, so DVC has no reason to re-fetch the git metadata per row. Subpaths inside a tracked directory work the same way on both paths.
 
 Rows download one at a time rather than fanned out, because the network is the bottleneck and `--jobs` already parallelises within a row.
@@ -184,6 +186,7 @@ On the download path, resume works **per file**, not per directory: a sample dir
 
 ## See also
 
+- [`dt auth setup --repo`](auth.md#setting-up-a-repo-you-have-not-cloned) — credentials for a repo you only `dt get` from
 - [`dt import`](import.md) — same batch shape, but keeps provenance
 - [`dt fetch`](fetch.md) — populate the primary cache
 - [`dt pull`](pull.md) — fetch plus checkout in your own project

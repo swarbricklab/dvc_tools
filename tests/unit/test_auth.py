@@ -228,6 +228,40 @@ class TestDiscoverDtConfig:
         assert eps[0].url == '/remote/myproj'
         assert eps[0].source == 'remote.root'
 
+    @patch('dt.auth.utils.get_project_name', return_value='myproj')
+    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.utils.get_cache_dir', return_value=None)
+    def test_remote_root_may_be_a_list(self, _, mock_get, __):
+        """`dt config add remote.root` makes the key a list.
+
+        Treating it as a scalar raised TypeError out of Path(), which took
+        down every command that discovers endpoints.
+        """
+        mock_get.side_effect = lambda k: (
+            ['/remote_a', '/remote_b'] if k == 'remote.root' else None
+        )
+        eps = _discover_dt_config()
+        # Neither root holds the project, so the first is offered as the
+        # convention default -- the same root `dt remote init` would use.
+        assert [e.url for e in eps] == ['/remote_a/myproj']
+
+    @patch('dt.auth.utils.get_project_name', return_value='myproj')
+    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.utils.get_cache_dir', return_value=None)
+    def test_remote_roots_holding_the_project_are_all_offered(
+        self, _, mock_get, __, tmp_path,
+    ):
+        held = tmp_path / 'held'
+        (held / 'myproj').mkdir(parents=True)
+        other = tmp_path / 'other'
+        other.mkdir()
+
+        mock_get.side_effect = lambda k: (
+            [str(other), str(held)] if k == 'remote.root' else None
+        )
+        eps = _discover_dt_config()
+        assert [e.url for e in eps] == [str(held / 'myproj')]
+
     @patch('dt.auth.utils.get_project_name', return_value='proj')
     @patch('dt.auth.cfg.get_value')
     @patch('dt.auth.utils.get_cache_dir')
