@@ -158,15 +158,21 @@ def _discover_dt_config() -> List[Endpoint]:
                 source='cache.root (dt config)',
             ))
 
-    remote_root = cfg.get_value('remote.root')
-    if remote_root:
+    # remote.root may hold several roots (`dt config add remote.root ...`),
+    # so go through the shared accessor rather than treating it as a scalar.
+    # The project's remote lives under one of them: offer the roots that
+    # actually hold it, and otherwise the first, which is where
+    # `dt remote init` would create it.
+    roots = remote_mod.remote_roots()
+    if roots:
         project_name = utils.get_project_name()
-        full_path = str(Path(remote_root) / project_name)
-        endpoints.append(Endpoint(
-            type='filesystem',
-            url=full_path,
-            source='remote.root',
-        ))
+        holding = [r for r in roots if (r / project_name).is_dir()]
+        for root in (holding or roots[:1]):
+            endpoints.append(Endpoint(
+                type='filesystem',
+                url=str(root / project_name),
+                source='remote.root',
+            ))
 
     return endpoints
 
