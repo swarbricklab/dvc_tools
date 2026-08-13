@@ -750,7 +750,6 @@ def get_from_csv(
     force: bool = False,
     link: Optional[str] = None,
     path_col: str = 'path',
-    filters: Optional[List[str]] = None,
     refresh: bool = True,
     allow_remote: bool = True,
     resume: bool = False,
@@ -771,7 +770,6 @@ def get_from_csv(
         force: Overwrite existing files.
         link: Link-type override.
         path_col: CSV column holding the source path.
-        filters: ``COL=VALUE`` / ``COL!=VALUE`` row filters, ANDed.
         refresh: Refresh the cached clone before resolving.
         verbose: Print per-file progress.
 
@@ -789,16 +787,13 @@ def get_from_csv(
         # instead of replacing it outright. Replacing it would mean one row
         # could silently redirect to a local path mid-transfer.
         targets = utils.read_csv_targets(
-            csv_path, path_col, None if to_s3 else out, filters
+            csv_path, path_col, None if to_s3 else out
         )
     except ValueError as e:
         raise GetError(str(e))
 
     if not targets:
-        raise GetError(
-            f"No rows selected from {csv_path}"
-            + (f" with filter(s): {', '.join(filters)}" if filters else "")
-        )
+        raise GetError(f"No rows selected from {csv_path}")
 
     if to_s3:
         root = get_dest.S3Dest(out, dest_config)

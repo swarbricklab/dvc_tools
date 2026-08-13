@@ -6,6 +6,7 @@ Fetch DVC-tracked files into the primary cache from local sources.
 
 ```bash
 dt fetch [targets...] [options]
+dt fetch --csv <file> [--path-col COL] [options]
 ```
 
 ## What it does
@@ -37,6 +38,8 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 
 | Option | Description |
 |--------|-------------|
+| `--csv FILE` | Read targets from a CSV file instead of the command line |
+| `--path-col NAME` | CSV column holding the target path (default: `path`) |
 | `-v, --verbose` | Show detailed progress messages |
 | `--update` | Allow the mutating import re-resolution path (`dvc update`, which rewrites the `.dvc` file) and `.dir` manifest rebuild for imports that cannot be fetched otherwise |
 | `--force` | Force re-fetch even if .dir exists in cache (ensures all child files are fetched) |
@@ -50,6 +53,30 @@ After `dt fetch`, run `dvc checkout` to link files from cache to workspace.
 | `--source PATH` | Explicit source cache path (overrides auto-discovery) |
 | `--destination PATH` | Explicit destination cache path (overrides primary cache) |
 | `--cache-type TYPE` | Link type: `reflink`, `hardlink`, `symlink`, or `copy` |
+
+### Targets from a CSV
+
+`--csv` reads the target list from a file instead of the command line — for when the selection lives in a sample sheet rather than your shell history:
+
+```bash
+# Every target in the path column
+dt fetch --csv samples.csv
+
+# The paths are in a differently-named column
+dt fetch --csv samples.csv --path-col fq_dir
+
+# See what the sheet selected before fetching anything
+dt fetch --csv samples.csv --dry
+
+# Composes with the stage type filters
+dt fetch --csv samples.csv --regular
+```
+
+Every column other than the path column is ignored, so a sheet carrying sample metadata needs no preparation beyond having the targets in it. To fetch a *subset*, select the rows first (`csvgrep`, `awk`, pandas) and pass the result — which also leaves an artifact recording exactly what was fetched.
+
+**Two rules, both about the same hazard.** `dt fetch` with no targets fetches *everything*, so a CSV that produced no targets would silently escalate into a whole-repo fetch. It therefore refuses rather than proceeding when the file has no data rows, and when any row has a blank cell in the path column — naming the line, since a blank cell in a hand-edited sheet is the usual cause. (A wholly blank *line* is harmless; the CSV reader drops those first.) Passing both `--csv` and positional targets is also refused.
+
+The same flags work on [`dt pull`](pull.md), which is `dt fetch` plus a checkout.
 
 ### Stage Type Filters
 
