@@ -415,6 +415,33 @@ class TestDestFor:
     def test_plain_name_is_used_verbatim(self):
         assert get_mod._dest_for('renamed', 'data/fq/AF013-A') == Path('renamed')
 
+    @pytest.mark.parametrize('url', [
+        's3://bucket/prefix/',
+        's3://bucket/prefix',
+        'gs://bucket/prefix/',
+        'ssh://host/path',
+        'https://example.com/data',
+    ])
+    def test_url_destination_is_rejected(self, url):
+        """``Path('s3://b/p')`` is a valid relative path, so without this guard
+        the fetch silently created a local directory named ``s3:``."""
+        with pytest.raises(GetError, match='must be a local path'):
+            get_mod._dest_for(url, 'data/fq/AF013-A')
+
+    def test_url_error_names_the_scheme(self):
+        with pytest.raises(GetError, match=r's3:// URL'):
+            get_mod._dest_for('s3://bucket/prefix/', 'data/fq/AF013-A')
+
+    @pytest.mark.parametrize('out', [
+        'fastqs:backup/',      # colon, but no scheme separator
+        './s3:/not-a-url',
+        'C:/looks-like-a-drive',
+        'run:1/sample',
+    ])
+    def test_colon_in_a_relative_path_is_not_a_url(self, out):
+        """The guard is anchored on ``://`` so ordinary paths still work."""
+        assert isinstance(get_mod._dest_for(out, 'data/fq/AF013-A'), Path)
+
 
 # =============================================================================
 # CSV contract (shared with dt import --csv)
