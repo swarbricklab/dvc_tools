@@ -107,6 +107,7 @@ Fetch DVC-tracked files into the primary cache from local sources.
 
 ```bash
 dt fetch [targets...] [-v] [--imports|--urls|--regular] [--network]
+dt fetch --csv <file> [--path-col COL]
 ```
 
 Populates the primary cache with links to files in source caches (reflink → hardlink → symlink → copy, or a single method with `--cache-type`). For repo imports, clones the source repo to find a locally-accessible cache. [Full documentation →](fetch.md)
@@ -167,6 +168,7 @@ Pull DVC-tracked files, handling imports automatically.
 
 ```bash
 dt pull [targets...] [-v] [--update] [--no-network]
+dt pull --csv <file> [--path-col COL]
 ```
 
 Equivalent to `dt fetch` followed by `dvc checkout`. Imports and local-remote data are fetched through `dt fetch`; data needing network access falls back to the non-mutating `dvc fetch`. Use `--update` to opt in to the mutating import re-resolution (`dvc update`, which rewrites the `.dvc` file). [Full documentation →](pull.md)
@@ -203,7 +205,7 @@ Download DVC-tracked data without creating tracking files.
 
 ```bash
 dt get <repository> <path> [-o <output>] [--rev REV] [--link TYPES] [-j N] [-f] [-v]
-dt get <repository> --csv <file> [--path-col COL] [--filter EXPR] [-o <dir>]
+dt get <repository> --csv <file> [--path-col COL] [-o <dir>]
 ```
 
 The `dvc get` counterpart to `dt import`: materialises data and writes no `.dvc` file, for handing a subset of a dataset to someone outside the group. A path may name a subdirectory *inside* a tracked directory output, so you can take part of a large dataset without transferring all of it. With `--csv` the source is cloned once and every row resolved against that clone, rather than re-cloning per path. [Full documentation →](get.md)

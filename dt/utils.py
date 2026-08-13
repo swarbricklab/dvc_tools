@@ -1446,79 +1446,26 @@ def recompute_dvc_md5(dvc_data: Dict[str, Any]) -> Dict[str, Any]:
 # CSV target lists
 # =============================================================================
 
-def parse_row_filters(exprs: Optional[List[str]]) -> List[Tuple[str, str, bool]]:
-    """Parse ``--filter`` expressions into ``(column, value, negate)`` triples.
-
-    Accepts ``COL=VALUE`` and ``COL!=VALUE``. An empty *VALUE* matches an empty
-    or absent cell, which is how you select on "this column wasn't filled in"
-    -- the common case when a spreadsheet column marks an exception rather than
-    a value.
-
-    Args:
-        exprs: Raw ``--filter`` strings, or None.
-
-    Returns:
-        List of (column, value, negate) triples, ANDed together by the caller.
-
-    Raises:
-        ValueError: If an expression has no ``=``.
-    """
-    parsed: List[Tuple[str, str, bool]] = []
-    for expr in exprs or []:
-        if '!=' in expr:
-            column, value = expr.split('!=', 1)
-            negate = True
-        elif '=' in expr:
-            column, value = expr.split('=', 1)
-            negate = False
-        else:
-            raise ValueError(
-                f"Invalid filter {expr!r}: expected COL=VALUE or COL!=VALUE"
-            )
-        column = column.strip()
-        if not column:
-            raise ValueError(f"Invalid filter {expr!r}: empty column name")
-        parsed.append((column, value.strip(), negate))
-    return parsed
-
-
-def row_matches(row: Dict[str, str], filters: List[Tuple[str, str, bool]]) -> bool:
-    """Test a CSV row against parsed filters, ANDed together."""
-    for column, value, negate in filters:
-        cell = (row.get(column) or '').strip()
-        if (cell == value) == negate:
-            return False
-    return True
-
-
-def read_csv_targets(
+def _read_csv_rows(
     csv_path: str,
-    path_col: str = 'path',
-    out: Optional[str] = None,
-    filters: Optional[List[str]] = None,
-) -> List[Tuple[str, Optional[str]]]:
-    """Read a batch target list from a CSV file.
+    path_col: str,
+) -> List[Dict[str, str]]:
+    """Read and validate a CSV batch file, returning its data rows.
 
-    Shared by ``dt import --csv`` and ``dt get --csv`` so the two agree on the
-    contract: one column names the source path, an optional ``output`` column
-    overrides the destination per row, and ``--filter`` narrows the selection.
-
-    Rows whose path cell is empty are returned with an empty path so the caller
-    can report them as failures rather than silently dropping them -- a silently
-    skipped row in a 400-row manifest is very hard to notice.
+    The shared half of :func:`read_csv_targets` and
+    :func:`read_csv_target_list`: locate the file, insist on *path_col*, and
+    reject a header-only file. The two public readers differ only in what they
+    build from the rows.
 
     Args:
         csv_path: Path to the CSV file.
-        path_col: Column holding the source path.
-        out: Fallback destination when a row has no ``output`` cell.
-        filters: ``COL=VALUE`` / ``COL!=VALUE`` expressions, ANDed.
+        path_col: Column that must be present.
 
     Returns:
-        List of (path, output) pairs in file order.
+        The data rows, in file order.
 
     Raises:
-        ValueError: If the file is missing, empty, lacks *path_col*, or a
-            filter names a column the CSV does not have.
+        ValueError: If the file is missing, has no *path_col*, or has no rows.
     """
     csv_file = Path(csv_path)
     if not csv_file.exists():
@@ -1537,22 +1484,105 @@ def read_csv_targets(
     if not rows:
         raise ValueError(f"CSV file is empty: {csv_path}")
 
-    parsed = parse_row_filters(filters)
-    # Catch a mistyped filter column now. Otherwise every row silently fails to
-    # match and the run reports "0 rows selected", which reads like the data is
-    # wrong rather than the flag.
-    unknown = [c for c, _, _ in parsed if c not in fieldnames]
-    if unknown:
-        raise ValueError(
-            f"Filter column(s) not in CSV: {', '.join(sorted(set(unknown)))}. "
-            f"Found columns: {fieldnames}"
-        )
+    return rows
 
+
+def read_csv_targets(
+    csv_path: str,
+    path_col: str = 'path',
+    out: Optional[str] = None,
+) -> List[Tuple[str, Optional[str]]]:
+    """Read a batch target list from a CSV file.
+
+    Shared by ``dt import --csv`` and ``dt get --csv`` so the two agree on the
+    contract: one column names the source path in the *remote* repository, and
+    an optional ``output`` column overrides the local destination per row.
+
+    Rows whose path cell is empty are returned with an empty path so the caller
+    can report them as failures rather than silently dropping them -- a silently
+    skipped row in a 400-row manifest is very hard to notice. Contrast
+    :func:`read_csv_target_list`, where a blank cell is fatal because there is
+    no per-row report to carry it.
+
+    Args:
+        csv_path: Path to the CSV file.
+        path_col: Column holding the source path.
+        out: Fallback destination when a row has no ``output`` cell.
+
+    Returns:
+        List of (path, output) pairs in file order.
+
+    Raises:
+        ValueError: If the file is missing, empty, or lacks *path_col*.
+    """
     targets: List[Tuple[str, Optional[str]]] = []
-    for row in rows:
-        if not row_matches(row, parsed):
-            continue
+    for row in _read_csv_rows(csv_path, path_col):
         row_path = (row.get(path_col) or '').strip()
         row_out = (row.get('output') or '').strip() or out
         targets.append((row_path, row_out))
     return targets
+
+
+def read_csv_target_list(
+    csv_path: str,
+    path_col: str = 'path',
+) -> List[str]:
+    """Read a DVC target list from a CSV file.
+
+    The counterpart to :func:`read_csv_targets` for commands that act on the
+    *current* repo -- ``dt fetch --csv`` and ``dt pull --csv``. There a row
+    names a target and there is no destination to choose, so every column but
+    *path_col* is ignored, ``output`` no differently from any other.
+
+    Unlike :func:`read_csv_targets`, a blank path cell is fatal rather than a
+    reportable per-row failure. An empty string target resolves to the working
+    directory, so a stray blank row would quietly widen the operation to the
+    whole repo -- and "fetch everything" is not a failure mode a trailing
+    newline should be able to reach. Together with the header-only check in
+    :func:`_read_csv_rows`, that makes an empty return impossible: callers may
+    rely on the result being non-empty.
+
+    Args:
+        csv_path: Path to the CSV file.
+        path_col: Column holding the target path.
+
+    Returns:
+        De-duplicated target paths, in first-seen order. Never empty.
+
+    Raises:
+        ValueError: If the file is missing, empty, lacks *path_col*, or any
+            selected row has a blank path cell.
+    """
+    rows = _read_csv_rows(csv_path, path_col)
+
+    paths: List[str] = []
+    seen = set()
+    blank: List[int] = []
+    for i, row in enumerate(rows):
+        row_path = (row.get(path_col) or '').strip()
+        if not row_path:
+            # +2: one for the header line, one for 1-based numbering, so the
+            # number matches what a text editor shows.
+            blank.append(i + 2)
+            continue
+        if row_path in seen:
+            continue
+        seen.add(row_path)
+        paths.append(row_path)
+
+    if blank:
+        shown = ', '.join(str(n) for n in blank[:10])
+        more = f" (and {len(blank) - 10} more)" if len(blank) > 10 else ""
+        raise ValueError(
+            f"Blank {path_col!r} cell on line {shown}{more} of {csv_path}. "
+            f"An empty target would match the whole repository, so this is "
+            f"refused rather than skipped."
+        )
+
+    # Unreachable given the checks above -- _read_csv_rows rejects a header-only
+    # file and every remaining row either contributed a path or raised. Asserted
+    # anyway because the callers turn an empty list into "operate on everything".
+    if not paths:
+        raise ValueError(f"No targets found in {csv_path}")
+
+    return paths

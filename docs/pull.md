@@ -6,6 +6,7 @@ Pull DVC-tracked files, automatically handling imports from other repositories.
 
 ```bash
 dt pull [options] [targets...]
+dt pull [options] --csv <file> [--path-col COL]
 ```
 
 ## What it does
@@ -29,6 +30,8 @@ sources.
 
 | Option | Description |
 |--------|-------------|
+| `--csv <file>` | Read targets from a CSV file instead of the command line |
+| `--path-col <name>` | CSV column holding the target path (default: `path`) |
 | `-f`, `--force` | Delete `.dir` manifests before pulling to force re-fetch (also passes `--force` to `dvc checkout`) |
 | `--dry`, `--dry-run` | Show the stage categorisation without fetching or checking out |
 | `-v`, `--verbose` | Show detailed progress (with `--dry`, lists every stage) |
@@ -58,6 +61,46 @@ dt pull -v
 # Force re-fetch (after fixing corrupted cache files)
 dt pull --force data/
 ```
+
+### From a CSV
+
+When the selection lives in a sample sheet rather than in your shell history:
+
+```bash
+# Every target in the path column
+dt pull --csv samples.csv
+
+# The paths are in a differently-named column
+dt pull --csv samples.csv --path-col fq_dir
+
+# See what the sheet selected before pulling anything
+dt pull --csv samples.csv --dry
+```
+
+Every column other than the path column is ignored, so a sheet carrying sample
+metadata needs no preparation beyond having the targets in it. A sheet written
+for [`dt get --csv`](get.md) works here too — if its `path` column holds
+registry paths and `output` holds the local ones, `--path-col output` is what
+you want.
+
+To pull a *subset*, select the rows first and pass the result:
+
+```bash
+csvgrep -c kind -m wts samples.csv > wts.csv
+dt pull --csv wts.csv
+```
+
+This is deliberate rather than a missing feature. Row selection is something
+`csvgrep`, `awk`, and pandas already do well, and doing it beforehand leaves an
+artifact recording exactly what was pulled.
+
+**Two rules, both about the same hazard.** `dt pull` with no targets pulls
+*everything*, so a CSV that produced no targets would silently escalate into a
+whole-repo pull. It therefore refuses rather than proceeding when the file has
+no data rows, and when any row has a blank cell in the path column — naming the
+line, since a blank cell in a hand-edited sheet is the usual cause. (A wholly
+blank *line* is harmless; the CSV reader drops those before `dt` sees them.)
+Passing both `--csv` and positional targets is also refused.
 
 ### Dry run
 

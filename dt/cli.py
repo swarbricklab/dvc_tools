@@ -3683,11 +3683,70 @@ def data_status(ctx, threads, no_wait, verbose, worker):
         raise click.ClickException(str(e))
 
 
+def _resolve_targets(csv_path, path_col, positional):
+    """Resolve a target list for ``dt fetch`` / ``dt pull``.
+
+    Both commands read ``targets=None`` as *every stage*, which is right for a
+    bare invocation and disastrous for a CSV -- a sheet that yielded nothing
+    would silently widen to the whole repo. ``read_csv_target_list`` cannot
+    return an empty list, and the check below refuses to build one anyway,
+    because the distance between here and that guarantee is exactly where a
+    later edit would reintroduce ``x if x else None``.
+
+    Args:
+        csv_path: ``--csv`` value, or None.
+        path_col: ``--path-col`` value.
+        positional: TARGETS from the command line.
+
+    Returns:
+        A non-empty list of targets, or None meaning "everything" -- the
+        latter only when neither a CSV nor positional targets were given.
+    """
+    if not csv_path:
+        return list(positional) if positional else None
+
+    if positional:
+        raise click.UsageError(
+            "Do not provide TARGETS when using --csv. Merging the two is "
+            "never what's meant, and doing it silently hides the mistake."
+        )
+
+    try:
+        targets = utils.read_csv_target_list(csv_path, path_col)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+
+    if not targets:
+        raise click.UsageError(f"No targets found in {csv_path}")
+
+    return targets
+
+
+def _csv_context(message, csv_path, path_col, targets):
+    """Add CSV provenance to an error about an unresolvable target.
+
+    DVC names the first target it could not resolve and stops. Over a 400-row
+    sheet that is one run per typo, and nothing in the message says the path
+    came from a file at all -- let alone which file or which column.
+    """
+    if not csv_path:
+        return message
+    return (
+        f"{message}\n\n"
+        f"Targets came from {csv_path} (column {path_col!r}, "
+        f"{len(targets)} target(s)). A sheet written against a different repo "
+        f"-- or for `dt get` against a registry -- will name paths this "
+        f"repository does not have."
+    )
+
+
 @cli.command(context_settings=dict(
     ignore_unknown_options=True,
     allow_extra_args=True,
 ))
 @click.argument('targets', nargs=-1, type=click.Path())
+@click.option('--csv', 'csv_path', default=None, type=click.Path(exists=True), help='CSV file listing targets to fetch (requires a path column)')
+@click.option('--path-col', default='path', show_default=True, help='CSV column holding the target path')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--update', is_flag=True, help='Allow mutating import re-resolution (dvc update / .dvc rewrite) and .dir manifest rebuild for imports that cannot be fetched otherwise')
 @click.option('--network', is_flag=True, help='Fall back to dvc fetch (network) if local remote not available')
@@ -3703,7 +3762,7 @@ def data_status(ctx, threads, no_wait, verbose, worker):
               help='Link type for cache population. If not specified, tries reflink → hardlink → symlink → copy.')
 @click.option('--dir-only', is_flag=True, help='Only fetch .dir manifest files, not the data files they reference.')
 @click.pass_context
-def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, regular, source, remote_name, destination, cache_type, dir_only):
+def fetch(ctx, targets, csv_path, path_col, verbose, update, network, dry, force, imports, urls, regular, source, remote_name, destination, cache_type, dir_only):
     """Fetch DVC-tracked files into the primary cache.
     
     Populates the primary cache with symlinks to files from source caches.
@@ -3726,9 +3785,18 @@ def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, reg
     \b
     Stage type filters (combinable, default is all types):
         --imports    Only repo imports (dvc import)
-        --urls       Only URL imports (dvc import-url)  
+        --urls       Only URL imports (dvc import-url)
         --regular    Only regular stages (non-imports)
-    
+
+    \b
+    Targets from a CSV:
+        --csv        Fetch every target listed in a CSV file
+        --path-col   Name the CSV column holding the target (default: path)
+
+    Every other column is ignored, so a sample sheet needs no preparation
+    beyond having the targets in it. To fetch a subset, select the rows first
+    and pass the result. Combines with the type filters and with --dry.
+
     \b
     Remote selection:
         -r, --remote   Fetch from a named DVC remote (local or network)
@@ -3744,6 +3812,9 @@ def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, reg
     Examples:
         dt fetch                           # Fetch all .dvc files from local sources
         dt fetch data/external.dvc         # Fetch specific targets
+        dt fetch --csv samples.csv         # Fetch every target listed in a CSV
+        dt fetch --csv samples.csv --path-col fq_dir   # Path is in another column
+        dt fetch --csv samples.csv --dry   # Show what the sheet selected
         dt fetch -v                        # Show detailed progress
         dt fetch --update                  # Rebuild .dir files, update .dvc if needed
         dt fetch --force                   # Force re-fetch even if .dir exists (ensures children are fetched)
@@ -3764,7 +3835,9 @@ def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, reg
     from . import fetch as fetch_mod
     from . import remote as remote_mod
     from pathlib import Path
-    
+
+    target_list = _resolve_targets(csv_path, path_col, targets)
+
     # Resolve -r/--remote: try local path first, fall back to network fetch
     if remote_name:
         if source:
@@ -3792,7 +3865,7 @@ def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, reg
         # which acquire .dvc/tmp/lock themselves; holding it here would
         # deadlock (#119).
         results = fetch_mod.fetch(
-            targets=list(targets) if targets else None,
+            targets=target_list,
             verbose=verbose,
             update=update,
             network=network,
@@ -3843,7 +3916,9 @@ def fetch(ctx, targets, verbose, update, network, dry, force, imports, urls, reg
         # Clean error message with suggestion
         raise click.ClickException(str(e))
     except fetch_mod.FetchError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(
+            _csv_context(str(e), csv_path, path_col, target_list)
+        )
 
 
 @cli.command()
@@ -3983,6 +4058,10 @@ def mv(src, dst, verbose):
 
 @cli.command()
 @click.argument('targets', nargs=-1)
+@click.option('--csv', 'csv_path', default=None, type=click.Path(exists=True),
+              help='CSV file listing targets to pull (requires a path column)')
+@click.option('--path-col', default='path', show_default=True,
+              help='CSV column holding the target path')
 @click.option('--force', '-f', is_flag=True,
               help='Delete .dir manifests before pulling to force re-fetch. Useful after dt cache validate --fix.')
 @click.option('--dry', '--dry-run', is_flag=True,
@@ -3993,7 +4072,7 @@ def mv(src, dst, verbose):
                    'advancing pins) for imports that cannot be pulled otherwise.')
 @click.option('--network/--no-network', default=True,
               help='Enable/disable network access for fetching. Default: enabled.')
-def pull(targets, force, dry, verbose, update, network):
+def pull(targets, csv_path, path_col, force, dry, verbose, update, network):
     """Pull DVC-tracked files (fetch + checkout).
 
     This is the dt equivalent of `dvc pull`. It fetches data to the cache
@@ -4013,19 +4092,31 @@ def pull(targets, force, dry, verbose, update, network):
     data available locally (from local remotes or import sources).
 
     \b
+    Targets from a CSV:
+        --csv        Pull every target listed in a CSV file
+        --path-col   Name the CSV column holding the target (default: path)
+
+    Every other column is ignored, so a sample sheet needs no preparation
+    beyond having the targets in it -- and if the paths you want are in a
+    differently-named column, --path-col reaches them. To pull a subset,
+    select the rows first and pass the result.
+
+    \b
     Examples:
         dt pull                    # Pull all tracked files (pinned, non-mutating)
         dt pull data/              # Pull specific target
+        dt pull --csv samples.csv  # Pull every target listed in a CSV
+        dt pull --csv samples.csv --path-col fq_dir   # Path is in another column
+        dt pull --csv samples.csv --dry               # Show what the sheet selected
         dt pull --dry              # Show what would be pulled
         dt pull -v                 # Show detailed progress
         dt pull --force data/      # Force re-fetch (after cache validate --fix)
         dt pull --update           # Permit mutating import re-resolution (dvc update)
         dt pull --no-network       # Only pull data available locally
     """
+    target_list = _resolve_targets(csv_path, path_col, targets)
+
     try:
-        # Convert tuple to list or None
-        target_list = list(targets) if targets else None
-        
         # Call the simplified pull function.
         # No workspace lock: pull shells out to `dvc fetch`/`dvc checkout`
         # which acquire .dvc/tmp/lock themselves; holding it here would
@@ -4043,9 +4134,13 @@ def pull(targets, force, dry, verbose, update, network):
             raise SystemExit(1)
 
     except fetch_mod.FetchError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(
+            _csv_context(str(e), csv_path, path_col, target_list)
+        )
     except pull_mod.PullError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(
+            _csv_context(str(e), csv_path, path_col, target_list)
+        )
 
 
 @cli.group()
@@ -4266,7 +4361,6 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('--rev', default=None, help='Git revision (branch, tag, or commit) to fetch from')
 @click.option('--csv', 'csv_path', default=None, type=click.Path(exists=True), help='CSV file listing paths to fetch (requires a path column, optional "output" column)')
 @click.option('--path-col', default='path', show_default=True, help='CSV column holding the source path')
-@click.option('--filter', 'filters', multiple=True, help='Select rows: COL=VALUE or COL!=VALUE. Repeatable (ANDed). An empty VALUE matches an empty cell.')
 @click.option('-j', '--jobs', type=int, default=8, show_default=True, help='Parallel workers')
 @click.option('--link', default=None, help='Link type(s) to use, comma-separated (reflink, hardlink, symlink, copy). Defaults to DVC cache.type if set.')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing the temp clone (for offline use)')
@@ -4280,7 +4374,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('--dest-account-id', default=None, help='Abort unless the destination credentials resolve to this AWS account. For unattended runs.')
 @click.option('--chunk-size', type=int, default=None, help='Streaming chunk size in MiB for s3:// destinations (default: 8)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
+def get_cmd(repository, path, out, owner, rev, csv_path, path_col,
             jobs, link, no_refresh, remote_fallback, resume, check, force,
             dest_profile, dest_endpoint_url, dest_region, dest_account_id,
             chunk_size, verbose):
@@ -4298,7 +4392,6 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
     Options:
         --csv        Fetch every path listed in a CSV file
         --path-col   Name the CSV column holding the path (default: path)
-        --filter     Select rows, e.g. --filter 'wts_lib='
         --link       Override the link type (default: DVC cache.type)
 
     Unlike a loop over ``dvc get``, the source repository is cloned once and
@@ -4309,7 +4402,6 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
         dt get my-registry data/fq/AF013-A -o fastqs/
         dt get my-registry --csv samples.csv -o fastqs/
         dt get my-registry --csv samples.csv --path-col fq_dir -o fastqs/
-        dt get my-registry --csv samples.csv --filter 'wts_lib=' -o fastqs/
         dt get my-registry data/ref.fa --link copy -o ./
         dt get my-registry data/fq/AF013-A -o s3://bucket/fastqs/ --dest-profile aws
     """
@@ -4364,7 +4456,6 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
                 force=force,
                 link=link,
                 path_col=path_col,
-                filters=list(filters),
                 refresh=not no_refresh,
                 allow_remote=remote_fallback,
                 resume=resume,
