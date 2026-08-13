@@ -21,6 +21,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -29,9 +30,15 @@ import click
 import yaml
 
 from ..errors import AuthError
+from ._helpers import _extract_repo_name_from_url, _short_repo_name
 from .checks import STATUS_FAIL, check_endpoints
 from .credentials import install_credentials
-from .endpoints import Endpoint, classify_url, discover_endpoints
+from .endpoints import (
+    Endpoint,
+    classify_url,
+    discover_endpoints,
+    discover_endpoints_from_repo,
+)
 from .ssh import (
     SSHSetupResult,
     _DEFAULT_KEY_PATH,
@@ -116,6 +123,7 @@ def auth_setup(
     config_path: Optional[Path] = None,
     username: Optional[str] = None,
     ssh_config_file: Optional[Path] = None,
+    repo_url: Optional[str] = None,
     verbose: bool = False,
 ) -> SetupReport:
     """Combined SSH + credentials setup driven by endpoint discovery.
@@ -132,6 +140,10 @@ def auth_setup(
             and passwords.
         username: Default SSH username (overridden by config file).
         ssh_config_file: Path to SSH config (default ``~/.ssh/config``).
+        repo_url: Set up access to this repository (URL or short name)
+            instead of the current directory's project. The repo is
+            shallow-cloned to a temp dir purely to read its config, so
+            this works from anywhere and without cloning it for real.
         verbose: Print progress.
 
     Returns:
@@ -152,7 +164,10 @@ def auth_setup(
     # -- 2. Discover ALL endpoints -----------------------------------------
     if verbose:
         print("\nDiscovering endpoints ...")
-    all_endpoints = discover_endpoints(verbose=verbose)
+    if repo_url:
+        all_endpoints = discover_endpoints_from_repo(repo_url, verbose=verbose)
+    else:
+        all_endpoints = discover_endpoints(verbose=verbose)
 
     # Flatten including children
     flat_eps: List[Endpoint] = []
@@ -205,8 +220,17 @@ def auth_setup(
         if verbose:
             print("\n--- S3 credential setup ---")
         try:
-            cred_results = install_credentials(verbose=verbose)
-            report.credentials_installed = cred_results
+            if repo_url:
+                # install_credentials() discovers repos from the current
+                # directory, which is the wrong project entirely here.
+                # Name the repos explicitly instead.
+                report.credentials_installed = _install_credentials_for_repos(
+                    _s3_secret_names(repo_url, all_endpoints),
+                    report=report,
+                    verbose=verbose,
+                )
+            else:
+                report.credentials_installed = install_credentials(verbose=verbose)
         except AuthError as exc:
             report.errors.append(f"Credential install error: {exc}")
             if verbose:
@@ -220,8 +244,85 @@ def auth_setup(
 
 
 # =============================================================================
+# Credentials for a named repo (--repo)
+# =============================================================================
+
+def _s3_secret_names(repo_url: str, endpoints: List[Endpoint]) -> List[str]:
+    """Names of the secrets needed for the S3 endpoints in *endpoints*.
+
+    Secrets are named after the repo that owns the remote, so this maps
+    each S3 endpoint back to its owning repo:
+
+    * a top-level S3 endpoint is a remote of ``repo_url`` itself;
+    * an S3 endpoint nested under a parent is a remote of that parent,
+      which is an import source (``deps.repo.url`` in a ``.dvc`` file).
+
+    A repo whose data is imported from elsewhere needs the source repo's
+    credentials too, otherwise the fetch fails on exactly the paths the
+    caller came for.
+
+    Returns:
+        Repo names, in discovery order, without duplicates.
+    """
+    names: List[str] = []
+
+    def _add(name: Optional[str]) -> None:
+        if name and name not in names:
+            names.append(name)
+
+    for ep in endpoints:
+        if ep.type == 's3':
+            _add(_short_repo_name(repo_url))
+        if any(child.type == 's3' for child in ep.children):
+            _add(_extract_repo_name_from_url(ep.url) or _short_repo_name(ep.url))
+
+    return names
+
+
+def _install_credentials_for_repos(
+    repo_names: List[str],
+    report: SetupReport,
+    verbose: bool,
+) -> Dict[str, bool]:
+    """Install credentials for each named repo, recording per-repo failures.
+
+    One repo failing must not abort the others — ``install_credentials``
+    raises when *its* single repo yields nothing usable, so each call is
+    guarded separately.
+    """
+    installed: Dict[str, bool] = {}
+
+    for name in repo_names:
+        try:
+            installed.update(install_credentials(verbose=verbose, repo_name=name))
+        except AuthError as exc:
+            installed[name] = False
+            report.errors.append(f"Credential install error ({name}): {exc}")
+            if verbose:
+                print(f"  ERROR: {name}: {exc}")
+
+    return installed
+
+
+# =============================================================================
 # SSH setup (config-aware variant)
 # =============================================================================
+
+def _prompt_username(host: str) -> str:
+    """Ask for an SSH username, failing usefully when there is nobody to ask.
+
+    ``click.prompt`` aborts with an empty message on a closed stdin, which
+    surfaces as a bare "SSH setup error:" telling the caller nothing. Say
+    what is missing and how to supply it instead.
+    """
+    if not sys.stdin.isatty():
+        raise AuthError(
+            f"No SSH username for {host}, and stdin is not interactive.\n"
+            f"Supply one with -u/--username, or give the host an entry in a "
+            f"--config file."
+        )
+    return click.prompt(f"SSH username for {host}", type=str)
+
 
 def _do_ssh_setup(
     endpoints: List[Endpoint],
@@ -268,10 +369,7 @@ def _do_ssh_setup(
             if url_user:
                 host_users[host] = url_user
             else:
-                host_users[host] = click.prompt(
-                    f"SSH username for {host}",
-                    type=str,
-                )
+                host_users[host] = _prompt_username(host)
 
     # Ensure ~/.ssh and keypair
     _ensure_ssh_dir(verbose=verbose)

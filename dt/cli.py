@@ -2488,9 +2488,11 @@ def auth():
               type=click.Path(dir_okay=False),
               default=None,
               help='SSH config file path (default: ~/.ssh/config).')
+@click.option('--repo', 'repo_url', default=None,
+              help='Set up access to a remote repo (URL or short name).')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show detailed progress.')
-def auth_setup(username, config_path, ssh_config_file, verbose):
+def auth_setup(username, config_path, ssh_config_file, repo_url, verbose):
     """Set up SSH keys, config, and credentials in one step.
 
     Discovers all endpoints, then:
@@ -2507,11 +2509,19 @@ def auth_setup(username, config_path, ssh_config_file, verbose):
           username: jr9959
         github.com: {}
 
+    Use --repo to set up access to a repo you have not cloned — enough to
+    `dt get` files out of it, without a working copy:
+
+    \b
+      dt auth setup --repo git@github.com:org/data-repo.git
+      dt auth setup --repo data-repo
+
     \b
     Examples:
       dt auth setup                        # interactive
       dt auth setup -u jr9959              # default SSH username
       dt auth setup --config hosts.yaml    # non-interactive
+      dt auth setup --repo data-repo       # a repo you have not cloned
       dt auth setup -v                     # verbose output
     """
     from pathlib import Path as _Path
@@ -2524,6 +2534,7 @@ def auth_setup(username, config_path, ssh_config_file, verbose):
             config_path=cfg,
             username=username,
             ssh_config_file=ssh_cfg,
+            repo_url=repo_url,
             verbose=verbose,
         )
         click.echo(format_setup_report(report))
