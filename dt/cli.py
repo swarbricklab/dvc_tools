@@ -4266,7 +4266,6 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('--rev', default=None, help='Git revision (branch, tag, or commit) to fetch from')
 @click.option('--csv', 'csv_path', default=None, type=click.Path(exists=True), help='CSV file listing paths to fetch (requires a path column, optional "output" column)')
 @click.option('--path-col', default='path', show_default=True, help='CSV column holding the source path')
-@click.option('--filter', 'filters', multiple=True, help='Select rows: COL=VALUE or COL!=VALUE. Repeatable (ANDed). An empty VALUE matches an empty cell.')
 @click.option('-j', '--jobs', type=int, default=8, show_default=True, help='Parallel workers')
 @click.option('--link', default=None, help='Link type(s) to use, comma-separated (reflink, hardlink, symlink, copy). Defaults to DVC cache.type if set.')
 @click.option('--no-refresh', is_flag=True, help='Skip refreshing the temp clone (for offline use)')
@@ -4280,7 +4279,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('--dest-account-id', default=None, help='Abort unless the destination credentials resolve to this AWS account. For unattended runs.')
 @click.option('--chunk-size', type=int, default=None, help='Streaming chunk size in MiB for s3:// destinations (default: 8)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
+def get_cmd(repository, path, out, owner, rev, csv_path, path_col,
             jobs, link, no_refresh, remote_fallback, resume, check, force,
             dest_profile, dest_endpoint_url, dest_region, dest_account_id,
             chunk_size, verbose):
@@ -4298,7 +4297,6 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
     Options:
         --csv        Fetch every path listed in a CSV file
         --path-col   Name the CSV column holding the path (default: path)
-        --filter     Select rows, e.g. --filter 'wts_lib='
         --link       Override the link type (default: DVC cache.type)
 
     Unlike a loop over ``dvc get``, the source repository is cloned once and
@@ -4309,7 +4307,6 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
         dt get my-registry data/fq/AF013-A -o fastqs/
         dt get my-registry --csv samples.csv -o fastqs/
         dt get my-registry --csv samples.csv --path-col fq_dir -o fastqs/
-        dt get my-registry --csv samples.csv --filter 'wts_lib=' -o fastqs/
         dt get my-registry data/ref.fa --link copy -o ./
         dt get my-registry data/fq/AF013-A -o s3://bucket/fastqs/ --dest-profile aws
     """
@@ -4364,7 +4361,6 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col, filters,
                 force=force,
                 link=link,
                 path_col=path_col,
-                filters=list(filters),
                 refresh=not no_refresh,
                 allow_remote=remote_fallback,
                 resume=resume,

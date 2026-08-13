@@ -474,43 +474,14 @@ class TestReadCsvTargets:
             ('data/fq/AF013', None)
         ]
 
-    def test_filter_on_empty_cell_selects_setup_rows(self, tmp_path):
-        """SETUP = rows with an empty wts_lib."""
+    def test_extra_columns_are_ignored(self, tmp_path):
         csv_file = _write_csv(
             tmp_path / 'a.csv',
-            'path,wts_lib\ndata/a,\ndata/b,LIB1\ndata/c,\n',
+            'path,kind,wts_lib\ndata/a,wts,\ndata/b,wgs,L1\n',
         )
-        assert utils.read_csv_targets(csv_file, filters=['wts_lib=']) == [
-            ('data/a', None), ('data/c', None)
+        assert utils.read_csv_targets(csv_file) == [
+            ('data/a', None), ('data/b', None)
         ]
-
-    def test_filter_negation(self, tmp_path):
-        csv_file = _write_csv(
-            tmp_path / 'a.csv', 'path,kind\ndata/a,wgs\ndata/b,wts\n'
-        )
-        assert utils.read_csv_targets(csv_file, filters=['kind!=wgs']) == [
-            ('data/b', None)
-        ]
-
-    def test_filters_are_anded(self, tmp_path):
-        csv_file = _write_csv(
-            tmp_path / 'a.csv',
-            'path,kind,wts_lib\ndata/a,wts,\ndata/b,wts,L1\ndata/c,wgs,\n',
-        )
-        assert utils.read_csv_targets(
-            csv_file, filters=['kind=wts', 'wts_lib=']
-        ) == [('data/a', None)]
-
-    def test_unknown_filter_column_is_an_error(self, tmp_path):
-        """Otherwise every row silently fails to match and it reads as bad data."""
-        csv_file = _write_csv(tmp_path / 'a.csv', 'path\ndata/a\n')
-        with pytest.raises(ValueError, match='Filter column'):
-            utils.read_csv_targets(csv_file, filters=['nope=1'])
-
-    def test_malformed_filter_is_an_error(self, tmp_path):
-        csv_file = _write_csv(tmp_path / 'a.csv', 'path\ndata/a\n')
-        with pytest.raises(ValueError, match='expected COL=VALUE'):
-            utils.read_csv_targets(csv_file, filters=['garbage'])
 
     def test_missing_path_column(self, tmp_path):
         csv_file = _write_csv(tmp_path / 'a.csv', 'name\nfoo\n')
@@ -696,13 +667,13 @@ class TestGetFromCsv:
         assert results[0] == ('(empty)', False, 'Missing path')
         assert len(results) == 2
 
-    def test_filter_selecting_nothing_is_an_error(self, tmp_path, monkeypatch):
+    def test_header_only_csv_is_an_error(self, tmp_path, monkeypatch):
         """Better than silently reporting success over zero rows."""
         monkeypatch.chdir(tmp_path)
-        csv_file = _write_csv(tmp_path / 'a.csv', 'path,kind\nd/one,wgs\n')
+        csv_file = _write_csv(tmp_path / 'a.csv', 'path,kind\n')
 
-        with pytest.raises(GetError, match='No rows selected'):
-            get_mod.get_from_csv(csv_file, 'myrepo', filters=['kind=wts'])
+        with pytest.raises(GetError, match='CSV file is empty'):
+            get_mod.get_from_csv(csv_file, 'myrepo')
 
     def test_csv_problems_surface_as_get_error(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

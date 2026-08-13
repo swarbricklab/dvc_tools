@@ -53,10 +53,9 @@ dt get my-registry --csv samples.csv -o fastqs/
 
 # The path lives in a differently-named column
 dt get my-registry --csv samples.csv --path-col fq_dir -o fastqs/
-
-# Only rows where wts_lib is empty
-dt get my-registry --csv samples.csv --filter 'wts_lib=' -o fastqs/
 ```
+
+Every column other than the path column is ignored, so a sheet carrying sample metadata needs no preparation beyond having the paths in it. To fetch a *subset*, select the rows first and pass the result — `csvgrep`, `awk`, or pandas — which also leaves an artifact recording exactly what was transferred.
 
 Each row reports `✓`/`✗` with a summary, and the command exits non-zero if any row failed.
 
@@ -67,16 +66,6 @@ This describes the local-cache path; on the download path see [Two paths](#two-p
 Rows are resolved concurrently, then **every file from every row is placed through a single pool** of `--jobs` workers. The budget covers the transfer as a whole rather than being re-divided per row.
 
 This matters when rows are small. A sample directory of two fastqs would, under per-row batching, leave six of eight workers idle for the whole row; flattening keeps them all fed across the 164 files of an 82-sample manifest. Reporting is still per row and still in CSV order.
-
-### Filters
-
-`--filter` is repeatable and the expressions are ANDed:
-
-- `COL=VALUE` — the cell equals VALUE
-- `COL!=VALUE` — the cell does not equal VALUE
-- `COL=` — the cell is **empty**, which is how you select on "this column wasn't filled in"
-
-Naming a column the CSV does not have is an error rather than a silent zero-row result.
 
 ## Link types
 
@@ -108,7 +97,6 @@ dt get my-registry data/ref.fa --link hardlink,copy -o ./
 - `--rev <rev>`: Fetch from a specific git revision (branch, tag, or commit)
 - `--csv <file>`: Fetch every path listed in a CSV file
 - `--path-col <name>`: CSV column holding the source path (default: `path`)
-- `--filter <expr>`: Select rows, e.g. `--filter 'wts_lib='`. Repeatable, ANDed.
 - `-j, --jobs <n>`: Parallel workers (default: 8). In `--csv` mode the budget spans the whole transfer, not each row — see below.
 - `--link <types>`: Link type(s), comma-separated. Defaults to DVC `cache.type` if set.
 - `--no-refresh`: Skip refreshing the temp clone (for offline use)
@@ -196,8 +184,12 @@ dt get my-registry data/reference -o ./
 # From a specific revision
 dt get my-registry data/fq/AF013-A --rev v1.2.0 -o fastqs/
 
-# Batch, selecting SETUP samples straight from the source manifest
-dt get bcarc-wts --csv paths.csv --path-col fq_dir --filter 'wts_lib=' -o fastqs/
+# Batch, reading paths from a column of the source manifest
+dt get bcarc-wts --csv paths.csv --path-col fq_dir -o fastqs/
+
+# Batch, over a subset selected beforehand
+csvgrep -c wts_lib -r '^$' paths.csv > setup.csv
+dt get bcarc-wts --csv setup.csv --path-col fq_dir -o fastqs/
 
 # Force a real copy regardless of cache.type
 dt get my-registry data/fq/AF013-A --link copy -o fastqs/
