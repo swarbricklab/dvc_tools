@@ -19,6 +19,7 @@ of 412 samples without transferring the other 330.
 """
 
 import json
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import cache_ops
+from . import get_dest
 from . import remote as remote_mod
 from . import tmp as tmp_mod
 from . import utils
@@ -214,7 +216,7 @@ def verify_file(dest: Path, md5: str) -> bool:
 
 
 def decide(
-    dest: Path,
+    dest,
     md5: str,
     force: bool,
     resume: bool,
@@ -222,15 +224,24 @@ def decide(
 ) -> Tuple[str, str]:
     """Decide what to do with one destination file. Returns (action, message).
 
-    Action is ``fetch``, ``skip``, or ``bad``. Shared by the local and remote
-    paths so a resumed download behaves identically whichever way the bytes
-    arrive.
+    Action is ``fetch``, ``skip``, or ``bad``. Shared by every path -- local
+    cache, network download, and S3 upload -- so a resumed transfer behaves
+    identically whichever way the bytes arrive.
+
+    *dest* is either a :class:`~pathlib.Path` or an object exposing
+    ``exists()`` and ``verify(md5)``; a Path is wrapped so this logic is
+    written once rather than once per destination type.
 
     The combination that matters is ``--resume`` without ``--check``: a
     transfer interrupted mid-file leaves a *truncated* file behind, and by size
     or existence alone it is indistinguishable from a complete one. Resuming
     over it silently keeps the corruption. That is why ``--check`` exists.
+    (On S3 that failure cannot arise -- an interrupted multipart upload is
+    never committed -- but the rule is the same either way.)
     """
+    if isinstance(dest, Path):
+        dest = get_dest.LocalDestFile(dest)
+
     if not dest.exists():
         return 'fetch', 'missing'
 
@@ -238,7 +249,7 @@ def decide(
         return 'fetch', 're-fetching'
 
     if check:
-        if verify_file(dest, md5):
+        if dest.verify(md5):
             return 'skip', 'verified'
         # A file that fails its checksum is worse than a missing one, because
         # nothing else will ever look at it again. Replace it when resuming;
@@ -441,6 +452,195 @@ def fetch_via_remote(
     return written + skipped, note
 
 
+def _open_source_odb(clone: Path):
+    """Open the source repository's DVC remote as an object database.
+
+    This is the whole trick for S3 destinations. ``dvc get`` would download to
+    a local path; the object database hands us the *filesystem* instead --
+    already carrying the remote's credentials and endpoint from the clone's
+    ``.dvc/config`` -- so we can open a content-addressed object and stream it
+    somewhere else without ever materialising it.
+
+    Returns ``(repo, odb)``; the caller must close *repo*.
+    """
+    try:
+        from dvc.repo import Repo
+    except ImportError:
+        raise GetError("dvc is required to read the source remote")
+
+    try:
+        repo = Repo(str(clone))
+    except Exception as e:
+        raise GetError(f"Could not open the source repository: {e}")
+
+    try:
+        remote = repo.cloud.get_remote()
+    except Exception as e:
+        repo.close()
+        raise GetError(
+            f"The source repository has no usable DVC remote: {e}\n"
+            f"An S3 destination streams from the remote, so one is required."
+        )
+    return repo, remote.odb
+
+
+def _upload_one(
+    entry: Dict[str, object],
+    odb,
+    dest: 'get_dest.S3Dest',
+    force: bool,
+    resume: bool,
+    check: bool,
+    chunk_size: int,
+) -> Tuple[str, bool, str]:
+    """Stream a single object from the source remote to S3."""
+    relpath = str(entry['relpath'])
+    md5 = str(entry['md5'])
+    target = dest.child(relpath)
+
+    action, note = decide(target, md5, force, resume, check)
+    if action == 'skip':
+        return relpath, True, note
+    if action == 'bad':
+        return relpath, False, note
+
+    source = odb.oid_to_path(md5)
+    try:
+        if not odb.fs.exists(source):
+            return relpath, False, f'object {md5[:8]} not on the source remote'
+    except Exception as e:
+        return relpath, False, f'could not reach the source remote: {e}'
+
+    try:
+        transferred = target.write_from(odb.fs, source, md5, chunk_size)
+    except Exception as e:
+        # An interrupted multipart upload is never committed, so there is no
+        # partial object to clean up here.
+        return relpath, False, f'upload failed: {e}'
+
+    if transferred != md5:
+        # The bytes that arrived are not the bytes DVC recorded. Delete rather
+        # than leave a plausible-looking wrong object behind -- it would carry
+        # our md5 metadata and pass --check forever after.
+        try:
+            target.remove()
+        except GetError:
+            pass
+        return relpath, False, (
+            f'CHECKSUM MISMATCH in flight '
+            f'(got {transferred[:8]}, expected {md5[:8]})'
+        )
+
+    return relpath, True, 'uploaded'
+
+
+def upload_to_s3(
+    clone: Path,
+    targets: Sequence[Tuple[str, 'get_dest.S3Dest']],
+    rev: Optional[str] = None,
+    jobs: int = 8,
+    force: bool = False,
+    resume: bool = False,
+    check: bool = False,
+    chunk_size: int = get_dest.DEFAULT_CHUNK_SIZE,
+    verbose: bool = False,
+) -> Tuple[List[Tuple[str, bool, str]], List[Tuple[str, bool, str]]]:
+    """Stream every ``(source path, destination)`` pair into object storage.
+
+    Returns ``(rows, files)``: one entry per requested path, and one per object
+    placed. The single-path caller wants file counts; the CSV caller wants row
+    outcomes. Both come from the same run.
+
+    Resolves all rows first, then places every file from every row through one
+    pool, for the same reason the local path does: a row is often a sample
+    directory of two fastqs, and batching per row would idle most workers.
+
+    Unlike the local network path there is no ``dvc get`` subprocess and so no
+    contention on the clone's SQLite state database, which is what forced that
+    path to run rows serially.
+    """
+    repo, odb = _open_source_odb(clone)
+    try:
+        resolved = []
+        for row_path, row_dest in targets:
+            if not row_path:
+                resolved.append((row_path, row_dest, None, 'missing source path'))
+                continue
+            try:
+                resolved.append(
+                    (row_path, row_dest, list_source_files(clone, row_path, rev=rev), None)
+                )
+            except GetError as e:
+                resolved.append((row_path, row_dest, None, str(e)))
+
+        tasks: List[Tuple[Dict[str, object], 'get_dest.S3Dest']] = []
+        spans: Dict[int, Tuple[int, int]] = {}
+        for i, (_, row_dest, entries, _) in enumerate(resolved):
+            if entries is None:
+                continue
+            start = len(tasks)
+            tasks.extend((entry, row_dest) for entry in entries)
+            spans[i] = (start, len(tasks))
+
+        if verbose and tasks:
+            mib = get_dest.memory_estimate(jobs, chunk_size) // (1024 * 1024)
+            print(f"Streaming {len(tasks)} objects across {max(1, jobs)} workers "
+                  f"(~{mib} MiB peak memory)")
+
+        def place(task):
+            entry, row_dest = task
+            return _upload_one(
+                entry, odb, row_dest, force, resume, check, chunk_size
+            )
+
+        with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+            placed = list(pool.map(place, tasks))
+
+        results: List[Tuple[str, bool, str]] = []
+        for i, (row_path, row_dest, entries, error) in enumerate(resolved):
+            if entries is None:
+                results.append((row_path or '(empty)', False, error))
+                continue
+            start, end = spans[i]
+            written, failed = _tally(placed[start:end], verbose)
+            if failed:
+                results.append((row_path, False, f'{written} uploaded, {failed} failed'))
+            else:
+                plural = '' if written == 1 else 's'
+                results.append(
+                    (row_path, True, f'{written} file{plural} -> {row_dest}')
+                )
+        return results, placed
+    finally:
+        repo.close()
+
+
+def _prepare_s3_dest(
+    out: str,
+    name: Optional[str],
+    config: Optional['get_dest.S3DestConfig'],
+) -> 'get_dest.S3Dest':
+    """Build the destination, verify we can write to it, and say where.
+
+    Mirrors the local trailing-slash rule: ``s3://bucket/fastqs/`` collects
+    under ``fastqs/<basename>``, while ``s3://bucket/fastqs`` is used verbatim.
+    There is no ``is_dir()`` to consult on object storage, so the slash is the
+    only signal available -- which is why it means something here and is merely
+    one of two signals locally.
+
+    The identity is printed unconditionally, not only under ``--verbose``.
+    Omitting ``--dest-profile`` is legal so that an EC2 instance role needs no
+    configuration, and the only thing between that and writing to the wrong
+    account is stating which account it is.
+    """
+    root = get_dest.S3Dest(out, config)
+    identity = root.preflight()
+    dest = root.under(name) if (out.endswith('/') and name) else root
+    print(f"Destination: {dest}")
+    print(f"Writing as:  {identity}")
+    return dest
+
+
 def _resolve_source(
     repository: str,
     owner: Optional[str],
@@ -486,6 +686,8 @@ def get_data(
     allow_remote: bool = True,
     resume: bool = False,
     check: bool = False,
+    dest_config: Optional['get_dest.S3DestConfig'] = None,
+    chunk_size: int = get_dest.DEFAULT_CHUNK_SIZE,
     verbose: bool = False,
 ) -> Tuple[int, int]:
     """Materialise a single path from a source repository.
@@ -508,6 +710,17 @@ def get_data(
     Raises:
         GetError: If the source cannot be resolved.
     """
+    if out is not None and get_dest.is_s3_url(out):
+        dest = _prepare_s3_dest(out, Path(path).name, dest_config)
+        clone = tmp_mod.clone_repo(
+            repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
+        )
+        _, placed = upload_to_s3(
+            clone, [(path, dest)], rev, jobs, force, resume, check,
+            chunk_size, verbose,
+        )
+        return _tally(placed, verbose)
+
     clone, cache_root = _resolve_source(
         repository, owner, rev, refresh, verbose, allow_remote
     )
@@ -542,6 +755,8 @@ def get_from_csv(
     allow_remote: bool = True,
     resume: bool = False,
     check: bool = False,
+    dest_config: Optional['get_dest.S3DestConfig'] = None,
+    chunk_size: int = get_dest.DEFAULT_CHUNK_SIZE,
     verbose: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     """Materialise every path listed in a CSV, resolving the source once.
@@ -566,8 +781,16 @@ def get_from_csv(
     Raises:
         GetError: If the CSV or the source cannot be read.
     """
+    to_s3 = out is not None and get_dest.is_s3_url(out)
+
     try:
-        targets = utils.read_csv_targets(csv_path, path_col, out, filters)
+        # For S3 the fallback is applied here rather than in the CSV reader, so
+        # a row's ``output`` cell can be read as a sub-prefix under ``-o``
+        # instead of replacing it outright. Replacing it would mean one row
+        # could silently redirect to a local path mid-transfer.
+        targets = utils.read_csv_targets(
+            csv_path, path_col, None if to_s3 else out, filters
+        )
     except ValueError as e:
         raise GetError(str(e))
 
@@ -576,6 +799,24 @@ def get_from_csv(
             f"No rows selected from {csv_path}"
             + (f" with filter(s): {', '.join(filters)}" if filters else "")
         )
+
+    if to_s3:
+        root = get_dest.S3Dest(out, dest_config)
+        identity = root.preflight()
+        print(f"Destination: {root}")
+        print(f"Writing as:  {identity}")
+        clone = tmp_mod.clone_repo(
+            repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
+        )
+        s3_targets = [
+            (row_path, root.under(row_out or Path(row_path or '.').name))
+            for row_path, row_out in targets
+        ]
+        rows, _ = upload_to_s3(
+            clone, s3_targets, rev, jobs, force, resume, check,
+            chunk_size, verbose,
+        )
+        return rows
 
     clone, cache_root = _resolve_source(
         repository, owner, rev, refresh, verbose, allow_remote
@@ -689,14 +930,42 @@ def _download_rows(
     return results
 
 
+# A URL scheme, per RFC 3986: letter followed by letters/digits/+/-/. then "://".
+# Anchored, so a relative path containing a colon ("foo:bar/baz") is not a URL.
+_URL_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://')
+
+
+def _reject_url_destination(out: str) -> None:
+    """Fail on a URL destination instead of silently writing a local directory.
+
+    ``Path('s3://bucket/prefix/')`` collapses the double slash to
+    ``s3:/bucket/prefix``, which is a perfectly valid *relative* path -- so
+    ``-o s3://bucket/prefix/`` used to create a local directory literally named
+    ``s3:`` and report success. Bytes went to the wrong filesystem entirely and
+    nothing said so.
+    """
+    match = _URL_SCHEME_RE.match(out)
+    if not match:
+        return
+    scheme = match.group(0)[:-3]
+    raise GetError(
+        f"Destination must be a local path, not a {scheme}:// URL: {out}\n"
+        f"Fetch to a local directory, then upload it separately."
+    )
+
+
 def _dest_for(out: Optional[str], path: str) -> Path:
     """Destination directory for a source path.
 
     ``-o fastqs/`` collects every row under ``fastqs/<basename>``, which is what
     makes a CSV of 82 sample directories land as 82 sibling directories.
+
+    Raises:
+        GetError: If *out* is a URL. The destination is a local filesystem path.
     """
     if out is None:
         return Path(Path(path).name)
+    _reject_url_destination(out)
     out_p = Path(out)
     if out_p.is_dir() or out.endswith('/'):
         return out_p / Path(path).name
