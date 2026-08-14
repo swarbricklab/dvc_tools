@@ -218,21 +218,66 @@ class GCPSecretBackend(SecretBackend):
     # -----------------------------------------------------------------
 
     @staticmethod
-    def _require_gcloud() -> str:
-        """Return path to gcloud or raise."""
-        path = shutil.which('gcloud')
-        if not path:
-            raise SecretError(
-                "Neither the google-cloud-secret-manager Python package "
-                "nor the gcloud CLI is available.\n"
-                "Install one of:\n"
-                "  pip install google-cloud-secret-manager\n"
-                "  https://cloud.google.com/sdk/docs/install"
-            )
-        return path
+    def _require_gcloud(cause: Optional[Exception] = None) -> str:
+        """Return path to gcloud, or raise explaining why nothing worked.
 
-    def _cli_secret_exists(self, repo_name: str) -> bool:
-        gcloud = self._require_gcloud()
+        Args:
+            cause: The error that sent us to the CLI in the first place.
+                Reporting only "gcloud is not installed" throws away the
+                real reason -- a PermissionDenied from the Python client
+                reads as a missing package, and the user goes off installing
+                software that is already there.
+        """
+        path = shutil.which('gcloud')
+        if path:
+            return path
+
+        message = (
+            "Neither the google-cloud-secret-manager Python package "
+            "nor the gcloud CLI is available.\n"
+            "Install one of:\n"
+            "  pip install google-cloud-secret-manager\n"
+            "  https://cloud.google.com/sdk/docs/install"
+        )
+        if cause is not None:
+            message = (
+                f"Could not read the secret, and could not fall back to the "
+                f"gcloud CLI to retry.\n"
+                f"Original error: {cause}\n"
+                f"Fallback unavailable: gcloud is not on PATH "
+                f"(common inside containers).\n"
+                f"{message}"
+            )
+        raise SecretError(message)
+
+    def _denied_message(self, secret_id: str, detail: str) -> str:
+        """Explain a PERMISSION_DENIED, including the possibility of absence.
+
+        Secret Manager returns PERMISSION_DENIED rather than NOT_FOUND for a
+        secret you cannot see, so that a denial cannot be used to probe for
+        which secrets exist. The two are therefore indistinguishable from
+        here, and "you lack permission" is only half the story: the secret
+        may simply not be in this project.
+
+        Naming the project matters more than it looks. ``secrets.gcp.project``
+        can be set at system, user, or repo scope, so two people on the same
+        machine can be querying different projects -- and an access grant made
+        against the wrong one never takes effect, however many times it is
+        repeated.
+        """
+        return (
+            f"Cannot read secret '{secret_id}' in project '{self.project}'.\n"
+            f"Either you lack secretmanager.versions.access on it, or it does "
+            f"not exist there -- GCP reports both as PERMISSION_DENIED.\n"
+            f"Check which project is expected:  dt config get "
+            f"secrets.gcp.project\n"
+            f"List what is actually there:      gcloud secrets list "
+            f"--project={self.project}\n"
+            f"Error: {detail}"
+        )
+
+    def _cli_secret_exists(self, repo_name: str, cause: Optional[Exception] = None) -> bool:
+        gcloud = self._require_gcloud(cause)
         secret_id = self._get_secret_id(repo_name)
         result = subprocess.run(
             [gcloud, 'secrets', 'describe', secret_id,
@@ -325,8 +370,8 @@ class GCPSecretBackend(SecretBackend):
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
-    def _cli_access_secret(self, repo_name: str) -> str:
-        gcloud = self._require_gcloud()
+    def _cli_access_secret(self, repo_name: str, cause: Optional[Exception] = None) -> str:
+        gcloud = self._require_gcloud(cause)
         secret_id = self._get_secret_id(repo_name)
         result = subprocess.run(
             [gcloud, 'secrets', 'versions', 'access', 'latest',
@@ -342,9 +387,7 @@ class GCPSecretBackend(SecretBackend):
             )
         if 'PERMISSION_DENIED' in result.stderr:
             raise SecretError(
-                f"Permission denied accessing secret '{secret_id}'.\n"
-                f"Ensure you have secretmanager.versions.access permission.\n"
-                f"Error: {result.stderr.strip()}"
+                self._denied_message(secret_id, result.stderr.strip())
             )
         raise SecretError(f"gcloud error: {result.stderr.strip()}")
 
@@ -374,11 +417,11 @@ class GCPSecretBackend(SecretBackend):
             return True
         except gcp_exceptions.NotFound:
             return False
-        except gcp_exceptions.PermissionDenied:
+        except gcp_exceptions.PermissionDenied as exc:
             # ADC credentials may lack access — fall back to gcloud CLI
             # which honours `gcloud auth login`.
             self._use_cli = True
-            return self._cli_secret_exists(repo_name)
+            return self._cli_secret_exists(repo_name, cause=exc)
         except Exception as e:
             raise SecretError(f"Error checking secret existence: {e}")
     
@@ -422,10 +465,11 @@ class GCPSecretBackend(SecretBackend):
                 f"Secret '{self._get_secret_id(repo_name)}' not found in project '{self.project}'.\n"
                 f"Create it with: {self._create_secret_hint(self._get_secret_id(repo_name))}"
             )
-        except gcp_exceptions.PermissionDenied:
-            # Fall back to gcloud CLI for the rest of this session
+        except gcp_exceptions.PermissionDenied as exc:
+            # Fall back to gcloud CLI for the rest of this session, carrying
+            # the real error so it survives if the fallback is unavailable.
             self._use_cli = True
-            return self._cli_access_secret(repo_name)
+            return self._cli_access_secret(repo_name, cause=exc)
         except Exception as e:
             raise SecretError(f"Error fetching secret: {e}")
         

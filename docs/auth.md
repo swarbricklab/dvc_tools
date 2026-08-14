@@ -775,6 +775,27 @@ older dt, or from another tool, set it on the credentials directly:
 gcloud auth application-default set-quota-project <your-gcp-project>
 ```
 
+### When a secret is "permission denied"
+
+Secret Manager returns `PERMISSION_DENIED` for a secret you cannot see *and*
+for one that is not there — it will not distinguish them, since a denial that
+differed from a not-found would let anyone probe which secrets exist.
+
+So the first thing to check is not the grant but the project:
+
+```bash
+dt config get secrets.gcp.project        # which project dt is asking
+gcloud secrets list --project=<that>     # what is actually in it
+```
+
+`secrets.gcp.project` resolves through system, user, and repo scope in that
+order of increasing precedence, so a personal override in
+`~/.config/dt/config.yaml` silently wins over the group's system config. Two
+people on the same machine can therefore be querying different projects, and
+an access grant made against the wrong one never takes effect no matter how
+many times it is repeated. Check the resolved value in the environment that is
+failing, not in your own.
+
 ### Security
 
 - `~/.aws/credentials` and `~/.aws/config` are written with `600` permissions

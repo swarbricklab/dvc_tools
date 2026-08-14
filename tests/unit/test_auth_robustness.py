@@ -394,5 +394,88 @@ class TestQuotaProjectDegradesSafely:
                           return_value='[core]\n') as cli:
             assert backend.get_raw_config('visium') == '[core]\n'
 
-        cli.assert_called_once_with('visium')
+        # The cause travels with it, so it survives if the fallback is
+        # itself unavailable.
+        assert cli.call_args.args[0] == 'visium'
+        assert isinstance(cli.call_args.kwargs['cause'],
+                          gcp_exceptions.PermissionDenied)
         assert backend._use_cli is True, "should stay on the CLI for the session"
+
+
+# =============================================================================
+# 5. Secret errors must name the project and preserve the real cause
+# =============================================================================
+
+class TestSecretErrorsNameTheProject:
+    """PERMISSION_DENIED is also what GCP returns for a secret that is simply
+    not in the project you asked.
+
+    Secret Manager will not distinguish the two -- doing so would let a denial
+    be used to probe for which secrets exist. So "you lack permission" is at
+    best half the story, and when secrets.gcp.project points somewhere
+    unexpected it is the wrong half: no amount of granting access fixes a
+    secret that lives in another project.
+    """
+
+    def _denied(self, project='ctp-archive'):
+        backend = GCPSecretBackend(project=project)
+        result = MagicMock(returncode=1, stdout='',
+                           stderr='ERROR: PERMISSION_DENIED: denied on resource')
+        with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
+             patch('dt.secrets.gcp.subprocess.run', return_value=result):
+            with pytest.raises(Exception) as exc:
+                backend._cli_access_secret('bcarc_visium')
+        return str(exc.value)
+
+    def test_names_the_project(self):
+        assert "project 'ctp-archive'" in self._denied()
+
+    def test_says_the_secret_may_not_exist_there(self):
+        assert 'does not exist there' in self._denied()
+
+    def test_shows_how_to_check_which_project_is_configured(self):
+        message = self._denied()
+        assert 'dt config get secrets.gcp.project' in message
+        assert 'gcloud secrets list --project=ctp-archive' in message
+
+    def test_still_names_the_secret(self):
+        assert 'dvc-remote-bcarc_visium' in self._denied()
+
+
+class TestFallbackPreservesTheRealCause:
+    """When the CLI fallback is itself unavailable, report why we needed it."""
+
+    def test_permission_denied_survives_a_missing_gcloud(self):
+        """The bug: this reported "package not installed" for a 403.
+
+        The package was installed. The Python client raised PermissionDenied,
+        the CLI fallback found no gcloud on the container PATH, and only the
+        second failure was reported -- sending the user off to install
+        software that was already there.
+        """
+        from google.api_core import exceptions as gcp_exceptions
+
+        backend = GCPSecretBackend(project='ctp-archive')
+        client = MagicMock()
+        client.access_secret_version.side_effect = \
+            gcp_exceptions.PermissionDenied('403 denied on resource')
+
+        with patch.object(type(backend), 'client', property(lambda s: client)), \
+             patch('dt.secrets.gcp.shutil.which', return_value=None):
+            with pytest.raises(Exception) as exc:
+                backend.get_raw_config('bcarc_visium')
+
+        message = str(exc.value)
+        assert '403 denied on resource' in message, "real cause was discarded"
+        assert 'gcloud is not on PATH' in message
+        assert 'Original error' in message
+
+    def test_plain_missing_gcloud_still_reads_simply(self):
+        """With no prior failure, the old install advice is still right."""
+        backend = GCPSecretBackend(project='ctp-archive')
+        with patch('dt.secrets.gcp.shutil.which', return_value=None):
+            with pytest.raises(Exception) as exc:
+                backend._require_gcloud()
+        message = str(exc.value)
+        assert 'Neither the google-cloud-secret-manager' in message
+        assert 'Original error' not in message
