@@ -427,16 +427,20 @@ def _check_gs(ep: Endpoint) -> CheckResult:
             hints=['Install the Google Cloud SDK: https://cloud.google.com/sdk/docs/install'],
         )
 
+    from ..secrets.gcp import GCLOUD_AUTH_TIMEOUT
+
     try:
         auth_result = subprocess.run(
             ['gcloud', 'auth', 'list', '--format=value(account)',
              '--filter=status:ACTIVE'],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=GCLOUD_AUTH_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, OSError):
         return CheckResult(
             endpoint=ep, status=STATUS_WARN,
             summary='gcloud auth check timed out',
+            hints=['gcloud can be slow to start from /g/data. '
+                   'Run "gcloud auth list" once by hand, then retry.'],
         )
 
     if auth_result.returncode != 0 or not auth_result.stdout.strip():

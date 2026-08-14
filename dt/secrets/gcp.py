@@ -4,10 +4,20 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .. import config as cfg
 from .base import SecretBackend, SecretError
+
+#: Seconds to allow ``gcloud auth list`` before giving up.
+#:
+#: Generous because ``gcloud`` is a large Python application and on NCI it
+#: lives on ``/g/data``, so a cold start pays NFS latency for every module it
+#: imports. Measured on a Gadi persistent-session node: 20.4s cold, 5.3s warm.
+#: The previous 10s budget turned a slow filesystem into a false "you are not
+#: logged in", which sent people off to re-run ``gcloud auth login`` for a
+#: problem that authentication could not fix.
+GCLOUD_AUTH_TIMEOUT = 30.0
 
 
 def _configured_secret_locations() -> Optional[str]:
@@ -57,25 +67,68 @@ class GCPSecretBackend(SecretBackend):
         self._use_cli = False
     
     @staticmethod
-    def check_gcloud_authenticated() -> Optional[str]:
-        """Quick check whether gcloud CLI has an active authenticated account.
+    def gcloud_auth_status() -> Tuple[str, Optional[str]]:
+        """Determine why gcloud authentication is or isn't usable.
 
-        Returns the active account email, or ``None`` if not authenticated
-        or gcloud is not installed.
+        Three failures used to collapse into a bare ``None``: gcloud missing,
+        the check timing out, and nobody being logged in. Only the last is
+        fixed by ``gcloud auth login``, so telling all three to run it sends
+        two-thirds of callers down a dead end.
+
+        Returns:
+            ``(status, account)`` where *status* is one of ``'ok'``,
+            ``'missing'``, ``'timeout'``, ``'error'``, or
+            ``'unauthenticated'``. *account* is the active account email
+            when *status* is ``'ok'``, otherwise None.
         """
         gcloud = shutil.which('gcloud')
         if not gcloud:
-            return None
+            return 'missing', None
         try:
             result = subprocess.run(
                 [gcloud, 'auth', 'list', '--filter=status:ACTIVE',
                  '--format=value(account)'],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True,
+                timeout=GCLOUD_AUTH_TIMEOUT,
             )
-            account = result.stdout.strip()
-            return account if account else None
-        except (subprocess.TimeoutExpired, OSError):
-            return None
+        except subprocess.TimeoutExpired:
+            return 'timeout', None
+        except OSError:
+            return 'error', None
+        account = result.stdout.strip()
+        return ('ok', account) if account else ('unauthenticated', None)
+
+    @staticmethod
+    def gcloud_auth_hint(status: str) -> str:
+        """A message that matches the actual failure."""
+        return {
+            'missing': (
+                "gcloud CLI not found on PATH. Install the Google Cloud SDK, "
+                "or load the module providing it."
+            ),
+            'timeout': (
+                f"gcloud did not respond within {GCLOUD_AUTH_TIMEOUT:.0f}s. "
+                f"This usually means a cold start over a slow filesystem "
+                f"rather than an authentication problem -- run "
+                f"'gcloud auth list' once by hand, then retry."
+            ),
+            'error': "Could not run gcloud to check authentication.",
+            'unauthenticated': (
+                "No active GCP account. Run 'gcloud auth login' to "
+                "authenticate, then retry."
+            ),
+        }.get(status, "GCP authentication unavailable.")
+
+    @staticmethod
+    def check_gcloud_authenticated() -> Optional[str]:
+        """Active gcloud account email, or None if unusable for any reason.
+
+        Retained for callers that only need a yes/no. Prefer
+        :meth:`gcloud_auth_status` when the answer is shown to a user, so the
+        message can name the actual problem.
+        """
+        status, account = GCPSecretBackend.gcloud_auth_status()
+        return account if status == 'ok' else None
 
     @staticmethod
     def _has_adc_credentials() -> bool:
@@ -109,8 +162,47 @@ class GCPSecretBackend(SecretBackend):
             except ImportError:
                 self._use_cli = True
                 return None
-            self._client = secretmanager.SecretManagerServiceClient()
+            self._client = secretmanager.SecretManagerServiceClient(
+                credentials=self._credentials(),
+            )
         return self._client
+
+    def _credentials(self):
+        """ADC with the configured project attached as the quota project.
+
+        Two different things are called "the project" here. ``self.project``
+        names where the *secret* lives, and is baked into the resource path.
+        The *quota* project says who gets billed for the API call, and lives
+        on the credentials. They hold the same value for us, but nothing
+        derives one from the other.
+
+        Left unset, ``gcloud auth application-default login`` credentials
+        carry no quota project, so google-auth prints a UserWarning on every
+        single call about possible "quota exceeded"/"API not enabled" errors.
+        Attaching it here fixes that for everyone at once, rather than each
+        user having to run ``gcloud auth application-default
+        set-quota-project`` on every machine they touch.
+
+        Returns None if credentials can't be resolved, letting the client
+        fall back to its own default lookup rather than failing outright.
+        """
+        try:
+            import google.auth
+        except ImportError:
+            return None
+        try:
+            credentials, _ = google.auth.default()
+        except Exception:
+            return None
+        # Service-account and metadata-server credentials bill their own
+        # project and have no with_quota_project; only user credentials need
+        # this, so treat its absence as "nothing to do".
+        if self.project and hasattr(credentials, 'with_quota_project'):
+            try:
+                return credentials.with_quota_project(self.project)
+            except Exception:
+                return credentials
+        return credentials
     
     def _get_secret_name(self, repo_name: str) -> str:
         """Build the full secret resource name."""

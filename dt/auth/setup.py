@@ -182,16 +182,14 @@ def auth_setup(
     # -- 2b. Early GCP auth check (fail fast, not after SSH setup) ---------
     if has_s3:
         from ..secrets.gcp import GCPSecretBackend
-        if not GCPSecretBackend._has_adc_credentials() \
-                and not GCPSecretBackend.check_gcloud_authenticated():
-            report.errors.append(
-                "No active GCP authentication. "
-                "Run 'gcloud auth login' then retry."
-            )
-            if verbose:
-                print("\n\u26a0 No active GCP authentication found.")
-                print("  Run 'gcloud auth login' to authenticate, then retry.")
-            has_s3 = False  # skip credential install
+        if not GCPSecretBackend._has_adc_credentials():
+            status, _account = GCPSecretBackend.gcloud_auth_status()
+            if status != 'ok':
+                hint = GCPSecretBackend.gcloud_auth_hint(status)
+                report.errors.append(f"GCP authentication unavailable. {hint}")
+                if verbose:
+                    print(f"\n\u26a0 {hint}")
+                has_s3 = False  # skip credential install
 
     # -- 3. SSH setup (if needed) ------------------------------------------
     if has_ssh_or_git:
@@ -418,11 +416,6 @@ def _do_ssh_setup(
             if host:
                 failing_hosts.add(host)
 
-    if verbose and failing_hosts:
-        print(f"\n{len(failing_hosts)} host(s) need key deployment:")
-        for h in sorted(failing_hosts):
-            print(f"  \u2022 {h}")
-
     # Refine failing_hosts: for non-forge hosts that passed the
     # connectivity check, verify whether the configured key is already
     # accepted.  This avoids running ssh-copy-id (which prompts for a
@@ -439,6 +432,14 @@ def _do_ssh_setup(
             if verbose:
                 print(f"  Key not accepted by {host} — will deploy")
 
+    # Report the list only once it is final. Printing it before the
+    # refinement above announced a subset and then deployed to hosts
+    # that were never named, which reads as the check being wrong.
+    if verbose and failing_hosts:
+        print(f"\n{len(failing_hosts)} host(s) need key deployment:")
+        for h in sorted(failing_hosts):
+            print(f"  \u2022 {h}")
+
     # Deploy keys
     setup_results: List[SSHSetupResult] = []
     for host, ep in all_hosts.items():
@@ -451,16 +452,26 @@ def _do_ssh_setup(
         manual_action = False
 
         if host_needs_key:
-            if is_forge:
-                key_deployed = _deploy_key_forge(host, key_path, verbose=verbose)
-                if not key_deployed:
-                    manual_action = True
-            else:
-                key_deployed = _deploy_key_ssh_copy_id(
-                    host, host_user, key_path, verbose=verbose,
-                )
-                if not key_deployed:
-                    manual_action = True
+            # One host's deployment must not take the others down with it.
+            # An exception here used to escape the whole function, so the
+            # caller's broad `except Exception` discarded every result --
+            # including hosts that had already succeeded, which then went
+            # unreported entirely.
+            try:
+                if is_forge:
+                    key_deployed = _deploy_key_forge(
+                        host, key_path, verbose=verbose,
+                    )
+                else:
+                    key_deployed = _deploy_key_ssh_copy_id(
+                        host, host_user, key_path, verbose=verbose,
+                    )
+            except Exception as exc:
+                key_deployed = False
+                if verbose:
+                    print(f"  Key deployment to {host} failed: {exc}")
+            if not key_deployed:
+                manual_action = True
 
         if not host_needs_key and not config_written:
             continue

@@ -3,6 +3,7 @@
 import getpass
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -235,22 +236,82 @@ def _write_ssh_config_stanza(
         print(f"  Added SSH config stanza for {host}")
 
 
+#: Appends a key to authorized_keys, creating ~/.ssh if needed and skipping
+#: the write when the key is already there. What ssh-copy-id does, minus
+#: ssh-copy-id. Runs under the remote /bin/sh, so keep it POSIX.
+_AUTHORIZED_KEYS_SH = (
+    'set -e; '
+    'mkdir -p ~/.ssh; '
+    'chmod 700 ~/.ssh; '
+    'touch ~/.ssh/authorized_keys; '
+    'chmod 600 ~/.ssh/authorized_keys; '
+    'if ! grep -qxF "$0" ~/.ssh/authorized_keys; then '
+    'printf "%s\\n" "$0" >> ~/.ssh/authorized_keys; '
+    'fi'
+)
+
+
 def _deploy_key_ssh_copy_id(
     host: str,
     user: str,
     key_path: Path,
     verbose: bool = False,
 ) -> bool:
-    """Deploy a public key to a remote host via ``ssh-copy-id``.
+    """Deploy a public key to a remote host.
+
+    Prefers ``ssh-copy-id``, falling back to appending to
+    ``authorized_keys`` over plain ``ssh`` when it isn't installed.
+
+    The fallback exists because ``ssh-copy-id`` is not guaranteed to be
+    present. It ships in ``openssh-clients`` as a separate file from ``ssh``
+    itself, so minimal container images routinely have one and not the other
+    -- which is exactly what the containerised ``module load dt`` build hits.
+    Previously that raised FileNotFoundError out of the whole SSH phase.
 
     Returns True on success, False on failure.
     """
     pub_key = Path(f'{key_path}.pub')
     target = f'{user}@{host}'
+
+    if shutil.which('ssh-copy-id'):
+        if verbose:
+            print(f"  Deploying key to {target} via ssh-copy-id ...")
+        result = subprocess.run(
+            ['ssh-copy-id', '-i', str(pub_key), target],
+            capture_output=False,
+            stdin=None,
+        )
+        return result.returncode == 0
+
     if verbose:
-        print(f"  Deploying key to {target} via ssh-copy-id ...")
+        print(f"  ssh-copy-id not installed — appending to "
+              f"authorized_keys over ssh instead")
+        print(f"  Deploying key to {target} via ssh ...")
+
+    try:
+        key_text = pub_key.read_text().strip()
+    except OSError as exc:
+        if verbose:
+            print(f"  Could not read {pub_key}: {exc}")
+        return False
+
+    if not shutil.which('ssh'):
+        if verbose:
+            print("  ssh not installed either — cannot deploy the key")
+        return False
+
+    # ssh joins its trailing arguments into one string and hands it to the
+    # remote *shell*, which parses it again -- so both the script and the key
+    # have to survive a round of shell quoting. shlex.quote does that, and
+    # passing the key as $0 keeps its content out of the script body entirely.
+    #
+    # stdin is deliberately left alone: the key isn't deployed yet, so ssh may
+    # need to prompt for a password.
+    remote = (
+        f"sh -c {shlex.quote(_AUTHORIZED_KEYS_SH)} {shlex.quote(key_text)}"
+    )
     result = subprocess.run(
-        ['ssh-copy-id', '-i', str(pub_key), target],
+        ['ssh', target, remote],
         capture_output=False,
         stdin=None,
     )
@@ -523,19 +584,25 @@ def ssh_setup(
         manual_action = False
 
         if host_needs_key:
-            if is_forge:
-                key_deployed = _deploy_key_forge(host, key_path, verbose=verbose)
-                if not key_deployed:
-                    manual_action = True
-            else:
-                key_deployed = _deploy_key_ssh_copy_id(
-                    host, host_user, key_path, verbose=verbose,
-                )
-                if not key_deployed:
-                    manual_action = True
-                    if verbose:
-                        print(f"  \u26a0 ssh-copy-id failed for {host}. "
-                              f"You may need to deploy the key manually.")
+            # Isolate per host: one failure must not abandon the rest.
+            try:
+                if is_forge:
+                    key_deployed = _deploy_key_forge(
+                        host, key_path, verbose=verbose,
+                    )
+                else:
+                    key_deployed = _deploy_key_ssh_copy_id(
+                        host, host_user, key_path, verbose=verbose,
+                    )
+            except Exception as exc:
+                key_deployed = False
+                if verbose:
+                    print(f"  Key deployment to {host} failed: {exc}")
+            if not key_deployed:
+                manual_action = True
+                if verbose and not is_forge:
+                    print(f"  \u26a0 Could not deploy the key to {host}. "
+                          f"You may need to deploy it manually.")
 
         if not host_needs_key and not config_written:
             continue
