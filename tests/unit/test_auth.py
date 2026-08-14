@@ -2905,8 +2905,8 @@ class TestHasAdcCredentials:
 class TestGetSecretBackendAuthCheck:
     """Test that _get_secret_backend checks GCP auth before returning."""
 
-    @patch('dt.secrets.gcp.GCPSecretBackend.check_gcloud_authenticated',
-           return_value=None)
+    @patch('dt.secrets.gcp.GCPSecretBackend.gcloud_auth_status',
+           return_value=('unauthenticated', None))
     @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
            return_value=False)
     @patch('dt.config.get_value')
@@ -2917,11 +2917,29 @@ class TestGetSecretBackendAuthCheck:
             'secrets.gcp.project': 'my-project',
             'secrets.prefix': 'dvc-remote-',
         }.get(k)
-        with pytest.raises(AuthError, match='No active GCP authentication'):
+        with pytest.raises(AuthError, match="gcloud auth login"):
             _get_secret_backend()
 
-    @patch('dt.secrets.gcp.GCPSecretBackend.check_gcloud_authenticated',
-           return_value='user@example.com')
+    @patch('dt.secrets.gcp.GCPSecretBackend.gcloud_auth_status',
+           return_value=('timeout', None))
+    @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
+           return_value=False)
+    @patch('dt.config.get_value')
+    def test_timeout_does_not_blame_the_user(self, mock_get_value, mock_adc, mock_gcloud):
+        """A slow filesystem is not a missing login; don't send them to re-auth."""
+        from dt.auth.credentials import _get_secret_backend
+        mock_get_value.side_effect = lambda k: {
+            'secrets.backend': 'gcp',
+            'secrets.gcp.project': 'my-project',
+            'secrets.prefix': 'dvc-remote-',
+        }.get(k)
+        with pytest.raises(AuthError) as exc:
+            _get_secret_backend()
+        assert 'did not respond' in str(exc.value)
+        assert 'gcloud auth login' not in str(exc.value)
+
+    @patch('dt.secrets.gcp.GCPSecretBackend.gcloud_auth_status',
+           return_value=('ok', 'user@example.com'))
     @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
            return_value=False)
     @patch('dt.config.get_value')

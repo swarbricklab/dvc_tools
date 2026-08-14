@@ -4,10 +4,20 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .. import config as cfg
 from .base import SecretBackend, SecretError
+
+#: Seconds to allow ``gcloud auth list`` before giving up.
+#:
+#: Generous because ``gcloud`` is a large Python application and on NCI it
+#: lives on ``/g/data``, so a cold start pays NFS latency for every module it
+#: imports. Measured on a Gadi persistent-session node: 20.4s cold, 5.3s warm.
+#: The previous 10s budget turned a slow filesystem into a false "you are not
+#: logged in", which sent people off to re-run ``gcloud auth login`` for a
+#: problem that authentication could not fix.
+GCLOUD_AUTH_TIMEOUT = 30.0
 
 
 def _configured_secret_locations() -> Optional[str]:
@@ -57,25 +67,68 @@ class GCPSecretBackend(SecretBackend):
         self._use_cli = False
     
     @staticmethod
-    def check_gcloud_authenticated() -> Optional[str]:
-        """Quick check whether gcloud CLI has an active authenticated account.
+    def gcloud_auth_status() -> Tuple[str, Optional[str]]:
+        """Determine why gcloud authentication is or isn't usable.
 
-        Returns the active account email, or ``None`` if not authenticated
-        or gcloud is not installed.
+        Three failures used to collapse into a bare ``None``: gcloud missing,
+        the check timing out, and nobody being logged in. Only the last is
+        fixed by ``gcloud auth login``, so telling all three to run it sends
+        two-thirds of callers down a dead end.
+
+        Returns:
+            ``(status, account)`` where *status* is one of ``'ok'``,
+            ``'missing'``, ``'timeout'``, ``'error'``, or
+            ``'unauthenticated'``. *account* is the active account email
+            when *status* is ``'ok'``, otherwise None.
         """
         gcloud = shutil.which('gcloud')
         if not gcloud:
-            return None
+            return 'missing', None
         try:
             result = subprocess.run(
                 [gcloud, 'auth', 'list', '--filter=status:ACTIVE',
                  '--format=value(account)'],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True,
+                timeout=GCLOUD_AUTH_TIMEOUT,
             )
-            account = result.stdout.strip()
-            return account if account else None
-        except (subprocess.TimeoutExpired, OSError):
-            return None
+        except subprocess.TimeoutExpired:
+            return 'timeout', None
+        except OSError:
+            return 'error', None
+        account = result.stdout.strip()
+        return ('ok', account) if account else ('unauthenticated', None)
+
+    @staticmethod
+    def gcloud_auth_hint(status: str) -> str:
+        """A message that matches the actual failure."""
+        return {
+            'missing': (
+                "gcloud CLI not found on PATH. Install the Google Cloud SDK, "
+                "or load the module providing it."
+            ),
+            'timeout': (
+                f"gcloud did not respond within {GCLOUD_AUTH_TIMEOUT:.0f}s. "
+                f"This usually means a cold start over a slow filesystem "
+                f"rather than an authentication problem -- run "
+                f"'gcloud auth list' once by hand, then retry."
+            ),
+            'error': "Could not run gcloud to check authentication.",
+            'unauthenticated': (
+                "No active GCP account. Run 'gcloud auth login' to "
+                "authenticate, then retry."
+            ),
+        }.get(status, "GCP authentication unavailable.")
+
+    @staticmethod
+    def check_gcloud_authenticated() -> Optional[str]:
+        """Active gcloud account email, or None if unusable for any reason.
+
+        Retained for callers that only need a yes/no. Prefer
+        :meth:`gcloud_auth_status` when the answer is shown to a user, so the
+        message can name the actual problem.
+        """
+        status, account = GCPSecretBackend.gcloud_auth_status()
+        return account if status == 'ok' else None
 
     @staticmethod
     def _has_adc_credentials() -> bool:
@@ -109,8 +162,47 @@ class GCPSecretBackend(SecretBackend):
             except ImportError:
                 self._use_cli = True
                 return None
-            self._client = secretmanager.SecretManagerServiceClient()
+            self._client = secretmanager.SecretManagerServiceClient(
+                credentials=self._credentials(),
+            )
         return self._client
+
+    def _credentials(self):
+        """ADC with the configured project attached as the quota project.
+
+        Two different things are called "the project" here. ``self.project``
+        names where the *secret* lives, and is baked into the resource path.
+        The *quota* project says who gets billed for the API call, and lives
+        on the credentials. They hold the same value for us, but nothing
+        derives one from the other.
+
+        Left unset, ``gcloud auth application-default login`` credentials
+        carry no quota project, so google-auth prints a UserWarning on every
+        single call about possible "quota exceeded"/"API not enabled" errors.
+        Attaching it here fixes that for everyone at once, rather than each
+        user having to run ``gcloud auth application-default
+        set-quota-project`` on every machine they touch.
+
+        Returns None if credentials can't be resolved, letting the client
+        fall back to its own default lookup rather than failing outright.
+        """
+        try:
+            import google.auth
+        except ImportError:
+            return None
+        try:
+            credentials, _ = google.auth.default()
+        except Exception:
+            return None
+        # Service-account and metadata-server credentials bill their own
+        # project and have no with_quota_project; only user credentials need
+        # this, so treat its absence as "nothing to do".
+        if self.project and hasattr(credentials, 'with_quota_project'):
+            try:
+                return credentials.with_quota_project(self.project)
+            except Exception:
+                return credentials
+        return credentials
     
     def _get_secret_name(self, repo_name: str) -> str:
         """Build the full secret resource name."""
@@ -126,21 +218,66 @@ class GCPSecretBackend(SecretBackend):
     # -----------------------------------------------------------------
 
     @staticmethod
-    def _require_gcloud() -> str:
-        """Return path to gcloud or raise."""
-        path = shutil.which('gcloud')
-        if not path:
-            raise SecretError(
-                "Neither the google-cloud-secret-manager Python package "
-                "nor the gcloud CLI is available.\n"
-                "Install one of:\n"
-                "  pip install google-cloud-secret-manager\n"
-                "  https://cloud.google.com/sdk/docs/install"
-            )
-        return path
+    def _require_gcloud(cause: Optional[Exception] = None) -> str:
+        """Return path to gcloud, or raise explaining why nothing worked.
 
-    def _cli_secret_exists(self, repo_name: str) -> bool:
-        gcloud = self._require_gcloud()
+        Args:
+            cause: The error that sent us to the CLI in the first place.
+                Reporting only "gcloud is not installed" throws away the
+                real reason -- a PermissionDenied from the Python client
+                reads as a missing package, and the user goes off installing
+                software that is already there.
+        """
+        path = shutil.which('gcloud')
+        if path:
+            return path
+
+        message = (
+            "Neither the google-cloud-secret-manager Python package "
+            "nor the gcloud CLI is available.\n"
+            "Install one of:\n"
+            "  pip install google-cloud-secret-manager\n"
+            "  https://cloud.google.com/sdk/docs/install"
+        )
+        if cause is not None:
+            message = (
+                f"Could not read the secret, and could not fall back to the "
+                f"gcloud CLI to retry.\n"
+                f"Original error: {cause}\n"
+                f"Fallback unavailable: gcloud is not on PATH "
+                f"(common inside containers).\n"
+                f"{message}"
+            )
+        raise SecretError(message)
+
+    def _denied_message(self, secret_id: str, detail: str) -> str:
+        """Explain a PERMISSION_DENIED, including the possibility of absence.
+
+        Secret Manager returns PERMISSION_DENIED rather than NOT_FOUND for a
+        secret you cannot see, so that a denial cannot be used to probe for
+        which secrets exist. The two are therefore indistinguishable from
+        here, and "you lack permission" is only half the story: the secret
+        may simply not be in this project.
+
+        Naming the project matters more than it looks. ``secrets.gcp.project``
+        can be set at system, user, or repo scope, so two people on the same
+        machine can be querying different projects -- and an access grant made
+        against the wrong one never takes effect, however many times it is
+        repeated.
+        """
+        return (
+            f"Cannot read secret '{secret_id}' in project '{self.project}'.\n"
+            f"Either you lack secretmanager.versions.access on it, or it does "
+            f"not exist there -- GCP reports both as PERMISSION_DENIED.\n"
+            f"Check which project is expected:  dt config get "
+            f"secrets.gcp.project\n"
+            f"List what is actually there:      gcloud secrets list "
+            f"--project={self.project}\n"
+            f"Error: {detail}"
+        )
+
+    def _cli_secret_exists(self, repo_name: str, cause: Optional[Exception] = None) -> bool:
+        gcloud = self._require_gcloud(cause)
         secret_id = self._get_secret_id(repo_name)
         result = subprocess.run(
             [gcloud, 'secrets', 'describe', secret_id,
@@ -233,8 +370,8 @@ class GCPSecretBackend(SecretBackend):
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
-    def _cli_access_secret(self, repo_name: str) -> str:
-        gcloud = self._require_gcloud()
+    def _cli_access_secret(self, repo_name: str, cause: Optional[Exception] = None) -> str:
+        gcloud = self._require_gcloud(cause)
         secret_id = self._get_secret_id(repo_name)
         result = subprocess.run(
             [gcloud, 'secrets', 'versions', 'access', 'latest',
@@ -250,9 +387,7 @@ class GCPSecretBackend(SecretBackend):
             )
         if 'PERMISSION_DENIED' in result.stderr:
             raise SecretError(
-                f"Permission denied accessing secret '{secret_id}'.\n"
-                f"Ensure you have secretmanager.versions.access permission.\n"
-                f"Error: {result.stderr.strip()}"
+                self._denied_message(secret_id, result.stderr.strip())
             )
         raise SecretError(f"gcloud error: {result.stderr.strip()}")
 
@@ -282,11 +417,11 @@ class GCPSecretBackend(SecretBackend):
             return True
         except gcp_exceptions.NotFound:
             return False
-        except gcp_exceptions.PermissionDenied:
+        except gcp_exceptions.PermissionDenied as exc:
             # ADC credentials may lack access — fall back to gcloud CLI
             # which honours `gcloud auth login`.
             self._use_cli = True
-            return self._cli_secret_exists(repo_name)
+            return self._cli_secret_exists(repo_name, cause=exc)
         except Exception as e:
             raise SecretError(f"Error checking secret existence: {e}")
     
@@ -330,10 +465,11 @@ class GCPSecretBackend(SecretBackend):
                 f"Secret '{self._get_secret_id(repo_name)}' not found in project '{self.project}'.\n"
                 f"Create it with: {self._create_secret_hint(self._get_secret_id(repo_name))}"
             )
-        except gcp_exceptions.PermissionDenied:
-            # Fall back to gcloud CLI for the rest of this session
+        except gcp_exceptions.PermissionDenied as exc:
+            # Fall back to gcloud CLI for the rest of this session, carrying
+            # the real error so it survives if the fallback is unavailable.
             self._use_cli = True
-            return self._cli_access_secret(repo_name)
+            return self._cli_access_secret(repo_name, cause=exc)
         except Exception as e:
             raise SecretError(f"Error fetching secret: {e}")
         
