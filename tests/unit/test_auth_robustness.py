@@ -1,4 +1,4 @@
-"""Tests for three dt auth setup failure modes.
+"""Tests for the dt auth setup failure modes, and the loop they shared.
 
 All three made `dt auth setup` misreport a working environment as a broken
 one, and all three were found together on a single run in a containerised
@@ -12,6 +12,10 @@ one, and all three were found together on a single run in a containerised
    and discarded results for hosts that had already succeeded.
 3. The GCP quota project was never attached to the credentials, so every
    Secret Manager call emitted a UserWarning.
+
+Bug 2 was only half-fixable in place: the key-deployment loop existed twice,
+in ssh.ssh_setup and setup._do_ssh_setup, so the last section here covers
+the single extracted copy both now call.
 """
 
 import subprocess
@@ -20,6 +24,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dt.auth import setup as setup_mod
+from dt.auth.ssh import (
+    _AUTHORIZED_KEYS_SH,
+    _deploy_key_ssh_copy_id,
+    _deploy_keys_and_report,
+)
 from dt.secrets.gcp import GCLOUD_AUTH_TIMEOUT, GCPSecretBackend
 
 
@@ -158,9 +168,6 @@ class TestQuotaProject:
 # 3. ssh-copy-id fallback
 # =============================================================================
 
-from dt.auth.ssh import _AUTHORIZED_KEYS_SH, _deploy_key_ssh_copy_id
-
-
 @pytest.fixture
 def pub_key(tmp_path):
     key = tmp_path / 'id_ed25519'
@@ -281,3 +288,84 @@ class TestAuthorizedKeysScript:
         assert (ssh_dir / 'authorized_keys').read_text().splitlines() == [
             existing, key,
         ]
+
+
+# =============================================================================
+# 4. The shared deployment loop
+# =============================================================================
+
+def _report(hosts, failing, **kw):
+    return _deploy_keys_and_report(
+        hosts=hosts,
+        host_users={h: 'u' for h in hosts},
+        failing_hosts=set(failing),
+        stanzas_written=kw.pop('stanzas', {h: False for h in hosts}),
+        key_path=Path('/tmp/id_ed25519'),
+        key_generated=False,
+        has_passphrase=kw.pop('passphrase', False),
+        verbose=False,
+    )
+
+
+class TestDeployKeysAndReport:
+    """One loop, shared by ssh_setup and setup._do_ssh_setup.
+
+    They previously held byte-identical copies, which drifted: a fix applied
+    to one left the other broken.
+    """
+
+    def test_one_hosts_failure_does_not_lose_the_others(self):
+        """The bug that hid a successful GitHub registration."""
+        def deploy(host, user, key_path, verbose=False):
+            if host == 'bad.example':
+                raise FileNotFoundError('ssh-copy-id')
+            return True
+
+        with patch('dt.auth.ssh._deploy_key_ssh_copy_id', side_effect=deploy):
+            results = _report(
+                ['good.example', 'bad.example', 'other.example'],
+                failing=['good.example', 'bad.example', 'other.example'],
+            )
+
+        by_host = {r.host: r for r in results}
+        assert by_host['good.example'].key_deployed is True
+        assert by_host['other.example'].key_deployed is True
+        assert by_host['bad.example'].key_deployed is False
+        assert by_host['bad.example'].manual_action_needed is True
+
+    def test_forge_hosts_use_the_forge_path(self):
+        with patch('dt.auth.ssh._deploy_key_forge', return_value=True) as forge, \
+             patch('dt.auth.ssh._deploy_key_ssh_copy_id') as copy_id:
+            _report(['github.com'], failing=['github.com'])
+        forge.assert_called_once()
+        copy_id.assert_not_called()
+
+    def test_hosts_needing_nothing_are_omitted(self):
+        results = _report(['a.example'], failing=[])
+        assert len(results) == 1
+        assert results[0].host == '(all)'
+        assert results[0].already_ok is True
+
+    def test_config_only_change_is_reported(self):
+        results = _report(['a.example'], failing=[],
+                          stanzas={'a.example': True})
+        assert results[0].host == 'a.example'
+        assert results[0].message == 'config stanza added'
+
+    def test_passphrase_warning_lands_on_the_first_result(self):
+        with patch('dt.auth.ssh._deploy_key_ssh_copy_id', return_value=True):
+            results = _report(['a.example'], failing=['a.example'],
+                              passphrase=True)
+        assert 'passphrase-protected' in results[0].message
+
+
+class TestBothEntryPointsShareTheLoop:
+    """Guards against the two copies reappearing."""
+
+    def test_setup_imports_the_shared_helper(self):
+        assert setup_mod._deploy_keys_and_report is _deploy_keys_and_report
+
+    def test_setup_no_longer_calls_the_deploy_helpers_directly(self):
+        """If these come back, the duplication has come back with them."""
+        assert not hasattr(setup_mod, '_deploy_key_ssh_copy_id')
+        assert not hasattr(setup_mod, '_deploy_key_forge')
