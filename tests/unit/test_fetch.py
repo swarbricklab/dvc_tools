@@ -1467,12 +1467,16 @@ class TestFetchUrlImport:
     
     def test_successful_update(self, dvc_project):
         """Successful dvc update returns success."""
+        # s3:// sources hit doctor.check_network_connectivity -- a
+        # real socket probe -- before the patched subprocess.run is
+        # reached, so it must be mocked or these fail off-network.
         dvc_file = dvc_project['project'] / 'data.dvc'
         dvc_file.write_text('deps:\n  - path: s3://bucket/data.csv\nouts:\n  - md5: abc\n')
         
         with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': 'abc'}]}), \
              patch('dt.fetch.utils.get_cache_dir', return_value=None), \
              patch('dt.fetch.utils.get_url_import_info', return_value={'url': 's3://bucket/data.csv', 'out': 'data.csv'}), \
+             patch('dt.doctor.check_network_connectivity', return_value=True), \
              patch('subprocess.run') as mock_run:
             
             mock_run.return_value = MagicMock(returncode=0, stdout='Importing', stderr='')
@@ -1487,12 +1491,16 @@ class TestFetchUrlImport:
     
     def test_failed_update(self, dvc_project):
         """Failed dvc update returns failure with error."""
+        # s3:// sources hit doctor.check_network_connectivity -- a
+        # real socket probe -- before the patched subprocess.run is
+        # reached, so it must be mocked or these fail off-network.
         dvc_file = dvc_project['project'] / 'data.dvc'
         dvc_file.write_text('deps:\n  - path: s3://bucket/data.csv\nouts:\n  - md5: abc\n')
         
         with patch('dt.fetch.utils.parse_dvc_file', return_value={'outs': [{'md5': 'abc'}]}), \
              patch('dt.fetch.utils.get_cache_dir', return_value=None), \
              patch('dt.fetch.utils.get_url_import_info', return_value={'url': 's3://bucket/data.csv'}), \
+             patch('dt.doctor.check_network_connectivity', return_value=True), \
              patch('subprocess.run') as mock_run:
             
             mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='Access denied')

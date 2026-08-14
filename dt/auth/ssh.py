@@ -3,6 +3,7 @@
 import getpass
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -235,22 +236,82 @@ def _write_ssh_config_stanza(
         print(f"  Added SSH config stanza for {host}")
 
 
+#: Appends a key to authorized_keys, creating ~/.ssh if needed and skipping
+#: the write when the key is already there. What ssh-copy-id does, minus
+#: ssh-copy-id. Runs under the remote /bin/sh, so keep it POSIX.
+_AUTHORIZED_KEYS_SH = (
+    'set -e; '
+    'mkdir -p ~/.ssh; '
+    'chmod 700 ~/.ssh; '
+    'touch ~/.ssh/authorized_keys; '
+    'chmod 600 ~/.ssh/authorized_keys; '
+    'if ! grep -qxF "$0" ~/.ssh/authorized_keys; then '
+    'printf "%s\\n" "$0" >> ~/.ssh/authorized_keys; '
+    'fi'
+)
+
+
 def _deploy_key_ssh_copy_id(
     host: str,
     user: str,
     key_path: Path,
     verbose: bool = False,
 ) -> bool:
-    """Deploy a public key to a remote host via ``ssh-copy-id``.
+    """Deploy a public key to a remote host.
+
+    Prefers ``ssh-copy-id``, falling back to appending to
+    ``authorized_keys`` over plain ``ssh`` when it isn't installed.
+
+    The fallback exists because ``ssh-copy-id`` is not guaranteed to be
+    present. It ships in ``openssh-clients`` as a separate file from ``ssh``
+    itself, so minimal container images routinely have one and not the other
+    -- which is exactly what the containerised ``module load dt`` build hits.
+    Previously that raised FileNotFoundError out of the whole SSH phase.
 
     Returns True on success, False on failure.
     """
     pub_key = Path(f'{key_path}.pub')
     target = f'{user}@{host}'
+
+    if shutil.which('ssh-copy-id'):
+        if verbose:
+            print(f"  Deploying key to {target} via ssh-copy-id ...")
+        result = subprocess.run(
+            ['ssh-copy-id', '-i', str(pub_key), target],
+            capture_output=False,
+            stdin=None,
+        )
+        return result.returncode == 0
+
     if verbose:
-        print(f"  Deploying key to {target} via ssh-copy-id ...")
+        print(f"  ssh-copy-id not installed — appending to "
+              f"authorized_keys over ssh instead")
+        print(f"  Deploying key to {target} via ssh ...")
+
+    try:
+        key_text = pub_key.read_text().strip()
+    except OSError as exc:
+        if verbose:
+            print(f"  Could not read {pub_key}: {exc}")
+        return False
+
+    if not shutil.which('ssh'):
+        if verbose:
+            print("  ssh not installed either — cannot deploy the key")
+        return False
+
+    # ssh joins its trailing arguments into one string and hands it to the
+    # remote *shell*, which parses it again -- so both the script and the key
+    # have to survive a round of shell quoting. shlex.quote does that, and
+    # passing the key as $0 keeps its content out of the script body entirely.
+    #
+    # stdin is deliberately left alone: the key isn't deployed yet, so ssh may
+    # need to prompt for a password.
+    remote = (
+        f"sh -c {shlex.quote(_AUTHORIZED_KEYS_SH)} {shlex.quote(key_text)}"
+    )
     result = subprocess.run(
-        ['ssh-copy-id', '-i', str(pub_key), target],
+        ['ssh', target, remote],
         capture_output=False,
         stdin=None,
     )
@@ -354,6 +415,115 @@ class SSHSetupResult:
     config_written: bool
     manual_action_needed: bool
     message: str
+
+
+def _deploy_keys_and_report(
+    hosts: List[str],
+    host_users: Dict[str, str],
+    failing_hosts: Set[str],
+    stanzas_written: Dict[str, bool],
+    key_path: Path,
+    key_generated: bool,
+    has_passphrase: bool,
+    verbose: bool = False,
+) -> List[SSHSetupResult]:
+    """Deploy keys to the hosts that need them and summarise the outcome.
+
+    Shared by :func:`ssh_setup` and ``setup._do_ssh_setup``, which had
+    byte-identical copies of this loop. They drifted -- a fix applied to one
+    silently left the other broken -- so it lives in one place now.
+
+    Each host is isolated: an exception deploying to one must not abandon the
+    rest, because the caller's error handling discards partial results and a
+    host that already succeeded would go unreported.
+
+    Args:
+        hosts: Hostnames to consider, in report order.
+        host_users: Username to use per host.
+        failing_hosts: Hosts whose key needs deploying.
+        stanzas_written: Whether a config stanza was just written, per host.
+        key_path: Private key; the ``.pub`` beside it is what gets deployed.
+        key_generated: Whether the key was created during this run.
+        has_passphrase: Whether the key is passphrase-protected.
+        verbose: Print per-host progress.
+
+    Returns:
+        One result per host that needed work, or a single ``(all)`` result
+        when there was nothing to do.
+    """
+    setup_results: List[SSHSetupResult] = []
+
+    for host in hosts:
+        is_forge = _is_forge_host(host)
+        host_needs_key = host in failing_hosts
+        config_written = stanzas_written.get(host, False)
+        host_user = host_users[host]
+
+        key_deployed = False
+        manual_action = False
+
+        if host_needs_key:
+            try:
+                if is_forge:
+                    key_deployed = _deploy_key_forge(
+                        host, key_path, verbose=verbose,
+                    )
+                else:
+                    key_deployed = _deploy_key_ssh_copy_id(
+                        host, host_user, key_path, verbose=verbose,
+                    )
+            except Exception as exc:
+                key_deployed = False
+                if verbose:
+                    print(f"  Key deployment to {host} failed: {exc}")
+            if not key_deployed:
+                manual_action = True
+                if verbose and not is_forge:
+                    print(f"  ⚠ Could not deploy the key to {host}. "
+                          f"You may need to deploy it manually.")
+
+        if not host_needs_key and not config_written:
+            continue
+
+        msg_parts = []
+        if key_deployed:
+            msg_parts.append('key deployed')
+        elif manual_action:
+            msg_parts.append('key deployment needs manual action')
+        if config_written:
+            msg_parts.append('config stanza added')
+        message = '; '.join(msg_parts) if msg_parts else 'already configured'
+
+        setup_results.append(SSHSetupResult(
+            host=host,
+            already_ok=not host_needs_key and not config_written,
+            key_generated=key_generated,
+            key_deployed=key_deployed,
+            config_written=config_written,
+            manual_action_needed=manual_action,
+            message=message,
+        ))
+
+    if not setup_results:
+        if verbose:
+            print("All SSH/git hosts already configured — nothing to do.")
+        return [
+            SSHSetupResult(
+                host='(all)', already_ok=True, key_generated=False,
+                key_deployed=False, config_written=False,
+                manual_action_needed=False,
+                message='All SSH/git hosts already configured',
+            )
+        ]
+
+    if has_passphrase:
+        setup_results[0] = SSHSetupResult(
+            **{**setup_results[0].__dict__,
+               'message': setup_results[0].message +
+               ' (⚠ key is passphrase-protected — run ssh-add)'}
+        )
+
+    return setup_results
 
 
 def ssh_setup(
@@ -513,70 +683,13 @@ def ssh_setup(
             print(f"  \u2022 {h}")
 
     # -- 7. Deploy keys for failing hosts ----------------------------------
-    for host, ep in all_hosts.items():
-        is_forge = _is_forge_host(host)
-        host_needs_key = host in failing_hosts
-        config_written = stanzas_written[host]
-        host_user = host_users[host]
-
-        key_deployed = False
-        manual_action = False
-
-        if host_needs_key:
-            if is_forge:
-                key_deployed = _deploy_key_forge(host, key_path, verbose=verbose)
-                if not key_deployed:
-                    manual_action = True
-            else:
-                key_deployed = _deploy_key_ssh_copy_id(
-                    host, host_user, key_path, verbose=verbose,
-                )
-                if not key_deployed:
-                    manual_action = True
-                    if verbose:
-                        print(f"  \u26a0 ssh-copy-id failed for {host}. "
-                              f"You may need to deploy the key manually.")
-
-        if not host_needs_key and not config_written:
-            continue
-
-        msg_parts = []
-        if key_deployed:
-            msg_parts.append('key deployed')
-        elif manual_action:
-            msg_parts.append('key deployment needs manual action')
-        if config_written:
-            msg_parts.append('config stanza added')
-        message = '; '.join(msg_parts) if msg_parts else 'already configured'
-
-        setup_results.append(SSHSetupResult(
-            host=host,
-            already_ok=not host_needs_key and not config_written,
-            key_generated=key_generated,
-            key_deployed=key_deployed,
-            config_written=config_written,
-            manual_action_needed=manual_action,
-            message=message,
-        ))
-
-    if not setup_results:
-        if verbose:
-            print("All SSH/git hosts already configured \u2014 nothing to do.")
-        return [
-            SSHSetupResult(
-                host='(all)', already_ok=True, key_generated=False,
-                key_deployed=False, config_written=False,
-                manual_action_needed=False,
-                message='All SSH/git hosts already configured',
-            )
-        ]
-
-    # -- Passphrase warning in summary ----------------------------------
-    if has_passphrase:
-        setup_results[0] = SSHSetupResult(
-            **{**setup_results[0].__dict__,
-               'message': setup_results[0].message +
-               ' (\u26a0 key is passphrase-protected \u2014 run ssh-add)'}
-        )
-
-    return setup_results
+    return _deploy_keys_and_report(
+        hosts=list(all_hosts),
+        host_users=host_users,
+        failing_hosts=failing_hosts,
+        stanzas_written=stanzas_written,
+        key_path=key_path,
+        key_generated=key_generated,
+        has_passphrase=has_passphrase,
+        verbose=verbose,
+    )

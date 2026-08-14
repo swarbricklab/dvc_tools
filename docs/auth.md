@@ -523,12 +523,16 @@ dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [--repo URL] [-v
 
 `dt auth setup` discovers all endpoints the project uses (same as `dt auth list`), then:
 
-1. **SSH / git endpoints** — reuses an existing key (`~/.ssh/id_ed25519`, `id_rsa`, or `id_ecdsa`) or generates a passphrase-less `~/.ssh/id_ed25519` pair, appends a `Host` stanza to `~/.ssh/config` for any host that doesn't already have one, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts, `gh ssh-key add` for `github.com`, `glab ssh-key add` for `gitlab.com`)
+1. **SSH / git endpoints** — reuses an existing key (`~/.ssh/id_ed25519`, `id_rsa`, or `id_ecdsa`) or generates a passphrase-less `~/.ssh/id_ed25519` pair, appends a `Host` stanza to `~/.ssh/config` for any host that doesn't already have one, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts, `gh ssh-key add` for `github.com`, `glab ssh-key add` for `gitlab.com`). Where `ssh-copy-id` is not installed — as in the containerised `module load dt` image, which ships `ssh` without it — the key is appended to the remote `authorized_keys` over plain `ssh` instead
 2. **S3 endpoints** — fetches credentials from the configured secret manager and installs them as a profile in `~/.aws/credentials` / `~/.aws/config` (one profile per repo, named after the repo)
 
-If S3 endpoints exist but there is no active GCP authentication, the
-credential step is skipped with an error telling you to run
-`gcloud auth login`; SSH setup still runs.
+If S3 endpoints exist but GCP authentication is unavailable, the credential
+step is skipped with an error and SSH setup still runs. The error names the
+actual cause, which is not always a missing login: `gcloud` can also be absent
+from `PATH`, or simply too slow to answer. On NCI it lives on `/g/data`, so a
+cold start can take over 20 seconds — well past the point where a check has to
+give up. That is reported as a timeout, not as "you are not logged in", because
+re-running `gcloud auth login` cannot fix a slow filesystem.
 
 Username resolution priority (per host):
 1. `git`, for known forge hosts (`github.com`, `gitlab.com`) — these never prompt
@@ -583,7 +587,7 @@ hosts:
 ```
 
 > **Do not put passwords in this file.** A `password:` key is parsed but is
-> not used by anything; `ssh-copy-id` prompts for the password
+> not used by anything; key deployment prompts for the password
 > interactively. Writing one here only leaves a plaintext credential on
 > disk.
 
@@ -749,6 +753,48 @@ to use GCP's default automatic (global) replication. Set it to switch new
 secrets to user-managed replication in those regions — required under a
 `gcp.resourceLocations` org policy that forbids creating secrets in
 `global`.
+
+`secrets.gcp.project` does double duty. It names the project holding the
+secrets, which is baked into the resource path
+(`projects/<project>/secrets/...`), and it is also attached to the credentials
+as the **quota project** — the project billed for the API call. These are
+separate concepts in GCP that happen to share a value here; nothing derives
+one from the other.
+
+Attaching it matters because credentials from `gcloud auth application-default
+login` carry no quota project of their own, and google-auth then warns on
+every call:
+
+> Your application has authenticated using end user credentials from Google
+> Cloud SDK without a quota project.
+
+dt sets it for you from `secrets.gcp.project`. If you see that warning from an
+older dt, or from another tool, set it on the credentials directly:
+
+```bash
+gcloud auth application-default set-quota-project <your-gcp-project>
+```
+
+### When a secret is "permission denied"
+
+Secret Manager returns `PERMISSION_DENIED` for a secret you cannot see *and*
+for one that is not there — it will not distinguish them, since a denial that
+differed from a not-found would let anyone probe which secrets exist.
+
+So the first thing to check is not the grant but the project:
+
+```bash
+dt config get secrets.gcp.project        # which project dt is asking
+gcloud secrets list --project=<that>     # what is actually in it
+```
+
+`secrets.gcp.project` resolves through system, user, and repo scope in that
+order of increasing precedence, so a personal override in
+`~/.config/dt/config.yaml` silently wins over the group's system config. Two
+people on the same machine can therefore be querying different projects, and
+an access grant made against the wrong one never takes effect no matter how
+many times it is repeated. Check the resolved value in the environment that is
+failing, not in your own.
 
 ### Security
 

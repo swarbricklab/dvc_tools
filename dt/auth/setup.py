@@ -13,7 +13,7 @@ YAML config format::
         # forge — no username needed
 
 Do not put passwords in this file. Nothing reads them: where a password
-is genuinely needed, ``ssh-copy-id`` prompts for it interactively.
+is genuinely needed, key deployment prompts for it interactively.
 """
 
 import getpass
@@ -42,8 +42,7 @@ from .endpoints import (
 from .ssh import (
     SSHSetupResult,
     _DEFAULT_KEY_PATH,
-    _deploy_key_forge,
-    _deploy_key_ssh_copy_id,
+    _deploy_keys_and_report,
     _ensure_ssh_dir,
     _extract_ssh_host,
     _extract_ssh_user,
@@ -182,16 +181,14 @@ def auth_setup(
     # -- 2b. Early GCP auth check (fail fast, not after SSH setup) ---------
     if has_s3:
         from ..secrets.gcp import GCPSecretBackend
-        if not GCPSecretBackend._has_adc_credentials() \
-                and not GCPSecretBackend.check_gcloud_authenticated():
-            report.errors.append(
-                "No active GCP authentication. "
-                "Run 'gcloud auth login' then retry."
-            )
-            if verbose:
-                print("\n\u26a0 No active GCP authentication found.")
-                print("  Run 'gcloud auth login' to authenticate, then retry.")
-            has_s3 = False  # skip credential install
+        if not GCPSecretBackend._has_adc_credentials():
+            status, _account = GCPSecretBackend.gcloud_auth_status()
+            if status != 'ok':
+                hint = GCPSecretBackend.gcloud_auth_hint(status)
+                report.errors.append(f"GCP authentication unavailable. {hint}")
+                if verbose:
+                    print(f"\n\u26a0 {hint}")
+                has_s3 = False  # skip credential install
 
     # -- 3. SSH setup (if needed) ------------------------------------------
     if has_ssh_or_git:
@@ -418,11 +415,6 @@ def _do_ssh_setup(
             if host:
                 failing_hosts.add(host)
 
-    if verbose and failing_hosts:
-        print(f"\n{len(failing_hosts)} host(s) need key deployment:")
-        for h in sorted(failing_hosts):
-            print(f"  \u2022 {h}")
-
     # Refine failing_hosts: for non-forge hosts that passed the
     # connectivity check, verify whether the configured key is already
     # accepted.  This avoids running ssh-copy-id (which prompts for a
@@ -439,71 +431,24 @@ def _do_ssh_setup(
             if verbose:
                 print(f"  Key not accepted by {host} — will deploy")
 
-    # Deploy keys
-    setup_results: List[SSHSetupResult] = []
-    for host, ep in all_hosts.items():
-        is_forge = _is_forge_host(host)
-        host_needs_key = host in failing_hosts
-        config_written = stanzas_written[host]
-        host_user = host_users[host]
+    # Report the list only once it is final. Printing it before the
+    # refinement above announced a subset and then deployed to hosts
+    # that were never named, which reads as the check being wrong.
+    if verbose and failing_hosts:
+        print(f"\n{len(failing_hosts)} host(s) need key deployment:")
+        for h in sorted(failing_hosts):
+            print(f"  \u2022 {h}")
 
-        key_deployed = False
-        manual_action = False
-
-        if host_needs_key:
-            if is_forge:
-                key_deployed = _deploy_key_forge(host, key_path, verbose=verbose)
-                if not key_deployed:
-                    manual_action = True
-            else:
-                key_deployed = _deploy_key_ssh_copy_id(
-                    host, host_user, key_path, verbose=verbose,
-                )
-                if not key_deployed:
-                    manual_action = True
-
-        if not host_needs_key and not config_written:
-            continue
-
-        msg_parts = []
-        if key_deployed:
-            msg_parts.append('key deployed')
-        elif manual_action:
-            msg_parts.append('key deployment needs manual action')
-        if config_written:
-            msg_parts.append('config stanza added')
-        message = '; '.join(msg_parts) if msg_parts else 'already configured'
-
-        setup_results.append(SSHSetupResult(
-            host=host,
-            already_ok=not host_needs_key and not config_written,
-            key_generated=key_generated,
-            key_deployed=key_deployed,
-            config_written=config_written,
-            manual_action_needed=manual_action,
-            message=message,
-        ))
-
-    if not setup_results:
-        if verbose:
-            print("All SSH/git hosts already configured \u2014 nothing to do.")
-        return [
-            SSHSetupResult(
-                host='(all)', already_ok=True, key_generated=False,
-                key_deployed=False, config_written=False,
-                manual_action_needed=False,
-                message='All SSH/git hosts already configured',
-            )
-        ]
-
-    if has_passphrase:
-        setup_results[0] = SSHSetupResult(
-            **{**setup_results[0].__dict__,
-               'message': setup_results[0].message +
-               ' (\u26a0 key is passphrase-protected \u2014 run ssh-add)'}
-        )
-
-    return setup_results
+    return _deploy_keys_and_report(
+        hosts=list(all_hosts),
+        host_users=host_users,
+        failing_hosts=failing_hosts,
+        stanzas_written=stanzas_written,
+        key_path=key_path,
+        key_generated=key_generated,
+        has_passphrase=has_passphrase,
+        verbose=verbose,
+    )
 
 
 # =============================================================================
