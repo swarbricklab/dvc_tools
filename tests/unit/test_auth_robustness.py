@@ -369,3 +369,30 @@ class TestBothEntryPointsShareTheLoop:
         """If these come back, the duplication has come back with them."""
         assert not hasattr(setup_mod, '_deploy_key_ssh_copy_id')
         assert not hasattr(setup_mod, '_deploy_key_forge')
+
+
+class TestQuotaProjectDegradesSafely:
+    """Setting a quota project asks GCP to bill it, which needs
+    serviceusage.services.use on that project.
+
+    A user who can read the secret but lacks that permission would get
+    USER_PROJECT_DENIED -- a 403, i.e. PermissionDenied -- on a call that
+    would have worked without the header. That must not be fatal: the
+    existing gcloud CLI fallback sends no quota header, so it still works.
+    """
+
+    def test_permission_denied_falls_back_to_the_cli(self):
+        from google.api_core import exceptions as gcp_exceptions
+
+        backend = GCPSecretBackend(project='bcarc-489101')
+        client = MagicMock()
+        client.access_secret_version.side_effect = \
+            gcp_exceptions.PermissionDenied('USER_PROJECT_DENIED')
+
+        with patch.object(type(backend), 'client', property(lambda s: client)), \
+             patch.object(backend, '_cli_access_secret',
+                          return_value='[core]\n') as cli:
+            assert backend.get_raw_config('visium') == '[core]\n'
+
+        cli.assert_called_once_with('visium')
+        assert backend._use_cli is True, "should stay on the CLI for the session"
