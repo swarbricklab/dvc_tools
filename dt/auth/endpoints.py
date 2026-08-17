@@ -150,8 +150,12 @@ def _discover_dt_config() -> List[Endpoint]:
             source='DVC cache (dvc cache dir)',
         ))
     else:
-        cache_root_cfg = cfg.get_value('cache.root')
-        if cache_root_cfg:
+        # cache.root may hold one path or several, like remote.root. Reading
+        # it with get_value would put the raw list into Endpoint.url, which
+        # does not fail here -- it fails later in classify_url ('list' has no
+        # attribute 'strip') and in the filesystem check, a long way from the
+        # cause.
+        for cache_root_cfg in cfg.get_str_list('cache.root'):
             endpoints.append(Endpoint(
                 type='filesystem',
                 url=cache_root_cfg,

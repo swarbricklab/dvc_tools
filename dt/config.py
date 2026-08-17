@@ -208,6 +208,25 @@ def unset_value(key: str, scope: str = 'user') -> bool:
     return True
 
 
+#: Keys whose value may legitimately be a list.
+#:
+#: ``dt config add`` used to accept any key at all, which is how a scalar that
+#: every consumer reads with ``get_value`` could quietly become a list. The
+#: reader does not crash -- it hands back the list -- so the failure surfaces
+#: much later and somewhere else entirely, as ``Path(['/a', '/b'])`` or
+#: ``['/a'].strip()``. Worse, the config outlives the tool: a list written
+#: today keeps breaking every already-released version, which cannot be
+#: patched.
+#:
+#: Adding a key here is a promise that every consumer of it reads through
+#: :func:`get_str_list` (or otherwise tolerates a list).
+LIST_VALUED_KEYS = frozenset({
+    'remote.root',
+    'cache.root',
+    'secrets.gcp.locations',
+})
+
+
 def get_str_list(key: str, default: Optional[List[str]] = None) -> List[str]:
     """Get a configuration value as a list of strings, honouring scope override.
 
@@ -246,7 +265,19 @@ def add_to_list(key: str, value: str, scope: str = 'user') -> bool:
 
     Returns:
         True if added, False if it was already present.
+
+    Raises:
+        ValueError: If *key* is not in :data:`LIST_VALUED_KEYS`.
     """
+    if key not in LIST_VALUED_KEYS:
+        known = ', '.join(sorted(LIST_VALUED_KEYS))
+        raise ValueError(
+            f"{key!r} does not take a list of values.\n"
+            f"Keys that do: {known}.\n"
+            f"Making another key a list breaks every tool that reads it as a "
+            f"single value -- including released versions, which cannot be "
+            f"fixed after the fact. Use 'dt config set {key} <value>' instead."
+        )
     current = get_str_list(key)
     if value in current:
         return False
