@@ -45,9 +45,24 @@ dt config list --show-origin  # Show which scope each value comes from
 
 ## List-valued settings
 
-Some settings hold several values. `remote.root` is the main one: the **first**
-entry is where new remotes are created, and the rest are additional places that
-`dt remote perms --all` and `dt remote clean --all` sweep.
+Only some settings hold several values:
+
+| Key | Meaning of the list |
+|-----|---------------------|
+| `remote.root` | The **first** entry is where new remotes are created; the rest are also swept by `dt remote perms --all` and `dt remote clean --all` |
+| `cache.root` | The **first** entry is the primary cache; the rest are reported by `dt auth list` |
+| `secrets.gcp.locations` | Regions for user-managed secret replication |
+
+`dt config add` refuses any other key. That is deliberate, and the reason is
+worth knowing: a config outlives the code that reads it. Every other setting is
+read as a single value, so turning one into a list does not fail where the
+mistake was made — the reader hands the list on quite happily, and it surfaces
+later as `Path(['/a', '/b'])` somewhere else entirely.
+
+This is not hypothetical. `remote.root` gained extra entries before every
+consumer had been taught to expect them, which retroactively broke 26 already
+published `dt` container images: each aborts on startup with a bare
+`TypeError`, and being immutable, none of them can be fixed.
 
 ```bash
 dt config add remote.root /g/data/px14/dvc/analysis
@@ -78,6 +93,11 @@ A list can also be written directly, though quoting makes it error-prone:
 ```bash
 dt config set remote.root '[/g/data/a56/dvc/analysis, /g/data/a56/dvc/datasets]'
 ```
+
+`set` does **not** apply the restriction above — it will write a list to any
+key, since it cannot tell a YAML list from a string that looks like one. If you
+need a genuinely new list-valued setting, add it to `LIST_VALUED_KEYS` in
+`dt/config.py` and make sure every consumer reads it through `get_str_list`.
 
 ## See Also
 

@@ -227,14 +227,17 @@ def check_github_ssh() -> DiagnosticResult:
 
 def check_cache_root() -> DiagnosticResult:
     """Check if cache root is configured and accessible."""
-    cache_root = cfg.get_value('cache.root')
-    
-    if not cache_root:
+    # May hold several roots; the first is the primary, and it is the one the
+    # rest of dt will use. Reading it with get_value would hand Path() a list.
+    configured = cfg.get_str_list('cache.root')
+
+    if not configured:
         return DiagnosticResult(
             "cache_root", False, "Cache root not configured",
             "Run: dt config set cache.root /path/to/cache"
         )
-    
+
+    cache_root = configured[0]
     cache_path = Path(cache_root)
     if cache_path.exists():
         if os.access(cache_path, os.W_OK):

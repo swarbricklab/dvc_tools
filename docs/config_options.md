@@ -11,7 +11,7 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `owner` | Default GitHub owner (user or org) for [short repository names](clone.md#short-name-feature) | `myorg` |
 | `team` | GitHub team for [`gh repo create --team`](https://cli.github.com/manual/gh_repo_create) | `analysts` |
 | `username` | Default SSH username for remote hosts, used by [`dt clone`](clone.md) and [`dt auth setup`](auth.md) | `jr9959` |
-| `cache.root` | Root directory for [shared external caches](cache.md) | `/g/data/a56/dvc_cache` |
+| `cache.root` | Root director**y** for [shared external caches](cache.md). May also be a list, in which case the **first** entry is the primary cache and the rest are reported by `dt auth list`. Manage with `dt config add/remove cache.root <path>` | `/g/data/a56/dvc_cache` |
 | `remote.root` | Root director**ies** for [DVC remote storage](remote.md). A single path, or a list. The **first** entry is where new remotes are created; the rest are also scanned by `--all`. Manage with `dt config add/remove remote.root <path>` | `/g/data/a56/dvc/analysis` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
 | `site_cache.root` | Root directory for shared DVC [`site_cache_dir`](index.md) | `/g/data/a56/dvc/site` |
