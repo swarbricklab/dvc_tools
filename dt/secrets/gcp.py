@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -398,15 +399,21 @@ class GCPSecretBackend(SecretBackend):
         every single call while everything appears to work -- until the same
         credentials are used somewhere the fallback is unavailable (a
         container with no gcloud), where it surfaces as a mystery.
+        Written to stderr: this is a diagnostic, and must survive being piped
+        or redirected away from whatever the command was actually printing.
         """
-        print(f"\n⚠ Permission denied reading secret '{secret_id}' "
-              f"from GCP project '{self.project}'")
-        print(f"    authenticated as: {who}")
+        def _err(line: str) -> None:
+            print(line, file=sys.stderr)
+
+        _err(f"\n\u26a0 Permission denied reading secret '{secret_id}' "
+             f"from GCP project '{self.project}'")
+        _err(f"    authenticated as: {who}")
         if note:
             for line in note.splitlines():
-                print(f"    {line}")
+                _err(f"    {line}")
         if retrying:
-            print("    retrying via the gcloud CLI, which may use a different account ...")
+            _err("    retrying via the gcloud CLI, which may use a "
+                 "different account ...")
 
     def _denied_message(self, secret_id: str, detail: str,
                         identity: Optional[str] = None,
@@ -439,6 +446,10 @@ class GCPSecretBackend(SecretBackend):
         lines += [
             f"Check which project is expected:  dt config get "
             f"secrets.gcp.project",
+            # Listing is the fastest way to spot the cases this message cannot
+            # distinguish: a secret named differently from the repo, a typo, or
+            # the right secret sitting in a different project.
+            f"See what you can actually read:   dt auth credentials list",
             f"List what is actually there:      gcloud secrets list "
             f"--project={self.project}",
             f"Error: {detail}",
@@ -482,7 +493,23 @@ class GCPSecretBackend(SecretBackend):
             capture_output=True, text=True,
         )
         if result.returncode != 0:
-            raise SecretError(f"gcloud error listing secrets: {result.stderr.strip()}")
+            stderr = result.stderr.strip()
+            if 'PERMISSION_DENIED' in stderr:
+                who = self._cli_identity_desc()
+                self._echo_denial(f"<list of {self.prefix}*>", who)
+                raise SecretError(
+                    f"Cannot list secrets in project '{self.project}'.\n"
+                    f"Refused for: {who}\n"
+                    f"This needs secretmanager.secrets.list on the project, "
+                    f"which is a separate grant from reading any one secret.\n"
+                    f"Check which project is expected:  dt config get "
+                    f"secrets.gcp.project\n"
+                    f"Error: {stderr}"
+                )
+            raise SecretError(
+                f"Could not list secrets in project '{self.project}'.\n"
+                f"Error: {stderr}"
+            )
         ids = []
         for line in result.stdout.strip().splitlines():
             # Full resource name: projects/<proj>/secrets/<id>
@@ -557,6 +584,8 @@ class GCPSecretBackend(SecretBackend):
         if 'NOT_FOUND' in result.stderr:
             raise SecretError(
                 f"Secret '{secret_id}' not found in project '{self.project}'.\n"
+                f"The repo may use a differently-named secret -- see what "
+                f"exists with: dt auth credentials list\n"
                 f"Create it with: {self._create_secret_hint(secret_id)}"
             )
         if 'PERMISSION_DENIED' in result.stderr:
@@ -644,6 +673,8 @@ class GCPSecretBackend(SecretBackend):
         except gcp_exceptions.NotFound:
             raise SecretError(
                 f"Secret '{self._get_secret_id(repo_name)}' not found in project '{self.project}'.\n"
+                f"The repo may use a differently-named secret -- see what "
+                f"exists with: dt auth credentials list\n"
                 f"Create it with: {self._create_secret_hint(self._get_secret_id(repo_name))}"
             )
         except gcp_exceptions.PermissionDenied as exc:

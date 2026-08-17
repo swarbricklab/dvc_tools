@@ -260,11 +260,12 @@ class TestFailureReasonsAreNotVerboseOnly:
 
     DENIED = SecretError("Cannot read secret 'dvc-remote-bcarc_wts' in project 'x'.")
 
-    def test_denial_reaches_stdout_without_verbose(self, capsys):
+    def test_denial_is_reported_without_verbose(self, capsys):
+        """On stderr, so it survives the output being piped elsewhere."""
         with _patched_backend(side_effect=self.DENIED):
             with pytest.raises(AuthError):
                 install_credentials(verbose=False, repo_name='bcarc_wts')
-        assert 'Cannot read secret' in capsys.readouterr().out
+        assert 'Cannot read secret' in capsys.readouterr().err
 
     def test_denial_is_in_the_exception_too(self):
         """stdout gets piped away and pasted selectively; the error must stand alone."""
@@ -320,9 +321,9 @@ class TestIdentityIsReportedOnEveryFetch:
                           return_value='Authenticating to GCP as: sa@x'):
             with pytest.raises(AuthError):
                 install_credentials(verbose=False, repo_name='bcarc_wts')
-        out = capsys.readouterr().out
-        assert 'Authenticating to GCP as: sa@x' in out
-        assert out.index('Authenticating') < out.index('denied')
+        captured = capsys.readouterr()
+        assert 'Authenticating to GCP as: sa@x' in captured.out
+        assert 'denied' in captured.err
 
     def test_identity_printed_on_success_too(self, capsys):
         valid = '[bcarc_wts]\naws_access_key_id = AK\naws_secret_access_key = SK\n'
@@ -377,10 +378,10 @@ class TestDenialsAreEchoed:
              patch.object(b, '_cli_access_secret', return_value='[r]\nk = v\n'):
             b.get_raw_config('bcarc_wts')
 
-        out = capsys.readouterr().out
-        assert 'Permission denied' in out
-        assert 'dvc-remote-bcarc_wts' in out
-        assert 'bcarc-489101' in out
+        err = capsys.readouterr().err
+        assert 'Permission denied' in err
+        assert 'dvc-remote-bcarc_wts' in err
+        assert 'bcarc-489101' in err
 
     def test_echo_names_the_refused_identity(self, tmp_path, monkeypatch, capsys):
         b = self._denied_backend(tmp_path, monkeypatch)
@@ -389,7 +390,7 @@ class TestDenialsAreEchoed:
         with patch.object(type(b), 'client', property(lambda _self: client)), \
              patch.object(b, '_cli_access_secret', return_value='x'):
             b.get_raw_config('bcarc_wts')
-        assert SA_JSON['client_email'] in capsys.readouterr().out
+        assert SA_JSON['client_email'] in capsys.readouterr().err
 
     def test_echo_carries_the_service_account_caveat(self, tmp_path, monkeypatch, capsys):
         b = self._denied_backend(tmp_path, monkeypatch)
@@ -398,7 +399,7 @@ class TestDenialsAreEchoed:
         with patch.object(type(b), 'client', property(lambda _self: client)), \
              patch.object(b, '_cli_access_secret', return_value='x'):
             b.get_raw_config('bcarc_wts')
-        assert 'do not apply' in capsys.readouterr().out
+        assert 'do not apply' in capsys.readouterr().err
 
     def test_echo_says_it_is_retrying_elsewhere(self, tmp_path, monkeypatch, capsys):
         b = self._denied_backend(tmp_path, monkeypatch)
@@ -407,7 +408,7 @@ class TestDenialsAreEchoed:
         with patch.object(type(b), 'client', property(lambda _self: client)), \
              patch.object(b, '_cli_access_secret', return_value='x'):
             b.get_raw_config('bcarc_wts')
-        assert 'retrying via the gcloud CLI' in capsys.readouterr().out
+        assert 'retrying via the gcloud CLI' in capsys.readouterr().err
 
     def test_prior_identity_reaches_the_cli_call(self, tmp_path, monkeypatch):
         """So a second denial can name both accounts."""
@@ -490,7 +491,152 @@ class TestNotFoundIsNotADenial:
              patch('dt.secrets.gcp.subprocess.run', return_value=missing):
             with pytest.raises(SecretError, match='not found'):
                 b._cli_access_secret('bcarc_wts')
+        assert 'Permission denied' not in capsys.readouterr().err
+
+
+class TestDiagnosticsGoToStderr:
+    """Diagnostics must survive `dt ... > file` and `| head`."""
+
+    def test_denial_echo_is_not_on_stdout(self, tmp_path, monkeypatch, capsys):
+        _write(tmp_path / 'key.json', SA_JSON)
+        monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS', str(tmp_path / 'key.json'))
+        b = GCPSecretBackend(project='bcarc-489101')
+        b._cli_account = 'her@example.org'
+        from google.api_core import exceptions as gcp_exceptions
+        client = MagicMock()
+        client.access_secret_version.side_effect = gcp_exceptions.PermissionDenied('no')
+        with patch.object(type(b), 'client', property(lambda _s: client)), \
+             patch.object(b, '_cli_access_secret', return_value='x'):
+            b.get_raw_config('bcarc_wts')
         assert 'Permission denied' not in capsys.readouterr().out
+
+    def test_failure_reason_is_not_on_stdout(self, capsys):
+        with _patched_backend(side_effect=SecretError('denied for reasons')):
+            with pytest.raises(AuthError):
+                install_credentials(verbose=False, repo_name='bcarc_wts')
+        assert 'denied for reasons' not in capsys.readouterr().out
+
+
+# =============================================================================
+# `dt auth credentials list` -- the "what CAN I read?" escape hatch
+# =============================================================================
+
+class TestListIsSuggestedOnFailure:
+    """Listing catches what a denial message structurally cannot.
+
+    PERMISSION_DENIED cannot distinguish "you lack access" from "it is not
+    here". A secret named differently from the repo, or a typo, looks
+    identical to a missing grant -- unless you list what is actually visible.
+    """
+
+    def test_summary_error_suggests_listing(self):
+        with _patched_backend(side_effect=SecretError('denied')):
+            with pytest.raises(AuthError) as exc:
+                install_credentials(verbose=False, repo_name='bcarc_wts')
+        assert 'dt auth credentials list' in str(exc.value)
+
+    def test_denied_message_suggests_listing(self):
+        b = GCPSecretBackend(project='bcarc-489101')
+        assert 'dt auth credentials list' in b._denied_message('dvc-remote-x', 'detail')
+
+    def test_not_found_suggests_listing(self):
+        b = GCPSecretBackend(project='bcarc-489101')
+        missing = MagicMock(returncode=1, stderr='NOT_FOUND: nope', stdout='')
+        with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
+             patch('dt.secrets.gcp.subprocess.run', return_value=missing):
+            with pytest.raises(SecretError) as exc:
+                b._cli_access_secret('bcarc_wts')
+        assert 'dt auth credentials list' in str(exc.value)
+
+
+class TestListSecretsErrorsAreReported:
+    """`list` had a bare `gcloud error listing secrets: <stderr>`."""
+
+    def _list_failing(self, stderr):
+        b = GCPSecretBackend(project='bcarc-489101')
+        b._cli_account = 'her@example.org'
+        failed = MagicMock(returncode=1, stderr=stderr, stdout='')
+        with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
+             patch('dt.secrets.gcp.subprocess.run', return_value=failed):
+            with pytest.raises(SecretError) as exc:
+                b.list_secrets()
+        return str(exc.value)
+
+    def test_denial_names_the_project(self):
+        assert "bcarc-489101" in self._list_failing('PERMISSION_DENIED: nope')
+
+    def test_denial_names_the_identity(self):
+        assert 'her@example.org' in self._list_failing('PERMISSION_DENIED: nope')
+
+    def test_denial_explains_list_is_a_separate_grant(self):
+        """Being able to read one secret does not imply being able to list."""
+        assert 'secretmanager.secrets.list' in self._list_failing('PERMISSION_DENIED: x')
+
+    def test_denial_is_echoed(self, capsys):
+        self._list_failing('PERMISSION_DENIED: nope')
+        assert 'Permission denied' in capsys.readouterr().err
+
+    def test_other_errors_still_name_the_project(self):
+        msg = self._list_failing('some other gcloud failure')
+        assert 'bcarc-489101' in msg
+        assert 'some other gcloud failure' in msg
+
+
+class TestCredentialsCliCommands:
+
+    def _invoke(self, args):
+        from click.testing import CliRunner
+        from dt.cli import cli
+        return CliRunner().invoke(cli, args)
+
+    def test_list_names_the_project(self):
+        with patch('dt.auth.list_repo_secrets', return_value=['bcarc_wts']), \
+             patch('dt.config.get_value', return_value='bcarc-489101'):
+            result = self._invoke(['auth', 'credentials', 'list'])
+        assert 'bcarc-489101' in result.output
+
+    def test_empty_list_names_the_project_too(self):
+        with patch('dt.auth.list_repo_secrets', return_value=[]), \
+             patch('dt.config.get_value', return_value='bcarc-489101'):
+            result = self._invoke(['auth', 'credentials', 'list'])
+        assert 'bcarc-489101' in result.output
+
+    def test_empty_list_admits_it_may_be_visibility(self):
+        with patch('dt.auth.list_repo_secrets', return_value=[]), \
+             patch('dt.config.get_value', return_value='bcarc-489101'):
+            result = self._invoke(['auth', 'credentials', 'list'])
+        assert 'cannot see them' in result.output
+
+    def test_list_error_reaches_the_user(self):
+        with patch('dt.auth.list_repo_secrets',
+                   side_effect=AuthError('Cannot list secrets in project X')):
+            result = self._invoke(['auth', 'credentials', 'list'])
+        assert result.exit_code != 0
+        assert 'Cannot list secrets' in result.output
+
+    def test_check_does_not_call_a_denial_not_found(self):
+        from dt.auth.credentials import SecretInfo
+        info = SecretInfo(repo_name='bcarc_wts', exists=False, accessible=False,
+                          error='Cannot read secret ... PERMISSION_DENIED')
+        with patch('dt.auth.check_secret', return_value=info):
+            result = self._invoke(['auth', 'credentials', 'check', 'bcarc_wts'])
+        assert 'could not confirm' in result.output
+        assert 'secret not found' not in result.output
+
+    def test_check_genuine_absence_still_says_not_found(self):
+        from dt.auth.credentials import SecretInfo
+        info = SecretInfo(repo_name='bcarc_wts', exists=False, accessible=False, error=None)
+        with patch('dt.auth.check_secret', return_value=info):
+            result = self._invoke(['auth', 'credentials', 'check', 'bcarc_wts'])
+        assert 'secret not found' in result.output
+        assert 'dt auth credentials list' in result.output
+
+    def test_install_partial_failure_is_not_called_not_found(self):
+        with patch('dt.auth.install_credentials',
+                   return_value={'a': True, 'b': False}):
+            result = self._invoke(['auth', 'credentials', 'install'])
+        assert 'Not found' not in result.output
+        assert 'Failed: b' in result.output
 
 
 # =============================================================================

@@ -17,6 +17,7 @@ import io
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -60,14 +61,17 @@ def _no_credentials_message(reasons: Dict[str, str], identity: Optional[str]) ->
     """
     lines = ["No credentials were installed."]
     for name, reason in reasons.items():
-        # Reasons are often multi-line (the secret-denied hint is three lines);
-        # indent continuations so the repo names stay scannable.
+        # Reasons are often multi-line (the secret-denied hint is several
+        # lines); indent continuations so the repo names stay scannable.
         first, *rest = str(reason).splitlines() or ['']
         lines.append(f"  {name}: {first}")
         lines.extend(f"    {line}" for line in rest)
     if identity:
         lines.append("")
         lines.append(identity)
+    lines.append("")
+    lines.append("To see which secrets this identity can read:  "
+                 "dt auth credentials list")
     return '\n'.join(lines)
 
 
@@ -732,8 +736,9 @@ def install_credentials(
     def _failed(name: str, reason: str) -> None:
         results[name] = False
         reasons[name] = reason
-        # Unconditional: a failure reason is not verbose-level information.
-        print(f"  \u26a0 {name}: {reason}")
+        # Unconditional, and on stderr: a failure reason is not verbose-level
+        # information, and it must survive the output being piped elsewhere.
+        print(f"  \u26a0 {name}: {reason}", file=sys.stderr)
 
     for repo_info in repos:
         try:
