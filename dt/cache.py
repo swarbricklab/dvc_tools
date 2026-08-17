@@ -40,8 +40,13 @@ def resolve_cache_path(
     if cache_path:
         return Path(cache_path).resolve()
     
-    # Get cache root from argument or config
-    root = cache_root or cfg.get_value('cache.root')
+    # Get cache root from argument or config. Config may hold several roots;
+    # the first is the primary, matching remote.root's convention that the
+    # first entry is the one used when creating something new.
+    root = cache_root
+    if not root:
+        configured = cfg.get_str_list('cache.root')
+        root = configured[0] if configured else None
     if not root:
         raise CacheError(
             "Cache root not configured.\n"

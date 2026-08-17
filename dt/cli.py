@@ -295,7 +295,11 @@ def config_add(key, value, local, project, user, system):
         raise click.UsageError("Only one scope flag can be specified.")
 
     scope = _get_scope(local, project, user, system)
-    if cfg.add_to_list(key, value, scope):
+    try:
+        added = cfg.add_to_list(key, value, scope)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+    if added:
         values = cfg.get_str_list(key)
         click.echo(f"Added to {key} in {scope} config "
                    f"({len(values)} value{'s' if len(values) != 1 else ''}):")
