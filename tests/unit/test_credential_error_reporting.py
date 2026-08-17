@@ -345,6 +345,155 @@ class TestIdentityIsReportedOnEveryFetch:
 
 
 # =============================================================================
+# Permission denials must be echoed, even when the fallback rescues them
+# =============================================================================
+
+class TestDenialsAreEchoed:
+    """A silently-retried denial is a denial nobody learns from.
+
+    The gcloud CLI fallback frequently succeeds, so the Python client can be
+    refused on every call while everything appears to work -- right up until
+    the same credentials are used where no fallback exists (a container with
+    no gcloud), where it surfaces as a mystery.
+    """
+
+    def _denied_backend(self, tmp_path, monkeypatch, sa=True):
+        gac = _write(tmp_path / 'key.json', SA_JSON if sa else USER_JSON)
+        monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS', str(gac))
+        b = GCPSecretBackend(project='bcarc-489101')
+        b._cli_account = 'her@example.org'
+        return b
+
+    def _permission_denied(self):
+        from google.api_core import exceptions as gcp_exceptions
+        return gcp_exceptions.PermissionDenied('denied by test')
+
+    def test_library_denial_is_echoed_even_when_fallback_succeeds(
+            self, tmp_path, monkeypatch, capsys):
+        b = self._denied_backend(tmp_path, monkeypatch)
+        client = MagicMock()
+        client.access_secret_version.side_effect = self._permission_denied()
+        with patch.object(type(b), 'client', property(lambda _self: client)), \
+             patch.object(b, '_cli_access_secret', return_value='[r]\nk = v\n'):
+            b.get_raw_config('bcarc_wts')
+
+        out = capsys.readouterr().out
+        assert 'Permission denied' in out
+        assert 'dvc-remote-bcarc_wts' in out
+        assert 'bcarc-489101' in out
+
+    def test_echo_names_the_refused_identity(self, tmp_path, monkeypatch, capsys):
+        b = self._denied_backend(tmp_path, monkeypatch)
+        client = MagicMock()
+        client.access_secret_version.side_effect = self._permission_denied()
+        with patch.object(type(b), 'client', property(lambda _self: client)), \
+             patch.object(b, '_cli_access_secret', return_value='x'):
+            b.get_raw_config('bcarc_wts')
+        assert SA_JSON['client_email'] in capsys.readouterr().out
+
+    def test_echo_carries_the_service_account_caveat(self, tmp_path, monkeypatch, capsys):
+        b = self._denied_backend(tmp_path, monkeypatch)
+        client = MagicMock()
+        client.access_secret_version.side_effect = self._permission_denied()
+        with patch.object(type(b), 'client', property(lambda _self: client)), \
+             patch.object(b, '_cli_access_secret', return_value='x'):
+            b.get_raw_config('bcarc_wts')
+        assert 'do not apply' in capsys.readouterr().out
+
+    def test_echo_says_it_is_retrying_elsewhere(self, tmp_path, monkeypatch, capsys):
+        b = self._denied_backend(tmp_path, monkeypatch)
+        client = MagicMock()
+        client.access_secret_version.side_effect = self._permission_denied()
+        with patch.object(type(b), 'client', property(lambda _self: client)), \
+             patch.object(b, '_cli_access_secret', return_value='x'):
+            b.get_raw_config('bcarc_wts')
+        assert 'retrying via the gcloud CLI' in capsys.readouterr().out
+
+    def test_prior_identity_reaches_the_cli_call(self, tmp_path, monkeypatch):
+        """So a second denial can name both accounts."""
+        b = self._denied_backend(tmp_path, monkeypatch)
+        client = MagicMock()
+        client.access_secret_version.side_effect = self._permission_denied()
+        with patch.object(type(b), 'client', property(lambda _self: client)), \
+             patch.object(b, '_cli_access_secret', return_value='x') as cli:
+            b.get_raw_config('bcarc_wts')
+        assert SA_JSON['client_email'] in cli.call_args.kwargs['prior_identity']
+
+
+class TestBothIdentitiesRefused:
+    """When the fallback is refused too, name both -- not just the last."""
+
+    def _run(self, tmp_path, monkeypatch):
+        _write(tmp_path / 'key.json', SA_JSON)
+        monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS', str(tmp_path / 'key.json'))
+        b = GCPSecretBackend(project='bcarc-489101')
+        b._cli_account = 'her@example.org'
+        denied = MagicMock(returncode=1, stderr='PERMISSION_DENIED: nope', stdout='')
+        with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
+             patch('dt.secrets.gcp.subprocess.run', return_value=denied):
+            with pytest.raises(SecretError) as exc:
+                b._cli_access_secret('bcarc_wts',
+                                     prior_identity='service account sa@x (from env)')
+        return str(exc.value)
+
+    def test_names_the_cli_identity(self, tmp_path, monkeypatch):
+        assert 'her@example.org' in self._run(tmp_path, monkeypatch)
+
+    def test_also_names_the_library_identity(self, tmp_path, monkeypatch):
+        msg = self._run(tmp_path, monkeypatch)
+        assert 'Also refused for' in msg
+        assert 'sa@x' in msg
+
+    def test_keeps_the_ambiguity_warning(self, tmp_path, monkeypatch):
+        """PERMISSION_DENIED also means 'absent'; do not assert it is permissions."""
+        assert 'does not exist there' in self._run(tmp_path, monkeypatch)
+
+    def test_keeps_the_raw_gcloud_error(self, tmp_path, monkeypatch):
+        assert 'PERMISSION_DENIED: nope' in self._run(tmp_path, monkeypatch)
+
+    def test_suggests_checking_the_project(self, tmp_path, monkeypatch):
+        assert 'dt config get secrets.gcp.project' in self._run(tmp_path, monkeypatch)
+
+
+class TestCliIdentityDescription:
+
+    def test_cached_account_avoids_shelling_out(self):
+        b = GCPSecretBackend(project='p')
+        b._cli_account = 'her@example.org'
+        with patch.object(GCPSecretBackend, 'gcloud_auth_status') as status:
+            desc = b._cli_identity_desc()
+        status.assert_not_called()
+        assert 'her@example.org' in desc
+
+    def test_resolves_and_caches_when_unknown(self):
+        b = GCPSecretBackend(project='p')
+        with patch.object(GCPSecretBackend, 'gcloud_auth_status',
+                          return_value=('ok', 'him@example.org')) as status:
+            b._cli_identity_desc()
+            b._cli_identity_desc()
+        assert status.call_count == 1
+        assert b._cli_account == 'him@example.org'
+
+    def test_degrades_without_claiming_an_account(self):
+        b = GCPSecretBackend(project='p')
+        with patch.object(GCPSecretBackend, 'gcloud_auth_status',
+                          return_value=('unauthenticated', None)):
+            assert b._cli_identity_desc() == 'the gcloud CLI account'
+
+
+class TestNotFoundIsNotADenial:
+
+    def test_missing_secret_does_not_echo_a_denial(self, capsys):
+        b = GCPSecretBackend(project='bcarc-489101')
+        missing = MagicMock(returncode=1, stderr='NOT_FOUND: no such secret', stdout='')
+        with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
+             patch('dt.secrets.gcp.subprocess.run', return_value=missing):
+            with pytest.raises(SecretError, match='not found'):
+                b._cli_access_secret('bcarc_wts')
+        assert 'Permission denied' not in capsys.readouterr().out
+
+
+# =============================================================================
 # setup report -- stop claiming there are no S3 endpoints when there are
 # =============================================================================
 
