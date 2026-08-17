@@ -17,6 +17,7 @@ import io
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -29,6 +30,50 @@ from .endpoints import Endpoint, classify_url, _discover_import_sources
 # =============================================================================
 # DVC config helpers
 # =============================================================================
+
+def describe_secret_identity(backend) -> Optional[str]:
+    """Lines naming the identity and project a secret read will use.
+
+    Returns None for backends that have no notion of an identity, so callers
+    can print unconditionally without special-casing.
+    """
+    from ..secrets import GCPSecretBackend
+
+    if not isinstance(backend, GCPSecretBackend):
+        return None
+    ident = backend.identity()
+    lines = [
+        f"Authenticating to GCP as: {ident.describe()}",
+        f"Reading secrets from project: {backend.project}",
+    ]
+    if ident.caveat:
+        lines.append(f"  ⚠ {ident.caveat}")
+    return '\n'.join(lines)
+
+
+def _no_credentials_message(reasons: Dict[str, str], identity: Optional[str]) -> str:
+    """Summary error that names every cause, rather than implying one.
+
+    The per-repo reasons are printed as they happen, but stdout is easily
+    lost -- piped, scrolled past, or reported second-hand by a collaborator
+    who only pastes the last line. Repeating them in the exception means the
+    error alone is enough to diagnose from.
+    """
+    lines = ["No credentials were installed."]
+    for name, reason in reasons.items():
+        # Reasons are often multi-line (the secret-denied hint is several
+        # lines); indent continuations so the repo names stay scannable.
+        first, *rest = str(reason).splitlines() or ['']
+        lines.append(f"  {name}: {first}")
+        lines.extend(f"    {line}" for line in rest)
+    if identity:
+        lines.append("")
+        lines.append(identity)
+    lines.append("")
+    lines.append("To see which secrets this identity can read:  "
+                 "dt auth credentials list")
+    return '\n'.join(lines)
+
 
 def _get_secret_backend():
     """Get the configured secret backend.
@@ -65,14 +110,19 @@ def _get_secret_backend():
             )
         prefix = cfg.get_value('secrets.prefix') or 'dvc-remote-'
         # Quick auth check — fail fast instead of hanging on GCP calls
+        account = None
         if not GCPSecretBackend._has_adc_credentials():
-            status, _account = GCPSecretBackend.gcloud_auth_status()
+            status, account = GCPSecretBackend.gcloud_auth_status()
             if status != 'ok':
                 raise AuthError(
                     "GCP authentication unavailable.\n"
                     + GCPSecretBackend.gcloud_auth_hint(status)
                 )
-        return GCPSecretBackend(project=project, prefix=prefix)
+        backend = GCPSecretBackend(project=project, prefix=prefix)
+        # Hand over what this check already established, so reporting the
+        # identity later does not pay for another gcloud round trip.
+        backend._cli_account = account
+        return backend
     else:
         raise AuthError(
             f"Unknown secret backend: {backend_type}\n"
@@ -670,35 +720,44 @@ def install_credentials(
 
     backend = _get_secret_backend()
 
+    # Say who we are about to authenticate as, before anything can fail.
+    # A denial is uninterpretable without it: "permission denied" and "I
+    # already granted her access" are both true when the caller is a service
+    # account picked up from GOOGLE_APPLICATION_CREDENTIALS.
+    identity = describe_secret_identity(backend)
+    if identity:
+        print(identity)
+
     results: Dict[str, bool] = {}
     legacy_repos: List[str] = []
+    # Why each repo failed, so the summary error can say rather than imply.
+    reasons: Dict[str, str] = {}
+
+    def _failed(name: str, reason: str) -> None:
+        results[name] = False
+        reasons[name] = reason
+        # Unconditional, and on stderr: a failure reason is not verbose-level
+        # information, and it must survive the output being piped elsewhere.
+        print(f"  \u26a0 {name}: {reason}", file=sys.stderr)
 
     for repo_info in repos:
         try:
             raw = backend.get_raw_config(repo_info.name)
         except SecretError as exc:
-            results[repo_info.name] = False
-            if verbose:
-                print(f"  \u26a0 {repo_info.name}: {exc}")
+            _failed(repo_info.name, str(exc))
             continue
 
         if not raw or not raw.strip():
-            results[repo_info.name] = False
-            if verbose:
-                print(f"  \u26a0 {repo_info.name}: empty secret")
+            _failed(repo_info.name, "secret exists but is empty")
             continue
 
         fmt = _detect_secret_format(raw)
         if fmt == 'dvc':
             legacy_repos.append(repo_info.name)
-            results[repo_info.name] = False
-            if verbose:
-                print(f"  \u26a0 {repo_info.name}: legacy DVC-INI format")
+            _failed(repo_info.name, "secret is in legacy DVC-INI format")
             continue
         if fmt == 'unknown':
-            results[repo_info.name] = False
-            if verbose:
-                print(f"  \u26a0 {repo_info.name}: unrecognised secret format")
+            _failed(repo_info.name, "secret is not in a recognised AWS-INI format")
             continue
 
         access_key, secret_key = _parse_aws_secret(raw, repo_info.name)
@@ -720,7 +779,7 @@ def install_credentials(
         )
 
     if not any(results.values()):
-        raise AuthError("No credentials were installed (no usable secrets found).")
+        raise AuthError(_no_credentials_message(reasons, identity))
 
     # Strip now-redundant credential keys from DVC global config, scoped to
     # remotes in the current project.

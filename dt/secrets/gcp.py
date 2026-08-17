@@ -1,8 +1,11 @@
 """GCP Secret Manager backend for DVC credentials."""
 
+import json
 import os
 import shutil
 import subprocess
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -48,6 +51,57 @@ def _replication_create_flags() -> List[str]:
     return ['--replication-policy=user-managed', f'--locations={locations}']
 
 
+@dataclass
+class GCPIdentity:
+    """Who dt will authenticate to GCP as, and where that came from.
+
+    Resolved from files and environment only -- no network call, no gcloud
+    invocation unless we have already fallen through to the CLI. Cheap enough
+    to report on every credential operation, which is the point: a denial
+    means nothing until you know which identity was refused.
+
+    ``account`` is ``None`` for user ADC, because
+    ``gcloud auth application-default login`` does not record the email in
+    ``application_default_credentials.json``. Saying so is better than
+    guessing, and better than showing the ``gcloud auth list`` account, which
+    is a *different* identity that may well differ from the ADC one.
+    """
+
+    kind: str                            # 'service-account' | 'user' | 'cli' | 'none'
+    source: str                          # human-readable origin
+    account: Optional[str] = None        # email, when it is knowable
+    quota_project: Optional[str] = None
+
+    def describe(self) -> str:
+        """One line naming the identity, for printing before a secret read."""
+        if self.kind == 'service-account':
+            return f"service account {self.account or '<unknown>'} (from {self.source})"
+        if self.kind == 'user':
+            if self.account:
+                return f"{self.account} (from {self.source})"
+            return f"user login (from {self.source}; the file does not record which account)"
+        if self.kind == 'cli':
+            return f"{self.account} (via gcloud CLI)"
+        return f"no usable GCP credentials -- {self.source}"
+
+    @property
+    def caveat(self) -> Optional[str]:
+        """A warning when the identity is not the one the user expects.
+
+        A service account is the case worth shouting about: IAM grants made
+        to a human's email have no effect on it, so "I already granted her
+        access" and "permission denied" can both be true at once.
+        """
+        if self.kind != 'service-account':
+            return None
+        note = ("This is a service account, not your user account -- IAM grants "
+                "made to your email do not apply to it.")
+        if 'GOOGLE_APPLICATION_CREDENTIALS' in self.source:
+            note += ("\n  Unset GOOGLE_APPLICATION_CREDENTIALS to authenticate "
+                     "as yourself instead.")
+        return note
+
+
 class GCPSecretBackend(SecretBackend):
     """Fetch DVC config from Google Cloud Secret Manager.
     
@@ -65,6 +119,10 @@ class GCPSecretBackend(SecretBackend):
         self.prefix = prefix
         self._client = None
         self._use_cli = False
+        #: Account from an auth check the caller has already paid for, so
+        #: :meth:`identity` need not shell out to gcloud a second time.
+        self._cli_account: Optional[str] = None
+        self._identity: Optional[GCPIdentity] = None
     
     @staticmethod
     def gcloud_auth_status() -> Tuple[str, Optional[str]]:
@@ -142,8 +200,73 @@ class GCPSecretBackend(SecretBackend):
         explicit = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
         if explicit and Path(explicit).is_file():
             return True
-        adc_path = Path.home() / '.config' / 'gcloud' / 'application_default_credentials.json'
-        return adc_path.is_file()
+        return GCPSecretBackend._adc_path().is_file()
+
+    @staticmethod
+    def _adc_path() -> Path:
+        """Where ``gcloud auth application-default login`` writes credentials.
+
+        Resolved on each call rather than at import, so a patched ``HOME``
+        is honoured.
+        """
+        return Path.home() / '.config' / 'gcloud' / 'application_default_credentials.json'
+
+    @staticmethod
+    def _identity_from_file(path: Path, source: str) -> GCPIdentity:
+        """Classify a credentials JSON without importing google.auth."""
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            # Unreadable or malformed: we still know where it came from, and
+            # that is the part the user needs in order to go and look at it.
+            return GCPIdentity(kind='user', source=f"{source} (unreadable)")
+        if data.get('type') == 'service_account':
+            return GCPIdentity(
+                kind='service-account', source=source,
+                account=data.get('client_email'),
+                quota_project=data.get('quota_project_id'),
+            )
+        return GCPIdentity(
+            kind='user', source=source,
+            account=data.get('account') or None,
+            quota_project=data.get('quota_project_id'),
+        )
+
+    @staticmethod
+    def active_identity(cli_account: Optional[str] = None) -> GCPIdentity:
+        """Determine who dt will authenticate as, in ADC resolution order.
+
+        Mirrors what :meth:`_credentials` and the CLI fallback actually do:
+        ``GOOGLE_APPLICATION_CREDENTIALS`` wins, then the gcloud ADC file,
+        then the ``gcloud auth login`` account used by the CLI fallback.
+
+        Args:
+            cli_account: An already-known gcloud account. Supplying it avoids
+                a second ``gcloud auth list``, which costs ~20s cold on NCI.
+        """
+        explicit = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        if explicit and Path(explicit).is_file():
+            return GCPSecretBackend._identity_from_file(
+                Path(explicit), f"$GOOGLE_APPLICATION_CREDENTIALS={explicit}")
+
+        adc_path = GCPSecretBackend._adc_path()
+        if adc_path.is_file():
+            return GCPSecretBackend._identity_from_file(adc_path, f"ADC file {adc_path}")
+
+        if cli_account:
+            return GCPIdentity(kind='cli', source='gcloud CLI', account=cli_account)
+
+        status, account = GCPSecretBackend.gcloud_auth_status()
+        if status == 'ok' and account:
+            return GCPIdentity(kind='cli', source='gcloud CLI', account=account)
+        return GCPIdentity(
+            kind='none', source=GCPSecretBackend.gcloud_auth_hint(status))
+
+    def identity(self) -> GCPIdentity:
+        """The active identity, resolved once per backend instance."""
+        if self._identity is None:
+            self._identity = self.active_identity(cli_account=self._cli_account)
+        return self._identity
 
     @property
     def client(self):
@@ -250,7 +373,51 @@ class GCPSecretBackend(SecretBackend):
             )
         raise SecretError(message)
 
-    def _denied_message(self, secret_id: str, detail: str) -> str:
+    def _cli_identity_desc(self) -> str:
+        """Who the gcloud CLI fallback runs as.
+
+        Distinct from :meth:`identity`, which describes the *library* identity
+        (``GOOGLE_APPLICATION_CREDENTIALS`` or the ADC file). When both are
+        present they are frequently different accounts -- that divergence is
+        the whole reason a denial needs its identity attached.
+        """
+        if self._cli_account:
+            return f"{self._cli_account} (via gcloud CLI)"
+        status, account = self.gcloud_auth_status()
+        if status == 'ok' and account:
+            self._cli_account = account
+            return f"{account} (via gcloud CLI)"
+        return "the gcloud CLI account"
+
+    def _echo_denial(self, secret_id: str, who: str,
+                     note: Optional[str] = None,
+                     retrying: bool = False) -> None:
+        """Echo a permission denial at the moment it happens.
+
+        A denial that is silently retried is a denial nobody learns from. The
+        CLI fallback often succeeds, so the Python client can be refused on
+        every single call while everything appears to work -- until the same
+        credentials are used somewhere the fallback is unavailable (a
+        container with no gcloud), where it surfaces as a mystery.
+        Written to stderr: this is a diagnostic, and must survive being piped
+        or redirected away from whatever the command was actually printing.
+        """
+        def _err(line: str) -> None:
+            print(line, file=sys.stderr)
+
+        _err(f"\n\u26a0 Permission denied reading secret '{secret_id}' "
+             f"from GCP project '{self.project}'")
+        _err(f"    authenticated as: {who}")
+        if note:
+            for line in note.splitlines():
+                _err(f"    {line}")
+        if retrying:
+            _err("    retrying via the gcloud CLI, which may use a "
+                 "different account ...")
+
+    def _denied_message(self, secret_id: str, detail: str,
+                        identity: Optional[str] = None,
+                        prior_identity: Optional[str] = None) -> str:
         """Explain a PERMISSION_DENIED, including the possibility of absence.
 
         Secret Manager returns PERMISSION_DENIED rather than NOT_FOUND for a
@@ -265,16 +432,29 @@ class GCPSecretBackend(SecretBackend):
         against the wrong one never takes effect, however many times it is
         repeated.
         """
-        return (
-            f"Cannot read secret '{secret_id}' in project '{self.project}'.\n"
+        lines = [
+            f"Cannot read secret '{secret_id}' in project '{self.project}'.",
             f"Either you lack secretmanager.versions.access on it, or it does "
-            f"not exist there -- GCP reports both as PERMISSION_DENIED.\n"
+            f"not exist there -- GCP reports both as PERMISSION_DENIED.",
+        ]
+        if identity:
+            lines.append(f"Refused for: {identity}")
+        if prior_identity:
+            # Both identities were refused. Showing only the second invites
+            # "but I granted that account access" about the wrong one.
+            lines.append(f"Also refused for: {prior_identity}")
+        lines += [
             f"Check which project is expected:  dt config get "
-            f"secrets.gcp.project\n"
+            f"secrets.gcp.project",
+            # Listing is the fastest way to spot the cases this message cannot
+            # distinguish: a secret named differently from the repo, a typo, or
+            # the right secret sitting in a different project.
+            f"See what you can actually read:   dt auth credentials list",
             f"List what is actually there:      gcloud secrets list "
-            f"--project={self.project}\n"
-            f"Error: {detail}"
-        )
+            f"--project={self.project}",
+            f"Error: {detail}",
+        ]
+        return '\n'.join(lines)
 
     def _cli_secret_exists(self, repo_name: str, cause: Optional[Exception] = None) -> bool:
         gcloud = self._require_gcloud(cause)
@@ -289,8 +469,12 @@ class GCPSecretBackend(SecretBackend):
         if 'NOT_FOUND' in result.stderr:
             return False
         if 'PERMISSION_DENIED' in result.stderr:
+            who = self._cli_identity_desc()
+            self._echo_denial(secret_id, who)
             raise SecretError(
-                f"Permission denied accessing secret '{secret_id}'.\n"
+                f"Permission denied accessing secret '{secret_id}' "
+                f"in project '{self.project}'.\n"
+                f"Refused for: {who}\n"
                 f"Ensure you have secretmanager.secrets.get permission.\n"
                 f"Error: {result.stderr.strip()}"
             )
@@ -309,7 +493,23 @@ class GCPSecretBackend(SecretBackend):
             capture_output=True, text=True,
         )
         if result.returncode != 0:
-            raise SecretError(f"gcloud error listing secrets: {result.stderr.strip()}")
+            stderr = result.stderr.strip()
+            if 'PERMISSION_DENIED' in stderr:
+                who = self._cli_identity_desc()
+                self._echo_denial(f"<list of {self.prefix}*>", who)
+                raise SecretError(
+                    f"Cannot list secrets in project '{self.project}'.\n"
+                    f"Refused for: {who}\n"
+                    f"This needs secretmanager.secrets.list on the project, "
+                    f"which is a separate grant from reading any one secret.\n"
+                    f"Check which project is expected:  dt config get "
+                    f"secrets.gcp.project\n"
+                    f"Error: {stderr}"
+                )
+            raise SecretError(
+                f"Could not list secrets in project '{self.project}'.\n"
+                f"Error: {stderr}"
+            )
         ids = []
         for line in result.stdout.strip().splitlines():
             # Full resource name: projects/<proj>/secrets/<id>
@@ -370,7 +570,8 @@ class GCPSecretBackend(SecretBackend):
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
-    def _cli_access_secret(self, repo_name: str, cause: Optional[Exception] = None) -> str:
+    def _cli_access_secret(self, repo_name: str, cause: Optional[Exception] = None,
+                           prior_identity: Optional[str] = None) -> str:
         gcloud = self._require_gcloud(cause)
         secret_id = self._get_secret_id(repo_name)
         result = subprocess.run(
@@ -383,11 +584,16 @@ class GCPSecretBackend(SecretBackend):
         if 'NOT_FOUND' in result.stderr:
             raise SecretError(
                 f"Secret '{secret_id}' not found in project '{self.project}'.\n"
+                f"The repo may use a differently-named secret -- see what "
+                f"exists with: dt auth credentials list\n"
                 f"Create it with: {self._create_secret_hint(secret_id)}"
             )
         if 'PERMISSION_DENIED' in result.stderr:
+            who = self._cli_identity_desc()
+            self._echo_denial(secret_id, who)
             raise SecretError(
-                self._denied_message(secret_id, result.stderr.strip())
+                self._denied_message(secret_id, result.stderr.strip(),
+                                     identity=who, prior_identity=prior_identity)
             )
         raise SecretError(f"gcloud error: {result.stderr.strip()}")
 
@@ -420,6 +626,10 @@ class GCPSecretBackend(SecretBackend):
         except gcp_exceptions.PermissionDenied as exc:
             # ADC credentials may lack access — fall back to gcloud CLI
             # which honours `gcloud auth login`.
+            lib_identity = self.identity()
+            self._echo_denial(self._get_secret_id(repo_name),
+                              lib_identity.describe(), lib_identity.caveat,
+                              retrying=True)
             self._use_cli = True
             return self._cli_secret_exists(repo_name, cause=exc)
         except Exception as e:
@@ -463,13 +673,22 @@ class GCPSecretBackend(SecretBackend):
         except gcp_exceptions.NotFound:
             raise SecretError(
                 f"Secret '{self._get_secret_id(repo_name)}' not found in project '{self.project}'.\n"
+                f"The repo may use a differently-named secret -- see what "
+                f"exists with: dt auth credentials list\n"
                 f"Create it with: {self._create_secret_hint(self._get_secret_id(repo_name))}"
             )
         except gcp_exceptions.PermissionDenied as exc:
             # Fall back to gcloud CLI for the rest of this session, carrying
             # the real error so it survives if the fallback is unavailable.
+            # Echo first: if the fallback succeeds this is the only chance the
+            # user gets to learn that their ADC identity is being refused.
+            lib_identity = self.identity()
+            self._echo_denial(self._get_secret_id(repo_name),
+                              lib_identity.describe(), lib_identity.caveat,
+                              retrying=True)
             self._use_cli = True
-            return self._cli_access_secret(repo_name, cause=exc)
+            return self._cli_access_secret(repo_name, cause=exc,
+                                           prior_identity=lib_identity.describe())
         except Exception as e:
             raise SecretError(f"Error fetching secret: {e}")
         

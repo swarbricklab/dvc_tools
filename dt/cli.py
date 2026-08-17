@@ -2952,11 +2952,19 @@ def auth_credentials_list():
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 
+    # Name the project. Two people on one machine can have different
+    # secrets.gcp.project (system vs user vs repo scope), so a bare list is
+    # ambiguous about which project it came from -- and that ambiguity is
+    # exactly what makes a misdirected access grant so hard to spot.
+    project = cfg.get_value('secrets.gcp.project') or '<not configured>'
+
     if not names:
-        click.echo("No secrets found (or prefix matches nothing).")
+        click.echo(f"No secrets visible in project '{project}'.")
+        click.echo("Either it holds none with the configured prefix, or your "
+                   "account cannot see them.")
         return
 
-    click.echo(f"Secrets ({len(names)}):")
+    click.echo(f"Secrets readable in project '{project}' ({len(names)}):")
     for name in names:
         click.echo(f"  {name}")
 
@@ -2975,9 +2983,16 @@ def auth_credentials_check(repo_name):
     info = auth_mod.check_secret(repo_name)
 
     if not info.exists:
-        msg = f"✗ '{repo_name}': secret not found"
+        # An error here means we could not determine existence, which is not
+        # the same as having determined it is absent. GCP returns
+        # PERMISSION_DENIED for both, so claiming "not found" for a denial
+        # sends people off to create a secret that already exists.
         if info.error:
-            msg += f"\n  {info.error}"
+            msg = (f"✗ '{repo_name}': could not confirm the secret exists\n"
+                   f"  {info.error}")
+        else:
+            msg = (f"✗ '{repo_name}': secret not found\n"
+                   f"  See what does exist: dt auth credentials list")
         raise click.ClickException(msg)
 
     if not info.accessible:
@@ -3026,7 +3041,11 @@ def auth_credentials_install(repo_name, verbose):
     if ok:
         click.echo(click.style(f"✓ Installed: {', '.join(ok)}", fg='green'))
     if failed:
-        click.echo(click.style(f"⚠ Not found: {', '.join(failed)}", fg='yellow'))
+        # Not necessarily "not found" — could be denied, empty, or the wrong
+        # format. The reason was printed to stderr as each one failed.
+        click.echo(click.style(f"⚠ Failed: {', '.join(failed)}", fg='yellow'))
+        click.echo("  Reasons above. To see what you can read: "
+                   "dt auth credentials list")
 
 
 @auth_credentials.command('uninstall')
