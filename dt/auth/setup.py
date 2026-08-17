@@ -115,6 +115,11 @@ class SetupReport:
     credentials_installed: Dict[str, bool] = field(default_factory=dict)
     skipped_ssh: bool = False
     skipped_credentials: bool = False
+    #: Why credential install was skipped, when it was not simply that the
+    #: project has no S3 endpoints. Reporting "No S3 endpoints" for an auth
+    #: failure told users their repo had no S3 remote when it plainly did,
+    #: and invited them to dismiss the real error printed underneath.
+    credentials_skip_reason: Optional[str] = None
     errors: List[str] = field(default_factory=list)
 
 
@@ -186,9 +191,10 @@ def auth_setup(
             if status != 'ok':
                 hint = GCPSecretBackend.gcloud_auth_hint(status)
                 report.errors.append(f"GCP authentication unavailable. {hint}")
-                if verbose:
-                    print(f"\n\u26a0 {hint}")
+                print(f"\n\u26a0 GCP authentication unavailable. {hint}")
                 has_s3 = False  # skip credential install
+                report.credentials_skip_reason = (
+                    "GCP authentication unavailable \u2014 see the error below")
 
     # -- 3. SSH setup (if needed) ------------------------------------------
     if has_ssh_or_git:
@@ -235,7 +241,11 @@ def auth_setup(
     else:
         report.skipped_credentials = True
         if verbose:
-            print("\nNo S3 endpoints found — skipping credential install.")
+            if report.credentials_skip_reason:
+                print(f"\nSkipping credential install: "
+                      f"{report.credentials_skip_reason}")
+            else:
+                print("\nNo S3 endpoints found — skipping credential install.")
 
     return report
 
@@ -478,7 +488,11 @@ def format_setup_report(report: SetupReport) -> str:
             icon = click.style("\u2713", fg='green') if ok else click.style("\u2717", fg='red')
             lines.append(f"  {icon} {repo}")
     elif report.skipped_credentials:
-        lines.append("\nNo S3 endpoints — credential install skipped.")
+        if report.credentials_skip_reason:
+            lines.append(
+                f"\nCredential install skipped: {report.credentials_skip_reason}")
+        else:
+            lines.append("\nNo S3 endpoints — credential install skipped.")
 
     if report.errors:
         lines.append(click.style("\nErrors:", fg='red', bold=True))

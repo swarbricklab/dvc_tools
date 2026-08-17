@@ -1,8 +1,10 @@
 """GCP Secret Manager backend for DVC credentials."""
 
+import json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -48,6 +50,57 @@ def _replication_create_flags() -> List[str]:
     return ['--replication-policy=user-managed', f'--locations={locations}']
 
 
+@dataclass
+class GCPIdentity:
+    """Who dt will authenticate to GCP as, and where that came from.
+
+    Resolved from files and environment only -- no network call, no gcloud
+    invocation unless we have already fallen through to the CLI. Cheap enough
+    to report on every credential operation, which is the point: a denial
+    means nothing until you know which identity was refused.
+
+    ``account`` is ``None`` for user ADC, because
+    ``gcloud auth application-default login`` does not record the email in
+    ``application_default_credentials.json``. Saying so is better than
+    guessing, and better than showing the ``gcloud auth list`` account, which
+    is a *different* identity that may well differ from the ADC one.
+    """
+
+    kind: str                            # 'service-account' | 'user' | 'cli' | 'none'
+    source: str                          # human-readable origin
+    account: Optional[str] = None        # email, when it is knowable
+    quota_project: Optional[str] = None
+
+    def describe(self) -> str:
+        """One line naming the identity, for printing before a secret read."""
+        if self.kind == 'service-account':
+            return f"service account {self.account or '<unknown>'} (from {self.source})"
+        if self.kind == 'user':
+            if self.account:
+                return f"{self.account} (from {self.source})"
+            return f"user login (from {self.source}; the file does not record which account)"
+        if self.kind == 'cli':
+            return f"{self.account} (via gcloud CLI)"
+        return f"no usable GCP credentials -- {self.source}"
+
+    @property
+    def caveat(self) -> Optional[str]:
+        """A warning when the identity is not the one the user expects.
+
+        A service account is the case worth shouting about: IAM grants made
+        to a human's email have no effect on it, so "I already granted her
+        access" and "permission denied" can both be true at once.
+        """
+        if self.kind != 'service-account':
+            return None
+        note = ("This is a service account, not your user account -- IAM grants "
+                "made to your email do not apply to it.")
+        if 'GOOGLE_APPLICATION_CREDENTIALS' in self.source:
+            note += ("\n  Unset GOOGLE_APPLICATION_CREDENTIALS to authenticate "
+                     "as yourself instead.")
+        return note
+
+
 class GCPSecretBackend(SecretBackend):
     """Fetch DVC config from Google Cloud Secret Manager.
     
@@ -65,6 +118,10 @@ class GCPSecretBackend(SecretBackend):
         self.prefix = prefix
         self._client = None
         self._use_cli = False
+        #: Account from an auth check the caller has already paid for, so
+        #: :meth:`identity` need not shell out to gcloud a second time.
+        self._cli_account: Optional[str] = None
+        self._identity: Optional[GCPIdentity] = None
     
     @staticmethod
     def gcloud_auth_status() -> Tuple[str, Optional[str]]:
@@ -142,8 +199,73 @@ class GCPSecretBackend(SecretBackend):
         explicit = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
         if explicit and Path(explicit).is_file():
             return True
-        adc_path = Path.home() / '.config' / 'gcloud' / 'application_default_credentials.json'
-        return adc_path.is_file()
+        return GCPSecretBackend._adc_path().is_file()
+
+    @staticmethod
+    def _adc_path() -> Path:
+        """Where ``gcloud auth application-default login`` writes credentials.
+
+        Resolved on each call rather than at import, so a patched ``HOME``
+        is honoured.
+        """
+        return Path.home() / '.config' / 'gcloud' / 'application_default_credentials.json'
+
+    @staticmethod
+    def _identity_from_file(path: Path, source: str) -> GCPIdentity:
+        """Classify a credentials JSON without importing google.auth."""
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            # Unreadable or malformed: we still know where it came from, and
+            # that is the part the user needs in order to go and look at it.
+            return GCPIdentity(kind='user', source=f"{source} (unreadable)")
+        if data.get('type') == 'service_account':
+            return GCPIdentity(
+                kind='service-account', source=source,
+                account=data.get('client_email'),
+                quota_project=data.get('quota_project_id'),
+            )
+        return GCPIdentity(
+            kind='user', source=source,
+            account=data.get('account') or None,
+            quota_project=data.get('quota_project_id'),
+        )
+
+    @staticmethod
+    def active_identity(cli_account: Optional[str] = None) -> GCPIdentity:
+        """Determine who dt will authenticate as, in ADC resolution order.
+
+        Mirrors what :meth:`_credentials` and the CLI fallback actually do:
+        ``GOOGLE_APPLICATION_CREDENTIALS`` wins, then the gcloud ADC file,
+        then the ``gcloud auth login`` account used by the CLI fallback.
+
+        Args:
+            cli_account: An already-known gcloud account. Supplying it avoids
+                a second ``gcloud auth list``, which costs ~20s cold on NCI.
+        """
+        explicit = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        if explicit and Path(explicit).is_file():
+            return GCPSecretBackend._identity_from_file(
+                Path(explicit), f"$GOOGLE_APPLICATION_CREDENTIALS={explicit}")
+
+        adc_path = GCPSecretBackend._adc_path()
+        if adc_path.is_file():
+            return GCPSecretBackend._identity_from_file(adc_path, f"ADC file {adc_path}")
+
+        if cli_account:
+            return GCPIdentity(kind='cli', source='gcloud CLI', account=cli_account)
+
+        status, account = GCPSecretBackend.gcloud_auth_status()
+        if status == 'ok' and account:
+            return GCPIdentity(kind='cli', source='gcloud CLI', account=account)
+        return GCPIdentity(
+            kind='none', source=GCPSecretBackend.gcloud_auth_hint(status))
+
+    def identity(self) -> GCPIdentity:
+        """The active identity, resolved once per backend instance."""
+        if self._identity is None:
+            self._identity = self.active_identity(cli_account=self._cli_account)
+        return self._identity
 
     @property
     def client(self):

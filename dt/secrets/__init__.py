@@ -6,10 +6,11 @@ and appending it to .dvc/config.local.
 """
 
 from .base import SecretBackend, SecretError
-from .gcp import GCPSecretBackend
+from .gcp import GCPIdentity, GCPSecretBackend
 
 __all__ = [
     'SecretBackend',
     'SecretError',
     'GCPSecretBackend',
+    'GCPIdentity',
 ]
