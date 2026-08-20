@@ -1106,3 +1106,38 @@ class TestMixedTreeGuard:
         assert out['md5'] == md5
         assert 'nfiles' not in out
         assert out['size'] == 5
+
+
+# =============================================================================
+# CLI wiring
+# =============================================================================
+
+class TestImportForceFlag:
+    """`dt import --force` must reach the import, not a NameError.
+
+    Regression guard: a `if force and resume:` guard was copy-pasted in from
+    `dt get`, which does have --resume. `dt import` does not, so the flag was
+    dead on arrival -- and only when --force was passed, since short-circuit
+    evaluation hid it otherwise.
+    """
+
+    def _invoke(self, argv):
+        from click.testing import CliRunner
+        from dt.cli import cli
+
+        with patch.object(import_mod, 'import_data',
+                          return_value=(Path('x.dvc'), '/cache')) as mock_import:
+            result = CliRunner().invoke(cli, ['import', *argv],
+                                        catch_exceptions=False)
+        return result, mock_import
+
+    def test_force_reaches_import_data(self):
+        result, mock_import = self._invoke(['repo', 'data/x', '--force'])
+
+        assert result.exit_code == 0, result.output
+        assert mock_import.call_args.kwargs['force'] is True
+
+    def test_default_is_not_forced(self):
+        _, mock_import = self._invoke(['repo', 'data/x'])
+
+        assert mock_import.call_args.kwargs['force'] is False

@@ -4502,12 +4502,6 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
         dt import neochemo --csv paths.csv --no-download
     """
     # --csv mode: path argument is not required
-    if force and resume:
-        raise click.UsageError(
-            "--force and --resume are contradictory: one re-fetches everything, "
-            "the other skips what is already there."
-        )
-
     if csv_path:
         if path:
             raise click.UsageError("Do not provide PATH when using --csv.")
