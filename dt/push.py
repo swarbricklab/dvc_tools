@@ -321,15 +321,12 @@ def partition_manifest(
 ) -> Dict[int, List[str]]:
     """Partition manifest files across workers, balancing bytes per worker.
 
-    Uses greedy longest-processing-time (LPT) bin-packing: files are sorted
-    largest-first and each is assigned to the currently least-loaded worker.
-    This balances the total bytes per worker, so wave wall-clock approaches
-    ``max(total_bytes / num_workers, largest_single_file) / per-worker-rate``
-    instead of being dominated by whichever worker a hash-prefix split happened
-    to hand the big files (see issue #138).
+    The bin-packing itself is :func:`dt.hpc.partition_by_size` -- it is not
+    push-specific, and ``dt get --workers`` balances its own work the same way
+    (issue #172). What stays here is the part that genuinely is push-specific:
+    a file is identified by its hash, and its size therefore has to be read out
+    of the local cache.
 
-    The key partitioning invariant is preserved: each file is assigned to
-    exactly one worker, so partitions are disjoint and workers never contend.
     Assignment is deterministic given the file sizes (ties broken by hash, then
     by lowest worker id).
 
@@ -348,28 +345,13 @@ def partition_manifest(
     if sizes is None:
         sizes = get_file_sizes(files)
 
-    partitions: Dict[int, List[str]] = {i: [] for i in range(num_workers)}
-    loads = [0] * num_workers
-
-    # Largest files first; tie-break by hash so ordering is reproducible
-    # regardless of the manifest's file order.
-    for file_hash in sorted(files, key=lambda h: (sizes.get(h, 0), h), reverse=True):
-        # Assign to the least-loaded worker; tie-break by lowest worker id.
-        worker_id = min(range(num_workers), key=lambda w: (loads[w], w))
-        partitions[worker_id].append(file_hash)
-        loads[worker_id] += sizes.get(file_hash, 0)
-
-    if verbose:
-        active = [load for load in loads if load > 0]
-        if active:
-            print(
-                f"Partition byte balance across {len(active)} active worker(s): "
-                f"min={utils.format_size(min(active))}, "
-                f"max={utils.format_size(max(active))}, "
-                f"total={utils.format_size(sum(loads))}"
-            )
-
-    return partitions
+    return hpc.partition_by_size(
+        files,
+        num_workers,
+        weight=lambda h: sizes.get(h, 0),
+        tiebreak=lambda h: h,
+        verbose=verbose,
+    )
 
 
 def _missing_from_remote(

@@ -206,9 +206,10 @@ Download DVC-tracked data without creating tracking files.
 ```bash
 dt get <repository> <path> [-o <output>] [--rev REV] [--link TYPES] [-j N] [-f] [-v]
 dt get <repository> --csv <file> [--path-col COL] [-o <dir>]
+dt get <repository> --csv <file> -o s3://<bucket>/<prefix>/ [-w N] [--dest-profile NAME]
 ```
 
-The `dvc get` counterpart to `dt import`: materialises data and writes no `.dvc` file, for handing a subset of a dataset to someone outside the group. A path may name a subdirectory *inside* a tracked directory output, so you can take part of a large dataset without transferring all of it. With `--csv` the source is cloned once and every row resolved against that clone, rather than re-cloning per path. [Full documentation →](get.md)
+The `dvc get` counterpart to `dt import`: materialises data and writes no `.dvc` file, for handing a subset of a dataset to someone outside the group. A path may name a subdirectory *inside* a tracked directory output, so you can take part of a large dataset without transferring all of it. With `--csv` the source is cloned once and every row resolved against that clone, rather than re-cloning per path. `-o s3://…` streams from the source's remote straight into object storage, and `-w N` spreads that stream across N compute nodes via qxub — network-bound work, so nodes add bandwidth. [Full documentation →](get.md)
 
 ---
 

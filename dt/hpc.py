@@ -249,52 +249,136 @@ def get_prefixes_for_worker(worker_id: int, num_workers: int) -> Set[str]:
     return prefixes
 
 
+def partition_by_size(
+    items: List[Any],
+    num_workers: int,
+    weight: Callable[[Any], int],
+    tiebreak: Callable[[Any], Any],
+    verbose: bool = False,
+) -> Dict[int, List[Any]]:
+    """Split *items* across workers, balancing total weight per worker.
+
+    Greedy longest-processing-time (LPT) bin-packing: items are sorted
+    largest-first and each is assigned to the currently least-loaded worker.
+    Wave wall-clock then approaches
+    ``max(total_weight / num_workers, largest_single_item) / per-worker-rate``
+    instead of being dominated by whichever worker an arbitrary split happened
+    to hand the big items (issue #138).
+
+    This lives here, rather than in any one caller, because it is the answer to
+    a problem *qxub workers specifically* have: they are separate processes on
+    separate machines and cannot steal work from each other, so the split has to
+    be decided up front. A ``ThreadPoolExecutor`` hands tasks out from a shared
+    queue and so load-balances at runtime -- applying LPT there would be
+    strictly worse, freezing an assignment the queue would otherwise self-correct
+    (issue #172). Reach for this only when the consumers are separate processes.
+
+    Each item is assigned to exactly one worker, so partitions are disjoint and
+    workers never contend.
+
+    Args:
+        items: Work items to distribute. Opaque here; only *weight* and
+            *tiebreak* look inside them.
+        num_workers: Number of workers to split across.
+        weight: Cost of an item, in whatever unit the caller balances (bytes,
+            for both current callers).
+        tiebreak: Total order on equal-weight items. Required, not optional:
+            without it the assignment depends on the input order, and a
+            partitioning you cannot reproduce is one you cannot debug.
+        verbose: Log the resulting per-worker balance.
+
+    Returns:
+        Dict mapping worker_id to its list of items.
+
+    Raises:
+        ValueError: If *num_workers* is less than 1.
+    """
+    if num_workers < 1:
+        raise ValueError(f"num_workers must be at least 1, got {num_workers}")
+
+    partitions: Dict[int, List[Any]] = {i: [] for i in range(num_workers)}
+    loads = [0] * num_workers
+
+    for item in sorted(items, key=lambda it: (weight(it), tiebreak(it)),
+                       reverse=True):
+        # Assign to the least-loaded worker; tie-break by lowest worker id.
+        worker_id = min(range(num_workers), key=lambda w: (loads[w], w))
+        partitions[worker_id].append(item)
+        loads[worker_id] += weight(item)
+
+    if verbose:
+        active = [load for load in loads if load > 0]
+        if active:
+            print(
+                f"Partition byte balance across {len(active)} active worker(s): "
+                f"min={utils.format_size(min(active))}, "
+                f"max={utils.format_size(max(active))}, "
+                f"total={utils.format_size(sum(loads))}"
+            )
+
+    return partitions
+
+
 def save_manifest(
     manifest: Dict[str, Any],
-    partitions: Dict[int, List[str]],
+    partitions: Dict[int, List[Any]],
     job_id: str,
     operation: str,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Save manifest and partitions to disk.
-    
+
     Args:
         manifest: Original manifest with metadata
-        partitions: Worker partitions (worker_id -> list of file hashes)
+        partitions: Worker partitions (worker_id -> list of work items)
         job_id: Unique job identifier
-        operation: Transfer operation name ('push' or 'pull')
-        
+        operation: Transfer operation name ('push', 'pull' or 'get')
+        metadata: Extra key/values to record in ``manifest.json`` alongside the
+            standard fields. Everything a worker needs beyond its own partition
+            travels this way, because the worker is a fresh process on another
+            machine with no share of the submitter's state: ``push`` needs only
+            a remote name and a repo root, but ``get`` also has to be handed a
+            destination, credentials config and the flags the run was invoked
+            with. Read back by :func:`load_worker_partition`.
+
     Returns:
         Path to the manifest directory
     """
     manifest_dir = get_transfer_dir(operation) / job_id
     manifest_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Save metadata
+    payload = {
+        'remote': manifest.get('remote'),
+        'repo_root': manifest.get('repo_root'),
+        'total_files': len(manifest.get('files', [])),
+        'num_workers': len(partitions),
+    }
+    payload.update(metadata or {})
     with open(manifest_dir / 'manifest.json', 'w') as f:
-        json.dump({
-            'remote': manifest.get('remote'),
-            'repo_root': manifest.get('repo_root'),
-            'total_files': len(manifest.get('files', [])),
-            'num_workers': len(partitions),
-        }, f, indent=2)
-    
+        json.dump(payload, f, indent=2)
+
     # Save each worker's partition
     for worker_id, files in partitions.items():
         with open(manifest_dir / f'worker_{worker_id}.json', 'w') as f:
             json.dump({'files': files}, f)
-    
+
     return manifest_dir
 
 
-def load_worker_partition(manifest_dir: Path, worker_id: int) -> Tuple[Dict, List[str]]:
-    """Load manifest metadata and worker's file partition.
-    
+def load_worker_partition(
+    manifest_dir: Path, worker_id: int
+) -> Tuple[Dict, List[Any]]:
+    """Load manifest metadata and worker's partition.
+
     Args:
         manifest_dir: Path to manifest directory
         worker_id: Worker index
-        
+
     Returns:
-        Tuple of (metadata dict, list of file hashes)
+        Tuple of (metadata dict, list of work items). The items are whatever
+        the submitter put in the partition -- hashes for ``push``, per-file
+        task dicts for ``get``.
     """
     with open(manifest_dir / 'manifest.json') as f:
         metadata = json.load(f)
