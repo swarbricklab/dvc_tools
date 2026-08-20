@@ -7,6 +7,13 @@ Handles hierarchical configuration with four scopes:
 - local: .dt/config.local.yaml (workspace-specific, not tracked)
 
 Configuration is loaded in precedence order: local > project > user > system
+
+Writes default to *user* scope. Most settings (a cache root, an SSH host, a
+GitHub owner) describe the person and the machine rather than the repository,
+and a user-scope write applies to every repo instead of having to be repeated
+in each one. Project scope is the sharper instrument -- it is tracked by git,
+so a value written there is imposed on every collaborator -- and now has to be
+asked for by name with ``--project``.
 """
 
 import os
@@ -96,6 +103,33 @@ def load_scope_config(scope: str) -> dict:
     return {}
 
 
+def scopes_defining(key: str) -> List[str]:
+    """Return the scopes that set *key*, highest precedence first.
+
+    Used to explain a write that will not take effect (a lower scope shadowed
+    by a higher one) and a delete that found nothing (the key lives in another
+    scope). Both are the confusing half of a scoped config: the command
+    succeeds, and the effective value is not what was asked for.
+
+    Args:
+        key: Dot-separated key path (e.g. 'cache.root')
+
+    Returns:
+        Scope names in precedence order; empty if the key is set nowhere.
+    """
+    found = []
+    for scope in SCOPES:
+        data = load_scope_config(scope)
+        current = data
+        for part in key.split('.'):
+            if not isinstance(current, dict) or part not in current:
+                break
+            current = current[part]
+        else:
+            found.append(scope)
+    return found
+
+
 def get_value(key: str, default: Any = None) -> Any:
     """Get a configuration value by dot-separated key.
     
@@ -118,42 +152,60 @@ def get_value(key: str, default: Any = None) -> Any:
         return default
 
 
-def set_value(key: str, value: str, scope: str = 'user') -> None:
-    """Set a configuration value at the specified scope.
-    
-    Args:
-        key: Dot-separated key path (e.g., 'cache.root')
-        value: Value to set (will be parsed as YAML)
-        scope: One of 'local', 'project', 'user', 'system'
-    """
-    paths = get_config_paths()
-    path = paths[scope]
-    
-    # Load existing config or start fresh
-    if path.exists():
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-    else:
-        data = {}
-    
-    # Parse value as YAML to handle types correctly
-    try:
-        parsed_value = yaml.safe_load(value)
-    except yaml.YAMLError:
-        parsed_value = value
-    
-    # Navigate/create nested structure
+def _assign(data: dict, key: str, value: Any) -> None:
+    """Write *value* at the dot-separated *key* inside *data*, creating parents."""
     parts = key.split('.')
     current = data
     for part in parts[:-1]:
         if part not in current or not isinstance(current[part], dict):
             current[part] = {}
         current = current[part]
-    current[parts[-1]] = parsed_value
-    
+    current[parts[-1]] = value
+
+
+def set_value(key: str, value: str, scope: str = 'user') -> None:
+    """Set a configuration value at the specified scope.
+
+    Args:
+        key: Dot-separated key path (e.g., 'cache.root')
+        value: Value to set (will be parsed as YAML)
+        scope: One of 'local', 'project', 'user', 'system'
+    """
+    # Parse value as YAML to handle types correctly
+    try:
+        parsed_value = yaml.safe_load(value)
+    except yaml.YAMLError:
+        parsed_value = value
+
+    set_values({key: parsed_value}, scope)
+
+
+def set_values(values: dict, scope: str = 'user') -> None:
+    """Set several already-parsed values at *scope* in one rewrite.
+
+    Args:
+        values: Mapping of dot-separated key to value, stored as given (no
+            YAML parsing -- callers that hold a string to parse use
+            :func:`set_value`)
+        scope: One of 'local', 'project', 'user', 'system'
+    """
+    paths = get_config_paths()
+    path = paths[scope]
+
+    # Load existing config or start fresh. Merging key by key rather than
+    # replacing the file keeps whatever else the scope already holds.
+    if path.exists():
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    else:
+        data = {}
+
+    for key, value in values.items():
+        _assign(data, key, value)
+
     # Ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Write back
     with open(path, 'w') as f:
         yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
@@ -364,6 +416,75 @@ def list_config_with_sources() -> List[tuple]:
     
     return sorted(results.values())
 
+
+
+def read_config_file(path) -> dict:
+    """Read a config file handed over by someone else, flattened to dot keys.
+
+    The file is an ordinary ``config.yaml``, so the same file works whether it
+    is imported with ``dt config import`` or simply copied into place -- there
+    is no separate format to learn or keep in step.
+
+    Values are validated here rather than on the way in from the file, because
+    the failure this guards against is silent: a list under a key every
+    consumer reads as a scalar does not fail on import, it fails much later
+    somewhere else, in this version and in every already-released one.
+
+    Args:
+        path: Path to a YAML file
+
+    Returns:
+        Flat mapping of dot-separated key to value, in file order.
+
+    Raises:
+        ValueError: If the file is missing, unreadable, not a YAML mapping,
+            empty, or gives a list to a key that is not list-valued.
+    """
+    path = Path(path)
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        raise ValueError(f"No such file: {path}")
+    except OSError as e:
+        raise ValueError(f"Cannot read {path}: {e}")
+
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise ValueError(f"{path} is not valid YAML: {e}")
+
+    if data is None:
+        raise ValueError(f"{path} is empty -- no settings to import.")
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{path} must contain a mapping of settings, like a dt config "
+            f"file:\n"
+            f"  owner: myorg\n"
+            f"  cache:\n"
+            f"    root: /data/dvc_cache\n"
+            f"Found {type(data).__name__} instead."
+        )
+
+    values = flatten_dict(data)
+    if not values:
+        raise ValueError(f"{path} contains no settings to import.")
+
+    bad_lists = [
+        k for k, v in values.items()
+        if isinstance(v, (list, tuple)) and k not in LIST_VALUED_KEYS
+    ]
+    if bad_lists:
+        known = ', '.join(sorted(LIST_VALUED_KEYS))
+        raise ValueError(
+            f"{path} gives a list to {', '.join(sorted(bad_lists))}, which "
+            f"does not take one.\n"
+            f"Keys that do: {known}.\n"
+            f"Every other setting is read as a single value, so a list breaks "
+            f"the tools that read it -- including released versions, which "
+            f"cannot be fixed after the fact."
+        )
+
+    return values
 
 
 def add_list_value(key: str, value: str, scope: str = 'local') -> bool:

@@ -497,7 +497,11 @@ def check_large_files(max_size_str: str = '1MB', verbose: bool = False) -> bool:
             lines.append(f"  {filepath} ({format_size(size)})")
         lines.append("")
         lines.append("Track large files with DVC instead:  dt add <file>")
-        lines.append("Adjust the limit:  dt config set hooks.pre-commit.checks.large-files.max_size 10MB")
+        # --project: the threshold is a property of this repo's contents, and
+        # `set` now defaults to user scope, which would raise the limit
+        # everywhere.
+        lines.append("Adjust the limit:  dt config set --project "
+                     "hooks.pre-commit.checks.large-files.max_size 10MB")
         lines.append("Skip this check once:  git commit --no-verify")
         raise HookError('\n'.join(lines))
 

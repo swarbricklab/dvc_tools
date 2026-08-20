@@ -276,7 +276,7 @@ waiting. Results are listed most recent first:
       data/big_matrix.npy (128.5MB)
 
     Track large files with DVC instead:  dt add <file>
-    Adjust the limit:  dt config set hooks.pre-commit.checks.large-files.max_size 10MB
+    Adjust the limit:  dt config set --project hooks.pre-commit.checks.large-files.max_size 10MB
     Skip this check once:  git commit --no-verify
 ```
 
@@ -385,10 +385,12 @@ hooks:
 The default limit is 1 MB—intentionally strict for repos that use DVC for
 data.  There are three ways to override when needed:
 
-**Raise the limit permanently** (in project or local config):
+**Raise the limit permanently.** The threshold describes this repo's
+contents, so put it in project scope — `dt config set` on its own writes user
+scope, which raises the limit in every repo you work in:
 
 ```bash
-dt config set hooks.pre-commit.checks.large-files.max_size 10MB
+dt config set --project hooks.pre-commit.checks.large-files.max_size 10MB
 ```
 
 **Skip the check for a single commit** (e.g. committing a vendored PDF):

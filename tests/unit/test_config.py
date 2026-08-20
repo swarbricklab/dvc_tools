@@ -559,3 +559,392 @@ class TestListValuedConfig:
         r = runner.invoke(cli, ['config', 'remove', 'remote.root', '/nope',
                                 '--user'])
         assert r.exit_code != 0
+
+
+class TestDefaultWriteScope:
+    """`dt config set` with no scope flag writes user scope.
+
+    It used to write project scope, which surprised people twice over: the
+    setting only applied inside that one repo, and `.dt/config.yaml` is tracked
+    by git, so a personal preference arrived in everyone else's checkout.
+    """
+
+    def _user_config(self, temp_dirs):
+        return Path(temp_dirs['home']) / '.config' / 'dt' / 'config.yaml'
+
+    def _project_config(self, temp_dirs):
+        return Path(temp_dirs['project']) / '.dt' / 'config.yaml'
+
+    def test_set_writes_user_scope(self, runner, isolated_config, temp_dirs):
+        r = runner.invoke(cli, ['config', 'set', 'owner', 'myorg'])
+        assert r.exit_code == 0
+        assert yaml.safe_load(
+            self._user_config(temp_dirs).read_text())['owner'] == 'myorg'
+
+    def test_set_leaves_project_config_alone(self, runner, isolated_config,
+                                             temp_dirs):
+        """The tracked file is what collaborators inherit; don't touch it."""
+        runner.invoke(cli, ['config', 'set', 'owner', 'myorg'])
+        assert not self._project_config(temp_dirs).exists()
+
+    def test_set_names_the_file_it_wrote(self, runner, isolated_config,
+                                        temp_dirs):
+        """The default location is off in ~; say where the value went."""
+        r = runner.invoke(cli, ['config', 'set', 'owner', 'myorg'])
+        assert 'user' in r.stdout
+        assert str(self._user_config(temp_dirs)) in r.stdout
+
+    def test_add_defaults_to_user_scope(self, runner, isolated_config,
+                                        temp_dirs):
+        r = runner.invoke(cli, ['config', 'add', 'remote.root', '/a'])
+        assert r.exit_code == 0
+        assert yaml.safe_load(
+            self._user_config(temp_dirs).read_text())['remote']['root'] == ['/a']
+
+    def test_unset_defaults_to_user_scope(self, runner, isolated_config,
+                                          temp_dirs):
+        runner.invoke(cli, ['config', 'set', 'owner', 'myorg'])
+        r = runner.invoke(cli, ['config', 'unset', 'owner'])
+        assert r.exit_code == 0
+        assert cfg.get_value('owner') is None
+
+    def test_project_flag_still_works(self, runner, isolated_config,
+                                      temp_dirs):
+        r = runner.invoke(cli, ['config', 'set', '--project', 'owner', 'org'])
+        assert r.exit_code == 0
+        assert yaml.safe_load(
+            self._project_config(temp_dirs).read_text())['owner'] == 'org'
+
+
+class TestScopesDefining:
+    """`scopes_defining` reports every scope holding a key, best first."""
+
+    def test_empty_when_unset(self, isolated_config):
+        assert cfg.scopes_defining('owner') == []
+
+    def test_single_scope(self, isolated_config):
+        cfg.set_value('owner', 'a', 'user')
+        assert cfg.scopes_defining('owner') == ['user']
+
+    def test_precedence_order(self, isolated_config):
+        cfg.set_value('owner', 'u', 'user')
+        cfg.set_value('owner', 'p', 'project')
+        cfg.set_value('owner', 'l', 'local')
+        assert cfg.scopes_defining('owner') == ['local', 'project', 'user']
+
+    def test_nested_key(self, isolated_config):
+        cfg.set_value('cache.root', '/c', 'project')
+        assert cfg.scopes_defining('cache.root') == ['project']
+
+    def test_partial_path_is_not_a_match(self, isolated_config):
+        """`cache` existing must not imply `cache.root` does."""
+        cfg.set_value('cache.other', '/c', 'user')
+        assert cfg.scopes_defining('cache.root') == []
+
+    def test_scalar_midway_does_not_crash(self, isolated_config):
+        cfg.set_value('cache', 'not-a-dict', 'user')
+        assert cfg.scopes_defining('cache.root') == []
+
+
+class TestShadowedWriteWarning:
+    """A user-scope write under a project-scope value changes nothing.
+
+    That is the cost of the new default, so the command says so rather than
+    reporting plain success and leaving the old value in force.
+    """
+
+    def test_set_warns_when_project_overrides(self, runner, isolated_config):
+        cfg.set_value('owner', 'from-project', 'project')
+        r = runner.invoke(cli, ['config', 'set', 'owner', 'mine'])
+        assert r.exit_code == 0
+        assert 'project' in r.stderr
+        assert 'from-project' in r.stderr
+        assert '--project' in r.stderr
+
+    def test_warning_goes_to_stderr(self, runner, isolated_config):
+        cfg.set_value('owner', 'from-project', 'project')
+        r = runner.invoke(cli, ['config', 'set', 'owner', 'mine'])
+        assert 'Note:' not in r.stdout
+
+    def test_no_warning_when_unshadowed(self, runner, isolated_config):
+        r = runner.invoke(cli, ['config', 'set', 'owner', 'mine'])
+        assert r.stderr == ''
+
+    def test_no_warning_for_a_lower_scope(self, runner, isolated_config):
+        """User outranks system, so a system value is not a shadow."""
+        cfg.set_value('owner', 'from-system', 'system')
+        r = runner.invoke(cli, ['config', 'set', 'owner', 'mine'])
+        assert r.stderr == ''
+        assert cfg.get_value('owner') == 'mine'
+
+    def test_project_write_warns_about_local(self, runner, isolated_config):
+        cfg.set_value('owner', 'from-local', 'local')
+        r = runner.invoke(cli, ['config', 'set', '--project', 'owner', 'p'])
+        assert 'local' in r.stderr
+
+    def test_add_warns_when_shadowed(self, runner, isolated_config):
+        cfg.set_value('remote.root', '/proj', 'project')
+        r = runner.invoke(cli, ['config', 'add', 'remote.root', '/mine'])
+        assert r.exit_code == 0
+        assert 'project' in r.stderr
+
+
+class TestUnsetMissDirectsToTheRightScope:
+    """Unset now misses by default when the key is project-scoped."""
+
+    def test_names_the_scope_holding_the_key(self, runner, isolated_config):
+        cfg.set_value('owner', 'from-project', 'project')
+        r = runner.invoke(cli, ['config', 'unset', 'owner'])
+        assert r.exit_code != 0
+        assert 'project' in r.output
+        assert 'dt config unset --project owner' in r.output
+
+    def test_shows_the_file_to_edit(self, runner, isolated_config, temp_dirs):
+        cfg.set_value('owner', 'x', 'project')
+        r = runner.invoke(cli, ['config', 'unset', 'owner'])
+        assert str(Path(temp_dirs['project']) / '.dt' / 'config.yaml') in r.output
+
+    def test_lists_every_scope_holding_it(self, runner, isolated_config):
+        cfg.set_value('owner', 'l', 'local')
+        cfg.set_value('owner', 'p', 'project')
+        r = runner.invoke(cli, ['config', 'unset', 'owner'])
+        assert 'local' in r.output and 'project' in r.output
+
+    def test_unset_of_a_key_set_nowhere(self, runner, isolated_config):
+        r = runner.invoke(cli, ['config', 'unset', 'never.set'])
+        assert r.exit_code != 0
+        assert 'any configuration scope' in r.output
+
+
+class TestReadConfigFile:
+    """`read_config_file` validates a file written by someone else."""
+
+    def _write(self, tmp_path, text):
+        p = Path(tmp_path) / 'handed-over.yaml'
+        p.write_text(text)
+        return p
+
+    def test_flattens_nested_keys(self, tmp_path):
+        p = self._write(tmp_path, 'secrets:\n  gcp:\n    project: proj\n')
+        assert cfg.read_config_file(p) == {'secrets.gcp.project': 'proj'}
+
+    def test_preserves_types(self, tmp_path):
+        p = self._write(tmp_path, 'index:\n  auto_sync: true\n  lock_timeout: 120\n')
+        assert cfg.read_config_file(p) == {
+            'index.auto_sync': True, 'index.lock_timeout': 120,
+        }
+
+    def test_allows_a_list_for_a_list_valued_key(self, tmp_path):
+        p = self._write(tmp_path, 'remote:\n  root:\n    - /a\n    - /b\n')
+        assert cfg.read_config_file(p) == {'remote.root': ['/a', '/b']}
+
+    def test_rejects_a_list_for_a_scalar_key(self, tmp_path):
+        """A file is a new way to make a key a list; the same rule applies."""
+        p = self._write(tmp_path, 'owner:\n  - a\n  - b\n')
+        with pytest.raises(ValueError) as exc:
+            cfg.read_config_file(p)
+        assert 'owner' in str(exc.value)
+        assert 'remote.root' in str(exc.value), "should name the keys that do"
+
+    def test_rejects_a_non_mapping(self, tmp_path):
+        p = self._write(tmp_path, '- one\n- two\n')
+        with pytest.raises(ValueError, match='mapping'):
+            cfg.read_config_file(p)
+
+    def test_rejects_invalid_yaml(self, tmp_path):
+        p = self._write(tmp_path, 'owner: :\n  - x\n')
+        with pytest.raises(ValueError, match='not valid YAML'):
+            cfg.read_config_file(p)
+
+    def test_rejects_an_empty_file(self, tmp_path):
+        p = self._write(tmp_path, '')
+        with pytest.raises(ValueError, match='empty'):
+            cfg.read_config_file(p)
+
+    def test_rejects_a_missing_file(self, tmp_path):
+        with pytest.raises(ValueError, match='No such file'):
+            cfg.read_config_file(Path(tmp_path) / 'absent.yaml')
+
+
+class TestSetValues:
+    """Bulk writes merge into the scope rather than replacing it."""
+
+    def test_writes_several_keys_at_once(self, isolated_config):
+        cfg.set_values({'owner': 'org', 'cache.root': '/c'}, 'user')
+        assert cfg.get_value('owner') == 'org'
+        assert cfg.get_value('cache.root') == '/c'
+
+    def test_keeps_keys_it_was_not_given(self, isolated_config):
+        cfg.set_value('username', 'alice', 'user')
+        cfg.set_values({'owner': 'org'}, 'user')
+        assert cfg.get_value('username') == 'alice'
+
+    def test_stores_values_unparsed(self, isolated_config):
+        """Values arrive already typed; re-parsing them would corrupt them."""
+        cfg.set_values({'remote.root': ['/a', '/b'], 'index.auto_sync': True},
+                       'user')
+        assert cfg.get_str_list('remote.root') == ['/a', '/b']
+        assert cfg.get_value('index.auto_sync') is True
+
+
+class TestConfigImport:
+    """`dt config import` installs a config file handed over by someone else.
+
+    The case this exists for: an offsite collaborator on a different
+    filesystem, who should not have to be told where config lives on their own
+    machine or retype a dozen `dt config set` lines correctly.
+    """
+
+    def _file(self, tmp_path, text):
+        p = Path(tmp_path) / 'lab.yaml'
+        p.write_text(text)
+        return str(p)
+
+    def _user_config(self, temp_dirs):
+        return Path(temp_dirs['home']) / '.config' / 'dt' / 'config.yaml'
+
+    def test_imports_into_user_scope_by_default(self, runner, isolated_config,
+                                                tmp_path, temp_dirs):
+        f = self._file(tmp_path, 'owner: lab\nsecrets:\n  backend: gcp\n')
+        r = runner.invoke(cli, ['config', 'import', f])
+        assert r.exit_code == 0, r.output
+        data = yaml.safe_load(self._user_config(temp_dirs).read_text())
+        assert data['owner'] == 'lab'
+        assert data['secrets']['backend'] == 'gcp'
+
+    def test_merges_rather_than_replacing_the_file(self, runner,
+                                                  isolated_config, tmp_path):
+        """Importing lab defaults must not discard the collaborator's paths."""
+        cfg.set_value('cache.root', '/home/alice/cache', 'user')
+        f = self._file(tmp_path, 'owner: lab\n')
+        runner.invoke(cli, ['config', 'import', f])
+        assert cfg.get_value('cache.root') == '/home/alice/cache'
+        assert cfg.get_value('owner') == 'lab'
+
+    def test_additions_need_no_confirmation(self, runner, isolated_config,
+                                            tmp_path):
+        """Adding settings loses nothing, so it does not stop to ask."""
+        f = self._file(tmp_path, 'owner: lab\n')
+        r = runner.invoke(cli, ['config', 'import', f], input='')
+        assert r.exit_code == 0
+        assert cfg.get_value('owner') == 'lab'
+
+    def test_prompts_before_replacing_a_value(self, runner, isolated_config,
+                                              tmp_path):
+        cfg.set_value('owner', 'mine', 'user')
+        f = self._file(tmp_path, 'owner: lab\n')
+        r = runner.invoke(cli, ['config', 'import', f], input='n\n')
+        assert r.exit_code != 0
+        assert cfg.get_value('owner') == 'mine', "declining must change nothing"
+
+    def test_confirming_replaces_the_value(self, runner, isolated_config,
+                                           tmp_path):
+        cfg.set_value('owner', 'mine', 'user')
+        f = self._file(tmp_path, 'owner: lab\n')
+        r = runner.invoke(cli, ['config', 'import', f], input='y\n')
+        assert r.exit_code == 0
+        assert cfg.get_value('owner') == 'lab'
+
+    def test_yes_skips_the_prompt(self, runner, isolated_config, tmp_path):
+        cfg.set_value('owner', 'mine', 'user')
+        f = self._file(tmp_path, 'owner: lab\n')
+        r = runner.invoke(cli, ['config', 'import', f, '--yes'])
+        assert r.exit_code == 0
+        assert cfg.get_value('owner') == 'lab'
+
+    def test_shows_the_replacement_it_is_about_to_make(self, runner,
+                                                      isolated_config,
+                                                      tmp_path):
+        cfg.set_value('owner', 'mine', 'user')
+        f = self._file(tmp_path, 'owner: lab\n')
+        r = runner.invoke(cli, ['config', 'import', f, '--yes'])
+        assert 'mine -> lab' in r.output
+
+    def test_dry_run_writes_nothing(self, runner, isolated_config, tmp_path,
+                                    temp_dirs):
+        f = self._file(tmp_path, 'owner: lab\n')
+        r = runner.invoke(cli, ['config', 'import', f, '--dry-run'])
+        assert r.exit_code == 0
+        assert 'Dry run' in r.output
+        assert not self._user_config(temp_dirs).exists()
+
+    def test_dry_run_reports_the_counts(self, runner, isolated_config,
+                                        tmp_path):
+        cfg.set_value('owner', 'mine', 'user')
+        f = self._file(tmp_path, 'owner: lab\nusername: alice\n')
+        r = runner.invoke(cli, ['config', 'import', f, '--dry-run'])
+        assert '1 to add' in r.output and '1 to replace' in r.output
+
+    def test_project_scope_flag(self, runner, isolated_config, tmp_path,
+                                temp_dirs):
+        f = self._file(tmp_path, 'owner: lab\n')
+        r = runner.invoke(cli, ['config', 'import', f, '--project'])
+        assert r.exit_code == 0
+        project_config = Path(temp_dirs['project']) / '.dt' / 'config.yaml'
+        assert yaml.safe_load(project_config.read_text())['owner'] == 'lab'
+
+    def test_two_scope_flags_rejected(self, runner, isolated_config, tmp_path):
+        f = self._file(tmp_path, 'owner: lab\n')
+        r = runner.invoke(cli, ['config', 'import', f, '--user', '--project'])
+        assert r.exit_code != 0
+
+    def test_reimport_is_a_no_op(self, runner, isolated_config, tmp_path):
+        f = self._file(tmp_path, 'owner: lab\n')
+        runner.invoke(cli, ['config', 'import', f])
+        r = runner.invoke(cli, ['config', 'import', f])
+        assert r.exit_code == 0
+        assert 'Nothing to do' in r.output
+
+    def test_list_valued_key_round_trips(self, runner, isolated_config,
+                                         tmp_path):
+        f = self._file(tmp_path, 'remote:\n  root:\n    - /a\n    - /b\n')
+        r = runner.invoke(cli, ['config', 'import', f])
+        assert r.exit_code == 0
+        assert cfg.get_str_list('remote.root') == ['/a', '/b']
+
+    def test_bad_file_is_reported_not_traced(self, runner, isolated_config,
+                                             tmp_path):
+        f = self._file(tmp_path, 'owner:\n  - a\n  - b\n')
+        r = runner.invoke(cli, ['config', 'import', f])
+        assert r.exit_code != 0
+        assert 'owner' in r.output
+        assert 'Traceback' not in r.output
+
+    def test_missing_file_is_reported(self, runner, isolated_config, tmp_path):
+        r = runner.invoke(cli, ['config', 'import',
+                                str(Path(tmp_path) / 'absent.yaml')])
+        assert r.exit_code != 0
+
+    def test_warns_when_a_repo_config_will_override_the_import(
+            self, runner, isolated_config, tmp_path):
+        """Project scope outranks user, so the import may not take effect."""
+        cfg.set_value('cache.root', '/from/project', 'project')
+        f = self._file(tmp_path, 'cache:\n  root: /from/file\n')
+        r = runner.invoke(cli, ['config', 'import', f])
+        assert r.exit_code == 0
+        assert 'project' in r.stderr
+        assert '/from/project' in r.stderr
+
+    def test_flags_paths_that_do_not_exist_here(self, runner, isolated_config,
+                                                tmp_path):
+        """The handed-over file usually names the sender's filesystem."""
+        f = self._file(tmp_path, 'cache:\n  root: /g/data/nope/dvc_cache\n')
+        r = runner.invoke(cli, ['config', 'import', f])
+        assert r.exit_code == 0
+        assert '/g/data/nope/dvc_cache' in r.stderr
+        assert 'dt doctor' in r.stderr
+
+    def test_no_path_warning_when_the_path_exists(self, runner,
+                                                 isolated_config, tmp_path):
+        f = self._file(tmp_path, f'cache:\n  root: {tmp_path}\n')
+        r = runner.invoke(cli, ['config', 'import', f])
+        assert r.exit_code == 0
+        assert 'do not exist' not in r.stderr
+
+    def test_relative_paths_are_not_checked(self, runner, isolated_config,
+                                            tmp_path):
+        """Only absolute paths are unambiguous enough to call missing."""
+        f = self._file(tmp_path, 'archive:\n  registry_path: dt-archives/reg\n')
+        r = runner.invoke(cli, ['config', 'import', f])
+        assert r.exit_code == 0
+        assert 'do not exist' not in r.stderr
