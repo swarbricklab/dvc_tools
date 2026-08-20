@@ -190,7 +190,7 @@ dt config set index.retry_interval 10
 
 ## qxub Options
 
-These options configure the jobs `dt` submits via [qxub](https://github.com/swarbricklab/qxub): `dt push --workers`, `dt add`, and (via the `archive.qxub_*` fallbacks) `dt remote archive stage --via-qxub`.
+These options configure the jobs `dt` submits via [qxub](https://github.com/swarbricklab/qxub): `dt push --workers`, `dt get --workers`, `dt remote verify --workers`, `dt add`, and (via the `archive.qxub_*` fallbacks) `dt remote archive stage --via-qxub`.
 
 ### `qxub.env`
 
@@ -284,7 +284,8 @@ dt push -w 16
 ```
 
 `dt pull` has no `--workers` flag; it pulls in-process. The `qxub.*` settings
-apply to `dt push -w` and to `dt add` jobs submitted via qxub.
+apply to `dt push -w`, `dt get -w` (`s3://` destinations only), `dt remote
+verify -w`, and to `dt add` jobs submitted via qxub.
 
 ## auth Options
 

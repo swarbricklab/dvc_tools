@@ -18,16 +18,19 @@ single large ``.dir`` output -- which is what makes it possible to hand over 82
 of 412 samples without transferring the other 330.
 """
 
+import dataclasses
 import json
 import re
 import subprocess
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import cache_ops
 from . import get_dest
+from . import hpc
 from . import remote as remote_mod
 from . import tmp as tmp_mod
 from . import utils
@@ -205,6 +208,47 @@ def list_source_files(
     if not files:
         raise GetError(f"No tracked files found at {path}")
     return files
+
+
+def _resolve_rows(
+    clone: Path,
+    row_paths: Sequence[str],
+    rev: Optional[str],
+    jobs: int,
+    path_col: str = 'path',
+) -> List[Tuple[Optional[List[Dict[str, object]]], Optional[str]]]:
+    """Resolve each row's path to a file listing, concurrently.
+
+    Returns one ``(entries, error)`` pair per input path, in input order;
+    exactly one of the two is ever set. Destinations are deliberately *not*
+    computed here -- a local row lands in a directory and an S3 row lands under
+    a key prefix, and the callers differ on that while agreeing on this.
+
+    Each row costs a ``dvc list`` subprocess, so they run concurrently: on a
+    long manifest the resolves are otherwise a serial prologue to all the real
+    work.
+
+    ...but the first row is resolved on its own first. DVC keeps a SQLite state
+    db for the repository it is reading, and on a freshly-cloned one it does not
+    exist yet; fan out immediately and the workers race to create it, which
+    fails all but one with "database is locked". One serial call builds it,
+    after which concurrent readers are fine.
+    """
+    def resolve(row_path: str):
+        if not row_path:
+            return None, f'Missing {path_col}'
+        try:
+            return list_source_files(clone, row_path, rev=rev), None
+        except GetError as e:
+            return None, str(e)
+
+    resolved: List[Tuple[Optional[List[Dict[str, object]]], Optional[str]]] = []
+    if row_paths:
+        resolved.append(resolve(row_paths[0]))
+    if len(row_paths) > 1:
+        with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+            resolved.extend(pool.map(resolve, row_paths[1:]))
+    return resolved
 
 
 def verify_file(dest: Path, md5: str) -> bool:
@@ -534,6 +578,29 @@ def _upload_one(
     return relpath, True, 'uploaded'
 
 
+def _upload_all(
+    tasks: Sequence[Tuple[Dict[str, object], 'get_dest.S3Dest']],
+    odb,
+    jobs: int,
+    force: bool,
+    resume: bool = False,
+    check: bool = False,
+    chunk_size: int = get_dest.DEFAULT_CHUNK_SIZE,
+) -> List[Tuple[str, bool, str]]:
+    """Stream ``(entry, dest)`` pairs through one pool, preserving order.
+
+    The S3 counterpart to :func:`_place_all`, and flat for the same reason: a
+    row is often a sample directory of two fastqs, so a pool per row would idle
+    most of the budget.
+    """
+    def place(task):
+        entry, row_dest = task
+        return _upload_one(entry, odb, row_dest, force, resume, check, chunk_size)
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        return list(pool.map(place, tasks))
+
+
 def upload_to_s3(
     clone: Path,
     targets: Sequence[Tuple[str, 'get_dest.S3Dest']],
@@ -555,27 +622,18 @@ def upload_to_s3(
     pool, for the same reason the local path does: a row is often a sample
     directory of two fastqs, and batching per row would idle most workers.
 
-    Unlike the local network path there is no ``dvc get`` subprocess and so no
-    contention on the clone's SQLite state database, which is what forced that
-    path to run rows serially.
+    Unlike the local network path there is no ``dvc get`` subprocess, so nothing
+    here forces rows to run serially.
     """
     repo, odb = _open_source_odb(clone)
     try:
-        resolved = []
-        for row_path, row_dest in targets:
-            if not row_path:
-                resolved.append((row_path, row_dest, None, 'missing source path'))
-                continue
-            try:
-                resolved.append(
-                    (row_path, row_dest, list_source_files(clone, row_path, rev=rev), None)
-                )
-            except GetError as e:
-                resolved.append((row_path, row_dest, None, str(e)))
+        resolved = _resolve_rows(
+            clone, [row_path for row_path, _ in targets], rev, jobs
+        )
 
         tasks: List[Tuple[Dict[str, object], 'get_dest.S3Dest']] = []
         spans: Dict[int, Tuple[int, int]] = {}
-        for i, (_, row_dest, entries, _) in enumerate(resolved):
+        for i, ((_, row_dest), (entries, _)) in enumerate(zip(targets, resolved)):
             if entries is None:
                 continue
             start = len(tasks)
@@ -587,17 +645,14 @@ def upload_to_s3(
             print(f"Streaming {len(tasks)} objects across {max(1, jobs)} workers "
                   f"(~{mib} MiB peak memory)")
 
-        def place(task):
-            entry, row_dest = task
-            return _upload_one(
-                entry, odb, row_dest, force, resume, check, chunk_size
-            )
-
-        with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-            placed = list(pool.map(place, tasks))
+        placed = _upload_all(
+            tasks, odb, jobs, force, resume, check, chunk_size
+        )
 
         results: List[Tuple[str, bool, str]] = []
-        for i, (row_path, row_dest, entries, error) in enumerate(resolved):
+        for i, ((row_path, row_dest), (entries, error)) in enumerate(
+            zip(targets, resolved)
+        ):
             if entries is None:
                 results.append((row_path or '(empty)', False, error))
                 continue
@@ -613,6 +668,347 @@ def upload_to_s3(
         return results, placed
     finally:
         repo.close()
+
+
+# =============================================================================
+# Distributed streaming to S3 via qxub
+# =============================================================================
+#
+# Only the S3 destination has a distributed mode, and the reason is bandwidth
+# rather than convenience. Streaming from a DVC remote into object storage is
+# network-bound, so N nodes genuinely multiply throughput -- and on NCI `copyq`,
+# already hpc.DEFAULT_TRANSFER_QUEUE, is the queue with outbound network access.
+# A local destination is bound by the filesystem both ends share, where a second
+# node adds contention rather than bandwidth; `-j` is the knob there.
+#
+# What makes this cheap to build is that the submitter has to resolve every row
+# anyway, because LPT bin-packing needs the byte sizes and `list_source_files`
+# is where sizes come from. Having paid for that, it ships the resolved
+# (md5, size, key) tuples in the manifest -- so no worker ever runs `dvc list`,
+# which is what keeps N nodes off DVC's SQLite state db for the shared clone.
+# Each worker opens the clone once, read-only, for one thing only: the source
+# remote's filesystem and credentials out of its .dvc/config.
+
+
+def _worker_tasks(
+    targets: Sequence[Tuple[str, Optional[str]]],
+    resolved: Sequence[Tuple[Optional[List[Dict[str, object]]], Optional[str]]],
+) -> Tuple[List[Dict[str, object]], Dict[int, int]]:
+    """Flatten resolved rows into JSON-serialisable per-file tasks.
+
+    The partition unit is a *file*, not a row. A row keeps its identity through
+    the ``row`` tag, so reporting stays per-row either way, and per-file
+    balances properly in the two cases per-row cannot: a single row holding
+    thousands of files, and rows whose sizes differ by an order of magnitude --
+    which fastq sample directories reliably do.
+
+    Returns the task list, and a row index -> file count map so collation can
+    tell "this row's files failed" from "nothing came back for this row".
+    """
+    tasks: List[Dict[str, object]] = []
+    counts: Dict[int, int] = {}
+    for i, ((_, name), (entries, _)) in enumerate(zip(targets, resolved)):
+        if entries is None:
+            continue
+        counts[i] = len(entries)
+        for entry in entries:
+            tasks.append({
+                'row': i,
+                'name': name,
+                'relpath': str(entry['relpath']),
+                'md5': str(entry['md5']),
+                'size': int(entry.get('size') or 0),
+            })
+    return tasks, counts
+
+
+def _write_worker_results(
+    manifest_dir: Path,
+    worker_id: int,
+    results: List[Dict[str, object]],
+) -> Path:
+    """Record one worker's per-file outcomes for the submitter to collate.
+
+    Written even for an empty partition, so that a *missing* file means "this
+    worker did not finish" rather than "this worker had nothing to do".
+    """
+    path = manifest_dir / f'result_{worker_id}.json'
+    with open(path, 'w') as f:
+        json.dump({'results': results}, f)
+    return path
+
+
+def _collate_worker_results(
+    manifest_dir: Path,
+    targets: Sequence[Tuple[str, Optional[str]]],
+    resolved: Sequence[Tuple[Optional[List[Dict[str, object]]], Optional[str]]],
+    counts: Dict[int, int],
+    root: 'get_dest.S3Dest',
+) -> List[Tuple[str, bool, str]]:
+    """Rebuild per-row outcomes, in CSV order, from the workers' result files.
+
+    Because the partition unit is a file, one row's files may be spread across
+    several workers; the ``row`` tag each task carries is what puts them back
+    together.
+
+    A row whose files do not all come back is reported as a failure even when
+    every result that *did* arrive succeeded. A worker killed mid-partition --
+    walltime, most likely -- would otherwise read as a clean run of a short row.
+    """
+    per_row: Dict[int, List[Tuple[str, bool, str]]] = {}
+    for part in sorted(manifest_dir.glob('result_*.json')):
+        try:
+            with open(part) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            # A truncated result file is itself a worker that did not finish,
+            # and the per-row count check below is what reports it.
+            continue
+        for item in data.get('results', []):
+            per_row.setdefault(item.get('row'), []).append((
+                str(item.get('relpath')),
+                bool(item.get('ok')),
+                str(item.get('message')),
+            ))
+
+    results: List[Tuple[str, bool, str]] = []
+    for i, ((row_path, name), (entries, error)) in enumerate(
+        zip(targets, resolved)
+    ):
+        if entries is None:
+            results.append((row_path or '(empty)', False, error))
+            continue
+        placed = per_row.get(i, [])
+        written = sum(1 for _, ok, _ in placed if ok)
+        failed = len(placed) - written
+        missing = counts.get(i, 0) - len(placed)
+        if failed or missing:
+            note = f'{written} uploaded, {failed} failed'
+            if missing:
+                note += f', {missing} unreported (a worker did not finish)'
+            results.append((row_path, False, note))
+        else:
+            dest = root.under(name) if name else root
+            plural = '' if written == 1 else 's'
+            results.append((row_path, True, f'{written} file{plural} -> {dest}'))
+    return results
+
+
+def distributed_upload_to_s3(
+    repository: str,
+    targets: Sequence[Tuple[str, Optional[str]]],
+    root: 'get_dest.S3Dest',
+    num_workers: int,
+    owner: Optional[str] = None,
+    rev: Optional[str] = None,
+    jobs: int = 8,
+    force: bool = False,
+    resume: bool = False,
+    check: bool = False,
+    chunk_size: int = get_dest.DEFAULT_CHUNK_SIZE,
+    refresh: bool = True,
+    path_col: str = 'path',
+    qxub_args: Optional[List[str]] = None,
+    wait: bool = True,
+    verbose: bool = False,
+) -> Tuple[List[str], Optional[Path], Optional[List[Tuple[str, bool, str]]]]:
+    """Spread a stream-to-S3 transfer across ``num_workers`` compute nodes.
+
+    Args:
+        repository: Repository name, alias, or URL.
+        targets: ``(source path, destination name)`` pairs, one per row. The
+            name is the sub-prefix under *root* the row lands in, or None to
+            use *root* itself.
+        root: The destination prefix, already preflighted by the caller.
+        num_workers: Number of qxub jobs to submit.
+        owner: Owner override for short repository names.
+        rev: Git revision to resolve against.
+        jobs: Streaming threads *within* each worker.
+        force: Overwrite existing objects.
+        resume: Skip objects already present.
+        check: Verify existing objects against their recorded checksum.
+        chunk_size: Streaming chunk size in bytes.
+        refresh: Refresh the cached clone before resolving.
+        path_col: CSV column name, for error messages only.
+        qxub_args: Additional arguments for qxub exec.
+        wait: Wait for the jobs and collate their results.
+        verbose: Print progress.
+
+    Returns:
+        ``(job_ids, manifest_dir, results)``. *results* is the per-row report
+        when *wait* is True, and None when the jobs were left running.
+
+    Raises:
+        GetError: If qxub is unavailable, nothing resolves, or no job submits.
+    """
+    try:
+        hpc.require_qxub()
+    except hpc.HPCError as e:
+        raise GetError(str(e))
+
+    clone = tmp_mod.clone_repo(
+        repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
+    )
+
+    resolved = _resolve_rows(
+        clone, [row_path for row_path, _ in targets], rev, jobs, path_col
+    )
+    tasks, counts = _worker_tasks(targets, resolved)
+    if not tasks:
+        problems = [error for _, error in resolved if error]
+        detail = f" First error: {problems[0]}" if problems else ""
+        raise GetError(f"No row resolved to a tracked file.{detail}")
+
+    partitions = hpc.partition_by_size(
+        tasks,
+        num_workers,
+        weight=lambda task: task['size'],
+        # (row, relpath) is unique across the manifest and independent of the
+        # order the rows happened to resolve in, so the same CSV always
+        # partitions the same way.
+        tiebreak=lambda task: (task['row'], task['relpath']),
+        verbose=verbose,
+    )
+
+    job_id = str(uuid.uuid4())[:8]
+    manifest_dir = hpc.save_manifest(
+        {'files': tasks, 'repo_root': str(Path.cwd())},
+        partitions,
+        job_id,
+        operation='get',
+        metadata={
+            # Resolved on the submitting node and passed through, not
+            # re-derived per worker. resolve_link_types() reads `dvc config`
+            # from the cwd and preflight() resolves a credential chain; both
+            # could answer differently on a compute node, and a transfer that
+            # silently changes its mind halfway is worse than one that fails.
+            'clone': str(clone),
+            'rev': rev,
+            'root_url': root.url,
+            'dest_config': dataclasses.asdict(root.config),
+            'chunk_size': chunk_size,
+            'jobs': jobs,
+            'force': force,
+            'resume': resume,
+            'check': check,
+        },
+    )
+
+    if verbose:
+        print(f"Manifest saved to {manifest_dir}")
+
+    try:
+        job_ids = hpc.submit_workers(
+            manifest_dir,
+            num_workers,
+            operation='get',
+            qxub_args=qxub_args,
+            verbose=verbose,
+        )
+    except hpc.HPCError as e:
+        raise GetError(str(e))
+
+    if not job_ids:
+        raise GetError(
+            f"No worker jobs were submitted. The manifest is at {manifest_dir} "
+            f"if you want to inspect the partitioning."
+        )
+
+    if not wait:
+        return job_ids, manifest_dir, None
+
+    try:
+        succeeded = hpc.monitor_jobs(job_ids, verbose=verbose)
+    except hpc.HPCError as e:
+        raise GetError(str(e))
+    if not succeeded and verbose:
+        print("Some worker jobs reported failure; collating what landed.")
+
+    return job_ids, manifest_dir, _collate_worker_results(
+        manifest_dir, targets, resolved, counts, root
+    )
+
+
+def worker_upload_to_s3(
+    manifest_dir: Path,
+    worker_id: int,
+    jobs: Optional[int] = None,
+    verbose: bool = False,
+) -> Tuple[int, int]:
+    """Stream one worker's partition into S3. Called inside a submitted job.
+
+    The partition arrives already resolved -- md5, size and destination for
+    every file -- so this never runs ``dvc list``, and the only thing it needs
+    the clone for is the source remote's filesystem and credentials.
+
+    Args:
+        manifest_dir: Manifest directory written by the submitter.
+        worker_id: Worker index.
+        jobs: Streaming threads. None takes the value the submitter chose,
+            which is the authoritative one.
+        verbose: Print progress.
+
+    Returns:
+        (uploaded_count, failed_count) for this partition.
+    """
+    metadata, tasks = hpc.load_worker_partition(manifest_dir, worker_id)
+
+    root = get_dest.S3Dest(
+        metadata['root_url'],
+        get_dest.S3DestConfig(**(metadata.get('dest_config') or {})),
+    )
+
+    # Every worker preflights for itself rather than trusting the submitter's
+    # check. --dest-account-id exists for unattended runs and a worker is the
+    # most unattended thing here: a credential chain that resolves differently
+    # on a compute node than on the login node is exactly what it must catch.
+    identity = root.preflight()
+    if verbose:
+        rows = len({task.get('row') for task in tasks})
+        print(f"Worker {worker_id}: {len(tasks)} object(s) from {rows} "
+              f"row{'' if rows == 1 else 's'} under {root}")
+        print(f"Writing as:  {identity}")
+
+    if not tasks:
+        _write_worker_results(manifest_dir, worker_id, [])
+        return 0, 0
+
+    jobs = jobs or int(metadata.get('jobs') or 8)
+    chunk_size = int(metadata.get('chunk_size') or get_dest.DEFAULT_CHUNK_SIZE)
+
+    # Build the filesystem once up front: under() copies it into each child, so
+    # touching it here means every row shares one client rather than each
+    # relying on fsspec's instance cache to hand back the same one.
+    _ = root.fs
+    dests: Dict[Optional[str], 'get_dest.S3Dest'] = {}
+    for task in tasks:
+        name = task.get('name')
+        if name not in dests:
+            dests[name] = root.under(name) if name else root
+
+    repo, odb = _open_source_odb(Path(metadata['clone']))
+    try:
+        placed = _upload_all(
+            [
+                ({'relpath': task['relpath'], 'md5': task['md5']},
+                 dests[task.get('name')])
+                for task in tasks
+            ],
+            odb,
+            jobs,
+            bool(metadata.get('force')),
+            bool(metadata.get('resume')),
+            bool(metadata.get('check')),
+            chunk_size,
+        )
+    finally:
+        repo.close()
+
+    _write_worker_results(manifest_dir, worker_id, [
+        {'row': task['row'], 'relpath': relpath, 'ok': ok, 'message': message}
+        for task, (relpath, ok, message) in zip(tasks, placed)
+    ])
+    return _tally(placed, verbose)
 
 
 def _prepare_s3_dest(
@@ -824,39 +1220,22 @@ def get_from_csv(
 
     link_types = resolve_link_types(link)
 
-    # Phase 1: resolve every row to a file listing. Each row costs a `dvc list`
-    # subprocess, so run them concurrently -- on a long manifest the resolves
-    # alone are otherwise a serial prologue to all the real work.
-    def resolve(target):
-        row_path, row_out = target
-        if not row_path:
-            return None, None, f'Missing {path_col}'
-        try:
-            entries = list_source_files(clone, row_path, rev=rev)
-        except GetError as e:
-            return None, None, str(e)
-        return _dest_for(row_out, row_path), entries, None
-
-    # ...but resolve the first row on its own first. DVC keeps a SQLite state db
-    # inside the clone, and on a freshly-cloned repo it does not exist yet; fan
-    # out immediately and the workers race to create it, which fails all but one
-    # with "database is locked". One serial call builds it, after which
-    # concurrent readers are fine.
-    resolved = []
-    if targets:
-        resolved.append(resolve(targets[0]))
-    if len(targets) > 1:
-        with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-            resolved.extend(pool.map(resolve, targets[1:]))
+    # Phase 1: resolve every row to a file listing.
+    resolved = _resolve_rows(
+        clone, [row_path for row_path, _ in targets], rev, jobs, path_col
+    )
 
     # Phase 2: place every file from every row through a single pool, so the
     # worker budget goes to the transfer as a whole rather than being re-divided
     # per row. Spans let each row's outcome be recovered from the flat results.
     tasks: List[Tuple[Path, Dict[str, object]]] = []
     spans: Dict[int, Tuple[Path, int, int]] = {}
-    for i, (dest_root, entries, _) in enumerate(resolved):
+    for i, ((row_path, row_out), (entries, _)) in enumerate(
+        zip(targets, resolved)
+    ):
         if entries is None:
             continue
+        dest_root = _dest_for(row_out, row_path)
         start = len(tasks)
         tasks.extend((dest_root, entry) for entry in entries)
         spans[i] = (dest_root, start, len(tasks))
@@ -870,7 +1249,7 @@ def get_from_csv(
 
     # Phase 3: attribute the flat results back to their rows, in CSV order.
     results: List[Tuple[str, bool, str]] = []
-    for i, (target, (_, entries, error)) in enumerate(zip(targets, resolved)):
+    for i, (target, (entries, error)) in enumerate(zip(targets, resolved)):
         row_path = target[0]
         if entries is None:
             results.append((row_path or '(empty)', False, error))
