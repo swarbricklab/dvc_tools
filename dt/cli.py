@@ -838,6 +838,89 @@ def _report_rows(results, verb):
         raise SystemExit(1)
 
 
+def _get_distributed(repository, path, out, csv_path, path_col, owner, rev,
+                     num_workers, jobs, force, resume, check, refresh,
+                     dest_config, chunk_bytes, to_s3, wait, verbose):
+    """Run ``dt get --workers``: submit qxub workers and report what landed.
+
+    Split out of ``get_cmd`` because it is a third top-level mode alongside
+    single-path and ``--csv``, not a variation on either -- it consumes both
+    kinds of target list and then does something structurally different with
+    them.
+    """
+    if num_workers < 1:
+        raise click.UsageError("--workers must be at least 1.")
+
+    if not to_s3:
+        raise click.UsageError(
+            "--workers only applies to an s3:// destination.\n"
+            "Streaming to object storage is bound by the network, so more nodes "
+            "mean more bandwidth. A local destination is bound by the filesystem "
+            "both ends share, where a second node adds contention rather than "
+            "throughput -- raise -j instead."
+        )
+
+    # Rows land under the root prefix by name, matching the non-distributed
+    # path: a trailing slash on -o collects each row under its own basename,
+    # and a single path without one is used verbatim.
+    if csv_path:
+        if path:
+            raise click.UsageError("Do not provide PATH when using --csv.")
+        try:
+            rows = utils.read_csv_targets(csv_path, path_col, None)
+        except ValueError as e:
+            raise click.ClickException(str(e))
+        if not rows:
+            raise click.ClickException(f"No rows selected from {csv_path}")
+        targets = [
+            (row_path, row_out or Path(row_path or '.').name)
+            for row_path, row_out in rows
+        ]
+    else:
+        if not path:
+            raise click.UsageError("PATH is required (unless using --csv).")
+        targets = [(path, Path(path).name if out.endswith('/') else None)]
+
+    # Preflight on the submitting node before spending a queue slot: a bad
+    # profile or a missing s3:PutObject grant should fail here, not eight times
+    # over in eight PBS jobs.
+    root = get_dest.S3Dest(out, dest_config)
+    identity = root.preflight()
+    click.echo(f"Destination: {root}")
+    click.echo(f"Writing as:  {identity}")
+
+    try:
+        job_ids, manifest_dir, results = get_mod.distributed_upload_to_s3(
+            repository=repository,
+            targets=targets,
+            root=root,
+            num_workers=num_workers,
+            owner=owner,
+            rev=rev,
+            jobs=jobs,
+            force=force,
+            resume=resume,
+            check=check,
+            chunk_size=chunk_bytes,
+            refresh=refresh,
+            path_col=path_col,
+            wait=wait,
+            verbose=verbose,
+        )
+    except get_mod.GetError as e:
+        raise click.ClickException(str(e))
+
+    if results is None:
+        click.echo(f"Submitted {len(job_ids)} job(s):")
+        for job_id in job_ids:
+            click.echo(f"  {job_id}")
+        click.echo(f"Manifest: {manifest_dir}")
+        click.echo(f"\nMonitor with: qxub monitor {' '.join(job_ids)}")
+        return
+
+    _report_rows(results, "uploaded")
+
+
 def _bool_config(key, default):
     """Read a boolean config value, tolerating yes/no/true/false strings."""
     raw = cfg.get_value(key)
@@ -4574,7 +4657,7 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 
 
 @cli.command('get')
-@click.argument('repository')
+@click.argument('repository', required=False)
 @click.argument('path', required=False)
 @click.option('-o', '--out', help='Destination path. With --csv, the directory rows are collected under')
 @click.option('--owner', help='Override the GitHub owner for short names')
@@ -4593,11 +4676,19 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 @click.option('--dest-region', default=None, help='Region for an s3:// destination. Required if the profile\'s region is "auto".')
 @click.option('--dest-account-id', default=None, help='Abort unless the destination credentials resolve to this AWS account. For unattended runs.')
 @click.option('--chunk-size', type=int, default=None, help='Streaming chunk size in MiB for s3:// destinations (default: 8)')
+@click.option('--workers', '-w', type=int, default=None,
+              help='Distribute an s3:// transfer across N compute nodes via qxub.')
+@click.option('--no-wait', is_flag=True,
+              help='With --workers: submit jobs and exit without waiting.')
+@click.option('--worker', type=int, default=None,
+              help='Worker ID (internal, used by submitted jobs).')
+@click.option('--manifest', type=click.Path(exists=True), default=None,
+              help='Manifest directory (internal, used by submitted jobs).')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 def get_cmd(repository, path, out, owner, rev, csv_path, path_col,
             jobs, link, no_refresh, remote_fallback, resume, check, force,
             dest_profile, dest_endpoint_url, dest_region, dest_account_id,
-            chunk_size, verbose):
+            chunk_size, workers, no_wait, worker, manifest, verbose):
     """Download DVC-tracked data without creating tracking files.
 
     Wraps the idea of ``dvc get``: materialises data from a source repository
@@ -4618,13 +4709,47 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col,
     every row is resolved against that clone.
 
     \b
+    Two kinds of parallelism, and they are not alternatives:
+        -j, --jobs      threads inside one process
+        -w, --workers   compute nodes via qxub; s3:// destinations only
+
+    ``--workers`` exists because streaming into object storage is bound by the
+    network, so more nodes mean more bandwidth. A local destination is bound by
+    the filesystem both ends share, where a second node adds contention rather
+    than throughput -- widen ``-j`` there instead. Files are partitioned across
+    workers by size, so each gets a comparable share of the bytes.
+
+    \b
     Examples:
         dt get my-registry data/fq/AF013-A -o fastqs/
         dt get my-registry --csv samples.csv -o fastqs/
         dt get my-registry --csv samples.csv --path-col fq_dir -o fastqs/
         dt get my-registry data/ref.fa --link copy -o ./
         dt get my-registry data/fq/AF013-A -o s3://bucket/fastqs/ --dest-profile aws
+        dt get my-registry --csv samples.csv -o s3://bucket/fastqs/ -w 8
+        dt get my-registry --csv samples.csv -o s3://bucket/fastqs/ -w 8 --no-wait
     """
+    # Worker mode: everything this needs is in the manifest, including the
+    # destination and the clone, so no REPOSITORY argument is required or read.
+    if worker is not None:
+        if manifest is None:
+            raise click.UsageError("--worker requires --manifest.")
+        try:
+            written, failed = get_mod.worker_upload_to_s3(
+                manifest_dir=Path(manifest),
+                worker_id=worker,
+                verbose=verbose,
+            )
+        except get_mod.GetError as e:
+            raise click.ClickException(str(e))
+        click.echo(f"{written} uploaded, {failed} failed")
+        if failed:
+            raise SystemExit(1)
+        return
+
+    if not repository:
+        raise click.UsageError("REPOSITORY is required.")
+
     if force and resume:
         raise click.UsageError(
             "--force and --resume are contradictory: one re-fetches everything, "
@@ -4661,6 +4786,20 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col,
 
     chunk_bytes = (chunk_size * 1024 * 1024) if chunk_size \
         else get_dest.DEFAULT_CHUNK_SIZE
+
+    if no_wait and workers is None:
+        raise click.UsageError("--no-wait only means anything with --workers.")
+
+    if workers is not None:
+        _get_distributed(
+            repository=repository, path=path, out=out, csv_path=csv_path,
+            path_col=path_col, owner=owner, rev=rev, num_workers=workers,
+            jobs=jobs, force=force, resume=resume, check=check,
+            refresh=not no_refresh, dest_config=dest_config,
+            chunk_bytes=chunk_bytes, to_s3=to_s3, wait=not no_wait,
+            verbose=verbose,
+        )
+        return
 
     if csv_path:
         if path:

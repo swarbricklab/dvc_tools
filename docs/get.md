@@ -113,6 +113,8 @@ S3 destinations only (see [To an S3 bucket](#to-an-s3-bucket)):
 - `--dest-region <region>`: Destination region. Required if the profile's region is `auto`.
 - `--dest-account-id <id>`: Abort unless the destination credentials resolve to this account
 - `--chunk-size <MiB>`: Streaming chunk size (default: 8)
+- `-w, --workers <n>`: Distribute across n compute nodes via qxub — see [Across several compute nodes](#across-several-compute-nodes---workers)
+- `--no-wait`: With `--workers`, submit the jobs and exit without waiting
 
 ## To an S3 bucket
 
@@ -171,6 +173,71 @@ keep accruing storage charges. Add a lifecycle rule expiring incomplete multipar
 
 Not supported: `ssh://` destinations, and `--link` (there is nothing to link — an S3 destination is
 always a stream).
+
+## Across several compute nodes: `--workers`
+
+`-w/--workers N` spreads an `s3://` transfer over N compute nodes via [qxub](https://github.com/swarbricklab/qxub), instead of N threads in one process.
+
+```bash
+# 82 samples out to a collaborator's bucket, over 8 nodes
+dt get bcarc_wts --csv samples.csv -o s3://their-bucket/fastqs/ -w 8 --dest-profile their-aws
+
+# Submit and go; collect the result later with qxub monitor
+dt get bcarc_wts --csv samples.csv -o s3://their-bucket/fastqs/ -w 8 --no-wait
+```
+
+### Why only `s3://`
+
+`--workers` is an error on a local destination, and that is deliberate rather than unfinished:
+
+| | bound by | second node adds |
+|---|---|---|
+| `-o s3://…` | the network | **bandwidth** — a separate NIC |
+| `-o some/dir/` | the filesystem both ends share | contention |
+
+Streaming into object storage is network-bound, so nodes multiply throughput. A local destination on Lustre is limited by the filesystem, not the node, so a second node competes with the first rather than helping. Raise `-j` there.
+
+On NCI there is a second reason: `copyq` is the queue with outbound network access, and it is already the default for `dt` transfer workers (`qxub.queue`).
+
+> **Worth measuring before you scale up.** If your *source* remote is on `/g/data` rather than object storage, the read side is a shared filesystem again and the same argument applies to it. Time a single-node `-j 8` run over a few samples and watch whether throughput saturates before adding nodes.
+
+### The two axes
+
+`--jobs` and `--workers` are not alternatives, and they compose — `-w 8 -j 4` is 8 nodes running 4 streams each.
+
+| | `-w, --workers` | `-j, --jobs` |
+|---|---|---|
+| Unit | compute nodes via qxub | threads in one process |
+| Partitioned | up front, by size | not at all — a shared queue |
+
+The difference in the second row is the whole reason `--workers` needs more machinery than a bigger `-j`. Separate processes on separate machines cannot steal work from each other, so the split has to be decided before they start; a thread pool hands tasks out from a shared queue and self-corrects as it goes.
+
+### How the work is split
+
+Files are partitioned by **size**, largest-first onto the least-loaded worker (greedy LPT bin-packing — the same code `dt push --workers` uses). Fastq sample sizes are genuinely uneven, which is exactly the case this is for: a split by row count would hand one node a 40 GiB sample and another a 4 GiB one.
+
+The unit is a *file*, not a row, so one sample directory may be spread over several nodes. Reporting is unaffected — each file carries its row, and the per-row `✓`/`✗` report comes back in CSV order as usual:
+
+```
+Destination: s3://their-bucket/fastqs
+Writing as:  account 123456789012 as arn:aws:iam::123456789012:user/handoff
+Partition byte balance across 8 active worker(s): min=41.2G, max=46.8G, total=358G
+✓ data/fq/AF013-A: 2 files -> s3://their-bucket/fastqs/AF013-A
+✓ data/fq/AF013-B: 2 files -> s3://their-bucket/fastqs/AF013-B
+```
+
+Read the balance line: `min` far below `max` means one file dominates a partition and more nodes will not help.
+
+### What each worker needs
+
+The submitting node resolves every row once — it has to, because the byte sizes the partitioning needs come from that resolve — and ships the resolved md5, size and destination key for each file in the manifest under `.dt/tmp/get/<job-id>/`. Consequences worth knowing:
+
+- **No worker runs `dvc list`.** DVC keeps a SQLite state database for the repository it reads, and pointing N compute nodes at the shared clone's copy of it is how you get `database is locked`. Each worker opens the clone once, read-only, for one thing only: the source remote's filesystem and credentials out of its `.dvc/config`.
+- **The manifest directory and the clone must be visible from the compute nodes.** On `/scratch` or `/g/data` they are. This is the same requirement `dt push --workers` has.
+- **Each worker preflights for itself**, so `--dest-account-id` is enforced on the node that actually writes — a credential chain can resolve differently on a compute node than on a login node.
+- **No key material is written to the manifest.** The profile *name*, endpoint and region travel; secrets stay in `~/.aws`, which the compute nodes read for themselves.
+
+A worker killed mid-partition — walltime, usually — reports its rows as failed rather than silently short. Re-run with `--resume` to send only what is missing.
 
 ## Examples
 
