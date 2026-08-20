@@ -817,6 +817,102 @@ class TestCreateDvcFile:
         assert out['hash'] == 'md5'
 
 
+class TestCreateDvcFileOmitsUnknownSize:
+    """No size at all beats a size of zero (#182).
+
+    `size: 0` on a multi-GB import reads as an empty payload and silently
+    undercounts anything that sums recorded sizes.
+    """
+
+    def test_size_field_absent_when_none(self, tmp_path):
+        dvc_file = import_mod.create_dvc_file(
+            dest_path=tmp_path,
+            name="data",
+            md5="abc123.dir",
+            size=None,
+            nfiles=2,
+            repo_url="git@github.com:org/repo.git",
+            repo_path="data",
+            rev_lock="rev123",
+        )
+
+        out = yaml.safe_load(Path(dvc_file).read_text())['outs'][0]
+        assert 'size' not in out
+        assert out['nfiles'] == 2
+        assert out['md5'] == 'abc123.dir'
+
+
+class TestObjectSizeAcrossLayouts:
+    """Sizing must survive a half-migrated remote (#182).
+
+    The field case: a registry holding some objects under `files/md5/` and
+    others still at the bare `<xx>/<rest>` v2 path. Checkout coped, because it
+    falls back to v2; the size lookup did not, so every v2-resident object
+    contributed zero.
+    """
+
+    BLOB = b'z' * 4096
+
+    def _md5(self):
+        import hashlib
+        return hashlib.md5(self.BLOB).hexdigest()
+
+    def test_finds_v3_object(self, tmp_path):
+        md5 = self._md5()
+        obj = tmp_path / 'files' / 'md5' / md5[:2] / md5[2:]
+        obj.parent.mkdir(parents=True)
+        obj.write_bytes(self.BLOB)
+
+        assert import_mod.get_file_size_from_cache(str(tmp_path), md5) == 4096
+
+    def test_finds_v2_object(self, tmp_path):
+        """The regression: this returned None, and the caller made it 0."""
+        md5 = self._md5()
+        obj = tmp_path / md5[:2] / md5[2:]
+        obj.parent.mkdir(parents=True)
+        obj.write_bytes(self.BLOB)
+
+        assert import_mod.get_file_size_from_cache(str(tmp_path), md5) == 4096
+
+    def test_finds_v2_dir_object(self, tmp_path):
+        md5 = self._md5()
+        obj = tmp_path / md5[:2] / f"{md5[2:]}.dir"
+        obj.parent.mkdir(parents=True)
+        obj.write_bytes(self.BLOB)
+
+        assert import_mod.get_file_size_from_cache(str(tmp_path), f"{md5}.dir") == 4096
+
+    def test_missing_object_reports_none(self, tmp_path):
+        assert import_mod.get_file_size_from_cache(str(tmp_path), 'f' * 32) is None
+
+    def test_sum_reports_which_objects_are_unsized(self, tmp_path):
+        md5 = self._md5()
+        obj = tmp_path / md5[:2] / md5[2:]
+        obj.parent.mkdir(parents=True)
+        obj.write_bytes(self.BLOB)
+
+        total, missing = import_mod._sum_object_sizes(
+            [md5, 'f' * 32], str(tmp_path)
+        )
+
+        assert total == 4096
+        assert missing == ['f' * 32]
+
+    def test_second_root_is_consulted(self, tmp_path):
+        """The source remote may be missing what the local cache already has."""
+        md5 = self._md5()
+        local = tmp_path / 'cache'
+        obj = local / 'files' / 'md5' / md5[:2] / md5[2:]
+        obj.parent.mkdir(parents=True)
+        obj.write_bytes(self.BLOB)
+
+        total, missing = import_mod._sum_object_sizes(
+            [md5], str(tmp_path / 'remote'), str(local)
+        )
+
+        assert (total, missing) == (4096, [])
+
+
 # =============================================================================
 # create_dir_file -- shared, content-addressed caches (#175)
 # =============================================================================
@@ -929,3 +1025,84 @@ class TestCreateDirFileSkipsExisting:
         capsys.readouterr()
         import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
         assert capsys.readouterr().err == ''
+
+
+# =============================================================================
+# Refusing a path that is not a single out (#182)
+# =============================================================================
+
+class TestMixedTreeGuard:
+    """A directory mixing git-tracked files with outs cannot be imported.
+
+    `dvc import` hashes the git-tracked files from the worktree and folds them
+    into the payload; dt works from hashes alone. Building a manifest anyway
+    produced one that disagreed with dvc's -- and, before this guard, the
+    hashless entry travelled on until something dereferenced it and raised
+    AttributeError.
+    """
+
+    LISTING_MIXED = [
+        {'path': '.gitignore', 'isout': False, 'md5': None},
+        {'path': 'in_house.dvc', 'isout': False, 'md5': None},
+        {'path': 'in_house/a.txt', 'isout': True, 'md5': 'a' * 32},
+    ]
+    LISTING_CLEAN = [
+        {'path': 'in_house.dvc', 'isout': False, 'md5': None},
+        {'path': 'in_house/a.txt', 'isout': True, 'md5': 'a' * 32},
+    ]
+
+    def _run(self, listing, tmp_path, monkeypatch, path='data/annotations'):
+        monkeypatch.chdir(tmp_path)
+        with patch.object(utils, 'check_dvc'), \
+             patch.object(tmp_mod, 'clone_repo', return_value=tmp_path / 'clone'), \
+             patch.object(tmp_mod, 'resolve_repository_url', return_value='git@x:o/r.git'), \
+             patch.object(import_mod.remote_mod, 'find_local_remote_from_repo',
+                          return_value=('local', str(tmp_path / 'remote'))), \
+             patch.object(import_mod, 'configure_clone_cache'), \
+             patch.object(import_mod, 'list_files', return_value=listing), \
+             patch('subprocess.run', return_value=MagicMock(returncode=0, stdout='abc\n')):
+            return import_mod.import_data(
+                repository='r', path=path, checkout=False
+            )
+
+    def test_refuses_and_names_the_stray_file(self, tmp_path, monkeypatch):
+        with pytest.raises(ImportError) as exc:
+            self._run(self.LISTING_MIXED, tmp_path, monkeypatch)
+
+        msg = str(exc.value)
+        assert 'not a single DVC out' in msg
+        assert '.gitignore' in msg
+        assert '.dvcignore' in msg, "name the fix for a bare .gitignore"
+        assert 'in_house.dvc' not in msg, "dvc excludes .dvc files from payloads too"
+
+    def test_a_directory_of_outs_still_imports(self, tmp_path, monkeypatch):
+        """The .dvc files present alongside outs must not trip the guard."""
+        blob = b'data'
+        md5 = 'a' * 32
+        obj = tmp_path / 'remote' / 'files' / 'md5' / md5[:2] / md5[2:]
+        obj.parent.mkdir(parents=True)
+        obj.write_bytes(blob)
+
+        dvc_file, _ = self._run(self.LISTING_CLEAN, tmp_path, monkeypatch)
+
+        out = yaml.safe_load(Path(dvc_file).read_text())['outs'][0]
+        assert out['nfiles'] == 1, "only the tracked file belongs in the manifest"
+        assert out['size'] == len(blob)
+        assert out['md5'].endswith('.dir'), "a directory keeps its .dir manifest"
+
+    def test_single_file_import_gets_no_dir(self, tmp_path, monkeypatch):
+        """The lone entry IS the requested path, so it is a plain file out."""
+        md5 = 'b' * 32
+        obj = tmp_path / 'remote' / md5[:2] / md5[2:]
+        obj.parent.mkdir(parents=True)
+        obj.write_bytes(b'hello')
+
+        dvc_file, _ = self._run(
+            [{'path': 'samples.h5ad', 'isout': True, 'md5': md5}],
+            tmp_path, monkeypatch, path='data/samples.h5ad',
+        )
+
+        out = yaml.safe_load(Path(dvc_file).read_text())['outs'][0]
+        assert out['md5'] == md5
+        assert 'nfiles' not in out
+        assert out['size'] == 5

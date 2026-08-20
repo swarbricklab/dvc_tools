@@ -27,6 +27,7 @@ dt doctor -v        # Verbose output, includes dvc doctor
 | Archived remotes | No configured DVC remote has been archived (carries an `ARCHIVED.yaml` signpost) |
 | Git repo | The current directory is inside a git repository |
 | DVC repo | The current directory is inside a DVC repository |
+| dvcignore | `.dvcignore` excludes `.gitignore`, so this repo's generated ignore files cannot be hashed into the payload of anyone importing a directory from it ([why](init.md#why-dvcignore-starts-with-gitignore)) |
 
 ### Verbose-only checks
 
@@ -55,8 +56,9 @@ DVC Tools version: 0.1.0
 ✓ No archived remotes detected
 ✓ In git repository (/scratch/a56/me/my-project)
 ✓ In DVC repository (/scratch/a56/me/my-project)
+✓ .dvcignore excludes .gitignore files
 
-All 10 checks passed.
+All 11 checks passed.
 ```
 
 With issues:

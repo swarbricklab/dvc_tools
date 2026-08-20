@@ -15,6 +15,7 @@ from dt.init import (
     install_dvc_hooks,
     get_dvc_autostage,
     init_dt_directory,
+    init_dvcignore,
     init_project,
 )
 from dt.errors import InitError
@@ -278,6 +279,40 @@ class TestInitDtDirectory:
                     for c in calls
                 )
                 assert git_add_called
+
+
+class TestInitDvcignore:
+    """A new repo should not export its own .gitignore files as data (#182)."""
+
+    def test_seeds_the_gitignore_pattern(self, tmp_path):
+        with patch("dt.init.get_dvc_autostage", return_value=False):
+            changed = init_dvcignore(tmp_path, verbose=False)
+
+        assert changed is True
+        assert '.gitignore' in (tmp_path / '.dvcignore').read_text().splitlines()
+
+    def test_is_idempotent(self, tmp_path):
+        with patch("dt.init.get_dvc_autostage", return_value=False):
+            init_dvcignore(tmp_path, verbose=False)
+            assert init_dvcignore(tmp_path, verbose=False) is False
+
+    def test_autostages_when_enabled(self, tmp_path):
+        with patch("dt.init.get_dvc_autostage", return_value=True):
+            with patch("dt.init.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                init_dvcignore(tmp_path, verbose=False)
+
+        assert any('add' in str(c) for c in mock_run.call_args_list)
+
+    def test_does_not_stage_when_unchanged(self, tmp_path):
+        with patch("dt.init.get_dvc_autostage", return_value=True):
+            with patch("dt.init.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                init_dvcignore(tmp_path, verbose=False)
+                mock_run.reset_mock()
+                init_dvcignore(tmp_path, verbose=False)
+
+        mock_run.assert_not_called()
 
 
 # =============================================================================
