@@ -44,6 +44,29 @@ def run_dt(*args, cwd=None, check=True, env=None):
 
 
 # =============================================================================
+# Fixtures
+# =============================================================================
+
+@pytest.fixture(autouse=True)
+def isolated_xdg(tmp_path, monkeypatch):
+    """Point user and system scope at tmp_path for every test in this module.
+
+    `dt config set` writes user scope by default, and `run_dt` inherits
+    os.environ, so without this the suite would rewrite the developer's own
+    ~/.config/dt/config.yaml.
+    """
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg_config'))
+    monkeypatch.setenv('XDG_CONFIG_DIRS', str(tmp_path / 'xdg_dirs'))
+    return tmp_path
+
+
+@pytest.fixture
+def user_config_file(isolated_xdg):
+    """Path `dt config set` writes to with no scope flag."""
+    return isolated_xdg / 'xdg_config' / 'dt' / 'config.yaml'
+
+
+# =============================================================================
 # Config Set/Get Tests
 # =============================================================================
 
@@ -61,7 +84,7 @@ class TestConfigSetGet:
         assert result.returncode == 0
         assert result.stdout.strip() == 'testorg', f"Expected 'testorg', got '{result.stdout.strip()}'"
 
-    def test_set_nested_key(self, dvc_repo):
+    def test_set_nested_key(self, dvc_repo, user_config_file):
         """Set a nested key creates proper YAML structure."""
         run_dt('config', 'set', 'cache.root', '/tmp/caches', cwd=dvc_repo)
         
@@ -71,12 +94,11 @@ class TestConfigSetGet:
         assert result.stdout.strip() == '/tmp/caches'
         
         # Verify the YAML structure is correct
-        config_file = dvc_repo / '.dt' / 'config.yaml'
-        content = config_file.read_text()
+        content = user_config_file.read_text()
         assert 'cache:' in content, "Config should have 'cache:' section"
         assert 'root:' in content, "Config should have 'root:' nested key"
 
-    def test_set_overwrites_existing(self, dvc_repo):
+    def test_set_overwrites_existing(self, dvc_repo, user_config_file):
         """Setting existing key overwrites the value completely."""
         run_dt('config', 'set', 'owner', 'first', cwd=dvc_repo)
         run_dt('config', 'set', 'owner', 'second', cwd=dvc_repo)
@@ -86,8 +108,7 @@ class TestConfigSetGet:
         assert result.stdout.strip() == 'second'
         
         # Verify 'first' is no longer in the config file
-        config_file = dvc_repo / '.dt' / 'config.yaml'
-        content = config_file.read_text()
+        content = user_config_file.read_text()
         assert 'first' not in content, "Old value should be completely removed"
 
     def test_get_missing_key_fails(self, dvc_repo):
@@ -102,7 +123,7 @@ class TestConfigSetGet:
         result = run_dt('config', 'set', 'owner', 'myorg', cwd=dvc_repo)
         
         assert 'owner=myorg' in result.stdout, "Confirmation should show key=value"
-        assert 'project' in result.stdout.lower(), "Confirmation should show scope (project is default)"
+        assert 'user' in result.stdout.lower(), "Confirmation should show scope (user is default)"
 
 
 # =============================================================================
@@ -114,16 +135,42 @@ class TestConfigSetGet:
 class TestConfigScopes:
     """Test configuration scopes (local, project, user)."""
 
-    def test_set_project_scope_default(self, dvc_repo):
-        """Project scope is default for set, creating tracked config file."""
+    def test_set_user_scope_default(self, dvc_repo, user_config_file):
+        """User scope is the default for set, even inside a repo."""
         run_dt('config', 'set', 'test.key', 'value', cwd=dvc_repo)
         
-        # Check file was created in .dt/config.yaml
+        assert user_config_file.exists(), "user config.yaml should be created"
+        content = user_config_file.read_text()
+        assert 'test' in content
+        assert 'value' in content
+
+    def test_set_default_leaves_the_tracked_file_alone(self, dvc_repo):
+        """.dt/config.yaml is committed, so it takes an explicit --project."""
+        run_dt('config', 'set', 'test.key', 'value', cwd=dvc_repo)
+        
+        assert not (dvc_repo / '.dt' / 'config.yaml').exists(), \
+            "default write must not touch the git-tracked project config"
+
+    def test_set_project_scope_with_flag(self, dvc_repo):
+        """--project writes the tracked config file."""
+        run_dt('config', 'set', '--project', 'test.key', 'value', cwd=dvc_repo)
+        
         config_file = dvc_repo / '.dt' / 'config.yaml'
         assert config_file.exists(), ".dt/config.yaml should be created"
         content = config_file.read_text()
         assert 'test' in content
         assert 'value' in content
+
+    def test_set_warns_when_project_shadows_the_write(self, dvc_repo):
+        """A user-scope write under a project value changes nothing."""
+        run_dt('config', 'set', '--project', 'shadow.test', 'proj',
+               cwd=dvc_repo)
+        result = run_dt('config', 'set', 'shadow.test', 'mine', cwd=dvc_repo)
+        
+        assert 'project' in result.stderr, \
+            f"Should say the project value still wins: {result.stderr}"
+        assert run_dt('config', 'get', 'shadow.test',
+                      cwd=dvc_repo).stdout.strip() == 'proj'
 
     def test_set_local_scope(self, dvc_repo):
         """Set with --local uses local scope (not tracked)."""
@@ -143,7 +190,8 @@ class TestConfigScopes:
 
     def test_local_overrides_project(self, dvc_repo):
         """Local scope values override project scope (precedence test)."""
-        run_dt('config', 'set', 'override.test', 'project_value', cwd=dvc_repo)
+        run_dt('config', 'set', '--project', 'override.test', 'project_value',
+               cwd=dvc_repo)
         run_dt('config', 'set', 'override.test', 'local_value', '--local', cwd=dvc_repo)
         
         result = run_dt('config', 'get', 'override.test', cwd=dvc_repo)
@@ -214,7 +262,7 @@ class TestConfigList:
 
     def test_list_with_scope_filter(self, dvc_repo):
         """List with scope flag shows only that scope's values."""
-        run_dt('config', 'set', 'project.key', 'pval', cwd=dvc_repo)
+        run_dt('config', 'set', '--project', 'project.key', 'pval', cwd=dvc_repo)
         run_dt('config', 'set', 'local.key', 'lval', '--local', cwd=dvc_repo)
         
         result = run_dt('config', 'list', '--project', cwd=dvc_repo)
@@ -224,7 +272,7 @@ class TestConfigList:
 
     def test_list_show_origin(self, dvc_repo):
         """List with --show-origin shows source scope for each value."""
-        run_dt('config', 'set', 'origin.test', 'value', cwd=dvc_repo)
+        run_dt('config', 'set', '--project', 'origin.test', 'value', cwd=dvc_repo)
         
         result = run_dt('config', 'list', '--show-origin', cwd=dvc_repo)
         
@@ -261,7 +309,7 @@ class TestConfigList:
 class TestConfigUnset:
     """Test dt config unset command."""
 
-    def test_unset_existing_key(self, dvc_repo):
+    def test_unset_existing_key(self, dvc_repo, user_config_file):
         """Unset removes existing key from config file."""
         run_dt('config', 'set', 'remove.me', 'value', cwd=dvc_repo)
         run_dt('config', 'unset', 'remove.me', cwd=dvc_repo)
@@ -272,19 +320,31 @@ class TestConfigUnset:
         assert 'not found' in result.stderr.lower()
         
         # Verify the key is actually removed from the file
-        config_file = dvc_repo / '.dt' / 'config.yaml'
-        if config_file.exists():
-            content = config_file.read_text()
+        if user_config_file.exists():
+            content = user_config_file.read_text()
             assert 'remove' not in content or 'me' not in content
+
+    def test_unset_points_at_the_scope_holding_the_key(self, dvc_repo):
+        """Unset defaults to user scope; a project-scoped key misses there."""
+        run_dt('config', 'set', '--project', 'proj.only', 'value', cwd=dvc_repo)
+        
+        result = run_dt('config', 'unset', 'proj.only', cwd=dvc_repo,
+                        check=False)
+        
+        assert result.returncode != 0
+        combined = result.stdout + result.stderr
+        assert '--project' in combined, \
+            f"Error should name the scope to use: {combined}"
 
     def test_unset_missing_key_fails(self, dvc_repo):
         """Unset non-existent key fails with descriptive error."""
         result = run_dt('config', 'unset', 'does.not.exist', cwd=dvc_repo, check=False)
         
         assert result.returncode != 0
-        # Should indicate the key was not found
+        # Should say it is set nowhere, rather than name a scope to retry in
         combined_output = result.stdout + result.stderr
-        assert 'not found' in combined_output.lower() or 'does not exist' in combined_output.lower()
+        assert 'not set in any configuration scope' in combined_output.lower(), \
+            f"Error should say the key is set nowhere: {combined_output}"
 
     def test_unset_with_scope(self, dvc_repo):
         """Unset with scope flag removes from that scope only."""
@@ -300,6 +360,67 @@ class TestConfigUnset:
         if local_config.exists():
             content = local_config.read_text()
             assert 'scoped' not in content or 'local' not in content
+
+
+# =============================================================================
+# Config Import Tests
+# =============================================================================
+
+@pytest.mark.integration
+@requires_git
+class TestConfigImport:
+    """Installing a config file handed over by someone else."""
+
+    def test_import_creates_user_config_from_scratch(self, dvc_repo, tmp_path,
+                                                     user_config_file):
+        """The offsite case: no config yet, no idea where it goes."""
+        handed_over = tmp_path / 'lab-defaults.yaml'
+        handed_over.write_text(
+            'owner: swarbricklab\nsecrets:\n  backend: gcp\n'
+        )
+
+        result = run_dt('config', 'import', str(handed_over), cwd=dvc_repo)
+
+        assert result.returncode == 0
+        assert user_config_file.exists(), "should create the user config file"
+        assert run_dt('config', 'get', 'owner',
+                      cwd=dvc_repo).stdout.strip() == 'swarbricklab'
+        assert run_dt('config', 'get', 'secrets.backend',
+                      cwd=dvc_repo).stdout.strip() == 'gcp'
+
+    def test_import_keeps_the_local_paths_already_configured(self, dvc_repo,
+                                                            tmp_path):
+        """Merge, not replace: their filesystem is not the sender's."""
+        run_dt('config', 'set', 'cache.root', str(tmp_path / 'my-cache'),
+               cwd=dvc_repo)
+        handed_over = tmp_path / 'lab-defaults.yaml'
+        handed_over.write_text('owner: swarbricklab\n')
+
+        run_dt('config', 'import', str(handed_over), cwd=dvc_repo)
+
+        assert run_dt('config', 'get', 'cache.root',
+                      cwd=dvc_repo).stdout.strip() == str(tmp_path / 'my-cache')
+
+    def test_import_dry_run_writes_nothing(self, dvc_repo, tmp_path,
+                                           user_config_file):
+        handed_over = tmp_path / 'lab-defaults.yaml'
+        handed_over.write_text('owner: swarbricklab\n')
+
+        result = run_dt('config', 'import', str(handed_over), '--dry-run',
+                        cwd=dvc_repo)
+
+        assert result.returncode == 0
+        assert not user_config_file.exists()
+
+    def test_import_refuses_a_list_for_a_scalar_key(self, dvc_repo, tmp_path):
+        handed_over = tmp_path / 'bad.yaml'
+        handed_over.write_text('owner:\n  - a\n  - b\n')
+
+        result = run_dt('config', 'import', str(handed_over), cwd=dvc_repo,
+                        check=False)
+
+        assert result.returncode != 0
+        assert 'owner' in result.stderr
 
 
 # =============================================================================
@@ -361,12 +482,11 @@ class TestConfigPath:
 class TestConfigYamlParsing:
     """Test YAML value parsing in config set."""
 
-    def test_set_boolean_true(self, dvc_repo):
+    def test_set_boolean_true(self, dvc_repo, user_config_file):
         """Boolean true is parsed and stored correctly."""
         run_dt('config', 'set', 'bool.test', 'true', cwd=dvc_repo)
         
-        config_file = dvc_repo / '.dt' / 'config.yaml'
-        content = config_file.read_text()
+        content = user_config_file.read_text()
         # YAML should store as boolean, not string 'true'
         assert 'true' in content.lower()
         
@@ -414,18 +534,18 @@ class TestConfigCreatesDtDir:
     """Test that config creates .dt directory if needed."""
 
     def test_set_creates_dt_directory(self, git_repo):
-        """Config set creates .dt directory if missing."""
+        """Config set --project creates .dt directory if missing."""
         # git_repo doesn't have .dt directory
         assert not (git_repo / '.dt').exists()
         
-        run_dt('config', 'set', 'test.key', 'value', cwd=git_repo)
+        run_dt('config', 'set', '--project', 'test.key', 'value', cwd=git_repo)
         
         assert (git_repo / '.dt').is_dir(), ".dt directory should be created"
         assert (git_repo / '.dt' / 'config.yaml').exists(), "config.yaml should be created"
 
     def test_set_creates_nested_dt_structure(self, git_repo):
         """Config set creates proper .dt structure with gitignore."""
-        run_dt('config', 'set', 'test.key', 'value', cwd=git_repo)
+        run_dt('config', 'set', '--project', 'test.key', 'value', cwd=git_repo)
         
         # Check that .dt/.gitignore is also created
         gitignore = git_repo / '.dt' / '.gitignore'
@@ -455,7 +575,7 @@ class TestConfigPrecedence:
         isolated_env['XDG_CONFIG_HOME'] = str(tmp_path / 'user_config')
         
         # Set project value
-        run_dt('config', 'set', 'precedence.test', 'project_value', 
+        run_dt('config', 'set', '--project', 'precedence.test', 'project_value',
                cwd=dvc_repo, env=isolated_env)
         
         # Get should return project value (higher precedence)
@@ -477,7 +597,7 @@ class TestConfigPrecedence:
         isolated_env['XDG_CONFIG_HOME'] = str(tmp_path / 'user_config')
         
         # Set project value
-        run_dt('config', 'set', 'precedence.all', 'project_value', 
+        run_dt('config', 'set', '--project', 'precedence.all', 'project_value',
                cwd=dvc_repo, env=isolated_env)
         
         # Set local value (highest precedence)

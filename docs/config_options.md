@@ -442,9 +442,13 @@ Individual checks are configured under
 `hooks.<hook-name>.checks.<check-name>.<setting>` — for example:
 
 ```bash
-dt config set hooks.pre-commit.checks.large-files.max_size 10MB
-dt config set hooks.pre-push.checks.dvc-push.mode prompt
+dt config set --project hooks.pre-commit.checks.large-files.max_size 10MB
+dt config set --project hooks.pre-push.checks.dvc-push.mode prompt
 ```
+
+Hook settings usually belong to the repository rather than the person, so these
+examples pass `--project`; a bare `dt config set` writes user scope and would
+apply the same limit everywhere.
 
 Built-in defaults live in the code, so hooks work without any config file;
 configured scopes override the defaults per leaf. See

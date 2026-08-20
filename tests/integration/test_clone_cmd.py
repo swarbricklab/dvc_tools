@@ -157,7 +157,10 @@ class TestCloneShortName:
     def test_clone_short_name_with_config_owner(self, dvc_repo):
         """Clone with short name uses owner from config."""
         # Pre-configure owner
-        run_dt('config', 'set', 'owner', 'swarbricklab', cwd=dvc_repo)
+        # --project keeps the value in the test repo; a bare `set` now writes
+        # user scope, i.e. the developer's own ~/.config/dt/config.yaml.
+        run_dt('config', 'set', '--project', 'owner', 'swarbricklab',
+               cwd=dvc_repo)
         
         # Clone using short name - config owner should be used
         result = run_dt(
@@ -276,7 +279,8 @@ class TestCloneCacheConfiguration:
         
         # We need a DVC repo to set config in first
         run_dt('init', '--no-cache', '--no-remote', cwd=isolated_dir)
-        run_dt('config', 'set', 'cache.root', str(cache_root), cwd=isolated_dir)
+        run_dt('config', 'set', '--project', 'cache.root', str(cache_root),
+               cwd=isolated_dir)
         
         # Now clone - cache should be configured based on repo name
         result = run_dt(
@@ -299,7 +303,8 @@ class TestCloneCacheConfiguration:
         cache_root.mkdir()
         
         run_dt('init', '--no-cache', '--no-remote', cwd=isolated_dir)
-        run_dt('config', 'set', 'cache.root', str(cache_root), cwd=isolated_dir)
+        run_dt('config', 'set', '--project', 'cache.root', str(cache_root),
+               cwd=isolated_dir)
         
         result = run_dt(
             'clone',
