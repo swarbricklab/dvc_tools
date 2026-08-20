@@ -165,6 +165,21 @@ dt update imported/dir.dvc
 `dt update` does not check files out into the workspace — run `dvc checkout`
 afterwards if you need the workspace copies linked.
 
+## Imports of a path that is not a single out
+
+Step 5 needs a hash for every file under the path. A plain directory that merely
+*contains* outs also contains git-tracked files, which the source repo records
+no hash for — including the `.gitignore` files DVC generated there. `dvc import`
+hashes those from the git worktree and counts them; `dt update` cannot, so its
+rebuilt `.dir` would differ from DVC's in hash, `nfiles` and `size`, and step 7
+would publish that difference into a *shared* upstream remote as an object no
+DVC operation would ever produce.
+
+`dt update` therefore refuses such a target, names the files, and pushes
+nothing. See [dt import](import.md#the-path-must-be-a-single-dvc-out) for the
+fixes — most often adding `.gitignore` to the source repo's `.dvcignore`, after
+which dt and dvc agree exactly.
+
 ## Metadata population
 
 `dt update` produces first-class `.dvc` files with complete metadata:
@@ -188,7 +203,36 @@ outs:
   size: 52428800      # File size (50 MiB)
 ```
 
-This enables `dt du` to report accurate sizes and file counts. Note that size information is only available if the source repository's `.dvc` files also contain size metadata.
+This enables `dt du` to report accurate sizes and file counts.
+
+### Where `size` comes from
+
+`dvc list --size` against a repository *URL* usually reports no sizes at all: a
+`.dir` manifest records only an md5 and a relpath per file, so the only place a
+size actually exists is the object itself. When the listing is silent,
+`dt update` sizes each object by stat'ing it in the source repository's remote
+(if that remote is on this filesystem) or in the local cache — both the
+`files/md5/<xx>/` v3 layout and the legacy `<xx>/` v2 one.
+
+If even one object cannot be sized, `dt update` writes **no** `size` field
+rather than a partial total, and removes any `size` left over from the previous
+hash. An absent size means "not known"; a stale or partial one is a false
+statement that `dt du` and every downstream storage estimate will believe.
+Re-run `dt update` once the objects are locally readable, or `dvc update` to let
+DVC record it.
+
+### `rev` and `rev_lock`
+
+`deps.repo.rev` is the revision *spec* you track (a branch, tag, or pinned
+commit) and `rev_lock` is its resolution. `dt update` keeps the two consistent:
+
+- `--rev <branch|tag|sha>` records the spec in `rev` and the resolved 40-char
+  commit in `rev_lock`.
+- Without `--rev`, an import that tracks a branch advances `rev_lock` to the tip
+  of *that branch*, not to whatever the clone has checked out.
+- A `rev` pinned to a commit that the new `rev_lock` contradicts is removed,
+  with a message. Left in place, the next plain `dvc update` would resolve `rev`
+  and roll the import back to the commit you just updated away from.
 
 ## Import detection
 

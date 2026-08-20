@@ -15,9 +15,23 @@ my-project/
 │   ├── config            # DVC settings (tracked)
 │   ├── config.local      # Local DVC settings (not tracked)
 │   └── ...
-├── .dvcignore            # DVC ignore patterns
+├── .dvcignore            # DVC ignore patterns, seeded with `.gitignore`
 └── .gitignore            # Updated with DVC patterns
 ```
+
+### Why `.dvcignore` starts with `.gitignore`
+
+DVC writes a `.gitignore` next to everything it tracks. Its repo filesystem
+excludes only `*.dvc`, `dvc.yaml`, `dvc.lock` and `.dvcignore` when another repo
+reads through it — so `dvc import <this repo> <some/dir>`, where `some/dir` is
+not itself an out, hashes those generated ignore files and folds them into the
+importer's payload, `nfiles` and `size`. One pattern stops this repo's
+bookkeeping from becoming someone else's data.
+
+DVC still creates and maintains those `.gitignore` files; it just stops treating
+them as content. `dt doctor` flags repos that predate this, and adding the
+pattern later is safe — but note it changes the hash, `nfiles` and `size` of any
+directory import of a path that contains one.
 
 ## Usage
 

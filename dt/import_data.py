@@ -523,26 +523,71 @@ def list_files(
 
 def get_file_size_from_cache(cache_path: str, md5: str) -> Optional[int]:
     """Get file size by looking at the cached file.
-    
+
+    Delegates to :func:`cache_ops.object_size`, which checks the v3 layout
+    (``files/md5/<xx>/<rest>``) *and* the legacy v2 one (``<xx>/<rest>``).
+    This used to look only under ``files/md5``, which meant a mixed-layout
+    remote -- v2 objects that a migration left behind, alongside v3 ones --
+    reported no size at all for the v2 residents, while the checkout of the
+    same objects succeeded because that path already fell back to v2 (#182).
+
     Args:
-        cache_path: Path to the cache directory.
-        md5: MD5 hash of the file.
-        
+        cache_path: Path to the cache/remote root.
+        md5: MD5 hash of the file (with optional .dir suffix).
+
     Returns:
         File size in bytes, or None if not found.
     """
-    # Handle .dir suffix
-    hash_value = md5.replace('.dir', '')
-    cache_file = Path(cache_path) / 'files' / 'md5' / hash_value[:2] / hash_value[2:]
-    
-    # Check for .dir file
-    if md5.endswith('.dir'):
-        cache_file = Path(str(cache_file) + '.dir')
-    
-    if cache_file.exists():
-        return cache_file.stat().st_size
-    
-    return None
+    return cache_ops.object_size(md5, cache_path)
+
+
+def _primary_cache_root() -> Optional[str]:
+    """Root of this repo's DVC cache, i.e. the dir that holds ``files/md5``.
+
+    ``utils.get_cache_dir()`` hands back the ``files/md5`` level, which double-
+    nests if passed to anything that appends the layout itself.
+    """
+    primary_cache = utils.get_cache_dir()
+    if not primary_cache:
+        return None
+    primary_cache_str = str(primary_cache)
+    if primary_cache_str.endswith(('/files/md5', '\\files\\md5')):
+        return str(Path(primary_cache_str).parent.parent)
+    return primary_cache_str
+
+
+def _sum_object_sizes(
+    md5s: List[str],
+    *cache_roots: Optional[str],
+) -> Tuple[int, List[str]]:
+    """Add up the sizes of cache objects, reporting the ones we could not find.
+
+    Returns the running total and the hashes that could not be sized, so the
+    caller can tell a genuinely empty payload from an unanswered question. The
+    distinction matters: silently folding a miss into the total as zero is what
+    wrote ``size: 0`` onto multi-GB imports (#182).
+    """
+    total = 0
+    missing: List[str] = []
+    for md5 in md5s:
+        size = cache_ops.object_size(md5, *cache_roots)
+        if size is None:
+            missing.append(md5)
+        else:
+            total += size
+    return total, missing
+
+
+def _warn_unsized(missing: List[str], total_count: int, cache_path: str) -> None:
+    """Explain that ``outs.size`` is being left out, and why."""
+    print(
+        f"  WARNING: could not determine the size of {len(missing)} of "
+        f"{total_count} object(s) under {cache_path} "
+        f"(e.g. {missing[0][:12]}...). Recording no size rather than an "
+        f"undercount; run 'dvc status'/'dt du' against the checked-out data "
+        f"for the real figure.",
+        file=sys.stderr,
+    )
 
 
 def compute_dir_hash(entries: List[Dict[str, str]]) -> str:
@@ -640,19 +685,21 @@ def create_dvc_file(
     dest_path: Path,
     name: str,
     md5: str,
-    size: int,
+    size: Optional[int],
     nfiles: Optional[int] = None,
     repo_url: Optional[str] = None,
     repo_path: Optional[str] = None,
     rev_lock: Optional[str] = None,
 ) -> Path:
     """Create a .dvc file.
-    
+
     Args:
         dest_path: Destination directory for the .dvc file.
         name: Name of the output (file or directory name).
         md5: MD5 hash (with .dir suffix for directories).
-        size: Size in bytes.
+        size: Size in bytes, or None to omit the field. Omitting says "not
+            known"; a wrong number says something false, which is worse --
+            downstream storage sums believe it.
         nfiles: Number of files (for directories).
         repo_url: Source repository URL (for imports).
         repo_path: Path within source repository (for imports).
@@ -687,8 +734,9 @@ def create_dvc_file(
     # md5, size, nfiles (dirs only), hash, path.
     out: Dict[str, Any] = {
         'md5': md5,
-        'size': size,
     }
+    if size is not None:
+        out['size'] = size
     if nfiles is not None:
         out['nfiles'] = nfiles
     out['hash'] = 'md5'
@@ -910,28 +958,64 @@ def import_data(
     
     if not files:
         raise ImportError(f"No files found at {path}")
-    
+
+    # Refuse a path whose tree mixes git-tracked files with DVC outs. Those
+    # files have no hash to put in a manifest, and dvc import would include
+    # them -- so anything we build here disagrees with dvc. Until this check
+    # existed the None md5 simply travelled on until something dereferenced it
+    # and raised AttributeError (#182).
+    unhashed = utils.unhashed_listing_paths(files)
+    if unhashed:
+        raise ImportError(utils.describe_mixed_tree(
+            unhashed, path, repository, action='import'
+        ))
+
+    # Drop DVC's own bookkeeping files. `dvc list` reports the .dvc files
+    # inside a directory of outs, but `dvc import` excludes them from the
+    # payload -- and they carry no hash, so they cannot go in a manifest.
+    files = [
+        f for f in files
+        if not utils.is_dvc_metadata_file(f.get('path') or '')
+    ]
+    if not files:
+        raise ImportError(f"No DVC-tracked files found at {path}")
+
     if verbose:
         print(f"Found {len(files)} file(s)")
-    
-    # Track whether this is a directory or single file import
-    is_directory = not (len(files) == 1 and not files[0].get('isdir', False))
+
+    # Track whether this is a directory or single file import. A lone entry is
+    # a single file only when it *is* the requested path -- a directory holding
+    # one file also lists one entry, but as 'name/file', and must still get a
+    # .dir manifest. Same rule as update._compute_source_hash.
+    is_single_file = (
+        len(files) == 1
+        and not files[0].get('isdir', False)
+        and (files[0].get('path') or '') == Path(path).name
+    )
+    is_directory = not is_single_file
     root_hash = None  # Will be set to dir_hash or single file md5
     
+    # Sizes come from stat'ing the objects themselves. Look in the source
+    # remote first, then this repo's own cache -- a partly-migrated remote may
+    # be missing an object the local cache already holds.
+    size_roots = (cache_path, _primary_cache_root())
+
     # Step 5: Create .dvc file (and .dir file if needed)
     if not is_directory:
         # Single file import
         file_info = files[0]
         root_hash = file_info['md5']
-        
-        # Get size from cache
-        size = get_file_size_from_cache(cache_path, root_hash)
+
+        # Get size from cache. None means "not found", which stays None: a
+        # zero here would read as an empty import (#182).
+        size = cache_ops.object_size(root_hash, *size_roots)
         if size is None:
-            size = 0  # Fallback
-        
+            _warn_unsized([root_hash], 1, cache_path)
+
         if verbose:
-            print(f"Importing single file: {root_hash} ({size} bytes)")
-        
+            size_str = f"{size} bytes" if size is not None else "size unknown"
+            print(f"Importing single file: {root_hash} ({size_str})")
+
         dvc_file = create_dvc_file(
             dest_path=out_path.parent,
             name=out_path.name,
@@ -948,28 +1032,32 @@ def import_data(
         
         # Build entries for .dir file
         entries = []
-        total_size = 0
-        
+
         for f in files:
             if f.get('isdir', False):
                 continue  # Skip directory entries
-            
+
             md5 = f['md5']
             relpath = f['path']
-            
+
             entries.append({
                 'md5': md5,
                 'relpath': relpath,
             })
-            
-            # Get size from cache
-            file_size = get_file_size_from_cache(cache_path, md5)
-            if file_size:
-                total_size += file_size
-        
+
         if not entries:
             raise ImportError(f"No files found in {path}")
-        
+
+        # Total the object sizes. If any object cannot be found we record no
+        # size at all: a partial sum is indistinguishable from the truth and
+        # anything totalling recorded sizes would quietly undercount (#182).
+        total_size, unsized = _sum_object_sizes(
+            [e['md5'] for e in entries], *size_roots
+        )
+        if unsized:
+            _warn_unsized(unsized, len(entries), cache_path)
+            total_size = None
+
         # Create .dir file in the cache
         dir_hash, dir_size = create_dir_file(entries, cache_path)
         root_hash = dir_hash  # Already includes .dir suffix
@@ -1006,17 +1094,11 @@ def import_data(
         if verbose:
             print(f"Populating cache for {dvc_file}...")
         
-        # Populate primary cache with links from source cache.
-        # get_cache_dir() returns the .../files/md5 path; strip that suffix
-        # so populate_cache_file (which appends files/md5 for v3 layout)
-        # doesn't double-nest the path.
-        primary_cache = utils.get_cache_dir()
-        if primary_cache:
-            primary_cache_str = str(primary_cache)
-            if primary_cache_str.endswith(('/files/md5', '\\files\\md5')):
-                primary_cache_root = str(Path(primary_cache_str).parent.parent)
-            else:
-                primary_cache_root = primary_cache_str
+        # Populate primary cache with links from source cache. The root is the
+        # dir holding files/md5, since populate_cache_file appends the layout
+        # itself and would otherwise double-nest the path.
+        primary_cache_root = _primary_cache_root()
+        if primary_cache_root:
             # First, add the .dir file or single file hash to primary cache
             if root_hash:
                 populate_cache_file(

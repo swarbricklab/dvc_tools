@@ -738,3 +738,124 @@ class TestCacheRootFromOdbPath:
     def test_get_cache_root_none_outside_repo(self):
         with patch.object(utils, 'get_cache_dir', return_value=None):
             assert utils.get_cache_root() is None
+
+
+# =============================================================================
+# .dvcignore seeding and mixed-tree detection (#182)
+# =============================================================================
+
+class TestEnsureDvcignore:
+    """DVC's generated .gitignore files must not become other repos' data.
+
+    `dvc import <repo> <dir>`, where dir is not itself an out, hashes the
+    git-tracked files it finds -- including the .gitignore DVC wrote there --
+    and folds them into the importer's payload, nfiles and size. One
+    .dvcignore pattern in the source repo prevents that.
+    """
+
+    def test_creates_with_explanation(self, tmp_path):
+        path, changed = utils.ensure_dvcignore(tmp_path)
+
+        assert changed is True
+        assert path == tmp_path / '.dvcignore'
+        text = path.read_text()
+        assert '.gitignore' in text.splitlines()
+        assert text.startswith('#'), "the pattern needs its rationale beside it"
+
+    def test_is_idempotent(self, tmp_path):
+        utils.ensure_dvcignore(tmp_path)
+        before = (tmp_path / '.dvcignore').read_text()
+
+        path, changed = utils.ensure_dvcignore(tmp_path)
+
+        assert changed is False
+        assert path.read_text() == before
+
+    def test_appends_without_clobbering(self, tmp_path):
+        existing = "raw/scratch\n*.tmp\n"
+        (tmp_path / '.dvcignore').write_text(existing)
+
+        _, changed = utils.ensure_dvcignore(tmp_path)
+
+        text = (tmp_path / '.dvcignore').read_text()
+        assert changed is True
+        assert text.startswith(existing), "existing patterns must survive"
+        assert '.gitignore' in text.splitlines()
+
+    def test_tolerates_missing_trailing_newline(self, tmp_path):
+        (tmp_path / '.dvcignore').write_text("raw/scratch")
+
+        utils.ensure_dvcignore(tmp_path)
+
+        lines = (tmp_path / '.dvcignore').read_text().splitlines()
+        assert 'raw/scratch' in lines
+        assert '.gitignore' in lines
+
+
+class TestIsDvcMetadataFile:
+    """Mirrors dvc.fs.dvc._is_dvc_file -- note .gitignore is NOT on it."""
+
+    @pytest.mark.parametrize('path', [
+        'data.dvc', 'a/b/data.dvc', 'dvc.yaml', 'a/dvc.lock', '.dvcignore',
+    ])
+    def test_metadata(self, path):
+        assert utils.is_dvc_metadata_file(path) is True
+
+    @pytest.mark.parametrize('path', [
+        '.gitignore', 'a/b/.gitignore', 'README.md', 'data/x.fq', 'dvc.yamlx',
+    ])
+    def test_not_metadata(self, path):
+        assert utils.is_dvc_metadata_file(path) is False
+
+
+class TestUnhashedListingPaths:
+    """Which entries in a `dvc list` result make a faithful manifest impossible."""
+
+    def test_flags_git_tracked_files(self):
+        files = [
+            {'path': '.gitignore', 'isout': False, 'md5': None},
+            {'path': 'README.md', 'isout': False, 'md5': None},
+            {'path': 'in_house/a.txt', 'isout': True, 'md5': 'a' * 32},
+        ]
+        assert utils.unhashed_listing_paths(files) == ['.gitignore', 'README.md']
+
+    def test_ignores_dvc_files_and_dirs(self):
+        """A directory of outs plus their .dvc files is still rebuildable."""
+        files = [
+            {'path': 'in_house.dvc', 'isout': False, 'md5': None},
+            {'path': 'imerit.dvc', 'isout': False, 'md5': None},
+            {'path': 'sub', 'isdir': True, 'md5': None},
+            {'path': 'in_house/a.txt', 'isout': True, 'md5': 'a' * 32},
+        ]
+        assert utils.unhashed_listing_paths(files) == []
+
+    def test_empty_for_a_clean_out(self):
+        files = [{'path': 'a.txt', 'isout': True, 'md5': 'a' * 32}]
+        assert utils.unhashed_listing_paths(files) == []
+
+
+class TestDescribeMixedTree:
+    """The refusal has to say what to do about it."""
+
+    def test_names_the_files_and_the_dvcignore_remedy(self):
+        msg = utils.describe_mixed_tree(
+            ['.gitignore'], 'data/annotations',
+            'git@github.com:swarbricklab/images.git', action='rebuild',
+        )
+        assert 'data/annotations' in msg
+        assert '.gitignore' in msg
+        assert '.dvcignore' in msg, "for a bare .gitignore, name the real fix"
+        assert 'dvc update' in msg
+
+    def test_omits_dvcignore_advice_for_other_files(self):
+        msg = utils.describe_mixed_tree(
+            ['README.md'], 'data/annotations', 'repo', action='import',
+        )
+        assert 'README.md' in msg
+        assert '.dvcignore' not in msg, "adding it would not help here"
+
+    def test_summarises_a_long_list(self):
+        msg = utils.describe_mixed_tree(
+            [f'f{i}.txt' for i in range(25)], 'd', 'repo', action='import',
+        )
+        assert '... and 15 more' in msg

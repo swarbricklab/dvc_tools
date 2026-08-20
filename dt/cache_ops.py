@@ -300,6 +300,40 @@ def find_source_file(
     return None
 
 
+def object_size(md5: str, *cache_roots: Optional[str]) -> Optional[int]:
+    """Size of a cache object, searched across roots and both layouts.
+
+    The object *is* the file content, so its own size is authoritative -- no
+    need to ask the source repo. Uses :func:`find_source_file` so a remote in
+    the legacy v2 layout (or a half-migrated one holding some objects at
+    ``<xx>/<rest>`` and others under ``files/md5/``) answers as readily as a v3
+    one. That fallback is the whole point: sizing only the v3 path against a
+    mixed remote misses silently, and a miss that is then treated as zero
+    understates a multi-GB import (issue #182).
+
+    Args:
+        md5: The MD5 hash (with optional .dir suffix).
+        *cache_roots: Cache/remote roots to search, in priority order.
+            None/empty entries are skipped so callers can pass optional paths.
+
+    Returns:
+        Size in bytes, or None if the object was not found in any root.
+    """
+    for root in cache_roots:
+        if not root:
+            continue
+        path = find_source_file(md5, Path(root))
+        if path is None:
+            continue
+        try:
+            return path.stat().st_size
+        except OSError:
+            # Vanished or unreadable between the lookup and the stat -- try
+            # the next root rather than reporting a size we did not observe.
+            continue
+    return None
+
+
 def populate_cache_file(
     md5: str,
     source_cache: str,

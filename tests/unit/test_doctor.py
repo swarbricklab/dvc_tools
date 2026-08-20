@@ -374,3 +374,36 @@ class TestCheckRemoteRoot:
             assert 'Default remote root not writable' in r.message
         finally:
             os.chmod(a, 0o755)
+
+
+class TestCheckDvcignore:
+    """Flag repos whose .gitignore files can leak into importers' data (#182)."""
+
+    def test_passes_when_pattern_present(self, tmp_path):
+        (tmp_path / '.dvcignore').write_text("# why\n.gitignore\n")
+        with patch.object(doctor, 'check_in_dvc_repo', return_value=(True, tmp_path)):
+            result = doctor.check_dvcignore()
+
+        assert result.passed is True
+
+    def test_fails_when_dvcignore_missing(self, tmp_path):
+        with patch.object(doctor, 'check_in_dvc_repo', return_value=(True, tmp_path)):
+            result = doctor.check_dvcignore()
+
+        assert result.passed is False
+        assert '.gitignore' in result.message
+        assert '.dvcignore' in result.help_text
+
+    def test_fails_when_pattern_absent(self, tmp_path):
+        (tmp_path / '.dvcignore').write_text("raw/scratch\n")
+        with patch.object(doctor, 'check_in_dvc_repo', return_value=(True, tmp_path)):
+            result = doctor.check_dvcignore()
+
+        assert result.passed is False
+
+    def test_skips_outside_a_dvc_repo(self):
+        with patch.object(doctor, 'check_in_dvc_repo', return_value=(False, None)):
+            result = doctor.check_dvcignore()
+
+        assert result.passed is True
+        assert 'skipped' in result.message.lower()

@@ -136,6 +136,40 @@ def init_dvc(repo_path: Path, verbose: bool = True) -> bool:
     return True
 
 
+def init_dvcignore(repo_path: Path, verbose: bool = True) -> bool:
+    """Seed .dvcignore so this repo's .gitignore files stay out of its data.
+
+    DVC writes a ``.gitignore`` beside everything it tracks. When someone
+    imports a *directory* from this repo that is not itself an out, DVC's repo
+    filesystem hands them the git-tracked files too -- including those
+    generated ignore files -- and hashes them into the importer's payload,
+    inflating its ``nfiles`` and ``size`` with our bookkeeping (issue #182).
+    One pattern prevents it, for every future importer.
+
+    Safe on an existing repo: appends only if the pattern is absent, and DVC
+    keeps maintaining the ignore files either way.
+
+    Returns:
+        True if .dvcignore was created or appended to.
+    """
+    dvcignore, changed = utils.ensure_dvcignore(repo_path)
+
+    if changed and verbose:
+        print(f"Ignoring .gitignore files in {dvcignore.name} "
+              f"(keeps them out of imports of this repo)")
+
+    if changed and get_dvc_autostage(repo_path):
+        subprocess.run(
+            ['git', 'add', str(dvcignore)],
+            cwd=repo_path,
+            capture_output=True,
+        )
+        if verbose:
+            print("  Auto-staged .dvcignore")
+
+    return changed
+
+
 def install_dvc_hooks(repo_path: Path, verbose: bool = True) -> None:
     """Install dt git hooks (replaces dvc install).
     
@@ -299,6 +333,15 @@ def init_project(
         except site_cache_mod.SiteCacheError as e:
             if verbose:
                 print(f"Warning: {e}")
+
+    # Step 2c: .dvcignore, so our .gitignore files never become someone
+    # else's data (see init_dvcignore).
+    if not no_dvc:
+        try:
+            init_dvcignore(repo_path, verbose=verbose)
+        except OSError as e:
+            if verbose:
+                print(f"Warning: could not write .dvcignore: {e}")
 
     # Step 3: DVC Tools directory (.dt)
     init_dt_directory(repo_path, verbose=verbose)

@@ -521,6 +521,43 @@ def check_dvc_repo() -> DiagnosticResult:
         )
 
 
+def check_dvcignore() -> DiagnosticResult:
+    """Check that .dvcignore keeps this repo's .gitignore files out of imports.
+
+    DVC writes a ``.gitignore`` beside everything it tracks, and its repo
+    filesystem does not exclude those files -- so anyone importing a *directory*
+    from this repo that is not itself an out gets our bookkeeping hashed into
+    their payload, ``nfiles`` and ``size`` (issue #182). ``dt init`` seeds the
+    pattern; repos created before that need it adding.
+    """
+    from . import utils
+
+    in_repo, root = check_in_dvc_repo()
+    if not in_repo or root is None:
+        return DiagnosticResult(
+            "dvcignore", True, "Not in a DVC repository (skipped)"
+        )
+
+    dvcignore = Path(root) / '.dvcignore'
+    patterns = set()
+    if dvcignore.exists():
+        patterns = {l.strip() for l in dvcignore.read_text().splitlines()}
+
+    if utils.DVCIGNORE_GITIGNORE_PATTERN in patterns:
+        return DiagnosticResult(
+            "dvcignore", True, ".dvcignore excludes .gitignore files"
+        )
+
+    return DiagnosticResult(
+        "dvcignore", False,
+        ".dvcignore does not exclude .gitignore files",
+        "DVC's own generated .gitignore files can be hashed into the payload "
+        "of anyone importing a directory from this repo. Add a '.gitignore' "
+        "line to .dvcignore and commit it. Note this changes the hash, nfiles "
+        "and size of any such directory import."
+    )
+
+
 def check_network() -> DiagnosticResult:
     """Check network connectivity (for dt doctor output)."""
     has_network = check_network_connectivity(timeout=2.0)
@@ -625,6 +662,7 @@ def run_diagnostics(verbose: bool = False) -> list[DiagnosticResult]:
     # Repository context checks
     results.append(check_git_repo())
     results.append(check_dvc_repo())
+    results.append(check_dvcignore())
     
     # Environment checks (may be slow)
     if verbose:
