@@ -10,7 +10,7 @@ import shutil
 import socket
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from dvc.repo import Repo
 from dvc_data.hashfile.hash import file_md5 as _dvc_file_md5
@@ -1374,6 +1374,152 @@ def md5_bytes(data: bytes) -> str:
         Hex-encoded MD5 digest.
     """
     return hashlib.md5(data).hexdigest()
+
+
+# The pattern that keeps DVC's own bookkeeping out of other repos' payloads.
+# See ensure_dvcignore for why.
+DVCIGNORE_GITIGNORE_PATTERN = '.gitignore'
+
+_DVCIGNORE_HEADER = (
+    "# DVC's repo filesystem presents git-tracked files and DVC outs as one\n"
+    "# tree, and excludes only *.dvc, dvc.yaml, dvc.lock and .dvcignore from it.\n"
+    "# So `dvc import <this repo> <some/dir>`, where some/dir is not itself an\n"
+    "# out, hashes the .gitignore files DVC generated here and folds them into\n"
+    "# the importer's payload, nfiles and size. Ignoring them keeps this repo's\n"
+    "# bookkeeping out of other people's data.\n"
+)
+
+
+def ensure_dvcignore(repo_path: Optional[Path] = None) -> Tuple[Path, bool]:
+    """Ensure .dvcignore excludes .gitignore files.
+
+    DVC writes a ``.gitignore`` next to everything it tracks, then -- when
+    another repo imports a *directory* that is not itself an out -- hashes that
+    generated file as if it were data. The importer's manifest, ``nfiles`` and
+    ``size`` all silently include it. A single ``.dvcignore`` pattern here
+    prevents that for every future importer, and costs nothing: DVC keeps
+    maintaining the ignore files, it just stops treating them as content.
+
+    Appends rather than replaces, and is a no-op if the pattern is already
+    present, so it is safe to run on an existing repo.
+
+    Args:
+        repo_path: Repository root. Defaults to :func:`find_project_root`.
+
+    Returns:
+        Tuple of (path to .dvcignore, True if the file was changed).
+    """
+    if repo_path is None:
+        repo_path = find_project_root()
+    dvcignore = Path(repo_path) / '.dvcignore'
+
+    existing = dvcignore.read_text() if dvcignore.exists() else ''
+    if DVCIGNORE_GITIGNORE_PATTERN in {l.strip() for l in existing.splitlines()}:
+        return dvcignore, False
+
+    if existing:
+        if not existing.endswith('\n'):
+            existing += '\n'
+        existing += '\n'
+    else:
+        existing = _DVCIGNORE_HEADER
+    existing += f"{DVCIGNORE_GITIGNORE_PATTERN}\n"
+    dvcignore.write_text(existing)
+    return dvcignore, True
+
+
+def is_dvc_metadata_file(path: str) -> bool:
+    """True for the bookkeeping files DVC keeps out of imported payloads.
+
+    Mirrors ``dvc.fs.dvc._is_dvc_file``, the exclusion list DVC's repo
+    filesystem applies when it walks a tree: ``*.dvc``, ``dvc.yaml``,
+    ``dvc.lock`` and ``.dvcignore``. Notably absent from that list -- and hence
+    from this one -- is ``.gitignore``, which is why DVC's own generated ignore
+    files end up inside other repos' data. See :func:`ensure_dvcignore`.
+    """
+    name = Path(path).name
+    return name.endswith('.dvc') or name in ('dvc.yaml', 'dvc.lock', '.dvcignore')
+
+
+def unhashed_listing_paths(files: Iterable[Dict[str, Any]]) -> List[str]:
+    """Paths in a ``dvc list`` result that the source repo records no hash for.
+
+    These are the git-tracked files inside a directory that is not itself a
+    DVC out: ``dvc list`` reports them with ``md5: null`` and ``isout: false``.
+    ``dvc import`` hashes them from the git worktree and includes them in the
+    payload; nothing that works from hashes alone can, so their presence means
+    any manifest we build will disagree with DVC's (issue #182).
+
+    DVC's own bookkeeping files are excluded, because ``dvc import`` excludes
+    them too -- a directory of outs and their ``.dvc`` files is still one we
+    can rebuild faithfully.
+    """
+    paths = []
+    for f in files:
+        if f.get('isdir'):
+            continue
+        if f.get('md5'):
+            continue
+        path = f.get('path') or f.get('relpath')
+        if path and not is_dvc_metadata_file(path):
+            paths.append(path)
+    return paths
+
+
+def describe_mixed_tree(
+    paths: List[str],
+    source_path: str,
+    repo_url: str,
+    action: str,
+    limit: int = 10,
+) -> str:
+    """Explain why a path cannot be turned into a .dir manifest, and what to do.
+
+    Args:
+        paths: The unhashed (git-tracked) paths, from
+            :func:`unhashed_listing_paths`.
+        source_path: The path being imported, inside the source repo.
+        repo_url: The source repository.
+        action: Verb for the refused operation, e.g. 'import' or 'rebuild'.
+        limit: How many paths to name before summarising the rest.
+    """
+    shown = '\n'.join(f"    {p}" for p in paths[:limit])
+    if len(paths) > limit:
+        shown += f"\n    ... and {len(paths) - limit} more"
+
+    only_gitignores = all(
+        Path(p).name == '.gitignore' for p in paths
+    )
+
+    lines = [
+        f"Cannot {action} '{source_path}' from {repo_url}: it is not a single "
+        f"DVC out.",
+        f"{len(paths)} file(s) there are git-tracked, so the source repo "
+        f"records no hash for them:",
+        shown,
+        "",
+        "dvc import hashes those from the git worktree and counts them in the "
+        "payload; dt works from hashes alone, so the manifest it built would "
+        "disagree with dvc's in hash, nfiles and size.",
+        "",
+        "Options:",
+    ]
+    if only_gitignores:
+        lines += [
+            f"  - Those are DVC's own generated ignore files. In {repo_url}, "
+            f"add '.gitignore' to .dvcignore ('dt init' now does this) and "
+            f"commit, then retry. Note this changes the directory's hash, "
+            f"nfiles and size, as it removes them from the payload.",
+        ]
+    lines += [
+        f"  - Point at the out(s) instead, e.g. a subdirectory of "
+        f"'{source_path}' that is itself dvc-tracked.",
+        f"  - Make '{source_path}' a single out in {repo_url} "
+        f"('dvc add {source_path}').",
+        f"  - Or use plain 'dvc import'/'dvc update' for this path, which "
+        f"hashes the git-tracked files too.",
+    ]
+    return '\n'.join(lines)
 
 
 def build_dir_manifest(entries: List[Dict[str, str]]) -> bytes:

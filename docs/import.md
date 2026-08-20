@@ -20,6 +20,39 @@ Imports files or directories from another DVC repository by:
 
 `dt import` first tries a local-cache workflow that does not require network access to remote object storage. If the source repository has no locally-accessible remote/cache, it falls back to `dvc import`.
 
+## The path must be a single DVC out
+
+`dt import` builds its manifest from object hashes, so every file under the
+imported path needs one. That holds when the path is itself a DVC out (or lives
+inside one). It does not hold for a plain directory that merely *contains* outs:
+DVC's repo filesystem presents git-tracked files there as part of the same tree,
+and `dvc import` hashes them from the git worktree into the payload — including
+the `.gitignore` files DVC generated in that directory.
+
+Given such a path, `dt import` refuses and names the offending files rather than
+writing a manifest that disagrees with `dvc import` in hash, `nfiles` and
+`size`. The fixes, in order of preference:
+
+1. Import the out itself, e.g. `data/annotations/in_house` rather than
+   `data/annotations`.
+2. If the only stray files are DVC's own generated ignore files, add
+   `.gitignore` to the **source** repo's `.dvcignore` and commit
+   (`dt init` seeds this; `dt doctor` flags repos that lack it). The payload
+   then contains only real data and `dt import` matches `dvc import` exactly.
+3. Make the path a single out upstream (`dvc add <path>`).
+4. Use plain `dvc import`, which hashes the git-tracked files too — at the cost
+   of a payload that includes them, and that your own remote cannot serve
+   (DVC excludes repo-import stages from `dvc push`).
+
+## Recorded size
+
+`size` comes from stat'ing the cache objects, in both the `files/md5/<xx>/` v3
+layout and the legacy `<xx>/` v2 one — a remote part-way through migration holds
+some objects in each. If any object cannot be found, `dt import` records **no**
+`size` and says so on stderr, rather than counting the miss as zero: a `size: 0`
+on a multi-GB import reads as an empty payload and silently undercounts every
+storage estimate downstream.
+
 ## Options
 
 - `--out, -o <path>`: Destination path for imported files (default: basename of source path)

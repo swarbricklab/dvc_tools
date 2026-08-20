@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 from dvc.utils.serialize import dump_yaml
 
+from . import cache_ops
 from . import dvc_deps
 from . import dvc_lock
 from . import find as find_mod
@@ -41,6 +42,7 @@ class ImportInfo:
     locked_rev: str
     current_hash: Optional[str]  # Current outs.md5 (may be None)
     is_directory: bool  # True if hash ends with .dir
+    rev_spec: Optional[str] = None  # deps.repo.rev as written (branch/tag/sha)
 
 
 @dataclass
@@ -54,6 +56,9 @@ class SourceChanges:
     diff_summary: str  # Human-readable summary
     new_path: Optional[str] = None  # If deleted but moved, the new path
     diff_error: Optional[str] = None  # Error message if diff failed
+    # Git-tracked paths inside the import that the source repo does not hash.
+    # Their presence means no hash we compute can match what dvc records.
+    mixed_tree: Optional[List[str]] = None
 
 
 # =============================================================================
@@ -86,6 +91,7 @@ def _parse_import_info(dvc_path: Path) -> Optional[ImportInfo]:
         locked_rev=ref.locked_rev,
         current_hash=ref.md5,
         is_directory=ref.is_directory,
+        rev_spec=ref.rev,
     )
 
 
@@ -102,12 +108,65 @@ def _get_head_rev(clone_path: Path) -> str:
     return result.stdout.strip()
 
 
+def _is_sha_like(rev: str) -> bool:
+    """True if ``rev`` looks like a commit sha rather than a branch or tag.
+
+    A sha is immutable, so it pins; a branch name is a moving target that a
+    ``rev_lock`` is expected to resolve. The two need opposite treatment when
+    ``rev_lock`` advances, and this is the only signal available from the
+    ``.dvc`` file alone.
+    """
+    if not rev or len(rev) < 7 or len(rev) > 40:
+        return False
+    return all(c in '0123456789abcdefABCDEF' for c in rev)
+
+
+def _resolve_rev(clone_path: Path, rev: str) -> Optional[str]:
+    """Resolve a git revision spec to a full commit sha in the clone.
+
+    Tries the spec as given, then under ``origin/`` -- the tmp clones track
+    remote branches, so a bare branch name usually only exists as
+    ``origin/<name>``.
+
+    Returns:
+        The full 40-char sha, or None if the spec does not resolve.
+    """
+    for candidate in (rev, f'origin/{rev}'):
+        result = subprocess.run(
+            ['git', 'rev-parse', '--verify', '--quiet', f'{candidate}^{{commit}}'],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+        )
+        sha = result.stdout.strip()
+        if result.returncode == 0 and sha:
+            return sha
+    return None
+
+
+def _tracked_tip(clone_path: Path, rev_spec: Optional[str], verbose: bool = False) -> str:
+    """Current tip of the revision this import tracks.
+
+    ``dvc update`` advances ``rev_lock`` to the tip of ``deps.repo.rev``, not
+    to whatever the clone happens to have checked out. Honouring the recorded
+    spec keeps ``rev`` and ``rev_lock`` consistent; ignoring it is how the two
+    fields end up asserting different revisions (issue #182).
+    """
+    if rev_spec and not _is_sha_like(rev_spec):
+        resolved = _resolve_rev(clone_path, rev_spec)
+        if resolved:
+            return resolved
+        if verbose:
+            print(f"  Recorded rev '{rev_spec}' does not resolve in the clone; using HEAD")
+    return _get_head_rev(clone_path)
+
+
 def _compute_source_hash(
     repo_url: str,
     path: str,
     rev: str,
     verbose: bool = False,
-) -> Tuple[Optional[str], int]:
+) -> Tuple[Optional[str], int, List[str]]:
     """Compute the DVC hash of source data at a revision.
 
     Lists the path at ``rev`` and reconstructs the hash exactly the way
@@ -125,29 +184,34 @@ def _compute_source_hash(
         verbose: Print progress messages.
 
     Returns:
-        Tuple of (hash, nfiles). Returns (None, 0) if the path lists
-        nothing or cannot be listed at this revision (e.g. it was moved
-        or deleted).
+        Tuple of (hash, nfiles, unhashed_paths). Returns (None, 0, []) if the
+        path lists nothing or cannot be listed at this revision (e.g. it was
+        moved or deleted). ``unhashed_paths`` is non-empty when the path mixes
+        git-tracked files with DVC outs, in which case no hash computed from
+        hashes alone can match what ``dvc import`` recorded.
     """
     try:
-        entries = _get_file_listing(repo_url, path, rev, verbose=verbose)
+        entries, unhashed = _get_file_listing(repo_url, path, rev, verbose=verbose)
     except UpdateError as e:
         if verbose:
             print(f"  Could not list {path} at {rev[:12]}...: {e}")
-        return None, 0
+        return None, 0, []
+
+    if unhashed:
+        return None, 0, unhashed
 
     if not entries:
-        return None, 0
+        return None, 0, []
 
     # Single file: exactly one entry whose relpath is just the filename.
     source_filename = Path(path).name
     if len(entries) == 1 and entries[0]['relpath'] == source_filename:
-        return entries[0]['md5'], 1
+        return entries[0]['md5'], 1, []
 
     # Directory: hash matches outs.md5 (the .dir manifest md5).
     manifest_content = utils.build_dir_manifest(entries)
     dir_hash = f"{hashlib.md5(manifest_content).hexdigest()}.dir"
-    return dir_hash, len(entries)
+    return dir_hash, len(entries), []
 
 
 def _check_source_changes(
@@ -204,7 +268,23 @@ def _check_source_changes(
             diff_error="No recorded hash in .dvc file",
         )
 
-    head_hash, _ = _compute_source_hash(repo_url, path, head_rev, verbose=verbose)
+    head_hash, _, unhashed = _compute_source_hash(
+        repo_url, path, head_rev, verbose=verbose
+    )
+
+    if unhashed:
+        # Nothing to compare: dt's hash of this path can never equal the one
+        # dvc recorded, because dvc counted the git-tracked files too. Report
+        # it rather than the "data changed" it would otherwise look like.
+        return SourceChanges(
+            has_changes=True,
+            head_rev=head_rev,
+            added=0,
+            modified=0,
+            deleted=0,
+            diff_summary="Path mixes git-tracked files with DVC outs",
+            mixed_tree=unhashed,
+        )
 
     if head_hash is None:
         # Path lists nothing at HEAD - data may have moved or been deleted.
@@ -269,19 +349,23 @@ def _get_file_listing(
     path: str,
     revision: str,
     verbose: bool = False,
-) -> List[Dict[str, any]]:
+) -> Tuple[List[Dict[str, any]], List[str]]:
     """Get file listing with hashes and sizes from source repo using dvc list.
-    
+
     Args:
         repo_url: URL of source repository.
         path: Path within repo to list.
         revision: Git revision to list at.
         verbose: Print progress messages.
-        
+
     Returns:
-        List of dicts with 'md5', 'relpath', and 'size' keys.
-        Size may be None if not available from source.
-        
+        Tuple of (entries, unhashed_paths). Entries are dicts with 'md5',
+        'relpath' and optionally 'size'. ``unhashed_paths`` holds the files the
+        source repo records no hash for -- git-tracked files in a directory
+        that is not itself an out. They are reported rather than dropped:
+        dropping them silently produced a manifest that disagreed with dvc's
+        (issue #182).
+
     Raises:
         UpdateError: If listing fails.
     """
@@ -309,7 +393,9 @@ def _get_file_listing(
     except json.JSONDecodeError as e:
         raise UpdateError(f"Failed to parse dvc list output: {e}")
     
-    # Filter to files with hashes
+    # Split into hashed entries and the git-tracked files the source repo
+    # records no hash for.
+    unhashed = utils.unhashed_listing_paths(files)
     entries = []
     for f in files:
         if f.get('isdir'):
@@ -324,17 +410,87 @@ def _get_file_listing(
             if f.get('size') is not None:
                 entry['size'] = f['size']
             entries.append(entry)
-    
+
     if verbose:
         total_size = sum(e.get('size', 0) or 0 for e in entries)
         if total_size > 0:
             print(f"  Found {len(entries)} files ({utils.format_size(total_size, human_readable=True)})")
         else:
             print(f"  Found {len(entries)} files")
-    
-    return entries
+        if unhashed:
+            print(f"  {len(unhashed)} git-tracked file(s) carry no hash")
+
+    return entries, unhashed
 
 
+
+
+def _cache_root(cache: Optional[str]) -> Optional[str]:
+    """Root of the cache to work in: the dir that contains ``files/md5``."""
+    if cache:
+        return cache
+    cache_dir = utils.get_cache_dir()
+    if not cache_dir:
+        return None
+    base = str(cache_dir)
+    if base.endswith(('/files/md5', '\\files\\md5')):
+        return str(Path(base).parent.parent)
+    return base
+
+
+def _find_source_remote(repo_url: str, verbose: bool = False) -> Optional[str]:
+    """Path to the source repo's remote, if it is on this filesystem.
+
+    Used both to size objects and to publish a rebuilt manifest, so look it up
+    once. Returns None for cloud remotes or when the lookup fails -- neither is
+    fatal, it just means sizes have to come from elsewhere.
+    """
+    from . import remote as remote_mod
+    try:
+        local_remote = remote_mod.find_local_remote_from_repo(repo_url)
+    except Exception as e:
+        if verbose:
+            print(f"  Could not resolve source remote: {e}")
+        return None
+    return local_remote[1] if local_remote else None
+
+
+def _total_size_from_entries(
+    entries: List[Dict[str, any]],
+    *cache_roots: Optional[str],
+    verbose: bool = False,
+) -> Optional[int]:
+    """Total bytes for a manifest, or None if any entry cannot be accounted for.
+
+    ``dvc list --size`` against a repo *URL* generally reports no sizes at all:
+    a ``.dir`` manifest records only md5 and relpath, so the only place a size
+    exists is the object itself. Hence the fallback -- stat the object in a
+    locally-readable cache or remote, which is authoritative because the object
+    *is* the content.
+
+    Returns None if even one entry is unsized, rather than a partial total: an
+    undercount reads as fact downstream, where a missing size reads as unknown
+    (issue #182).
+    """
+    total = 0
+    unsized = 0
+    for entry in entries:
+        size = entry.get('size')
+        if size is None:
+            size = cache_ops.object_size(entry['md5'], *cache_roots)
+        if size is None:
+            unsized += 1
+        else:
+            total += size
+
+    if unsized:
+        if verbose:
+            print(
+                f"  Could not size {unsized} of {len(entries)} object(s) "
+                f"from the source listing or any local cache"
+            )
+        return None
+    return total
 
 
 def _write_dir_to_cache(
@@ -379,20 +535,30 @@ def _update_dvc_file(
     new_rev: Optional[str] = None,
     new_path: Optional[str] = None,
     size: Optional[int] = None,
+    clear_size: bool = False,
     nfiles: Optional[int] = None,
+    new_rev_spec: Optional[str] = None,
     verbose: bool = False,
 ) -> bool:
     """Update the .dvc file with new hash, size, nfiles, and optionally new revision/path.
-    
+
     Args:
         dvc_path: Path to the .dvc file.
         new_hash: New outs.md5 hash (with .dir suffix if directory).
         new_rev: New deps.repo.rev_lock (None to keep current).
         new_path: New deps.path if source path has changed (None to keep current).
-        size: Total size in bytes (None to omit).
+        size: Total size in bytes (None to leave the recorded size alone).
+        clear_size: Delete ``outs.size`` instead of leaving a value that
+            belongs to the previous hash. Set this when the data changed but
+            its size could not be determined -- a stale size is a false
+            statement that propagates downstream, where a missing one is
+            merely unknown (issue #182).
         nfiles: Number of files for directories (None to omit).
+        new_rev_spec: New deps.repo.rev, i.e. the revision *spec* the caller
+            asked for. When None, a recorded spec that would contradict
+            ``new_rev`` is dropped rather than left to roll the import back.
         verbose: Print progress messages.
-        
+
     Returns:
         True if file was modified.
     """
@@ -423,7 +589,17 @@ def _update_dvc_file(
                         old_str = utils.format_size(old_size, True) if old_size else 'None'
                         new_str = utils.format_size(size, True)
                         print(f"  Updated size: {old_str} → {new_str}")
-            
+            elif clear_size and 'size' in outs:
+                # The size we hold describes the old hash. Keeping it would
+                # assert something untrue about the new data.
+                old_size = outs.pop('size')
+                modified = True
+                print(
+                    f"  Removed outs.size ({utils.format_size(old_size, True)}): "
+                    f"could not determine the size of the new data. "
+                    f"Run 'dvc update {dvc_path}' or 'dt du' to record it."
+                )
+
             # Update nfiles if provided (for directories)
             if nfiles is not None:
                 old_nfiles = outs.get('nfiles')
@@ -438,15 +614,41 @@ def _update_dvc_file(
             deps = data.get('deps', [])
             for dep in deps:
                 repo = dep.get('repo', {})
-                if repo:
-                    old_rev = repo.get('rev_lock') or repo.get('rev', '')
-                    if old_rev != new_rev:
-                        repo['rev_lock'] = new_rev
+                if not repo:
+                    continue
+
+                old_rev = repo.get('rev_lock') or repo.get('rev', '')
+                if old_rev != new_rev:
+                    repo['rev_lock'] = new_rev
+                    modified = True
+                    if verbose:
+                        old_str = f"{old_rev[:12]}..." if old_rev else "None"
+                        print(f"  Updated rev_lock: {old_str} → {new_rev[:12]}...")
+
+                # Keep deps.repo.rev consistent with the lock. rev is the spec
+                # and rev_lock its resolution, so a rev pinned to a different
+                # commit makes the file assert two revisions at once -- and the
+                # next `dvc update` believes rev, rolling the import back to
+                # the commit we just moved away from (issue #182).
+                old_spec = repo.get('rev')
+                if new_rev_spec:
+                    if old_spec != new_rev_spec:
+                        repo['rev'] = new_rev_spec
                         modified = True
                         if verbose:
-                            old_str = f"{old_rev[:12]}..." if old_rev else "None"
-                            print(f"  Updated rev_lock: {old_str} → {new_rev[:12]}...")
-        
+                            print(f"  Updated rev: {old_spec or 'None'} → {new_rev_spec}")
+                elif (old_spec and _is_sha_like(old_spec)
+                        and not new_rev.lower().startswith(old_spec.lower())):
+                    del repo['rev']
+                    modified = True
+                    print(
+                        f"  Removed pinned rev ({old_spec}): it no longer matches "
+                        f"rev_lock {new_rev[:12]}..., and would have rolled this "
+                        f"import back on the next 'dvc update'. The import now "
+                        f"tracks the source's default branch; re-pin with "
+                        f"'dt update --rev <rev>' if that is not what you want."
+                    )
+
         # Update deps.path if source path has changed
         if new_path:
             deps = data.get('deps', [])
@@ -632,16 +834,33 @@ def update(
         source_path = info.path
         path_changed = False
         
+        # The spec to record in deps.repo.rev. An explicit --rev is what the
+        # caller now tracks; 'HEAD' is not a spec worth recording (it means
+        # "wherever the source is now"), so it leaves rev to be reconciled
+        # against the new lock.
+        rev_spec = rev if (rev and rev != 'HEAD') else None
+
         if rev:
-            # Explicit revision specified
-            target_rev = rev
-            if target_rev == 'HEAD':
+            # Explicit revision specified. Record the spec, but lock to a full
+            # sha: rev_lock is the *resolution* of the spec, so writing a
+            # branch name there would leave the import unpinned.
+            if rev == 'HEAD':
                 target_rev = _get_head_rev(clone_path)
+            else:
+                resolved = _resolve_rev(clone_path, rev)
+                if not resolved:
+                    results.append((str(target_path), False,
+                        f"Revision '{rev}' does not resolve in {info.repo_url}"))
+                    continue
+                target_rev = resolved
             if not show_status:
-                print(f"  Target rev: {target_rev[:12]}... (specified)")
+                spec_note = f" ({rev} → sha)" if rev_spec and rev_spec != target_rev else ""
+                print(f"  Target rev: {target_rev[:12]}...{spec_note} (specified)")
         else:
-            # Smart detection: check for changes
-            head_rev = _get_head_rev(clone_path)
+            # Smart detection: check for changes. Advance along the revision
+            # this import tracks, which is deps.repo.rev when it names a
+            # branch or tag -- not simply whatever the clone has checked out.
+            head_rev = _tracked_tip(clone_path, info.rev_spec, verbose=verbose)
             
             if rebuild:
                 # --rebuild: skip change detection, just rebuild at locked rev
@@ -665,6 +884,19 @@ def update(
                     current_hash=info.current_hash, verbose=verbose
                 )
                 
+                # A path that mixes git-tracked files with DVC outs cannot be
+                # rebuilt at all, so say that instead of reporting a change.
+                if changes.mixed_tree:
+                    if not show_status:
+                        print()
+                        print(utils.describe_mixed_tree(
+                            changes.mixed_tree, info.path, info.repo_url,
+                            action='rebuild',
+                        ))
+                    results.append((str(target_path), False,
+                        "Path mixes git-tracked files with DVC outs"))
+                    continue
+
                 # Handle diff errors (e.g., unknown revision)
                 if changes.diff_error:
                     if not show_status:
@@ -745,30 +977,52 @@ def update(
         
         # Get file listing from source
         try:
-            entries = _get_file_listing(
+            entries, unhashed = _get_file_listing(
                 info.repo_url, source_path, target_rev, verbose=verbose
             )
         except UpdateError as e:
             results.append((str(target_path), False, str(e)))
             continue
-        
+
+        # Reached via --rev/--rebuild, which skip change detection. Refuse
+        # rather than build a manifest that disagrees with dvc's -- and, since
+        # the .dir is pushed upstream, plant that disagreement in a shared
+        # remote where no dvc operation would ever produce it (#182).
+        if unhashed:
+            if not show_status:
+                print()
+                print(utils.describe_mixed_tree(
+                    unhashed, source_path, info.repo_url, action='rebuild'
+                ))
+            results.append((str(target_path), False,
+                "Path mixes git-tracked files with DVC outs"))
+            continue
+
         if not entries:
             # No entries found - error
             results.append((str(target_path), False, "No files found at source path"))
             continue
         
+        # Where sizes can be read from: the source repo's remote if it is on
+        # this filesystem, then the cache we are writing into.
+        cache_base = _cache_root(cache)
+        source_remote = _find_source_remote(info.repo_url, verbose=verbose)
+        size_roots = (source_remote, cache_base)
+
         # Check if this is a single file or directory import
         # Single file: exactly 1 entry where path is just the filename
         source_filename = Path(source_path).name
         is_single_file = (
-            len(entries) == 1 and 
+            len(entries) == 1 and
             entries[0]['relpath'] == source_filename
         )
-        
+
         if is_single_file:
             # Single file import - use the md5 directly (no .dir)
             file_hash = entries[0]['md5']
-            file_size = entries[0].get('size')  # May be None
+            file_size = _total_size_from_entries(
+                entries, *size_roots, verbose=verbose
+            )  # May be None if the object is not locally readable
             if verbose:
                 size_str = f" ({utils.format_size(file_size, True)})" if file_size else ""
                 print(f"  Single file import: {file_hash[:12]}...{size_str}")
@@ -782,11 +1036,15 @@ def update(
             )
             
             if needs_update:
-                new_rev = target_rev if target_rev != info.locked_rev else None
+                # Also pass the rev when only the spec changed, so an explicit
+                # --rev is recorded even if it resolves to the current lock.
+                new_rev = target_rev if (target_rev != info.locked_rev or rev_spec) else None
                 _update_dvc_file(
                     target_path, file_hash, new_rev,
                     new_path=source_path if path_changed else None,
                     size=file_size,
+                    clear_size=file_size is None and file_hash != info.current_hash,
+                    new_rev_spec=rev_spec,
                     verbose=verbose
                 )
                 if path_changed:
@@ -802,54 +1060,47 @@ def update(
                 results.append((str(target_path), True, "Already up to date"))
             continue
         
-        # Directory import - compute totals from entries
+        # Directory import
         nfiles = len(entries)
-        total_size = sum(e.get('size', 0) or 0 for e in entries)
-        # Only set total_size if we have size data for at least some files
-        has_size_data = any(e.get('size') is not None for e in entries)
-        
+
+        if not cache_base:
+            results.append((str(target_path), False, "DVC cache not configured"))
+            continue
+
+        # Total the payload. None means "could not be determined", which is
+        # written as an absent size rather than a stale or partial one.
+        total_size = _total_size_from_entries(entries, *size_roots, verbose=verbose)
+
         # Build .dir manifest
         manifest_content = utils.build_dir_manifest(entries)
-        
-        # Get cache path - use explicit or primary
-        if cache:
-            cache_base = cache
-        else:
-            cache_dir = utils.get_cache_dir()
-            if not cache_dir:
-                results.append((str(target_path), False, "DVC cache not configured"))
-                continue
-            
-            cache_base = str(cache_dir)
-            if cache_base.endswith('/files/md5') or cache_base.endswith('\\files\\md5'):
-                cache_base = str(Path(cache_base).parent.parent)
-        
+
         # Write to cache
         dir_hash, dir_file = _write_dir_to_cache(manifest_content, cache_base, verbose)
-        
+
         # Update .dvc file with size, nfiles, and path metadata
-        new_rev = target_rev if target_rev != info.locked_rev else None
+        # Also pass the rev when only the spec changed, so an explicit
+        # --rev is recorded even if it resolves to the current lock.
+        new_rev = target_rev if (target_rev != info.locked_rev or rev_spec) else None
         _update_dvc_file(
             target_path, dir_hash, new_rev,
             new_path=source_path if path_changed else None,
-            size=total_size if has_size_data else None,
+            size=total_size,
+            clear_size=total_size is None and dir_hash != info.current_hash,
             nfiles=nfiles,
+            new_rev_spec=rev_spec,
             verbose=verbose
         )
-        
+
         # Always push to source remote so fetch can find it
-        from . import remote as remote_mod
-        try:
-            local_remote = remote_mod.find_local_remote_from_repo(info.repo_url)
-            if local_remote:
-                remote_path = Path(local_remote[1])
-                _push_dir_to_remote(dir_file, remote_path, dir_hash, verbose)
-        except Exception as e:
-            if verbose:
-                print(f"  Warning: Could not push to source remote: {e}")
-        
+        if source_remote:
+            try:
+                _push_dir_to_remote(dir_file, Path(source_remote), dir_hash, verbose)
+            except Exception as e:
+                if verbose:
+                    print(f"  Warning: Could not push to source remote: {e}")
+
         updated_targets.append(str(target_path))
-        size_str = f", {utils.format_size(total_size, True)}" if has_size_data else ""
+        size_str = f", {utils.format_size(total_size, True)}" if total_size is not None else ""
         if path_changed:
             results.append((str(target_path), True, f"Moved to {source_path} ({nfiles} files{size_str})"))
         else:
