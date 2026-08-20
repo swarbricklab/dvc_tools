@@ -171,10 +171,15 @@ def clone(repository, path, owner, username, no_init, no_submodules, cache_name,
 @click.pass_context
 def config(ctx):
     """View and modify configuration settings.
-    
+
     Configuration follows a hierarchical scope system:
     local > project > user > system
-    
+
+    Writes go to user scope (~/.config/dt/config.yaml) unless a scope flag
+    says otherwise, so a setting applies in every repository. Use --project
+    for the few settings that belong to the repository itself and should be
+    shared with collaborators; .dt/config.yaml is tracked by git.
+
     Run without arguments to list all effective configuration.
     """
     if ctx.invoked_subcommand is None:
@@ -188,20 +193,52 @@ def config(ctx):
 
 
 def _get_scope(local: bool, project: bool, user: bool, system: bool) -> str:
-    """Determine which scope to use from flags."""
+    """Determine which scope to use from flags.
+
+    Defaults to user scope. Most settings describe the person or the machine,
+    not the repository, so a user-scope write is the one that does what was
+    meant in every repo rather than just this one. Project scope is tracked by
+    git, so writing there imposes the value on every collaborator -- that now
+    has to be asked for with --project.
+    """
     if local:
         return 'local'
-    elif user:
-        return 'user'
+    elif project:
+        return 'project'
     elif system:
         return 'system'
     else:
-        return 'project'  # default
+        return 'user'  # default
 
 
 def _count_scope_flags(local: bool, project: bool, user: bool, system: bool) -> int:
     """Count how many scope flags are set."""
     return sum([local, project, user, system])
+
+
+def _warn_if_shadowed(key: str, scope: str) -> None:
+    """Warn when a write lands in a scope that something else overrides.
+
+    Writing succeeds but changes nothing observable, which reads as the tool
+    ignoring the command. Now that writes default to user scope this is easy
+    to hit: a `.dt/config.yaml` committed to the repo outranks it.
+    """
+    shadowing = [
+        s for s in cfg.scopes_defining(key)
+        if cfg.SCOPES.index(s) < cfg.SCOPES.index(scope)
+    ]
+    if not shadowing:
+        return
+    paths = cfg.get_config_paths()
+    winner = shadowing[0]
+    click.echo(
+        f"Note: {key} is also set in {winner} config ({paths[winner]}), "
+        f"which takes precedence over {scope} — the effective value is "
+        f"unchanged ({cfg.get_value(key)!r}).\n"
+        f"      Precedence is local > project > user > system. To change the "
+        f"value that applies, target that scope: --{winner}.",
+        err=True,
+    )
 
 
 @config.command('list')
@@ -256,8 +293,8 @@ def config_get(key):
 @click.argument('key')
 @click.argument('value')
 @click.option('--local', is_flag=True, help='Set in local scope')
-@click.option('--project', is_flag=True, help='Set in project scope (default)')
-@click.option('--user', is_flag=True, help='Set in user scope')
+@click.option('--project', is_flag=True, help='Set in project scope (tracked by git, shared with collaborators)')
+@click.option('--user', is_flag=True, help='Set in user scope (default)')
 @click.option('--system', is_flag=True, help='Set in system scope')
 def config_set(key, value, local, project, user, system):
     """Set a configuration value."""
@@ -266,15 +303,17 @@ def config_set(key, value, local, project, user, system):
     
     scope = _get_scope(local, project, user, system)
     cfg.set_value(key, value, scope)
-    click.echo(f"Set {key}={value} in {scope} config.")
+    paths = cfg.get_config_paths()
+    click.echo(f"Set {key}={value} in {scope} config ({paths[scope]}).")
+    _warn_if_shadowed(key, scope)
 
 
 @config.command('add')
 @click.argument('key')
 @click.argument('value')
 @click.option('--local', is_flag=True, help='Set in local scope')
-@click.option('--project', is_flag=True, help='Set in project scope (default)')
-@click.option('--user', is_flag=True, help='Set in user scope')
+@click.option('--project', is_flag=True, help='Set in project scope (tracked by git, shared with collaborators)')
+@click.option('--user', is_flag=True, help='Set in user scope (default)')
 @click.option('--system', is_flag=True, help='Set in system scope')
 def config_add(key, value, local, project, user, system):
     """Append a value to a list-valued setting.
@@ -305,6 +344,7 @@ def config_add(key, value, local, project, user, system):
                    f"({len(values)} value{'s' if len(values) != 1 else ''}):")
         for i, v in enumerate(values):
             click.echo(f"  {v}{'   <- default' if i == 0 else ''}")
+        _warn_if_shadowed(key, scope)
     else:
         click.echo(f"{key} already contains {value}")
 
@@ -313,8 +353,8 @@ def config_add(key, value, local, project, user, system):
 @click.argument('key')
 @click.argument('value')
 @click.option('--local', is_flag=True, help='Set in local scope')
-@click.option('--project', is_flag=True, help='Set in project scope (default)')
-@click.option('--user', is_flag=True, help='Set in user scope')
+@click.option('--project', is_flag=True, help='Set in project scope (tracked by git, shared with collaborators)')
+@click.option('--user', is_flag=True, help='Set in user scope (default)')
 @click.option('--system', is_flag=True, help='Set in system scope')
 def config_remove(key, value, local, project, user, system):
     """Remove a value from a list-valued setting.
@@ -333,6 +373,7 @@ def config_remove(key, value, local, project, user, system):
                    f"({len(values)} remaining):")
         for i, v in enumerate(values):
             click.echo(f"  {v}{'   <- default' if i == 0 else ''}")
+        _warn_if_shadowed(key, scope)
     else:
         raise click.ClickException(f"{key} does not contain '{value}'")
 
@@ -340,8 +381,8 @@ def config_remove(key, value, local, project, user, system):
 @config.command('unset')
 @click.argument('key')
 @click.option('--local', is_flag=True, help='Unset in local scope')
-@click.option('--project', is_flag=True, help='Unset in project scope (default)')
-@click.option('--user', is_flag=True, help='Unset in user scope')
+@click.option('--project', is_flag=True, help='Unset in project scope (tracked by git, shared with collaborators)')
+@click.option('--user', is_flag=True, help='Unset in user scope (default)')
 @click.option('--system', is_flag=True, help='Unset in system scope')
 def config_unset(key, local, project, user, system):
     """Unset a configuration value."""
@@ -351,8 +392,164 @@ def config_unset(key, local, project, user, system):
     scope = _get_scope(local, project, user, system)
     if cfg.unset_value(key, scope):
         click.echo(f"Unset {key} from {scope} config.")
-    else:
-        raise click.ClickException(f"Key '{key}' not found in {scope} configuration.")
+        _warn_if_shadowed(key, scope)
+        return
+
+    # Unset defaults to user scope, so the common miss is a key that lives in
+    # another scope entirely. Saying only "not found" leaves the caller to
+    # guess which of the four to try next.
+    elsewhere = [s for s in cfg.scopes_defining(key) if s != scope]
+    if elsewhere:
+        paths = cfg.get_config_paths()
+        detail = '\n'.join(
+            f"  --{s}\t{paths[s]}" for s in elsewhere
+        )
+        raise click.ClickException(
+            f"Key '{key}' is not set in {scope} configuration, but is set in "
+            f"{'/'.join(elsewhere)}:\n{detail}\n"
+            f"Re-run with the scope you meant, e.g. "
+            f"'dt config unset --{elsewhere[0]} {key}'."
+        )
+    raise click.ClickException(
+        f"Key '{key}' is not set in any configuration scope "
+        f"({', '.join(cfg.SCOPES)})."
+    )
+
+
+@config.command('import')
+@click.argument('file', type=click.Path(dir_okay=False, path_type=Path))
+@click.option('--local', is_flag=True, help='Import into local scope')
+@click.option('--project', is_flag=True,
+              help='Import into project scope (tracked by git, shared with '
+                   'collaborators)')
+@click.option('--user', is_flag=True, help='Import into user scope (default)')
+@click.option('--system', is_flag=True, help='Import into system scope')
+@click.option('--dry-run', is_flag=True,
+              help='Show what would change and write nothing')
+@click.option('--yes', '-y', is_flag=True,
+              help='Do not prompt before replacing existing values')
+def config_import(file, local, project, user, system, dry_run, yes):
+    """Merge the settings in FILE into your configuration.
+
+    FILE is an ordinary dt config file -- the same shape as the one
+    'dt config path --user' points at -- so it can be handed over by email or
+    Slack and imported without knowing where config lives on this machine.
+
+    Settings are merged, not replaced: keys the file does not mention are left
+    alone, so importing lab defaults does not discard local paths. Values that
+    would change are listed and confirmed first.
+
+    \b
+    Examples:
+        dt config import lab-defaults.yaml
+        dt config import lab-defaults.yaml --dry-run
+        dt config import repo-settings.yaml --project
+    """
+    if _count_scope_flags(local, project, user, system) > 1:
+        raise click.UsageError("Only one scope flag can be specified.")
+
+    scope = _get_scope(local, project, user, system)
+    paths = cfg.get_config_paths()
+
+    try:
+        incoming = cfg.read_config_file(file)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+
+    existing = cfg.flatten_dict(cfg.load_scope_config(scope))
+    added = {k: v for k, v in incoming.items() if k not in existing}
+    changed = {k: v for k, v in incoming.items()
+               if k in existing and existing[k] != v}
+    unchanged = [k for k, v in incoming.items()
+                 if k in existing and existing[k] == v]
+
+    def show(value):
+        """Render a value the way the config file spells it, not as a repr."""
+        if isinstance(value, (list, tuple)):
+            return ', '.join(str(v) for v in value)
+        return str(value)
+
+    click.echo(f"{file} -> {scope} config ({paths[scope]})")
+    width = max(len(k) for k in incoming)
+    for key, value in added.items():
+        click.echo(f"  + {key:<{width}}  {show(value)}")
+    for key, value in changed.items():
+        click.echo(f"  ~ {key:<{width}}  {show(existing[key])} -> {show(value)}")
+    for key in unchanged:
+        click.echo(f"  = {key:<{width}}  {show(incoming[key])}  (already set)")
+
+    if not added and not changed:
+        click.echo("Nothing to do: every setting already has this value.")
+        return
+
+    if dry_run:
+        click.echo(f"\nDry run: {len(added)} to add, {len(changed)} to "
+                   f"replace. Nothing written.")
+        return
+
+    # Only the replacements can lose information, so that is the only case
+    # worth stopping for -- an import that purely adds settings is not
+    # destructive and prompting for it would just train people to hit enter.
+    if changed and not yes:
+        click.confirm(
+            f"\nReplace {len(changed)} existing "
+            f"value{'s' if len(changed) != 1 else ''} in {scope} config?",
+            abort=True,
+        )
+
+    cfg.set_values({**added, **changed}, scope)
+    click.echo(f"Wrote {len(added) + len(changed)} setting"
+               f"{'s' if len(added) + len(changed) != 1 else ''} to {scope} "
+               f"config ({paths[scope]}).")
+
+    for key in list(added) + list(changed):
+        _warn_if_shadowed(key, scope)
+
+    _warn_about_missing_paths(incoming)
+
+
+#: Settings whose value is a path that has to exist on *this* machine.
+#:
+#: A config file is usually handed to someone on a different filesystem, which
+#: is exactly the case where these are wrong -- and wrong in a way that only
+#: shows up later, when a push or an archive run cannot find its directory.
+_PATH_KEYS = (
+    'cache.root',
+    'remote.root',
+    'site_cache.root',
+    'index.mirror_root',
+    'archive.staging_dir',
+    'archive.registry_path',
+    'deps.cache_dir',
+)
+
+
+def _warn_about_missing_paths(values: dict) -> None:
+    """Flag imported paths that do not exist here, without failing."""
+    missing = []
+    for key in _PATH_KEYS:
+        if key not in values:
+            continue
+        entries = values[key] if isinstance(values[key], list) else [values[key]]
+        for entry in entries:
+            if isinstance(entry, str) and entry.startswith('/') \
+                    and not Path(entry).exists():
+                missing.append((key, entry))
+
+    if not missing:
+        return
+    click.echo(
+        "\nThese imported paths do not exist on this machine — likely if the "
+        "file came from a different filesystem:",
+        err=True,
+    )
+    for key, entry in missing:
+        click.echo(f"  {key}: {entry}", err=True)
+    click.echo(
+        "Set them to local paths ('dt config set <key> <path>') or run "
+        "'dt doctor' for the full check.",
+        err=True,
+    )
 
 
 @config.command('path')

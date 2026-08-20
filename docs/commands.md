@@ -372,9 +372,11 @@ View and modify configuration settings.
 | `dt config unset <key>` | Remove a configuration value |
 | `dt config add <key> <value>` | Append a value to a list-valued setting (e.g. `remote.root`) |
 | `dt config remove <key> <value>` | Remove a value from a list-valued setting |
+| `dt config import <file>` | Merge a config file handed over by someone else |
 | `dt config path` | Show configuration file paths |
 
-Configuration uses hierarchical scopes: local > project > user > system. [Full documentation →](config.md)
+Configuration uses hierarchical scopes: local > project > user > system; writes
+default to user scope. [Full documentation →](config.md)
 
 ---
 

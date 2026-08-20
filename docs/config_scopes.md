@@ -7,8 +7,8 @@ The `dt` configuration system uses hierarchical scopes, similar to git and DVC.
 | Scope | Location | Tracked | Use case |
 |-------|----------|---------|----------|
 | **local** | `.dt/config.local.yaml` | No | Workspace overrides |
-| **project** | `.dt/config.yaml` | Yes | Shared repo settings (default) |
-| **user** | `$XDG_CONFIG_HOME/dt/config.yaml`, else `~/.config/dt/config.yaml` | N/A | Personal defaults |
+| **project** | `.dt/config.yaml` | Yes | Shared repo settings |
+| **user** | `$XDG_CONFIG_HOME/dt/config.yaml`, else `~/.config/dt/config.yaml` | N/A | Personal defaults (default for writes) |
 | **system** | `<dir>/dt/config.yaml` for a `<dir>` in `$XDG_CONFIG_DIRS` | N/A | Team defaults |
 
 The local and project paths are relative to the project root — the git root if
@@ -20,15 +20,53 @@ When a key exists in multiple scopes, the more specific scope wins. Local overri
 
 ## Choosing a Scope
 
-### Project Scope (default)
+`dt config set` writes **user** scope unless a flag says otherwise. Any other
+scope has to be named.
 
-Settings that should be shared with all collaborators on a repository. The `.dt/config.yaml` file is tracked by git.
+### User Scope (default for writes)
+
+Personal settings that apply in every repository you work in.
 
 ```bash
+dt config set owner myorg
+dt config set username jr9959
 dt config set cache.root /g/data/a56/dvc_cache
 ```
 
-Use for: cache locations, remote roots, project-specific settings.
+Use for: almost everything — GitHub owner, SSH username, cache and remote
+roots, staging directories. These describe you and the machine, not one
+repository, so writing them once is enough.
+
+This is the default because the alternative surprised people twice over: a
+setting made in one repo did not apply in the next one, and `.dt/config.yaml`
+is tracked by git, so a personal preference arrived in every collaborator's
+checkout on the next pull.
+
+### Project Scope
+
+Settings that genuinely belong to the repository and *should* be shared with
+everyone working on it. `.dt/config.yaml` is tracked by git, so a value written
+here is committed and inherited.
+
+```bash
+dt config set --project hooks.pre-commit.checks.large-files.max_size 10MB
+```
+
+Use for: settings a collaborator would get wrong if left to their own defaults
+— hook thresholds for a repo of unusually large files, a remote every
+collaborator must use.
+
+Because project scope outranks user scope, a value committed here overrides
+what a collaborator set for themselves. `dt config set` says so when it happens:
+
+```
+$ dt config set cache.root /scratch/a56/jr9959/cache
+Set cache.root=/scratch/a56/jr9959/cache in user config (/home/jr9959/.config/dt/config.yaml).
+Note: cache.root is also set in project config (/path/to/repo/.dt/config.yaml), which takes
+      precedence over user — the effective value is unchanged ('/g/data/a56/dvc_cache').
+      Precedence is local > project > user > system. To change the value that applies,
+      target that scope: --project.
+```
 
 ### Local Scope
 
@@ -39,17 +77,6 @@ dt config set --local ssh.host alternate-host.example.org
 ```
 
 Use for: temporary overrides, testing, machine-specific paths.
-
-### User Scope
-
-Personal settings that apply to all repositories for the current user.
-
-```bash
-dt config set --user owner myorg
-dt config set --user team analysts
-```
-
-Use for: GitHub owner (user or organization), team membership, personal preferences.
 
 ### System Scope
 
@@ -65,9 +92,10 @@ The same four flags work on `set`, `add`, `remove`, `unset`, `list`, and
 `path`. Only one may be given at a time.
 
 ```bash
+dt config set key value            # User scope (default)
 dt config set --local key value    # Local scope
-dt config set --project key value  # Project scope (default)
-dt config set --user key value     # User scope
+dt config set --project key value  # Project scope
+dt config set --user key value     # User scope (explicit)
 dt config set --system key value   # System scope
 
 dt config list --project           # List project config only
@@ -90,6 +118,19 @@ The config at `/g/data/a56/config/xdg/dt/config.yaml` will be loaded automatical
 If no directory in the list contains the file, `dt` reports the first
 directory as the system path — that is where `--system` writes.
 
+## Removing a Value
+
+`unset` also defaults to user scope, so removing a project-scoped value needs
+`--project`. Rather than a bare "not found", the error names the scopes that do
+hold the key:
+
+```
+$ dt config unset cache.root
+Error: Key 'cache.root' is not set in user configuration, but is set in project:
+  --project	/path/to/repo/.dt/config.yaml
+Re-run with the scope you meant, e.g. 'dt config unset --project cache.root'.
+```
+
 ## Viewing Configuration
 
 ```bash
@@ -100,6 +141,15 @@ dt config list --project       # Only project scope
 dt config path                 # Show all four paths, with ✓/✗ for existence
 dt config path --user          # Show just the user config path
 ```
+
+## Sharing a Configuration
+
+For a team on one filesystem, point `XDG_CONFIG_DIRS` at a shared system-scope
+file (above) — everyone then tracks it live. For someone offsite, on their own
+filesystem, send them a config file instead and have them run
+`dt config import <file>`, which merges it into their user scope without
+clobbering their own paths. See
+[Handing a configuration to someone else](config.md#handing-a-configuration-to-someone-else).
 
 ## See Also
 
