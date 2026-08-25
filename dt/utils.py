@@ -6,11 +6,12 @@ Common functions used across multiple modules.
 import csv
 import hashlib
 import os
+import re
 import shutil
 import socket
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from dvc.repo import Repo
 from dvc_data.hashfile.hash import file_md5 as _dvc_file_md5
@@ -18,7 +19,28 @@ from dvc_data.hashfile.hash_info import HashInfo
 from dvc_data.hashfile.meta import Meta
 from dvc_data.hashfile.tree import Tree
 
-from .errors import DependencyError, DVCFileError
+from .errors import DependencyError, DVCFileError, TargetNotFoundError
+
+# DVC's exceptions for "that target does not name anything I track". Caught
+# where we call DVC's collection directly, so a bad target is reported rather
+# than raised as a traceback.
+try:
+    from dvc.exceptions import (
+        NoOutputOrStageError,
+        OutputNotFoundError,
+        PathMissingError,
+    )
+    from dvc.stage.exceptions import StageFileDoesNotExistError, StageNotFound
+
+    _TARGET_COLLECTION_ERRORS = (
+        NoOutputOrStageError,
+        OutputNotFoundError,
+        PathMissingError,
+        StageFileDoesNotExistError,
+        StageNotFound,
+    )
+except ImportError:  # pragma: no cover - DVC always provides these
+    _TARGET_COLLECTION_ERRORS = ()
 
 
 # =============================================================================
@@ -226,6 +248,67 @@ def _get_dvc_file_metadata(path: str) -> Dict[str, Any]:
     return {'size': None, 'nfiles': None}
 
 
+def _stage_names(dvc_yaml: Path = Path('dvc.yaml')) -> Set[str]:
+    """Stage names defined in a dvc.yaml, empty if there isn't one."""
+    import yaml
+
+    if not dvc_yaml.exists():
+        return set()
+    try:
+        with open(dvc_yaml) as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return set()
+    stages = data.get('stages')
+    return set(stages) if isinstance(stages, dict) else set()
+
+
+def unresolvable_targets(targets: Optional[List[str]]) -> List[str]:
+    """Targets that cannot name anything DVC tracks.
+
+    A target is a path, a .dvc file, or a stage name; anything that is none of
+    those cannot resolve, whatever the repo state. Kept deliberately
+    permissive -- an out that is merely not checked out still has its .dvc
+    file, so it is not reported here.
+    """
+    missing = []
+    for target in targets or []:
+        path = Path(target)
+        if path.exists() or Path(f"{target}.dvc").exists():
+            continue
+        # `dvc.yaml:stage` and `subdir/dvc.yaml:stage` name a stage by file.
+        head, sep, _tail = target.partition(':')
+        if sep and Path(head).exists():
+            continue
+        if target in _stage_names():
+            continue
+        # A path inside a tracked directory resolves through the directory's
+        # .dvc file, even when the directory is not checked out.
+        if any(Path(f"{parent}.dvc").exists() for parent in path.parents):
+            continue
+        missing.append(target)
+    return missing
+
+
+def _target_not_found(exc: Exception, targets: Optional[List[str]]) -> TargetNotFoundError:
+    """Turn DVC's collection failure into a message that names the target."""
+    # DVC's messages lead with the offending target in quotes; prefer that,
+    # since it reflects what DVC actually choked on.
+    match = re.match(r"'([^']+)'", str(exc))
+    if match and match.group(1) in (targets or []):
+        named = [match.group(1)]
+    else:
+        named = unresolvable_targets(targets) or list(targets or [])
+
+    quoted = ', '.join(repr(t) for t in named)
+    plural = 's' if len(named) > 1 else ''
+    return TargetNotFoundError(
+        f"No such target{plural}: {quoted} "
+        f"(not a tracked path, a .dvc file, or a stage name)",
+        targets=named,
+    )
+
+
 def collect_tracked_entries(
     targets: Optional[List[str]] = None,
     remote: Optional[str] = None,
@@ -251,6 +334,7 @@ def collect_tracked_entries(
             
     Raises:
         DependencyError: If DVC internals are not available
+        TargetNotFoundError: If a target does not name anything DVC tracks
     """
     try:
         from dvc.repo.fetch import _collect_indexes
@@ -259,19 +343,22 @@ def collect_tracked_entries(
     
     repo = Repo()
     
-    indexes = _collect_indexes(
-        repo,
-        targets=targets,
-        remote=remote,
-        all_branches=False,
-        with_deps=False,
-        all_tags=False,
-        recursive=False,
-        all_commits=False,
-        revs=None,
-        workspace=True,
-        push=push,
-    )
+    try:
+        indexes = _collect_indexes(
+            repo,
+            targets=targets,
+            remote=remote,
+            all_branches=False,
+            with_deps=False,
+            all_tags=False,
+            recursive=False,
+            all_commits=False,
+            revs=None,
+            workspace=True,
+            push=push,
+        )
+    except _TARGET_COLLECTION_ERRORS as e:
+        raise _target_not_found(e, targets) from e
     
     if not indexes:
         return {

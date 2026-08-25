@@ -367,6 +367,8 @@ def collect_hashes_for_targets(
     
     try:
         result = utils.collect_tracked_entries(targets=targets, push=False)
+    except utils.TargetNotFoundError as e:
+        raise CacheError(str(e))
     except utils.DependencyError as e:
         raise CacheError(str(e))
     

@@ -18,8 +18,11 @@ from dt.push import (
     push_partition,
     parallel_push,
     _missing_from_remote,
+    explain_bad_target,
+    extract_targets,
+    check_targets,
 )
-from dt.errors import PushError
+from dt.errors import PushError, TargetNotFoundError
 
 
 # =============================================================================
@@ -497,3 +500,101 @@ class TestParallelPushReconciliation:
                 stack.enter_context(p)
             with pytest.raises(PushError, match="1 file"):
                 parallel_push(num_workers=2, wait=True)
+
+
+# =============================================================================
+# Bad-target reporting tests
+# =============================================================================
+
+class TestExtractTargets:
+    """Tests for the extract_targets helper."""
+
+    def test_drops_options(self):
+        """Option-shaped args are not targets."""
+        assert extract_targets(["--force", "data.txt"]) == ["data.txt"]
+
+    def test_drops_option_values(self):
+        """The value of a value-taking option is not a target."""
+        assert extract_targets(["--jobs", "8"]) == []
+        assert extract_targets(["-r", "myremote", "data.txt"]) == ["data.txt"]
+
+    def test_keeps_value_after_flag(self):
+        """A flag takes no value, so the next arg is still a target."""
+        assert extract_targets(["--force", "8"]) == ["8"]
+
+    def test_inline_option_value(self):
+        """--jobs=8 consumes its own value."""
+        assert extract_targets(["--jobs=8", "data.txt"]) == ["data.txt"]
+
+
+class TestExplainBadTarget:
+    """Tests for the explain_bad_target helper."""
+
+    def test_suggests_remote_flag_for_remote_name(self):
+        """A target that names a remote gets the -r suggestion."""
+        with patch("dt.push.remote_names", return_value={"myremote"}):
+            msg = explain_bad_target("No such target: 'myremote'", ["myremote"])
+
+            assert "dt push -r myremote" in msg
+            assert "configured remote" in msg
+
+    def test_explains_targets_otherwise(self):
+        """A target that is not a remote gets the generic explanation."""
+        with patch("dt.push.remote_names", return_value={"myremote"}):
+            msg = explain_bad_target("No such target: 'typo.txt'", ["typo.txt"])
+
+            assert "-r NAME" in msg
+            assert "configured remote" not in msg
+
+    def test_keeps_original_message(self):
+        """The original message is preserved."""
+        with patch("dt.push.remote_names", return_value=set()):
+            msg = explain_bad_target("No such target: 'typo.txt'", ["typo.txt"])
+
+            assert msg.startswith("No such target: 'typo.txt'")
+
+
+class TestCheckTargets:
+    """Tests for the check_targets pre-flight check."""
+
+    def test_rejects_remote_name_used_as_target(self, tmp_path, monkeypatch):
+        """`dt push myremote` is refused before shelling out to dvc."""
+        monkeypatch.chdir(tmp_path)
+        with patch("dt.push.remote_names", return_value={"myremote"}):
+            with pytest.raises(PushError) as exc_info:
+                check_targets(["myremote"])
+
+            assert "dt push -r myremote" in str(exc_info.value)
+
+    def test_allows_target_that_is_not_a_remote(self, tmp_path, monkeypatch):
+        """A bad target that is not a remote is left for dvc to report."""
+        monkeypatch.chdir(tmp_path)
+        with patch("dt.push.remote_names", return_value={"myremote"}):
+            check_targets(["typo.txt"])
+
+    def test_allows_real_path_sharing_a_remote_name(self, tmp_path, monkeypatch):
+        """A real path is a target even if a remote shares its name."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "myremote").write_text("data")
+        with patch("dt.push.remote_names", return_value={"myremote"}):
+            check_targets(["myremote"])
+
+    def test_ignores_option_values(self, tmp_path, monkeypatch):
+        """An option value that happens to name a remote is not a target."""
+        monkeypatch.chdir(tmp_path)
+        with patch("dt.push.remote_names", return_value={"myremote"}):
+            check_targets(["-r", "myremote"])
+
+
+class TestBuildManifestBadTarget:
+    """build_manifest reports bad targets instead of raising DVC's error."""
+
+    def test_target_not_found_becomes_push_error_with_hint(self):
+        """A TargetNotFoundError is re-raised as a PushError with a hint."""
+        err = TargetNotFoundError("No such target: 'myremote'", targets=["myremote"])
+        with patch("dt.push.utils.collect_tracked_entries", side_effect=err):
+            with patch("dt.push.remote_names", return_value={"myremote"}):
+                with pytest.raises(PushError) as exc_info:
+                    build_manifest(targets=["myremote"])
+
+                assert "dt push -r myremote" in str(exc_info.value)
