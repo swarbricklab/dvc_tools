@@ -140,6 +140,20 @@ class RemoteError(DTError):
     pass
 
 
+class TargetNotFoundError(DTError):
+    """A target does not name anything DVC tracks.
+
+    Raised instead of letting DVC's own collection exception escape, so a
+    mistyped (or misplaced) target reads as an error message rather than a
+    traceback. Carries the offending targets so callers can add their own
+    hint -- ``dt push`` suggests ``-r`` when the target is a remote name.
+    """
+
+    def __init__(self, message: str, targets=None):
+        super().__init__(message)
+        self.targets = list(targets or [])
+
+
 class StatusError(DTError):
     """Error during status operations."""
     pass
