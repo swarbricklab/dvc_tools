@@ -50,6 +50,7 @@ class TestExceptionHierarchy:
         errors.PushError,
         errors.RemoteError,
         errors.SummaryError,
+        errors.TargetNotFoundError,
         errors.TmpError,
         errors.WorktreeError,
         errors.AddError,
@@ -80,6 +81,7 @@ class TestExceptionHierarchy:
         errors.PushError,
         errors.RemoteError,
         errors.SummaryError,
+        errors.TargetNotFoundError,
         errors.TmpError,
         errors.WorktreeError,
         errors.AddError,
@@ -111,6 +113,7 @@ class TestExceptionHierarchy:
         errors.PushError,
         errors.RemoteError,
         errors.SummaryError,
+        errors.TargetNotFoundError,
         errors.TmpError,
         errors.WorktreeError,
         errors.AddError,
@@ -220,3 +223,16 @@ class TestExceptionUsage:
 
 
 # Run with: pytest tests/test_errors.py -v
+
+
+class TestTargetNotFoundError:
+    """TargetNotFoundError carries the offending targets."""
+
+    def test_stores_targets(self):
+        err = errors.TargetNotFoundError("No such target: 'x'", targets=["x"])
+        assert err.targets == ["x"]
+        assert str(err) == "No such target: 'x'"
+
+    def test_targets_default_to_empty(self):
+        err = errors.TargetNotFoundError("No such target")
+        assert err.targets == []

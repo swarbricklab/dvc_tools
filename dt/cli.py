@@ -3708,7 +3708,7 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
     try:
         # Dry run mode: show what would be pushed
         if dry:
-            targets = [arg for arg in ctx.args if not arg.startswith('-')]
+            targets = push_mod.extract_targets(list(ctx.args))
             manifest = push_mod.build_manifest(
                 targets=targets if targets else None,
                 remote=remote,
@@ -3765,7 +3765,7 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
         # Parallel mode: submit qxub jobs
         if workers is not None:
             # Extract targets from extra args (non-option args)
-            targets = [arg for arg in ctx.args if not arg.startswith('-')]
+            targets = push_mod.extract_targets(list(ctx.args))
             
             # Extract qxub-relevant options if any (could extend later)
             qxub_args = None
@@ -3792,6 +3792,8 @@ def push(ctx, workers, worker, manifest, remote, no_wait, dry, verbose):
         
         # Simple mode: push to all project remotes
         # If remote specified, push to just that one
+        push_mod.check_targets(list(ctx.args))
+
         if remote:
             success, output = push_mod.push_to_remote(remote, ctx.args)
             status = "✓" if success else "✗"

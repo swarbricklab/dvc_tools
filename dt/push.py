@@ -209,6 +209,88 @@ def push_all(args: List[str]) -> List[Tuple[str, bool, str]]:
     return results
 
 
+#: `dvc push` options that take a separate value. Their value is not a target,
+#: so it has to be skipped when picking targets out of the passthrough args.
+VALUE_OPTIONS = {'-j', '--jobs', '-r', '--remote', '--rev', '--remote-refresh'}
+
+
+def extract_targets(args: List[str]) -> List[str]:
+    """Pick the targets out of args forwarded to `dvc push`.
+
+    Anything option-shaped is dropped, as is the value of an option that takes
+    one -- otherwise `dt push --dry --jobs 8` reads 8 as a target.
+    """
+    targets = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg.startswith('-'):
+            skip_next = arg in VALUE_OPTIONS
+            continue
+        targets.append(arg)
+    return targets
+
+
+def remote_names() -> Set[str]:
+    """Every remote name visible to this repo, at any config scope."""
+    try:
+        from . import remote as remote_mod
+        return {name for name, _url, _default in remote_mod.list_remotes(project_only=False)}
+    except Exception:
+        return {name for name, _url in get_project_remotes()}
+
+
+def explain_bad_target(message: str, targets: Optional[List[str]] = None) -> str:
+    """Add a hint to a "no such target" message.
+
+    The common way to hit this is forgetting ``-r``: ``dt push myremote``
+    reads ``myremote`` as data to push, not as the remote to push it to. Say
+    so when the target really is a remote name; otherwise just say what a
+    target is.
+    """
+    named = [t for t in (targets or []) if t in remote_names()]
+
+    if named:
+        hint = (
+            f"\n\n'{named[0]}' is a configured remote, not a target. "
+            f"To push to it:\n"
+            f"    dt push -r {named[0]}"
+        )
+    else:
+        hint = (
+            "\n\nA target names data to push -- a tracked path, a .dvc file, "
+            "or a stage name.\nRun `dt push` with no targets to push everything, "
+            "or `dt push -r NAME` to choose a remote."
+        )
+
+    return message + hint
+
+
+def check_targets(args: List[str]) -> None:
+    """Reject a passthrough arg that names a remote rather than data.
+
+    The simple push path shells out to `dvc push`, which would report the
+    same argument as a missing stage. Only a target that cannot resolve *and*
+    names a configured remote is rejected here, so nothing DVC would have
+    accepted is turned away.
+
+    Raises:
+        PushError: If a target is a remote name.
+    """
+    missing = utils.unresolvable_targets(extract_targets(args))
+    named = [target for target in missing if target in remote_names()]
+    if not named:
+        return
+
+    raise PushError(explain_bad_target(
+        f"No such target: {named[0]!r} "
+        f"(not a tracked path, a .dvc file, or a stage name)",
+        named,
+    ))
+
+
 # =============================================================================
 # Parallel push infrastructure
 # =============================================================================
@@ -244,6 +326,8 @@ def build_manifest(
     # Use shared helper to collect tracked entries
     try:
         result = utils.collect_tracked_entries(targets=targets, remote=remote, push=True)
+    except utils.TargetNotFoundError as e:
+        raise PushError(explain_bad_target(str(e), e.targets))
     except utils.DependencyError as e:
         raise PushError(str(e))
     

@@ -137,6 +137,22 @@ For large datasets with thousands of files, a single `dvc push` can be slow due 
 
 Parallel push distributes the work across multiple nodes, with each worker handling a disjoint, byte-balanced partition of the files. This avoids conflicts, and because no single worker is left holding all the large files, wall-clock time scales with the number of workers rather than with the biggest partition.
 
+## Targets vs remotes
+
+A target names *data* to push -- a tracked path, a `.dvc` file, or a stage
+name. The remote is chosen with `-r`, so a bare remote name is read as a
+target and nothing matches it:
+
+```bash
+$ dt push myremote
+Error: No such target: 'myremote' (not a tracked path, a .dvc file, or a stage name)
+
+'myremote' is a configured remote, not a target. To push to it:
+    dt push -r myremote
+```
+
+With no targets at all, `dt push` pushes everything.
+
 ## Example
 
 Suppose a project has remotes for cloud storage and HPC as follows:

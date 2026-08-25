@@ -13,7 +13,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from dt import utils
-from dt.errors import DependencyError, DVCFileError
+from dt.errors import DependencyError, DVCFileError, TargetNotFoundError
 
 
 # =============================================================================
@@ -859,3 +859,88 @@ class TestDescribeMixedTree:
             [f'f{i}.txt' for i in range(25)], 'd', 'repo', action='import',
         )
         assert '... and 15 more' in msg
+
+
+class TestCollectTrackedEntriesBadTarget:
+    """A target DVC cannot resolve is an error message, not a traceback."""
+
+    def test_dvc_collection_error_becomes_target_not_found(self, tmp_path, monkeypatch):
+        """DVC's NoOutputOrStageError is converted, naming the target."""
+        from dvc.exceptions import NoOutputOrStageError
+
+        monkeypatch.chdir(tmp_path)
+        with patch.object(utils, 'Repo'):
+            with patch(
+                'dvc.repo.fetch._collect_indexes',
+                side_effect=NoOutputOrStageError('myremote', 'dvc.yaml'),
+                create=True,
+            ):
+                with pytest.raises(TargetNotFoundError) as exc_info:
+                    utils.collect_tracked_entries(targets=['myremote'])
+
+        assert exc_info.value.targets == ['myremote']
+        assert "'myremote'" in str(exc_info.value)
+
+    def test_names_only_the_unresolvable_target(self, tmp_path, monkeypatch):
+        """A target that does exist is not blamed alongside the bad one."""
+        from dvc.exceptions import OutputNotFoundError
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'data.txt').write_text('x')
+        with patch.object(utils, 'Repo'):
+            with patch(
+                'dvc.repo.fetch._collect_indexes',
+                side_effect=OutputNotFoundError('typo.txt'),
+                create=True,
+            ):
+                with pytest.raises(TargetNotFoundError) as exc_info:
+                    utils.collect_tracked_entries(targets=['data.txt', 'typo.txt'])
+
+        assert exc_info.value.targets == ['typo.txt']
+
+
+class TestUnresolvableTargets:
+    """Which targets cannot possibly name tracked data."""
+
+    def test_existing_path_is_resolvable(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'data.txt').write_text('x')
+        assert utils.unresolvable_targets(['data.txt']) == []
+
+    def test_dvc_file_makes_a_missing_path_resolvable(self, tmp_path, monkeypatch):
+        """A not-checked-out out is still a target: its .dvc file is there."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'data.txt.dvc').write_text('outs: []\n')
+        assert utils.unresolvable_targets(['data.txt']) == []
+
+    def test_unknown_name_is_unresolvable(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert utils.unresolvable_targets(['myremote']) == ['myremote']
+
+    def test_stage_name_is_resolvable(self, tmp_path, monkeypatch):
+        """A stage in dvc.yaml is a target even though it is not a path."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'dvc.yaml').write_text('stages:\n  train:\n    cmd: echo hi\n')
+        assert utils.unresolvable_targets(['train']) == []
+
+    def test_stage_named_by_file_is_resolvable(self, tmp_path, monkeypatch):
+        """`dvc.yaml:stage` resolves via the file it names."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'dvc.yaml').write_text('stages:\n  train:\n    cmd: echo hi\n')
+        assert utils.unresolvable_targets(['dvc.yaml:train']) == []
+
+    def test_no_targets(self):
+        assert utils.unresolvable_targets(None) == []
+
+
+class TestUnresolvableTargetsInsideTrackedDir:
+    """A path under a tracked directory resolves via the directory's .dvc."""
+
+    def test_file_in_tracked_dir_not_checked_out(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / 'dir.dvc').write_text('outs: []\n')
+        assert utils.unresolvable_targets(['dir/b.txt']) == []
+
+    def test_file_under_untracked_dir_is_unresolvable(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert utils.unresolvable_targets(['dir/b.txt']) == ['dir/b.txt']
