@@ -2,6 +2,8 @@
 
 List and filter DVC-tracked files. Wraps `dvc list` with powerful filtering capabilities.
 
+`dt list` is an alias for `dt ls`.
+
 ## Usage
 
 ```bash
@@ -9,6 +11,9 @@ dt ls [URL] [PATH] [options]
 ```
 
 By default, lists DVC outputs (tracked data) in the current repository. Can also list remote repositories by URL.
+
+For a nested, renderable view of the whole repository (terminal, Markdown, or
+interactive HTML), see [Tree view](#tree-view) below.
 
 ## Options
 
@@ -18,7 +23,7 @@ By default, lists DVC outputs (tracked data) in the current repository. Can also
 |--------|-------------|
 | `--rev REV` | Git revision (SHA, branch, tag) |
 | `-R, --recursive` | List recursively into directories |
-| `--all` | Include non-DVC files (git-tracked files like `.dvc`, `.gitignore`) |
+| `--all` | Include non-DVC (git-tracked) files. In `--tree` mode, also include untracked files (still never ignored ones) |
 
 ### Filter options
 
@@ -189,6 +194,91 @@ Fields:
 - `size`: Size in bytes
 - `md5`: MD5 hash (null for git-tracked files)
 - `path`: Relative path
+
+## Tree view
+
+`dt ls --tree` renders the repository as a nested tree instead of a flat
+listing, and can export it as Markdown or interactive HTML.
+
+By default the tree shows **tracked objects only** — the git-tracked and
+DVC-tracked files. Deliberately excluded:
+
+- **untracked** files — add them with `--all`;
+- **git-ignored** and **dvc-ignored** files — never shown (e.g. `.snakemake/`,
+  `__pycache__/`);
+- **DVC / VCS bookkeeping** — `*.dvc` pointer files, `dvc.lock`, `.gitignore`,
+  `.dvcignore`, and the `.dvc/` and `.dt/` directories. The tracked *object* is
+  shown, not the file that points at or configures it.
+
+DVC-tracked data is always shown, even though DVC keeps it under `.gitignore`.
+(`dvc list` already honours `.dvcignore`, so dvc-ignored paths never appear.)
+
+### Tree options
+
+| Option | Description |
+|--------|-------------|
+| `--tree` | Render as a tree (plain text, in the terminal) |
+| `-o, --output {text,md,html}` | Render format; `md` / `html` imply `--tree` |
+| `--all` | Also include untracked files (still never ignored ones) |
+| `--dvc-only` | Restrict the tree to DVC outputs |
+| `-L, --level N` | Maximum depth; deeper contents collapse to `… (N files)` |
+
+The `PATH`, `--rev`, `--pattern`, `--regex`, size, and type filters apply to
+the tree as well. A remote `URL` or a committed `--rev` is treated as an
+already-tracked tree (only bookkeeping is stripped).
+
+### Formats
+
+```bash
+dt ls --tree                  # ASCII tree in the terminal
+dt ls --tree --all            # ... including untracked files
+dt ls --tree --dvc-only       # ... only DVC outputs
+dt ls --tree -L 2             # ... limited to two levels deep
+dt ls --tree -o md > tree.md  # Markdown (fenced tree + repo link)
+dt ls -o html > tree.html     # Interactive HTML (implies --tree)
+```
+
+The plain-text and Markdown formats print the repository name and the revision
+(short SHA, any tags on that commit, and its date) above the tree:
+
+```
+myrepo
+b802a00 · v1.2.0 · 2026-08-31
+├── data/
+│   └── samples.h5ad
+└── README.md
+
+1 directories, 2 files
+```
+
+### HTML
+
+The HTML format is a self-contained, interactive page:
+
+- **Title** — the repository name, linked to its web page (derived from the git
+  remote for a local listing, or from the `URL` argument).
+- **Subtitle** — the revision: short SHA, any tags pointing at it, and the
+  commit date.
+- **Collapsible tree** — every directory folds up (`<details>`/`<summary>`),
+  with *Expand all* / *Collapse all* controls (the same fold-up display as
+  [`dt diff -o html`](diff.md)).
+- **Git-tracked files link to GitHub** — a git-tracked file (e.g. a `README`)
+  is a direct link to its blob on the repository's web page, pinned to the
+  listed revision. Handy for browsing docs straight from the tree.
+- **DVC objects get a command popup** — DVC-tracked data isn't on the git host,
+  so clicking its `dvc` button opens a popup with copy-pastable `dvc get` and
+  `dvc import` commands for that path. Each command has **HTTPS** and **SSH**
+  tabs (defaults to HTTPS; your choice is remembered across popups). Both clone
+  URLs are derived from the repository, so private repos over SSH work out of
+  the box. (Directories offer the same popup.)
+
+```bash
+# Share a browsable snapshot of a dataset repo
+dt ls git@github.com:org/data-repo.git -o html > data-repo.html
+
+# A tracked tree, two levels deep, as Markdown for a PR
+dt ls --tree -L 2 -o md
+```
 
 ## Related commands
 

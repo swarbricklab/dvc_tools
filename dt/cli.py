@@ -4285,16 +4285,28 @@ def history(path, limit, since, json_output, verbose):
 @click.option('--hash', 'hash_prefix', default=None, help='Filter by hash prefix')
 @click.option('-l', '--long', 'long_format', is_flag=True, help='Long format (show type and size)')
 @click.option('--show-hash', is_flag=True, help='Show MD5 hash')
+@click.option('--tree', is_flag=True, help='Render the repository as a tree (DVC- and git-tracked)')
+@click.option('-o', '--output', 'output_format',
+              type=click.Choice(['text', 'md', 'html']), default=None,
+              help='Tree render format: text, md, or html (implies --tree)')
+@click.option('--dvc-only', 'dvc_only', is_flag=True,
+              help='Tree view: restrict to DVC outputs')
+@click.option('-L', '--level', type=int, default=None,
+              help='Tree view: maximum depth; deeper contents are collapsed')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def ls(url, path, rev, recursive, include_all, pattern, regex, min_size, max_size,
-       files_only, dirs_only, exec_only, hash_prefix, long_format, show_hash, json_output):
+       files_only, dirs_only, exec_only, hash_prefix, long_format, show_hash,
+       tree, output_format, dvc_only, level, json_output):
     """List and filter DVC-tracked files.
-    
+
     Wraps `dvc list` with filtering capabilities. By default lists only DVC
     outputs (tracked data). Use --all to include git-tracked files too.
-    
+
+    URL may be '.' (this repo, the default) or any repository `dvc list`
+    accepts, including remote git/DVC repos.
+
     Output is pipe-friendly: one path per line by default.
-    
+
     \b
     Examples:
         dt ls                              # List DVC outputs only
@@ -4307,8 +4319,55 @@ def ls(url, path, rev, recursive, include_all, pattern, regex, min_size, max_siz
         dt ls --hash abc123                # Filter by hash prefix
         dt ls . data/                      # List specific directory
         dt ls --rev HEAD~5                 # List at specific revision
+        dt ls git@github.com:org/repo.git  # List a remote repository
         dt ls . --json | jq '.[] | .path'  # Pipe JSON to jq
+
+    \b
+    Tree view (git-tracked + DVC-tracked by default):
+        dt ls --tree                       # Tracked tree of this repo
+        dt ls --tree --all                 # Also include untracked (never ignored)
+        dt ls --tree --dvc-only            # Restrict to DVC outputs
+        dt ls --tree -o md > tree.md       # Markdown
+        dt ls -o html > tree.html          # Collapsible fold-up HTML (implies --tree)
+        dt ls --tree -L 2                  # Limit depth to 2 levels
+        dt ls --tree data/                 # Tree of a subdirectory
+        dt ls --tree git@github.com:org/repo.git   # Tree of a remote repo
+
+    The tree shows only tracked objects: git-ignored and dvc-ignored files are
+    excluded, as are DVC pointer/metadata (*.dvc, dvc.lock), .gitignore,
+    .dvcignore, and the .dvc/ and .dt/ directories -- the objects they track
+    are shown instead. The HTML tree titles the repo (linked to its web page),
+    shows the revision (SHA, tags, date), and offers a per-node popup with
+    copy-pastable `dvc get`/`dvc import` commands.
+
+    `dt list` is an alias for `dt ls`.
     """
+    # Tree mode: -o md/html implies --tree; default tree render is text.
+    if tree or output_format is not None:
+        try:
+            output = ls_mod.tree_view(
+                url=url,
+                path=path,
+                rev=rev,
+                output_format=output_format or 'text',
+                dvc_only=dvc_only,
+                include_untracked=include_all,
+                level=level,
+                pattern=pattern,
+                regex=regex,
+                min_size=min_size,
+                max_size=max_size,
+                files_only=files_only,
+                dirs_only=dirs_only,
+                exec_only=exec_only,
+                hash_prefix=hash_prefix,
+            )
+            if output:
+                click.echo(output)
+        except ls_mod.LsError as e:
+            raise click.ClickException(str(e))
+        return
+
     try:
         _, output = ls_mod.list_files(
             url=url,
@@ -4332,6 +4391,10 @@ def ls(url, path, rev, recursive, include_all, pattern, regex, min_size, max_siz
             click.echo(output)
     except ls_mod.LsError as e:
         raise click.ClickException(str(e))
+
+
+# `dt list` is an alias for `dt ls`.
+cli.add_command(ls, name='list')
 
 
 @cli.command()
