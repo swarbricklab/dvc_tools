@@ -436,3 +436,26 @@ class TestLsTree:
         assert 'const REPO_SSH = "git@github.com:swarbricklab/demo-repo.git"' \
             in result.stdout
         assert 'data-proto="ssh"' in result.stdout
+
+    def test_tree_html_git_files_link_to_github(self, dvc_repo_with_files, monkeypatch):
+        """Git-tracked files link to GitHub; DVC objects keep the popup."""
+        monkeypatch.chdir(dvc_repo_with_files)
+        subprocess.run(
+            ['git', 'remote', 'add', 'origin',
+             'git@github.com:swarbricklab/demo-repo.git'],
+            check=True, capture_output=True,
+        )
+        sha = subprocess.run(['git', 'rev-parse', 'HEAD'],
+                             capture_output=True, text=True).stdout.strip()
+
+        result = subprocess.run(
+            ['dt', 'ls', '-o', 'html'], capture_output=True, text=True,
+        )
+
+        assert result.returncode == 0
+        # README.md is git-tracked -> direct GitHub blob link, pinned to the SHA
+        assert (f'<a class="gh-file" href="https://github.com/swarbricklab/'
+                f'demo-repo/blob/{sha}/README.md"') in result.stdout
+        # data.csv is a DVC object -> not linked, keeps the popup
+        assert 'data-path="data.csv"' in result.stdout
+        assert f'/blob/{sha}/data.csv"' not in result.stdout

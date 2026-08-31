@@ -8,6 +8,7 @@ import html
 import json
 import re
 import subprocess
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -271,7 +272,9 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Build a nested directory tree from ``dvc list`` items.
 
     Each node is a dict mapping subdirectory names to child nodes, plus a
-    special ``_files`` key holding the list of file names at that level.
+    special ``_files`` key holding this level's file entries. A file entry is
+    ``{'name': str, 'gh': Optional[str]}`` where ``gh`` is the GitHub blob URL
+    for a git-tracked file (set by :func:`_annotate_github`, else None).
     Directories are derived from the path components of each item, so a
     recursive listing (full paths) is required to build a complete tree.
 
@@ -305,7 +308,7 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
             if not isinstance(current.get(leaf), dict):
                 current[leaf] = {'_files': []}
         else:
-            current['_files'].append(leaf)
+            current['_files'].append({'name': leaf, 'gh': item.get('_gh')})
 
     return tree
 
@@ -349,10 +352,10 @@ def _n_files(n: int) -> str:
     return f"{n} file" if n == 1 else f"{n} files"
 
 
-def _tree_entries(tree: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """Return (sorted subdirectory names, sorted file names) for a node."""
+def _tree_entries(tree: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Return (sorted subdirectory names, sorted file entries) for a node."""
     subdirs = sorted(k for k in tree if not k.startswith('_'))
-    files = sorted(tree.get('_files', []))
+    files = sorted(tree.get('_files', []), key=lambda f: f['name'])
     return subdirs, files
 
 
@@ -372,7 +375,8 @@ def _render_tree_text(
         return [f"{prefix}└── … ({_n_files(n_files)})"] if n_files else []
 
     subdirs, files = _tree_entries(tree)
-    entries = [(name, True) for name in subdirs] + [(name, False) for name in files]
+    entries = ([(name, True) for name in subdirs]
+               + [(f['name'], False) for f in files])
 
     lines = []
     for i, (name, is_dir) in enumerate(entries):
@@ -585,13 +589,23 @@ def _render_tree_html(
             lines.append(child_html)
         lines.append(f'{spaces}</details>')
 
-    for name in files:
-        full = f"{parent}/{name}" if parent else name
-        attr = html.escape(full, quote=True)
-        lines.append(
-            f'{spaces}<div class="file" data-path="{attr}">'
-            f'{html.escape(name)} {btn}</div>'
-        )
+    for f in files:
+        name = f['name']
+        disp = html.escape(name)
+        if f.get('gh'):
+            # git-tracked file: link straight to GitHub (e.g. view a README).
+            href = html.escape(f['gh'], quote=True)
+            lines.append(
+                f'{spaces}<div class="file"><a class="gh-file" href="{href}" '
+                f'target="_blank" rel="noopener">{disp}</a></div>'
+            )
+        else:
+            # DVC object (or unlinkable): offer the dvc get/import popup.
+            full = f"{parent}/{name}" if parent else name
+            attr = html.escape(full, quote=True)
+            lines.append(
+                f'{spaces}<div class="file" data-path="{attr}">{disp} {btn}</div>'
+            )
 
     return '\n'.join(lines)
 
@@ -634,6 +648,8 @@ _TREE_HTML_STYLE = """
         details > summary::before { content: "\\25B6 "; font-size: 10px; }
         details[open] > summary::before { content: "\\25BC "; }
         .file { margin-left: 20px; padding: 2px 0; }
+        .gh-file { color: #0366d6; text-decoration: none; }
+        .gh-file:hover { text-decoration: underline; }
         .counts { color: #6a737d; font-size: 12px; }
         .controls { margin-bottom: 12px; }
         .controls button {
@@ -957,10 +973,11 @@ def _git_revision_info(rev: Optional[str]) -> Optional[Dict[str, Any]]:
     sha = _run_git(['rev-parse', '--short', ref])
     if not sha:
         return None
+    sha_full = _run_git(['rev-parse', ref]) or sha
     date = _run_git(['show', '-s', '--format=%cs', ref])  # YYYY-MM-DD
     tags_out = _run_git(['tag', '--points-at', ref])
     tags = [t for t in tags_out.split('\n') if t] if tags_out else []
-    return {'sha': sha, 'date': date, 'tags': tags}
+    return {'sha': sha, 'sha_full': sha_full, 'date': date, 'tags': tags}
 
 
 # Paths hidden from the tree: only the tracked *objects* are shown, not the
@@ -1033,6 +1050,41 @@ def _filter_tree_items(
                 continue
         kept.append(it)
     return kept
+
+
+def _annotate_github(
+    items: List[Dict[str, Any]],
+    base: str,
+    repo: Dict[str, Optional[str]],
+    rev: Optional[str],
+    revinfo: Optional[Dict[str, Any]],
+    apply_git: bool,
+) -> None:
+    """Tag git-tracked files with their GitHub blob URL (in ``_gh``).
+
+    DVC objects (``isout``) are skipped -- their data lives in remote storage,
+    not on the git host -- so they keep the ``dvc get``/``import`` popup. Links
+    are pinned to the listed revision (its full SHA when known, else the ``rev``
+    or ``HEAD``). A no-op when the repo has no browsable web URL.
+    """
+    web = repo['web_url']
+    if not web:
+        return
+
+    ref = rev or (revinfo.get('sha_full') if revinfo else None) or 'HEAD'
+    # For a local workspace we must exclude untracked files (only reachable via
+    # --all): they aren't on the git host. A remote/committed tree has none.
+    tracked = _git_tracked_paths() if apply_git else None
+
+    for it in items:
+        if it.get('isout'):
+            continue
+        rel = it.get('path', '')
+        full = f"{base}/{rel}" if base else rel
+        if apply_git and tracked is not None and full not in tracked:
+            continue
+        quoted = urllib.parse.quote(full, safe='/')
+        it['_gh'] = f"{web}/blob/{ref}/{quoted}"
 
 
 def tree_view(
@@ -1145,9 +1197,17 @@ def tree_view(
         hash_prefix=hash_prefix,
     )
 
-    tree = build_tree(filtered)
+    local = url in ('.', '', None)
     repo = _repo_identity(url)
-    revinfo = _git_revision_info(rev) if url in ('.', '', None) else None
+    revinfo = _git_revision_info(rev) if local else None
+
+    # Only the HTML tree renders per-file links, so tag git-tracked files with
+    # their GitHub blob URL there (an extra git call we skip for text/md).
+    if output_format == 'html':
+        _annotate_github(filtered, base, repo, rev, revinfo,
+                         apply_git=local and rev is None)
+
+    tree = build_tree(filtered)
 
     if output_format == 'html':
         return _format_tree_html(tree, repo, base, rev, revinfo, max_level=level)

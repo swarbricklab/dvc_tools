@@ -147,7 +147,7 @@ dt ls [URL] [PATH] [-R] [--pattern GLOB] [--min-size SIZE] [--files] [--json]
 dt ls --tree [-o {text,md,html}] [--all] [--dvc-only] [-L N]
 ```
 
-Wraps `dvc list` with filtering by path pattern, size, type, and hash. Pipe-friendly output. `--tree` renders the tracked-object tree (git- and DVC-tracked, no ignored/untracked or `.dvc`/`.gitignore` bookkeeping) as text, Markdown, or interactive HTML — the HTML links the repo, shows the revision, and offers a per-node `dvc get`/`dvc import` popup with HTTPS/SSH tabs. [Full documentation →](ls.md)
+Wraps `dvc list` with filtering by path pattern, size, type, and hash. Pipe-friendly output. `--tree` renders the tracked-object tree (git- and DVC-tracked, no ignored/untracked or `.dvc`/`.gitignore` bookkeeping) as text, Markdown, or interactive HTML — the HTML links the repo, shows the revision, links git-tracked files (e.g. READMEs) straight to GitHub, and offers a per-DVC-object `dvc get`/`dvc import` popup with HTTPS/SSH tabs. [Full documentation →](ls.md)
 
 ---
 

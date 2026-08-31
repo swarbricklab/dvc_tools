@@ -262,11 +262,15 @@ The HTML format is a self-contained, interactive page:
 - **Collapsible tree** — every directory folds up (`<details>`/`<summary>`),
   with *Expand all* / *Collapse all* controls (the same fold-up display as
   [`dt diff -o html`](diff.md)).
-- **Command popup** — clicking the `dvc` button on any file or directory opens
-  a popup with copy-pastable `dvc get` and `dvc import` commands for that path.
-  Each command has **HTTPS** and **SSH** tabs (defaults to HTTPS; your choice is
-  remembered across popups). Both clone URLs are derived from the repository, so
-  private repos over SSH work out of the box.
+- **Git-tracked files link to GitHub** — a git-tracked file (e.g. a `README`)
+  is a direct link to its blob on the repository's web page, pinned to the
+  listed revision. Handy for browsing docs straight from the tree.
+- **DVC objects get a command popup** — DVC-tracked data isn't on the git host,
+  so clicking its `dvc` button opens a popup with copy-pastable `dvc get` and
+  `dvc import` commands for that path. Each command has **HTTPS** and **SSH**
+  tabs (defaults to HTTPS; your choice is remembered across popups). Both clone
+  URLs are derived from the repository, so private repos over SSH work out of
+  the box. (Directories offer the same popup.)
 
 ```bash
 # Share a browsable snapshot of a dataset repo

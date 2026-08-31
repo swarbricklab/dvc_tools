@@ -518,6 +518,10 @@ class TestBuildTree:
         tree = build_tree([])
         assert tree == {"_files": []}
 
+    @staticmethod
+    def _names(entries):
+        return sorted(e["name"] for e in entries)
+
     def test_nests_files_by_path_components(self):
         """Files are placed under nested directory nodes."""
         items = [
@@ -527,8 +531,8 @@ class TestBuildTree:
         ]
         tree = build_tree(items)
 
-        assert "README.md" in tree["_files"]
-        assert sorted(tree["data"]["raw"]["_files"]) == ["a.csv", "b.csv"]
+        assert self._names(tree["_files"]) == ["README.md"]
+        assert self._names(tree["data"]["raw"]["_files"]) == ["a.csv", "b.csv"]
 
     def test_directory_items_create_nodes(self):
         """An isdir item produces a directory node even with no files."""
@@ -543,7 +547,16 @@ class TestBuildTree:
         items = [{"path": "", "isdir": False}, {"path": "keep.txt", "isdir": False}]
         tree = build_tree(items)
 
-        assert tree["_files"] == ["keep.txt"]
+        assert self._names(tree["_files"]) == ["keep.txt"]
+
+    def test_file_entries_carry_github_link(self):
+        """A file's annotated ``_gh`` blob URL is stored on its entry."""
+        items = [{"path": "README.md", "isdir": False,
+                  "_gh": "https://github.com/org/repo/blob/main/README.md"}]
+        tree = build_tree(items)
+
+        assert tree["_files"][0]["name"] == "README.md"
+        assert tree["_files"][0]["gh"].endswith("/blob/main/README.md")
 
 
 # =============================================================================
@@ -842,7 +855,8 @@ class TestTreeView:
 
     def test_html_nodes_carry_full_path_and_popup(self):
         """Each node has a data-path and there is a dvc get/import popup."""
-        items = [{"path": "data/raw/a.csv", "isdir": False}]
+        # A DVC object keeps the popup (git-tracked files link out instead).
+        items = [{"path": "data/raw/a.csv", "isdir": False, "isout": True}]
         with patch("dt.ls.run_dvc_list", return_value=items), \
                 patch("dt.ls._repo_identity", return_value=self._REPO):
             output = tree_view(output_format="html")
@@ -870,12 +884,48 @@ class TestTreeView:
 
     def test_html_data_path_includes_subdir_prefix(self):
         """data-path is repo-root-relative even when listing a subdir."""
-        items = [{"path": "a.csv", "isdir": False}]
+        items = [{"path": "a.csv", "isdir": False, "isout": True}]
         with patch("dt.ls.run_dvc_list", return_value=items), \
                 patch("dt.ls._repo_identity", return_value=self._REPO):
             output = tree_view(output_format="html", path="data")
 
         assert 'data-path="data/a.csv"' in output
+
+    def test_html_git_tracked_files_link_to_github(self):
+        """Git-tracked files link to GitHub; DVC objects keep the popup."""
+        items = [
+            {"path": "README.md", "isdir": False, "isout": False},    # git
+            {"path": "data/x.h5ad", "isdir": False, "isout": True},   # dvc
+        ]
+        info = {"sha": "a1b2c3d", "sha_full": "a1b2c3d4e5f6",
+                "tags": [], "date": "2026-08-31"}
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._repo_identity", return_value=self._REPO), \
+                patch("dt.ls._git_revision_info", return_value=info), \
+                patch("dt.ls._git_tracked_paths", return_value={"README.md"}), \
+                patch("dt.ls._git_ignored_paths", return_value=set()):
+            output = tree_view(output_format="html")
+
+        # git-tracked README links to the blob, pinned to the full SHA
+        assert ('<a class="gh-file" '
+                'href="https://github.com/org/myrepo/blob/a1b2c3d4e5f6/README.md"'
+                in output)
+        # the DVC object is NOT linked; it keeps the popup
+        assert 'data-path="data/x.h5ad"' in output
+        assert '/blob/a1b2c3d4e5f6/data/x.h5ad' not in output
+
+    def test_html_no_links_without_web_url(self):
+        """With no browsable URL, files fall back to the popup (no links)."""
+        repo = {"name": "r", "web_url": None,
+                "https_url": "/local/r", "ssh_url": "/local/r"}
+        items = [{"path": "README.md", "isdir": False, "isout": False}]
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._repo_identity", return_value=repo), \
+                patch("dt.ls._git_tracked_paths", return_value={"README.md"}):
+            output = tree_view(output_format="html")
+
+        assert 'class="gh-file"' not in output
+        assert 'data-path="README.md"' in output
 
 
 class TestParseRepoUrl:
