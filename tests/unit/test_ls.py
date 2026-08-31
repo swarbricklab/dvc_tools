@@ -15,6 +15,8 @@ from dt.ls import (
     filter_items,
     format_output,
     list_files,
+    build_tree,
+    tree_view,
 )
 from dt.errors import LsError
 
@@ -136,6 +138,28 @@ class TestRunDvcList:
             assert "dvc" in call_args
             assert "list" in call_args
             assert "--json" in call_args
+
+    def test_omits_size_and_hash_by_default(self):
+        """Size/hash resolution is off by default (the expensive dvc path)."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+
+            run_dvc_list()
+
+            call_args = mock_run.call_args[0][0]
+            assert "--size" not in call_args
+            assert "--show-hash" not in call_args
+
+    def test_requests_size_and_hash_when_asked(self):
+        """Explicit size/show_hash add the corresponding dvc flags."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+
+            run_dvc_list(size=True, show_hash=True)
+
+            call_args = mock_run.call_args[0][0]
+            assert "--size" in call_args
+            assert "--show-hash" in call_args
 
     def test_includes_path_argument(self):
         """Test that path argument is included."""
@@ -442,9 +466,531 @@ class TestListFiles:
         
         with patch("dt.ls.run_dvc_list", return_value=mock_items):
             result = list_files()
-            
+
             assert isinstance(result, tuple)
             assert len(result) == 2
             items, output = result
             assert isinstance(items, list)
             assert isinstance(output, str)
+
+    def test_plain_listing_skips_size_and_hash(self):
+        """A bare path listing does not resolve sizes/hashes."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            list_files()
+
+        kwargs = mock_list.call_args.kwargs
+        assert kwargs["size"] is False
+        assert kwargs["show_hash"] is False
+
+    def test_long_format_requests_size(self):
+        """Long format needs sizes, so dvc is asked to resolve them."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            list_files(long_format=True)
+
+        assert mock_list.call_args.kwargs["size"] is True
+
+    def test_show_hash_requests_hash(self):
+        """--show-hash needs md5s, so dvc is asked to resolve them."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            list_files(show_hash=True)
+
+        assert mock_list.call_args.kwargs["show_hash"] is True
+
+    def test_json_output_requests_both(self):
+        """JSON output preserves every field, so both are resolved."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            list_files(json_output=True)
+
+        kwargs = mock_list.call_args.kwargs
+        assert kwargs["size"] is True
+        assert kwargs["show_hash"] is True
+
+
+# =============================================================================
+# build_tree tests
+# =============================================================================
+
+class TestBuildTree:
+    """Tests for the build_tree function."""
+
+    def test_empty_items_gives_empty_root(self):
+        """An empty listing yields a root node with no files or subdirs."""
+        tree = build_tree([])
+        assert tree == {"_files": []}
+
+    @staticmethod
+    def _names(entries):
+        return sorted(e["name"] for e in entries)
+
+    def test_nests_files_by_path_components(self):
+        """Files are placed under nested directory nodes."""
+        items = [
+            {"path": "data/raw/a.csv", "isdir": False},
+            {"path": "data/raw/b.csv", "isdir": False},
+            {"path": "README.md", "isdir": False},
+        ]
+        tree = build_tree(items)
+
+        assert self._names(tree["_files"]) == ["README.md"]
+        assert self._names(tree["data"]["raw"]["_files"]) == ["a.csv", "b.csv"]
+
+    def test_directory_items_create_nodes(self):
+        """An isdir item produces a directory node even with no files."""
+        items = [{"path": "empty_dir/", "isdir": True}]
+        tree = build_tree(items)
+
+        assert "empty_dir" in tree
+        assert tree["empty_dir"] == {"_files": []}
+
+    def test_ignores_items_without_path(self):
+        """Items with an empty path are skipped."""
+        items = [{"path": "", "isdir": False}, {"path": "keep.txt", "isdir": False}]
+        tree = build_tree(items)
+
+        assert self._names(tree["_files"]) == ["keep.txt"]
+
+    def test_file_entries_carry_github_link(self):
+        """A file's annotated ``_gh`` blob URL is stored on its entry."""
+        items = [{"path": "README.md", "isdir": False,
+                  "_gh": "https://github.com/org/repo/blob/main/README.md"}]
+        tree = build_tree(items)
+
+        assert tree["_files"][0]["name"] == "README.md"
+        assert tree["_files"][0]["gh"].endswith("/blob/main/README.md")
+
+
+# =============================================================================
+# tree_view tests
+# =============================================================================
+
+class TestTreeView:
+    """Tests for the tree_view rendering entry point."""
+
+    MOCK_ITEMS = [
+        {"path": "data/raw/a.csv", "isdir": False, "isout": True},
+        {"path": "data/proc/c.h5ad", "isdir": False, "isout": True},
+        {"path": "src/train.py", "isdir": False, "isout": False},
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _no_git(self):
+        """Neutralize git lookups so rendering tests don't touch the real repo.
+
+        ``_git_tracked_paths``/``_git_ignored_paths`` returning None makes the
+        tracked filter keep every (non-bookkeeping) item; ``_git_revision_info``
+        returning None omits the revision subtitle. Filtering tests override
+        these with explicit patches.
+        """
+        with patch("dt.ls._git_tracked_paths", return_value=None), \
+                patch("dt.ls._git_ignored_paths", return_value=None), \
+                patch("dt.ls._git_revision_info", return_value=None):
+            yield
+
+    def test_lists_full_workspace_recursively(self):
+        """Tree view requests a recursive listing including git files."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            tree_view(output_format="text")
+
+        kwargs = mock_list.call_args.kwargs
+        assert kwargs["recursive"] is True
+        assert kwargs["dvc_only"] is False
+
+    def test_text_format_renders_ascii_tree(self):
+        """Text format produces an ASCII tree with a summary line."""
+        with patch("dt.ls.run_dvc_list", return_value=self.MOCK_ITEMS):
+            output = tree_view(output_format="text")
+
+        assert "├──" in output or "└──" in output
+        assert "data/" in output
+        assert "a.csv" in output
+        assert "4 directories, 3 files" in output
+
+    def test_md_format_wraps_tree_in_code_block(self):
+        """Markdown format wraps the tree in a fenced code block."""
+        with patch("dt.ls.run_dvc_list", return_value=self.MOCK_ITEMS):
+            output = tree_view(output_format="md")
+
+        assert "```text" in output
+        assert output.rstrip().endswith("```")
+        assert "Repository tree:" in output
+
+    def test_html_format_uses_collapsible_foldup(self):
+        """HTML format uses the details/summary fold-up with controls."""
+        with patch("dt.ls.run_dvc_list", return_value=self.MOCK_ITEMS):
+            output = tree_view(output_format="html")
+
+        assert "<!DOCTYPE html>" in output
+        assert "<details" in output
+        assert "<summary>" in output
+        assert "Expand all" in output
+        assert "Collapse all" in output
+
+    def test_html_escapes_file_names(self):
+        """File names with HTML metacharacters are escaped."""
+        items = [{"path": "weird <name>.csv", "isdir": False}]
+        with patch("dt.ls.run_dvc_list", return_value=items):
+            output = tree_view(output_format="html")
+
+        assert "&lt;name&gt;" in output
+        assert "<name>.csv" not in output
+
+    def test_invalid_format_raises(self):
+        """An unsupported output format raises LsError."""
+        with patch("dt.ls.run_dvc_list", return_value=[]):
+            with pytest.raises(LsError, match="Invalid tree output format"):
+                tree_view(output_format="pdf")
+
+    def test_applies_filters(self):
+        """Filters (e.g. glob pattern) are applied before building the tree."""
+        with patch("dt.ls.run_dvc_list", return_value=self.MOCK_ITEMS):
+            output = tree_view(output_format="text", pattern="*.py")
+
+        assert "train.py" in output
+        assert "a.csv" not in output
+
+    def test_dvc_only_restricts_listing(self):
+        """--dvc-only passes dvc_only=True through to the listing."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            tree_view(output_format="text", dvc_only=True)
+
+        assert mock_list.call_args.kwargs["dvc_only"] is True
+
+    def test_forwards_url_for_remote_repos(self):
+        """A repository URL is forwarded verbatim to dvc list."""
+        url = "git@github.com:org/repo.git"
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            tree_view(url=url, output_format="text")
+
+        assert mock_list.call_args.kwargs["url"] == url
+
+    def test_level_collapses_deep_contents(self):
+        """--level collapses contents below the given depth."""
+        items = [
+            {"path": "data/raw/a.csv", "isdir": False},
+            {"path": "data/raw/b.csv", "isdir": False},
+        ]
+        with patch("dt.ls.run_dvc_list", return_value=items):
+            output = tree_view(output_format="text", level=1)
+
+        assert "data/" in output
+        assert "… (2 files)" in output
+        assert "a.csv" not in output
+
+    def test_level_deeper_than_tree_shows_everything(self):
+        """A generous --level renders the full tree with no placeholder."""
+        items = [{"path": "data/raw/a.csv", "isdir": False}]
+        with patch("dt.ls.run_dvc_list", return_value=items):
+            output = tree_view(output_format="text", level=9)
+
+        assert "a.csv" in output
+        assert "…" not in output
+
+    def test_level_placeholder_singular(self):
+        """A single collapsed file reads '1 file', not '1 files'."""
+        items = [{"path": "data/raw/a.csv", "isdir": False}]
+        with patch("dt.ls.run_dvc_list", return_value=items):
+            output = tree_view(output_format="text", level=1)
+
+        assert "… (1 file)" in output
+
+    def test_level_collapses_in_html(self):
+        """--level collapses deep contents in the HTML fold-up too."""
+        items = [
+            {"path": "data/raw/a.csv", "isdir": False},
+            {"path": "data/raw/b.csv", "isdir": False},
+        ]
+        with patch("dt.ls.run_dvc_list", return_value=items):
+            output = tree_view(output_format="html", level=1)
+
+        assert "… (2 files)" in output
+        assert ">a.csv<" not in output
+
+    def test_invalid_level_raises(self):
+        """A level below 1 raises LsError."""
+        with patch("dt.ls.run_dvc_list", return_value=[]):
+            with pytest.raises(LsError, match="level must be 1 or greater"):
+                tree_view(output_format="text", level=0)
+
+    def test_skips_size_and_hash_when_no_filter(self):
+        """Names-only tree does not ask dvc to resolve sizes/hashes."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            tree_view(output_format="text")
+
+        kwargs = mock_list.call_args.kwargs
+        assert kwargs["size"] is False
+        assert kwargs["show_hash"] is False
+
+    def test_requests_size_for_size_filter(self):
+        """A --min-size/--max-size filter forces dvc to resolve sizes."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            tree_view(output_format="text", min_size="1M")
+
+        assert mock_list.call_args.kwargs["size"] is True
+
+    def test_requests_hash_for_hash_filter(self):
+        """A --hash filter forces dvc to resolve hashes."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list:
+            tree_view(output_format="text", hash_prefix="abc")
+
+        assert mock_list.call_args.kwargs["show_hash"] is True
+
+    # Items covering every tracking category, plus hidden bookkeeping/metadata.
+    _MIXED = [
+        {"path": "data/big.h5ad", "isdir": False, "isout": True},       # dvc object
+        {"path": "data/big.h5ad.dvc", "isdir": False, "isout": False},  # pointer
+        {"path": "dvc.lock", "isdir": False, "isout": False},           # lock
+        {"path": ".gitignore", "isdir": False, "isout": False},         # vcs ignore
+        {"path": ".dvcignore", "isdir": False, "isout": False},         # dvc ignore
+        {"path": ".dvc/config", "isdir": False, "isout": False},        # .dvc dir
+        {"path": ".dt/tmp/x", "isdir": False, "isout": False},          # .dt dir
+        {"path": "README.md", "isdir": False, "isout": False},          # git-tracked
+        {"path": "scratch.md", "isdir": False, "isout": False},         # untracked
+        {"path": ".snakemake/log", "isdir": False, "isout": False},     # git-ignored
+    ]
+    _TRACKED = {"README.md", "data/big.h5ad.dvc", "dvc.lock",
+                ".gitignore", ".dvcignore", ".dvc/config", ".dt/tmp/x"}
+    _IGNORED = {".snakemake/log", "data/big.h5ad"}
+
+    def _run_mixed(self, **kwargs):
+        with patch("dt.ls.run_dvc_list", return_value=self._MIXED), \
+                patch("dt.ls._git_tracked_paths", return_value=set(self._TRACKED)), \
+                patch("dt.ls._git_ignored_paths", return_value=set(self._IGNORED)):
+            return tree_view(output_format="text", **kwargs)
+
+    def test_default_shows_tracked_and_dvc_objects(self):
+        """Default keeps git-tracked files and DVC objects only."""
+        output = self._run_mixed()
+        assert "big.h5ad" in output      # dvc object kept
+        assert "README.md" in output     # git-tracked kept
+
+    def test_default_excludes_untracked_and_ignored(self):
+        """Default drops untracked and git-ignored files."""
+        output = self._run_mixed()
+        assert "scratch.md" not in output      # untracked
+        assert ".snakemake" not in output      # git-ignored
+
+    def test_hides_bookkeeping_and_metadata(self):
+        """Pointers, lock, ignore files, and .dvc/.dt dirs are never shown."""
+        output = self._run_mixed()
+        assert "big.h5ad.dvc" not in output    # *.dvc pointer
+        assert "dvc.lock" not in output
+        assert ".gitignore" not in output
+        assert ".dvcignore" not in output
+        assert ".dvc/" not in output and "config" not in output   # .dvc dir
+        assert ".dt" not in output                                 # .dt dir
+        assert "big.h5ad" in output            # the tracked object still shows
+
+    def test_all_adds_untracked_but_not_ignored(self):
+        """--all (include_untracked) shows untracked but still hides ignored."""
+        output = self._run_mixed(include_untracked=True)
+        assert "scratch.md" in output          # untracked now shown
+        assert ".snakemake" not in output      # ignored still hidden
+        assert "big.h5ad" in output            # dvc object still shown
+
+    def test_dvc_only_skips_git_filtering(self):
+        """--dvc-only defers to dvc list and does not consult git sets."""
+        with patch("dt.ls.run_dvc_list", return_value=[]) as mock_list, \
+                patch("dt.ls._git_tracked_paths") as mock_tracked:
+            tree_view(output_format="text", dvc_only=True)
+
+        assert mock_list.call_args.kwargs["dvc_only"] is True
+        mock_tracked.assert_not_called()
+
+    def test_remote_listing_drops_bookkeeping_only(self):
+        """A remote URL is a tracked tree already; git sets aren't consulted."""
+        items = [
+            {"path": "data/big.h5ad", "isdir": False, "isout": True},
+            {"path": "data/big.h5ad.dvc", "isdir": False, "isout": False},
+            {"path": "README.md", "isdir": False, "isout": False},
+        ]
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._git_tracked_paths") as mock_tracked:
+            output = tree_view(url="git@github.com:org/repo.git",
+                               output_format="text")
+
+        mock_tracked.assert_not_called()
+        assert "README.md" in output           # committed file kept
+        assert "big.h5ad.dvc" not in output    # bookkeeping still hidden
+
+    def test_rev_listing_drops_bookkeeping_only(self):
+        """A committed --rev is a tracked tree; only bookkeeping is stripped."""
+        items = [
+            {"path": "README.md", "isdir": False, "isout": False},
+            {"path": "data/x.csv.dvc", "isdir": False, "isout": False},
+        ]
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._git_tracked_paths") as mock_tracked:
+            output = tree_view(output_format="text", rev="v1.0")
+
+        mock_tracked.assert_not_called()
+        assert "README.md" in output
+        assert "x.csv.dvc" not in output
+
+    def test_revision_subtitle_in_text(self):
+        """The revision (sha, tags, date) appears under the title."""
+        items = [{"path": "README.md", "isdir": False, "isout": True}]
+        info = {"sha": "a1b2c3d", "tags": ["v1.2.0"], "date": "2026-08-31"}
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._git_revision_info", return_value=info):
+            output = tree_view(output_format="text")
+
+        assert "a1b2c3d · v1.2.0 · 2026-08-31" in output
+
+    # Reusable identity for HTML-popup tests.
+    _REPO = {
+        "name": "myrepo",
+        "web_url": "https://github.com/org/myrepo",
+        "https_url": "https://github.com/org/myrepo.git",
+        "ssh_url": "git@github.com:org/myrepo.git",
+    }
+
+    def test_html_title_links_to_repo(self):
+        """The HTML title is the repo name linked to its web page."""
+        items = [{"path": "data/a.csv", "isdir": False}]
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._repo_identity", return_value=self._REPO):
+            output = tree_view(output_format="html")
+
+        assert '<a href="https://github.com/org/myrepo">myrepo</a>' in output
+
+    def test_html_nodes_carry_full_path_and_popup(self):
+        """Each node has a data-path and there is a dvc get/import popup."""
+        # A DVC object keeps the popup (git-tracked files link out instead).
+        items = [{"path": "data/raw/a.csv", "isdir": False, "isout": True}]
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._repo_identity", return_value=self._REPO):
+            output = tree_view(output_format="html")
+
+        assert 'data-path="data/raw/a.csv"' in output      # file full path
+        assert 'data-path="data"' in output                # dir full path
+        assert 'class="cmd-btn"' in output
+        # The get/import commands are assembled in JS from data-cmd values.
+        assert "cmdBlock('get', 'Download a copy')" in output
+        assert "cmdBlock('import', 'Import (track for updates)')" in output
+        assert "'dvc ' + cmd + ' ' + repoUrl()" in output
+
+    def test_html_popup_has_https_and_ssh_tabs(self):
+        """The popup embeds both clone URLs, protocol tabs, and defaults HTTPS."""
+        items = [{"path": "data/a.csv", "isdir": False}]
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._repo_identity", return_value=self._REPO):
+            output = tree_view(output_format="html")
+
+        assert 'const REPO_HTTPS = "https://github.com/org/myrepo.git"' in output
+        assert 'const REPO_SSH = "git@github.com:org/myrepo.git"' in output
+        assert 'data-proto="https"' in output
+        assert 'data-proto="ssh"' in output
+        assert "proto = 'https'" in output          # default protocol
+
+    def test_html_data_path_includes_subdir_prefix(self):
+        """data-path is repo-root-relative even when listing a subdir."""
+        items = [{"path": "a.csv", "isdir": False, "isout": True}]
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._repo_identity", return_value=self._REPO):
+            output = tree_view(output_format="html", path="data")
+
+        assert 'data-path="data/a.csv"' in output
+
+    def test_html_git_tracked_files_link_to_github(self):
+        """Git-tracked files link to GitHub; DVC objects keep the popup."""
+        items = [
+            {"path": "README.md", "isdir": False, "isout": False},    # git
+            {"path": "data/x.h5ad", "isdir": False, "isout": True},   # dvc
+        ]
+        info = {"sha": "a1b2c3d", "sha_full": "a1b2c3d4e5f6",
+                "tags": [], "date": "2026-08-31"}
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._repo_identity", return_value=self._REPO), \
+                patch("dt.ls._git_revision_info", return_value=info), \
+                patch("dt.ls._git_tracked_paths", return_value={"README.md"}), \
+                patch("dt.ls._git_ignored_paths", return_value=set()):
+            output = tree_view(output_format="html")
+
+        # git-tracked README links to the blob, pinned to the full SHA
+        assert ('<a class="gh-file" '
+                'href="https://github.com/org/myrepo/blob/a1b2c3d4e5f6/README.md"'
+                in output)
+        # the DVC object is NOT linked; it keeps the popup
+        assert 'data-path="data/x.h5ad"' in output
+        assert '/blob/a1b2c3d4e5f6/data/x.h5ad' not in output
+
+    def test_html_no_links_without_web_url(self):
+        """With no browsable URL, files fall back to the popup (no links)."""
+        repo = {"name": "r", "web_url": None,
+                "https_url": "/local/r", "ssh_url": "/local/r"}
+        items = [{"path": "README.md", "isdir": False, "isout": False}]
+        with patch("dt.ls.run_dvc_list", return_value=items), \
+                patch("dt.ls._repo_identity", return_value=repo), \
+                patch("dt.ls._git_tracked_paths", return_value={"README.md"}):
+            output = tree_view(output_format="html")
+
+        assert 'class="gh-file"' not in output
+        assert 'data-path="README.md"' in output
+
+
+class TestParseRepoUrl:
+    """Tests for repo-URL parsing and identity."""
+
+    def test_scp_style_github(self):
+        from dt.ls import _parse_repo_url
+        name, web = _parse_repo_url("git@github.com:org/repo.git")
+        assert name == "repo"
+        assert web == "https://github.com/org/repo"
+
+    def test_https_style_strips_git_suffix(self):
+        from dt.ls import _parse_repo_url
+        name, web = _parse_repo_url("https://github.com/org/repo.git")
+        assert name == "repo"
+        assert web == "https://github.com/org/repo"
+
+    def test_local_path_has_no_web_url(self):
+        from dt.ls import _parse_repo_url
+        name, web = _parse_repo_url("/data/projects/myrepo")
+        assert name == "myrepo"
+        assert web is None
+
+    def test_identity_derives_https_and_ssh_clone_urls(self):
+        from dt.ls import _repo_identity
+        ident = _repo_identity("git@github.com:org/repo.git")
+        assert ident["name"] == "repo"
+        assert ident["web_url"] == "https://github.com/org/repo"
+        assert ident["https_url"] == "https://github.com/org/repo.git"
+        assert ident["ssh_url"] == "git@github.com:org/repo.git"
+
+    def test_identity_derives_ssh_from_https_origin(self):
+        from dt.ls import _repo_identity
+        ident = _repo_identity("https://gitlab.com/grp/sub/repo.git")
+        assert ident["name"] == "repo"
+        assert ident["https_url"] == "https://gitlab.com/grp/sub/repo.git"
+        assert ident["ssh_url"] == "git@gitlab.com:grp/sub/repo.git"
+
+    def test_identity_unresolvable_url_falls_back(self):
+        from dt.ls import _repo_identity
+        ident = _repo_identity("/local/path/myrepo")
+        assert ident["web_url"] is None
+        # Both protocols collapse to the raw source (the popup hides its tabs).
+        assert ident["https_url"] == ident["ssh_url"] == "/local/path/myrepo"
+
+
+class TestHiddenInTree:
+    """Tests for which paths the tree suppresses."""
+
+    def test_hidden_paths(self):
+        from dt.ls import _is_hidden_in_tree
+        hidden = [
+            "data.csv.dvc", "dvc.lock", ".gitignore", ".dvcignore",
+            ".dvc/config", ".dvc/.gitignore", ".dt/tmp/x",
+            "sub/.gitignore", "nested/.dt/thing",
+        ]
+        for p in hidden:
+            assert _is_hidden_in_tree(p), p
+
+    def test_visible_paths(self):
+        from dt.ls import _is_hidden_in_tree
+        visible = [
+            "data.csv", "README.md", "src/train.py",
+            "notes.dvcignore.md",       # not exactly .dvcignore
+            "dt/module.py",             # 'dt' != '.dt'
+        ]
+        for p in visible:
+            assert not _is_hidden_in_tree(p), p
