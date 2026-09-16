@@ -406,6 +406,18 @@ def _resolve_s3_remote_settings(ep: Endpoint) -> Tuple[Optional[str], Optional[s
     if profile is None:
         profile = _profile_from_source(ep.source)
 
+    # Import children (source contains ' of ') carry their remote config in
+    # another repo, not the local .dvc/config, so the endpoint URL is unknown
+    # here. Without it boto3 talks to real AWS S3 and every R2 bucket
+    # false-fails as "unreachable" (issue #190). Fall back to the org-wide
+    # default R2 endpoint, which these per-repo remotes all share.
+    if endpoint_url is None:
+        try:
+            from .. import config as cfg
+            endpoint_url = cfg.get_value('secrets.default_endpointurl') or None
+        except Exception:
+            pass
+
     return endpoint_url, profile
 
 
