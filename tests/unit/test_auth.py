@@ -76,6 +76,9 @@ from dt.auth import (
     _check_gs,
     _check_dvc_remote,
     _check_dvc_remote_impl,
+    _profile_from_source,
+    _resolve_s3_remote_settings,
+    _split_s3_url,
     _try_check,
     _extract_remote_name,
     _short_repo_name,
@@ -1086,32 +1089,160 @@ class TestCheckHttp:
 # _check_s3 tests
 # =============================================================================
 
+class TestSplitS3Url:
+    """Tests for _split_s3_url."""
+
+    def test_bucket_and_prefix(self):
+        assert _split_s3_url('s3://bucket/a/b') == ('bucket', 'a/b')
+
+    def test_bucket_only(self):
+        assert _split_s3_url('s3://bucket') == ('bucket', '')
+
+    def test_no_scheme(self):
+        assert _split_s3_url('bucket/prefix') == ('bucket', 'prefix')
+
+
+class TestProfileFromSource:
+    """Tests for _profile_from_source."""
+
+    def test_import_child(self):
+        assert _profile_from_source("DVC remote 'gadi' of chromium (default)") == 'chromium'
+
+    def test_import_child_no_default(self):
+        assert _profile_from_source("DVC remote 'x' of visium") == 'visium'
+
+    def test_top_level_none(self):
+        assert _profile_from_source("DVC remote 'cloud' (default)") is None
+
+
+class TestResolveS3RemoteSettings:
+    """Tests for _resolve_s3_remote_settings."""
+
+    def test_top_level_reads_dvc_config(self):
+        ep = Endpoint(type='s3', url='s3://bucket', source="DVC remote 'cloud'")
+        with patch('dt.auth.checks._get_dvc_remote_config') as mock_cfg:
+            mock_cfg.side_effect = lambda name, key: {
+                'endpointurl': 'https://r2.example.com',
+                'profile': 'myrepo',
+            }.get(key)
+            endpoint_url, profile = _resolve_s3_remote_settings(ep)
+        assert endpoint_url == 'https://r2.example.com'
+        assert profile == 'myrepo'
+
+    def test_import_child_uses_repo_name_convention(self):
+        ep = Endpoint(type='s3', url='s3://bucket',
+                      source="DVC remote 'gadi' of chromium (default)")
+        # No local .dvc/config match, so the profile comes from the source repo.
+        with patch('dt.auth.credentials._get_project_s3_remotes', return_value={}):
+            endpoint_url, profile = _resolve_s3_remote_settings(ep)
+        assert profile == 'chromium'
+
+
 class TestCheckS3:
-    """Tests for _check_s3."""
+    """Tests for _check_s3 (boto3-based, profile-aware — issue #190)."""
 
-    @patch('shutil.which', return_value=None)
-    def test_aws_not_installed(self, _):
-        ep = Endpoint(type='s3', url='s3://bucket', source='cloud')
-        r = _check_s3(ep)
-        assert r.status == STATUS_SKIP
+    def _session(self, *, creds=object(), list_side_effect=None,
+                 list_return=None):
+        """Build a mock boto3 Session with a stubbed s3 client."""
+        session = MagicMock()
+        session.get_credentials.return_value = creds
+        client = MagicMock()
+        if list_side_effect is not None:
+            client.list_objects_v2.side_effect = list_side_effect
+        else:
+            client.list_objects_v2.return_value = list_return or {'KeyCount': 0}
+        session.client.return_value = client
+        return session, client
 
-    @patch('shutil.which', return_value='/usr/bin/aws')
-    @patch('subprocess.run')
-    def test_credentials_fail(self, mock_run, _):
-        mock_run.return_value = MagicMock(returncode=1)
+    def test_missing_credentials(self):
         ep = Endpoint(type='s3', url='s3://bucket', source='cloud')
-        r = _check_s3(ep)
+        session, _ = self._session(creds=None)
+        with patch('dt.auth.checks._resolve_s3_remote_settings',
+                   return_value=(None, 'wts')), \
+             patch('boto3.Session', return_value=session):
+            r = _check_s3(ep)
         assert r.status == STATUS_FAIL
-        assert 'credentials not configured' in r.summary
+        assert 'missing' in r.summary
+        assert "profile 'wts'" in r.summary
 
-    @patch('shutil.which', return_value='/usr/bin/aws')
-    @patch('subprocess.run')
-    def test_full_pass(self, mock_run, _):
-        mock_run.return_value = MagicMock(returncode=0)
+    def test_profile_not_found(self):
+        from botocore.exceptions import ProfileNotFound
+        ep = Endpoint(type='s3', url='s3://bucket', source='cloud')
+        with patch('dt.auth.checks._resolve_s3_remote_settings',
+                   return_value=(None, 'wts')), \
+             patch('boto3.Session',
+                   side_effect=ProfileNotFound(profile='wts')):
+            r = _check_s3(ep)
+        assert r.status == STATUS_FAIL
+        assert 'missing' in r.summary
+
+    def test_rejected_signature_does_not_match(self):
+        from botocore.exceptions import ClientError
+        ep = Endpoint(type='s3', url='s3://bucket', source='cloud')
+        err = ClientError(
+            {'Error': {'Code': 'SignatureDoesNotMatch'}}, 'ListObjectsV2')
+        session, _ = self._session(list_side_effect=err)
+        with patch('dt.auth.checks._resolve_s3_remote_settings',
+                   return_value=('https://r2', 'wts')), \
+             patch('boto3.Session', return_value=session):
+            r = _check_s3(ep)
+        assert r.status == STATUS_FAIL
+        assert 'rejected' in r.summary
+        assert 'SignatureDoesNotMatch' in r.summary
+
+    def test_access_denied_is_rejected(self):
+        from botocore.exceptions import ClientError
+        ep = Endpoint(type='s3', url='s3://bucket', source='cloud')
+        err = ClientError({'Error': {'Code': 'AccessDenied'}}, 'ListObjectsV2')
+        session, _ = self._session(list_side_effect=err)
+        with patch('dt.auth.checks._resolve_s3_remote_settings',
+                   return_value=('https://r2', 'wts')), \
+             patch('boto3.Session', return_value=session):
+            r = _check_s3(ep)
+        assert r.status == STATUS_FAIL
+        assert 'rejected' in r.summary
+
+    def test_endpoint_unreachable(self):
+        from botocore.exceptions import EndpointConnectionError
+        ep = Endpoint(type='s3', url='s3://bucket', source='cloud')
+        err = EndpointConnectionError(endpoint_url='https://r2')
+        session, _ = self._session(list_side_effect=err)
+        with patch('dt.auth.checks._resolve_s3_remote_settings',
+                   return_value=('https://r2', 'wts')), \
+             patch('boto3.Session', return_value=session):
+            r = _check_s3(ep)
+        assert r.status == STATUS_FAIL
+        assert 'unreachable' in r.summary or 'timed out' in r.summary
+
+    def test_bucket_not_found(self):
+        from botocore.exceptions import ClientError
+        ep = Endpoint(type='s3', url='s3://bucket', source='cloud')
+        err = ClientError({'Error': {'Code': 'NoSuchBucket'}}, 'ListObjectsV2')
+        session, _ = self._session(list_side_effect=err)
+        with patch('dt.auth.checks._resolve_s3_remote_settings',
+                   return_value=('https://r2', 'wts')), \
+             patch('boto3.Session', return_value=session):
+            r = _check_s3(ep)
+        assert r.status == STATUS_FAIL
+        assert 'bucket not found' in r.summary
+
+    def test_pass_uses_profile_and_endpoint(self):
         ep = Endpoint(type='s3', url='s3://bucket/prefix', source='cloud')
-        r = _check_s3(ep)
+        session, client = self._session()
+        with patch('dt.auth.checks._resolve_s3_remote_settings',
+                   return_value=('https://r2', 'xenium')), \
+             patch('boto3.Session', return_value=session) as mock_sess:
+            r = _check_s3(ep)
         assert r.status == STATUS_PASS
-        assert 'bucket accessible' in r.summary
+        assert "profile 'xenium'" in r.summary
+        # The resolved profile and endpoint URL are actually used.
+        mock_sess.assert_called_once_with(profile_name='xenium')
+        _, kwargs = session.client.call_args
+        assert kwargs['endpoint_url'] == 'https://r2'
+        _, list_kwargs = client.list_objects_v2.call_args
+        assert list_kwargs['Bucket'] == 'bucket'
+        assert list_kwargs['Prefix'] == 'prefix'
+        assert list_kwargs['MaxKeys'] == 1
 
 
 # =============================================================================
@@ -1339,6 +1470,31 @@ class TestTryCheck:
             mock_dvc.return_value = None  # should not matter
             result = _try_check(ep)
         mock_dvc.assert_not_called()
+
+    def test_ssh_skips_dvc_native_when_not_a_tty(self):
+        """A named SSH remote must not use the unbounded DVC-native probe
+        in a non-interactive shell — it would hang on a username prompt
+        (issue #190). It falls back to the bounded _check_ssh instead."""
+        ep = Endpoint(type='ssh', url='ssh://host/path',
+                      source="DVC remote 'nci'")
+        with patch('dt.auth.checks._check_dvc_remote') as mock_dvc, \
+             patch('dt.auth.checks.sys.stdin.isatty', return_value=False), \
+             patch('subprocess.run', return_value=MagicMock(returncode=0)):
+            result = _try_check(ep)
+        mock_dvc.assert_not_called()
+        assert result.endpoint is ep
+
+    def test_ssh_uses_dvc_native_when_interactive(self):
+        """When stdin is a tty the DVC-native probe is still used for a
+        named SSH remote (interactive behaviour is preserved)."""
+        ep = Endpoint(type='ssh', url='ssh://host/path',
+                      source="DVC remote 'nci'")
+        dvc_result = CheckResult(endpoint=ep, status=STATUS_PASS, summary='via DVC')
+        with patch('dt.auth.checks._check_dvc_remote', return_value=dvc_result) as mock_dvc, \
+             patch('dt.auth.checks.sys.stdin.isatty', return_value=True):
+            result = _try_check(ep)
+        mock_dvc.assert_called_once()
+        assert result.summary == 'via DVC'
 
 
 class TestCheckEndpoints:
