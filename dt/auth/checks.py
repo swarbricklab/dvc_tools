@@ -4,6 +4,7 @@ import getpass
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -350,70 +351,188 @@ def _extract_remote_name(source: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def _check_s3(ep: Endpoint) -> CheckResult:
-    """Check an S3-compatible endpoint."""
-    import shutil
+# S3 error codes that mean credentials were *presented and rejected* (a wrong
+# or stale secret), as opposed to being absent. Surfaced verbatim so a rejected
+# secret no longer reads as "not configured" (issue #190).
+_S3_REJECTED_CODES = {
+    'SignatureDoesNotMatch', 'InvalidAccessKeyId', 'AccessDenied',
+    'InvalidToken', 'ExpiredToken', 'TokenRefreshRequired',
+    'AuthorizationHeaderMalformed', 'Forbidden', '403',
+}
 
-    if not shutil.which('aws'):
+# Codes that mean the credentials worked but the bucket/prefix is wrong.
+_S3_MISSING_BUCKET_CODES = {'NoSuchBucket', 'NotFound', '404'}
+
+
+def _profile_from_source(source: str) -> Optional[str]:
+    """AWS profile name implied by an endpoint's *source* string.
+
+    Per-repo credentials use one profile per repo, named after the repo
+    (see :func:`dt.auth.credentials.configure_remotes`). An import child's
+    source reads ``DVC remote 'x' of <repo>``; the owning repo is the
+    profile. Returns *None* for a top-level remote (no ``of``).
+    """
+    import re
+    m = re.search(r' of ([^\s(]+)', source)
+    return m.group(1) if m else None
+
+
+def _resolve_s3_remote_settings(ep: Endpoint) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort ``(endpoint_url, profile)`` for an S3 endpoint.
+
+    Looks in the local ``.dvc/config`` first — by DVC remote name, then by
+    URL — then falls back to the profile-per-repo naming convention for
+    import children whose config lives in another repository.
+    """
+    endpoint_url: Optional[str] = None
+    profile: Optional[str] = None
+
+    remote_name = _extract_remote_name(ep.source)
+    if remote_name and ' of ' not in ep.source:
+        endpoint_url = _get_dvc_remote_config(remote_name, 'endpointurl')
+        profile = _get_dvc_remote_config(remote_name, 'profile')
+
+    if endpoint_url is None or profile is None:
+        try:
+            from .credentials import _get_project_s3_remotes
+            for values in _get_project_s3_remotes().values():
+                if values.get('url') == ep.url:
+                    endpoint_url = endpoint_url or values.get('endpointurl')
+                    profile = profile or values.get('profile')
+                    break
+        except Exception:
+            pass
+
+    if profile is None:
+        profile = _profile_from_source(ep.source)
+
+    return endpoint_url, profile
+
+
+def _split_s3_url(url: str) -> Tuple[str, str]:
+    """Split ``s3://bucket/prefix`` into ``(bucket, prefix)``."""
+    rest = url[len('s3://'):] if url.startswith('s3://') else url
+    bucket, _, prefix = rest.partition('/')
+    return bucket, prefix
+
+
+def _check_s3(ep: Endpoint) -> CheckResult:
+    """Check an S3-compatible endpoint with a bounded, profile-aware probe.
+
+    Resolves the DVC remote's configured AWS profile and endpoint URL, then
+    issues a lightweight ``list_objects_v2(MaxKeys=1)`` with a per-call
+    timeout. This avoids ``aws sts get-caller-identity`` (which Cloudflare R2
+    does not implement, so it timed out on healthy endpoints) and, unlike the
+    old default-credential CLI probe, actually uses the per-repo profile. The
+    outcome distinguishes *missing* credentials from *rejected* ones from an
+    *unreachable* endpoint (issue #190).
+    """
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+        from botocore.exceptions import (
+            ClientError, ConnectTimeoutError, EndpointConnectionError,
+            NoCredentialsError, ProfileNotFound, ReadTimeoutError,
+        )
+    except ImportError:
         return CheckResult(
             endpoint=ep, status=STATUS_SKIP,
-            summary='aws CLI not installed',
-            hints=['Install the AWS CLI: pip install awscli'],
+            summary='boto3 not installed',
+            hints=['Install boto3 to check S3 credentials: pip install boto3'],
         )
 
-    endpoint_url = None
-    remote_name = _extract_remote_name(ep.source)
-    if remote_name:
-        endpoint_url = _get_dvc_remote_config(remote_name, 'endpointurl')
+    endpoint_url, profile = _resolve_s3_remote_settings(ep)
+    profile_label = f"profile '{profile}'" if profile else 'default credentials'
 
-    extra_args: List[str] = []
-    if endpoint_url:
-        extra_args = ['--endpoint-url', endpoint_url]
-
+    # Resolve credentials up front so a missing/unknown profile is reported as
+    # "missing", not as a downstream request error.
     try:
-        cred_result = subprocess.run(
-            ['aws', 'sts', 'get-caller-identity'] + extra_args,
-            capture_output=True, text=True, timeout=10,
+        session = (
+            boto3.Session(profile_name=profile) if profile else boto3.Session()
         )
-    except (subprocess.TimeoutExpired, OSError):
+        creds = session.get_credentials()
+    except ProfileNotFound:
+        creds = None
+        session = None
+
+    if creds is None:
         return CheckResult(
             endpoint=ep, status=STATUS_FAIL,
-            summary='credentials check timed out',
+            summary=f'credentials missing — no {profile_label}',
+            hints=[
+                f'No AWS {profile_label} found. Install it: '
+                f'dt auth credentials install',
+            ],
         )
 
-    if cred_result.returncode != 0:
-        hint = 'Configure AWS credentials in ~/.aws/credentials or environment variables'
-        if endpoint_url:
-            hint += f' for endpoint {endpoint_url}'
-        return CheckResult(
-            endpoint=ep, status=STATUS_FAIL,
-            summary='credentials not configured',
-            hints=[hint],
-        )
+    boto_config = BotoConfig(
+        connect_timeout=5, read_timeout=10,
+        retries={'max_attempts': 1, 'mode': 'standard'},
+    )
+    client = session.client('s3', endpoint_url=endpoint_url, config=boto_config)
 
-    bucket_prefix = ep.url
+    bucket, prefix = _split_s3_url(ep.url)
     try:
-        ls_result = subprocess.run(
-            ['aws', 's3', 'ls', bucket_prefix] + extra_args,
-            capture_output=True, text=True, timeout=15,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return CheckResult(
-            endpoint=ep, status=STATUS_WARN,
-            summary='credentials OK, bucket check timed out',
-        )
-
-    if ls_result.returncode != 0:
+        client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    except (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError):
+        target = endpoint_url or 'AWS S3'
         return CheckResult(
             endpoint=ep, status=STATUS_FAIL,
-            summary='credentials OK, bucket not accessible',
-            hints=[f'Check bucket exists and your credentials have access: {bucket_prefix}'],
+            summary='endpoint unreachable / timed out',
+            hints=[f'Check network access to the S3 endpoint: {target}'],
+        )
+    except NoCredentialsError:
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary=f'credentials missing — no {profile_label}',
+            hints=['Install credentials: dt auth credentials install'],
+        )
+    except ClientError as exc:
+        code = str(exc.response.get('Error', {}).get('Code', '')) or 'Unknown'
+        if code in _S3_REJECTED_CODES:
+            return CheckResult(
+                endpoint=ep, status=STATUS_FAIL,
+                summary=f'credentials rejected ({code})',
+                hints=[
+                    f'The {profile_label} was presented but rejected ({code}). '
+                    f'The secret is likely wrong or stale — reinstall it: '
+                    f'dt auth credentials install',
+                ],
+            )
+        if code in _S3_MISSING_BUCKET_CODES:
+            return CheckResult(
+                endpoint=ep, status=STATUS_FAIL,
+                summary=f'bucket not found ({code})',
+                hints=[f'Check the bucket name/URL: {ep.url}'],
+            )
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary=f'access failed ({code})',
+            hints=[_s3_manual_probe_hint(ep.url, profile, endpoint_url)],
+        )
+    except Exception as exc:  # defensive: unexpected boto/network failure
+        return CheckResult(
+            endpoint=ep, status=STATUS_FAIL,
+            summary=f'credentials check failed: {exc}',
+            hints=[_s3_manual_probe_hint(ep.url, profile, endpoint_url)],
         )
 
     return CheckResult(
         endpoint=ep, status=STATUS_PASS,
-        summary='credentials OK, bucket accessible',
+        summary=f'credentials OK ({profile_label}), bucket accessible',
     )
+
+
+def _s3_manual_probe_hint(
+    url: str, profile: Optional[str], endpoint_url: Optional[str],
+) -> str:
+    """A copy-pasteable ``aws s3 ls`` command for manual reproduction."""
+    cmd = f'aws s3 ls {url}'
+    if profile:
+        cmd += f' --profile {profile}'
+    if endpoint_url:
+        cmd += f' --endpoint-url {endpoint_url}'
+    return f'Test manually: {cmd}'
 
 
 def _check_gs(ep: Endpoint) -> CheckResult:
@@ -974,7 +1093,16 @@ def _try_check(ep: Endpoint, verbose: bool = False,
 
     remote_name = _extract_remote_name(ep.source)
 
-    if remote_name and ' of ' not in ep.source:
+    # The DVC-native probe opens the remote through DVC's own filesystem. For
+    # SSH that filesystem is not BatchMode and has no timeout, so in a
+    # non-interactive shell it blocks indefinitely on a username/password
+    # prompt (issue #190). Fall back to the bounded _check_ssh (BatchMode +
+    # ConnectTimeout) whenever stdin is not a tty.
+    use_dvc_native = bool(remote_name) and ' of ' not in ep.source
+    if ep.type == 'ssh' and not sys.stdin.isatty():
+        use_dvc_native = False
+
+    if use_dvc_native:
         dvc_result = _check_dvc_remote(ep, remote_name, verbose=verbose)
         if dvc_result is not None:
             return dvc_result
