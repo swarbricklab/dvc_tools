@@ -1133,9 +1133,35 @@ class TestResolveS3RemoteSettings:
         ep = Endpoint(type='s3', url='s3://bucket',
                       source="DVC remote 'gadi' of chromium (default)")
         # No local .dvc/config match, so the profile comes from the source repo.
-        with patch('dt.auth.credentials._get_project_s3_remotes', return_value={}):
+        with patch('dt.auth.credentials._get_project_s3_remotes', return_value={}), \
+             patch('dt.config.get_value', return_value=None):
             endpoint_url, profile = _resolve_s3_remote_settings(ep)
         assert profile == 'chromium'
+
+    def test_import_child_falls_back_to_default_endpoint(self):
+        """An import child has no local endpoint config, so it must fall back
+        to secrets.default_endpointurl — otherwise boto3 hits real AWS S3 and
+        every R2 bucket false-fails as unreachable (issue #190)."""
+        ep = Endpoint(type='s3', url='s3://chromium',
+                      source="DVC remote 'gadi' of bcarc_chromium (default)")
+        with patch('dt.auth.credentials._get_project_s3_remotes', return_value={}), \
+             patch('dt.config.get_value',
+                   return_value='https://acct.r2.cloudflarestorage.com'):
+            endpoint_url, profile = _resolve_s3_remote_settings(ep)
+        assert endpoint_url == 'https://acct.r2.cloudflarestorage.com'
+        assert profile == 'bcarc_chromium'
+
+    def test_local_endpoint_not_overridden_by_default(self):
+        """A remote whose own config supplies an endpoint keeps it — the
+        default fallback only fills the gap."""
+        ep = Endpoint(type='s3', url='s3://bucket', source="DVC remote 'cloud'")
+        with patch('dt.auth.checks._get_dvc_remote_config') as mock_cfg, \
+             patch('dt.config.get_value', return_value='https://DEFAULT'):
+            mock_cfg.side_effect = lambda name, key: {
+                'endpointurl': 'https://OWN', 'profile': 'myrepo',
+            }.get(key)
+            endpoint_url, profile = _resolve_s3_remote_settings(ep)
+        assert endpoint_url == 'https://OWN'
 
 
 class TestCheckS3:
