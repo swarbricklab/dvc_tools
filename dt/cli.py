@@ -1116,6 +1116,67 @@ def cache_perms(cache_path, do_fix, sticky, allow_other, jobs, json_output,
     )
 
 
+@cache.command('relink')
+@click.argument('remote_name', required=False)
+@click.option('--skip-verify', is_flag=True,
+              help='Skip the integrity pass. Only safe if you have already '
+                   'run "dt remote verify" on this remote.')
+@click.option('--force', is_flag=True,
+              help='Relink even if verification found bad/incomplete blobs.')
+@click.option('--jobs', '-j', type=int, default=None,
+              help='Hashing threads for the verify pass.')
+@click.option('--dry', 'dry_run', is_flag=True,
+              help='Report what would be relinked without touching the cache.')
+@click.option('-v', '--verbose', is_flag=True,
+              help='List every object relinked or missing from the remote.')
+def cache_relink(remote_name, skip_verify, force, jobs, dry_run, verbose):
+    """Replace cache objects with symlinks to a local remote.
+
+    On a shared-filesystem HPC setup the local remote already holds a good
+    copy of every pushed object, so the identical bytes sitting in each clone's
+    cache are pure duplication. This walks the primary cache and replaces every
+    regular file with a symlink to its twin in the remote, reclaiming that space
+    while keeping the cache fully usable (`dvc checkout` still resolves each
+    object at its normal path).
+
+    The match is content-addressed: a cache object and its remote copy share
+    the md5 that names them, so the relink is existence-only and never re-hashes.
+    That is only trustworthy on a known-good remote, so `dt remote verify` runs
+    first by default (incremental via the remote's ledger, so repeat runs are
+    cheap) and the relink aborts if it finds bad blobs.
+
+    Objects not present in the remote (e.g. not yet pushed) are left untouched;
+    pass -v to list them. Objects already symlinked are skipped, so re-running
+    is safe.
+
+    \b
+    Examples:
+        dt cache relink                 # verify default remote, then relink
+        dt cache relink myremote        # relink onto a named remote
+        dt cache relink --dry           # preview + count reclaimable space
+        dt cache relink --skip-verify   # skip verify (already verified)
+        dt cache relink --force         # relink despite bad blobs
+        dt cache relink -v              # list every object touched/missing
+    """
+    from . import cache_relink as relink_mod
+
+    try:
+        stats = relink_mod.relink_cache(
+            remote_name,
+            skip_verify=skip_verify,
+            force=force,
+            jobs=jobs,
+            dry_run=dry_run,
+            verbose=verbose,
+        )
+    except relink_mod.RemoteError as e:
+        raise click.ClickException(str(e))
+
+    click.echo(relink_mod.format_stats(stats, dry_run=dry_run))
+    if stats.failed:
+        raise SystemExit(1)
+
+
 @cli.group()
 def remote():
     """Manage remote storage."""

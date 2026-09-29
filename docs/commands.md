@@ -265,6 +265,7 @@ Manage external shared caches.
 | `dt cache clean` | Remove abandoned .tmp files from interrupted transfers |
 | `dt cache perms` | Check/repair group-writable permissions on a shared cache |
 | `dt cache validate` | Verify cached blobs against the MD5 implied by their path |
+| `dt cache relink` | Replace cache files with symlinks to a verified local remote |
 
 [Full documentation →](cache.md)
 

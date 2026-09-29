@@ -320,6 +320,50 @@ deliberately left in place.
 Worth running on a shared cache, where one user's interrupted pulls consume
 quota everyone shares.
 
+## dt cache relink
+
+Replace every regular file in the primary cache with a symlink to its twin in
+a locally-accessible remote, reclaiming the duplicated space.
+
+On a shared-filesystem HPC setup the local remote already holds a good copy of
+every pushed object, so the identical bytes sitting in each clone's cache are
+pure duplication. `dt cache relink` walks the cache and points each object at
+the remote instead. The cache stays fully usable — `dvc checkout` still resolves
+each object at its normal path, it is just a symlink now.
+
+The match is content-addressed: a cache object and its remote copy share the
+md5 that names them, so the relink is **existence-only** and never re-hashes.
+Because that is only trustworthy on a known-good remote, `dt cache relink` runs
+[`dt remote verify`](remote.md#dt-remote-verify) first by default (incremental
+via the remote's ledger, so repeat runs are cheap) and **aborts if it finds any
+bad or incomplete blobs**. Fix those with
+[`dt remote quarantine`](remote.md#dt-remote-quarantine) and re-push, or pass
+`--force` to relink anyway.
+
+Objects present in the cache but **absent from the remote** (e.g. not yet
+pushed) are left untouched — symlinking them would dangle. Objects that are
+already symlinks are skipped, so re-running is safe and idempotent.
+
+```bash
+dt cache relink                 # verify default remote, then relink
+dt cache relink myremote        # relink onto a named remote
+dt cache relink --dry           # preview + count reclaimable space
+dt cache relink --skip-verify   # skip verify (already verified)
+dt cache relink --force         # relink despite bad blobs
+dt cache relink -v              # list every object touched or missing
+```
+
+| Option | Description |
+|--------|-------------|
+| `--skip-verify` | Skip the integrity pass. Only safe if you have already run `dt remote verify` on this remote. |
+| `--force` | Relink even if verification found bad/incomplete blobs. |
+| `-j, --jobs N` | Hashing threads for the verify pass. |
+| `--dry` | Report what would be relinked without touching the cache. |
+| `-v, --verbose` | List every object relinked or missing from the remote. |
+
+Each replacement is atomic (a temp symlink renamed over the object), so an
+interrupted run never leaves a half-written cache object behind.
+
 ## Related Commands
 
 - [`dt init`](init.md) - Initialize projects with cache setup
