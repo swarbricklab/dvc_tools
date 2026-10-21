@@ -32,6 +32,7 @@ The tree view is designed for large diffs (thousands of files) and automatically
 | `--new REV` | The newer revision to compare (default: workspace) |
 | `--content` | Show a content diff (one path = revision mode, two paths = direct comparison) |
 | `--level N` | Tree depth: number or "auto" to fit GH comment (default: auto) |
+| `--scope {changed,all}` | Tree view: limit the diff to outputs whose `.dvc` files changed (default: `changed`), or diff every tracked output (`all`) |
 | `-o, --output FORMAT` | Output format: `terminal`, `json`, `html`, `md`, `table`, `csv` |
 | `-v, --verbose` | Show detailed progress |
 | `--list-handlers` | List the registered content-diff handlers and exit |
@@ -125,6 +126,39 @@ Legend:
 ### Auto-Level
 
 By default, `--level auto` automatically collapses the tree to fit within ~60k characters (suitable for GitHub PR comments). Use `--level N` to set a specific depth.
+
+### Scoping (`--scope`)
+
+A plain `dvc diff` with no targets rebuilds the **entire data index for both
+revisions** — loading every tracked `.dir` manifest and enumerating every file —
+even when nothing DVC-tracked actually changed. On repos with many/large
+directory outputs this is minutes of I/O, which previously made the CI "post DVC
+diff" step time out on essentially every PR.
+
+To avoid this, the tree view defaults to `--scope changed`:
+
+1. It inspects the DVC **control files** (`*.dvc`, `dvc.lock`, `dvc.yaml`) that
+   differ between `--old` and `--new` using `git diff --name-only` (for
+   `--new`=workspace it diffs against the working tree and includes untracked
+   `*.dvc`).
+2. If **nothing** DVC-tracked changed, it short-circuits with
+   `No DVC-tracked changes between <old> and <new>.` — instantly, without
+   invoking `dvc diff` at all.
+3. Otherwise it maps each changed `foo.dvc` to its output `foo` and passes those
+   to `dvc diff --targets …`, so DVC only expands the directories that actually
+   changed.
+
+If `dvc.lock` or `dvc.yaml` changed, a single lock change can touch many stages,
+so `dt diff` falls back to a full (unscoped) diff for correctness.
+
+Explicit path arguments (`dt diff data/`) are already a scope and bypass this
+discovery. Use `--scope all` to force the legacy behaviour of diffing every
+tracked output:
+
+```bash
+dt diff --old v1.0 --new v2.0            # scoped to changed .dvc outputs (default)
+dt diff --old v1.0 --new v2.0 --scope all  # diff every tracked output (slow)
+```
 
 ## Content View (`--content`)
 

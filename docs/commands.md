@@ -94,10 +94,10 @@ Wraps `dvc data status` with parallel checksum computation and optional compute-
 Show differences between versions of DVC-tracked data.
 
 ```bash
-dt diff [paths...] [--old REV] [--new REV] [--content] [-o FORMAT] [-v]
+dt diff [paths...] [--old REV] [--new REV] [--content] [--scope changed|all] [-o FORMAT] [-v]
 ```
 
-By default shows *which* files changed as a tree (wrapping `dvc diff`). With `--content` and exactly one path, compares actual file content (not just checksums) using format-specific handlers; `--summary` and `--granular` adjust the level of detail. [Full documentation →](diff.md)
+By default shows *which* files changed as a tree (wrapping `dvc diff`). The tree view is scoped to the DVC outputs whose `.dvc` files changed between the revisions (`--scope changed`, the default), avoiding a full data-index rebuild; use `--scope all` to diff every tracked output. With `--content` and exactly one path, compares actual file content (not just checksums) using format-specific handlers; `--summary` and `--granular` adjust the level of detail. [Full documentation →](diff.md)
 
 ---
 

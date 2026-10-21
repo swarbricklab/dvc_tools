@@ -2604,6 +2604,9 @@ def _ensure_remote_ref_fresh(rev):
 @click.option('-o', '--output', 'output_format',
               type=click.Choice(['terminal', 'json', 'html', 'md', 'table', 'csv']),
               default='terminal', help='Output format')
+@click.option('--scope', type=click.Choice(['changed', 'all']), default='changed',
+              help='Tree diff: limit to DVC outputs whose .dvc files changed '
+                   '(default: changed) or diff every tracked output (all)')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
 @click.option('--list-handlers', 'list_handlers', is_flag=True,
               help='List registered content-diff handlers and exit')
@@ -2611,7 +2614,7 @@ def _ensure_remote_ref_fresh(rev):
               help='(--content) Show a brief summary of changes')
 @click.option('--granular', 'granular', is_flag=True,
               help='(--content) Show an exhaustive diff with full detail')
-def diff(paths, old_rev, new_rev, content, level, output_format, verbose, list_handlers, summary, granular):
+def diff(paths, old_rev, new_rev, content, level, output_format, scope, verbose, list_handlers, summary, granular):
     """Show differences between versions of DVC-tracked data.
     
     By default, shows which files changed in a tree format (wraps dvc diff).
@@ -2624,6 +2627,7 @@ def diff(paths, old_rev, new_rev, content, level, output_format, verbose, list_h
         dt diff data/ models/             # Multiple paths
         dt diff --old v1.0                # Compare to tag
         dt diff --old v1.0 --new v2.0     # Between revisions
+        dt diff --old v1.0 --scope all    # Diff every tracked output (slow)
         dt diff --level 3                 # Limit tree depth
         dt diff -o json                   # Raw JSON output
         dt diff -o table                  # Markdown table
@@ -2748,6 +2752,7 @@ def diff(paths, old_rev, new_rev, content, level, output_format, verbose, list_h
                 level=level_value,
                 output_format=output_format,
                 verbose=verbose,
+                scope=scope,
             )
             click.echo(result)
         except diff_mod.DiffError as e:
