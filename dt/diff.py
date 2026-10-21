@@ -97,6 +97,85 @@ def _run_dvc_diff(
         raise DiffError(f"Failed to parse dvc diff output: {e}")
 
 
+def _dvc_file_to_out(dvc_path: str) -> str:
+    """Map a DVC control file path to the output path it tracks.
+
+    ``foo.dvc`` -> ``foo`` (the tracked file/directory output).  Paths that do
+    not end in ``.dvc`` are returned unchanged.
+    """
+    if dvc_path.endswith('.dvc'):
+        return dvc_path[:-len('.dvc')]
+    return dvc_path
+
+
+def _discover_changed_targets(
+    old_rev: str,
+    new_rev: Optional[str],
+    cwd: Optional[Path] = None,
+) -> Tuple[List[str], bool]:
+    """Discover which DVC outputs changed between two revisions via git.
+
+    Inspects the DVC *control files* (``*.dvc``, ``dvc.lock``, ``dvc.yaml``)
+    that differ between ``old_rev`` and ``new_rev`` (or the workspace when
+    ``new_rev`` is ``None``), rather than rebuilding the full data index.
+
+    Returns a tuple ``(targets, lock_changed)``:
+
+    - ``targets`` – output paths (``foo.dvc`` -> ``foo``) for every changed
+      ``*.dvc`` file, de-duplicated and sorted.  These can be passed to
+      ``dvc diff --targets`` so DVC only expands the directories that actually
+      changed.
+    - ``lock_changed`` – ``True`` if ``dvc.lock`` or ``dvc.yaml`` changed.  A
+      lock/pipeline change can touch many stages, so mapping it to precise
+      output targets is unreliable; callers should fall back to a full
+      (unscoped) diff in that case.
+
+    When both ``targets`` is empty and ``lock_changed`` is ``False``, no
+    DVC-tracked control file changed and the caller can short-circuit.
+
+    Raises:
+        DiffError: If the underlying git command fails.
+    """
+    control_specs = ['*.dvc', 'dvc.lock', 'dvc.yaml']
+
+    def _git_name_only(args: List[str]) -> List[str]:
+        cmd = ['git', 'diff', '--name-only'] + args + ['--'] + control_specs
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            cwd=str(cwd) if cwd else None,
+        )
+        if result.returncode != 0:
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            raise DiffError(f"git diff failed: {error_msg}")
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    if new_rev:
+        # Rev-vs-rev: compare the two commits directly.
+        changed = _git_name_only([f"{old_rev}..{new_rev}"])
+    else:
+        # Workspace mode: compare old_rev against the working tree, and include
+        # any untracked *.dvc files that git diff won't report.
+        changed = _git_name_only([old_rev])
+        untracked = subprocess.run(
+            ['git', 'ls-files', '--others', '--exclude-standard', '--'] + ['*.dvc'],
+            capture_output=True, text=True,
+            cwd=str(cwd) if cwd else None,
+        )
+        if untracked.returncode == 0:
+            changed += [
+                line.strip() for line in untracked.stdout.splitlines()
+                if line.strip()
+            ]
+
+    lock_changed = any(
+        Path(p).name in ('dvc.lock', 'dvc.yaml') for p in changed
+    )
+    dvc_targets = sorted({
+        _dvc_file_to_out(p) for p in changed if p.endswith('.dvc')
+    })
+    return dvc_targets, lock_changed
+
+
 def _build_tree(diff_data: Dict[str, Any]) -> Dict[str, Any]:
     """Build a tree structure from dvc diff output.
     
@@ -709,9 +788,10 @@ def tree_diff(
     level: Union[int, str] = "auto",
     output_format: str = "terminal",
     verbose: bool = False,
+    scope: str = "changed",
 ) -> str:
     """Show which files changed between revisions.
-    
+
     Args:
         old_rev: Git revision for old version (default: HEAD)
         new_rev: Git revision for new version (default: None = workspace)
@@ -719,17 +799,44 @@ def tree_diff(
         level: Max tree depth (int) or "auto" to fit GH comment
         output_format: One of terminal, json, table, md, csv, html
         verbose: Show additional details
-        
+        scope: ``"changed"`` (default) limits the diff to the DVC outputs whose
+            control files (``*.dvc``) changed between the revisions, avoiding a
+            full data-index rebuild. ``"all"`` forces the legacy behaviour of
+            diffing every tracked output. Ignored when explicit ``targets`` are
+            given (the user has already scoped the diff).
+
     Returns:
         Formatted output string
-        
+
     Raises:
         DiffError: If diff fails
     """
+    # Scope the diff to the DVC outputs that actually changed, unless the caller
+    # already passed explicit targets or asked for the full ("all") scope.
+    # Without this, `dvc diff` rebuilds the entire data index for both revisions
+    # (minutes of I/O) even when nothing DVC-tracked changed.
+    if scope == "changed" and not targets:
+        changed_targets, lock_changed = _discover_changed_targets(old_rev, new_rev)
+        if lock_changed:
+            # A dvc.lock / dvc.yaml change can touch many stages; mapping it to
+            # precise output targets is unreliable, so fall back to a full diff.
+            if verbose:
+                print("dvc.lock/dvc.yaml changed — running a full (unscoped) diff")
+        elif not changed_targets:
+            # Nothing DVC-tracked changed between the revisions: short-circuit
+            # without invoking dvc diff at all.
+            new_desc = new_rev if new_rev else "workspace"
+            return f"No DVC-tracked changes between {old_rev} and {new_desc}."
+        else:
+            if verbose:
+                print(f"Scoped diff to {len(changed_targets)} changed target(s): "
+                      f"{', '.join(changed_targets)}")
+            targets = changed_targets
+
     # Handle table format separately (uses dvc diff --md)
     if output_format == "table":
         return _run_dvc_diff_md(old_rev, new_rev, targets)
-    
+
     # Get changes from dvc diff
     diff_data = _run_dvc_diff(old_rev, new_rev, targets)
     
