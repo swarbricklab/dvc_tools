@@ -51,9 +51,22 @@ def add(
     if verbose and cache_dir:
         print(f"Current DVC cache: {cache_dir}")
     
-    # Build git worktree command
-    cmd = ['git', 'worktree', 'add']
-    
+    # Build git worktree command.
+    #
+    # When we have a shared cache to configure, suppress git hooks for the
+    # initial checkout (issue #188). Git hooks live in the *common* dir shared
+    # by every worktree, so `git worktree add` fires the shared `post-checkout`
+    # hook inside the new worktree. That hook relinks the whole workspace, but
+    # at this point the worktree's `.dvc/config.local` has no `cache.dir` yet,
+    # so DVC resolves the local cache to the default `<worktree>/.dvc/cache`
+    # (a directory that never exists) and every symlink it creates dangles.
+    # We configure the cache first, then reconcile once, below. Pointing
+    # core.hooksPath at /dev/null (a non-directory) makes git find no hooks.
+    cmd = ['git']
+    if cache_dir:
+        cmd.extend(['-c', 'core.hooksPath=/dev/null'])
+    cmd.extend(['worktree', 'add'])
+
     if new_branch:
         cmd.extend(['-b', new_branch])
     
@@ -95,7 +108,30 @@ def add(
                 print(f"Warning: Failed to configure DVC cache: {result.stderr.strip()}")
         elif verbose:
             print(f"Set cache to: {cache_dir}")
-    
+
+        # Now that the correct shared cache is configured, reconcile the
+        # worktree once (issue #188). We suppressed the post-checkout hook
+        # during `git worktree add` above specifically so this is the *first*
+        # relink, and it runs against the real cache rather than a nonexistent
+        # `<worktree>/.dvc/cache`. `dvc checkout` only reads the local cache
+        # (no network), creating symlinks/hardlinks that point at the shared
+        # cache we just set.
+        if verbose:
+            print("Reconciling DVC-tracked files against the shared cache...")
+
+        result = subprocess.run(
+            ['dvc', 'checkout'],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            if verbose:
+                print(f"Warning: Failed to reconcile DVC workspace: {result.stderr.strip()}")
+        elif verbose and result.stdout.strip():
+            print(result.stdout.strip())
+
     # Initialize submodules
     if verbose:
         print("Initializing submodules...")
