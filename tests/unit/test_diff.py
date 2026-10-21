@@ -32,6 +32,8 @@ from dt.diff import (
     _render_tree_diff_style,
     _run_dvc_diff_md,
     _summarise_daff_json,
+    _discover_changed_targets,
+    _dvc_file_to_out,
 )
 from dt.errors import DiffError
 
@@ -748,7 +750,7 @@ class TestTreeDiff:
             'renamed': [],
         }
         
-        result = tree_diff()
+        result = tree_diff(scope='all')
         
         assert 'No changes' in result
 
@@ -762,7 +764,7 @@ class TestTreeDiff:
             'renamed': [],
         }
         
-        result = tree_diff()
+        result = tree_diff(scope='all')
         
         assert 'Changes' in result
         assert '1 added' in result
@@ -983,7 +985,7 @@ class TestTreeDiffOutputFormats:
             'renamed': [],
         }
         
-        result = tree_diff(output_format='json')
+        result = tree_diff(output_format='json', scope='all')
         
         parsed = json.loads(result)
         assert 'added' in parsed
@@ -998,7 +1000,7 @@ class TestTreeDiffOutputFormats:
             'renamed': [],
         }
         
-        result = tree_diff(output_format='csv')
+        result = tree_diff(output_format='csv', scope='all')
         
         assert 'change,path' in result
 
@@ -1012,7 +1014,7 @@ class TestTreeDiffOutputFormats:
             'renamed': [],
         }
         
-        result = tree_diff(output_format='md')
+        result = tree_diff(output_format='md', scope='all')
         
         assert '```diff' in result
 
@@ -1026,7 +1028,7 @@ class TestTreeDiffOutputFormats:
             'renamed': [],
         }
         
-        result = tree_diff(output_format='html')
+        result = tree_diff(output_format='html', scope='all')
         
         assert '<!DOCTYPE html>' in result
 
@@ -1035,7 +1037,7 @@ class TestTreeDiffOutputFormats:
         """Test that table format calls dvc diff --md."""
         mock_run_md.return_value = '| Path | Change |'
         
-        result = tree_diff(output_format='table')
+        result = tree_diff(output_format='table', scope='all')
         
         mock_run_md.assert_called_once()
         assert '|' in result
@@ -1048,3 +1050,175 @@ class TestContentDiffAlias:
         """Test that diff is an alias for content_diff."""
         from dt.diff import diff, content_diff
         assert diff is content_diff
+
+
+def _git_result(stdout, returncode=0, stderr=''):
+    return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+class TestDvcFileToOut:
+    """Tests for _dvc_file_to_out."""
+
+    def test_strips_dvc_suffix(self):
+        assert _dvc_file_to_out('data/raw.dvc') == 'data/raw'
+
+    def test_non_dvc_path_unchanged(self):
+        assert _dvc_file_to_out('dvc.lock') == 'dvc.lock'
+
+
+class TestDiscoverChangedTargets:
+    """Tests for _discover_changed_targets (git-based scoping)."""
+
+    @patch('dt.diff.subprocess.run')
+    def test_maps_dvc_files_to_outputs_rev_vs_rev(self, mock_run):
+        mock_run.return_value = _git_result('data/a.dvc\nmodels/b.dvc\n')
+
+        targets, lock_changed = _discover_changed_targets('v1', 'v2')
+
+        assert targets == ['data/a', 'models/b']
+        assert lock_changed is False
+        # rev-vs-rev uses the double-dot range form
+        cmd = mock_run.call_args[0][0]
+        assert 'v1..v2' in cmd
+        assert cmd[:3] == ['git', 'diff', '--name-only']
+
+    @patch('dt.diff.subprocess.run')
+    def test_empty_when_no_control_files_changed(self, mock_run):
+        mock_run.return_value = _git_result('')
+
+        targets, lock_changed = _discover_changed_targets('v1', 'v2')
+
+        assert targets == []
+        assert lock_changed is False
+
+    @patch('dt.diff.subprocess.run')
+    def test_lock_change_flags_fallback(self, mock_run):
+        mock_run.return_value = _git_result('dvc.lock\ndata/a.dvc\n')
+
+        targets, lock_changed = _discover_changed_targets('v1', 'v2')
+
+        assert lock_changed is True
+        assert targets == ['data/a']
+
+    @patch('dt.diff.subprocess.run')
+    def test_yaml_change_flags_fallback(self, mock_run):
+        mock_run.return_value = _git_result('dvc.yaml\n')
+
+        targets, lock_changed = _discover_changed_targets('v1', 'v2')
+
+        assert lock_changed is True
+        assert targets == []
+
+    @patch('dt.diff.subprocess.run')
+    def test_dedups_and_sorts_targets(self, mock_run):
+        mock_run.return_value = _git_result('z/c.dvc\na/b.dvc\na/b.dvc\n')
+
+        targets, _ = _discover_changed_targets('v1', 'v2')
+
+        assert targets == ['a/b', 'z/c']
+
+    @patch('dt.diff.subprocess.run')
+    def test_workspace_mode_includes_untracked_dvc(self, mock_run):
+        # First call: git diff against working tree; second: git ls-files others
+        mock_run.side_effect = [
+            _git_result('tracked/a.dvc\n'),
+            _git_result('new/b.dvc\n'),
+        ]
+
+        targets, lock_changed = _discover_changed_targets('HEAD', None)
+
+        assert targets == ['new/b', 'tracked/a']
+        assert lock_changed is False
+        # workspace-mode diff compares old_rev to the working tree (no range)
+        first_cmd = mock_run.call_args_list[0][0][0]
+        assert 'HEAD' in first_cmd
+        assert not any('..' in part for part in first_cmd)
+        second_cmd = mock_run.call_args_list[1][0][0]
+        assert second_cmd[:2] == ['git', 'ls-files']
+
+    @patch('dt.diff.subprocess.run')
+    def test_raises_on_git_failure(self, mock_run):
+        mock_run.return_value = _git_result('', returncode=128, stderr='bad rev')
+
+        with pytest.raises(DiffError, match='git diff failed'):
+            _discover_changed_targets('v1', 'v2')
+
+
+class TestTreeDiffScoping:
+    """Tests for tree_diff scope behaviour."""
+
+    @patch('dt.diff._discover_changed_targets')
+    @patch('dt.diff._run_dvc_diff')
+    def test_short_circuits_when_nothing_tracked_changed(self, mock_run, mock_disc):
+        mock_disc.return_value = ([], False)
+
+        result = tree_diff(old_rev='v1', new_rev='v2')
+
+        assert 'No DVC-tracked changes' in result
+        assert 'v1' in result and 'v2' in result
+        mock_run.assert_not_called()
+
+    @patch('dt.diff._discover_changed_targets')
+    @patch('dt.diff._run_dvc_diff')
+    def test_passes_discovered_targets_to_dvc_diff(self, mock_run, mock_disc):
+        mock_disc.return_value = (['data/a', 'models/b'], False)
+        mock_run.return_value = {
+            'added': [], 'deleted': [], 'modified': [], 'renamed': [],
+        }
+
+        tree_diff(old_rev='v1', new_rev='v2')
+
+        mock_run.assert_called_once()
+        passed_targets = mock_run.call_args[0][2]
+        assert passed_targets == ['data/a', 'models/b']
+
+    @patch('dt.diff._discover_changed_targets')
+    @patch('dt.diff._run_dvc_diff')
+    def test_lock_change_falls_back_to_full_diff(self, mock_run, mock_disc):
+        mock_disc.return_value = (['data/a'], True)
+        mock_run.return_value = {
+            'added': [], 'deleted': [], 'modified': [], 'renamed': [],
+        }
+
+        tree_diff(old_rev='v1', new_rev='v2')
+
+        mock_run.assert_called_once()
+        passed_targets = mock_run.call_args[0][2]
+        assert passed_targets is None
+
+    @patch('dt.diff._discover_changed_targets')
+    @patch('dt.diff._run_dvc_diff')
+    def test_scope_all_skips_discovery(self, mock_run, mock_disc):
+        mock_run.return_value = {
+            'added': [], 'deleted': [], 'modified': [], 'renamed': [],
+        }
+
+        tree_diff(old_rev='v1', new_rev='v2', scope='all')
+
+        mock_disc.assert_not_called()
+        mock_run.assert_called_once()
+
+    @patch('dt.diff._discover_changed_targets')
+    @patch('dt.diff._run_dvc_diff')
+    def test_explicit_targets_skip_discovery(self, mock_run, mock_disc):
+        mock_run.return_value = {
+            'added': [], 'deleted': [], 'modified': [], 'renamed': [],
+        }
+
+        tree_diff(old_rev='v1', new_rev='v2', targets=['data/'], scope='changed')
+
+        mock_disc.assert_not_called()
+        passed_targets = mock_run.call_args[0][2]
+        assert passed_targets == ['data/']
+
+    @patch('dt.diff._discover_changed_targets')
+    @patch('dt.diff._run_dvc_diff_md')
+    def test_table_format_respects_scoping(self, mock_run_md, mock_disc):
+        mock_disc.return_value = (['data/a'], False)
+        mock_run_md.return_value = '| Path | Change |'
+
+        tree_diff(old_rev='v1', new_rev='v2', output_format='table')
+
+        mock_run_md.assert_called_once()
+        passed_targets = mock_run_md.call_args[0][2]
+        assert passed_targets == ['data/a']
