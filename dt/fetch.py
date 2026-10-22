@@ -15,6 +15,7 @@ This is the "dt" equivalent of `dvc fetch`, but works with local caches
 """
 
 import hashlib
+import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -337,32 +338,103 @@ def _create_source_cache_db(source_path: Path):
     return LocalHashFileDB(local_fs, cache_path, tmp_dir=source_path / "tmp")
 
 
+def _read_dir_manifest_from_path(
+    dir_hash: str,
+    source_cache: Path,
+) -> Optional[List[Tuple[str, str]]]:
+    """Read a ``.dir`` manifest directly from a source cache/remote root.
+
+    Locates the manifest blob with :func:`cache_ops.find_source_file`, which
+    checks BOTH the v3 layout ``files/md5/<ab>/<rest>`` and the legacy v2
+    layout ``<ab>/<rest>``. This covers pure-v2, pure-v3 and mixed-layout
+    sources, unlike a single ``LocalHashFileDB`` rooted at one layout (which
+    cannot see manifests stored in the other — issue #195).
+
+    The on-disk ``.dir`` file is a JSON list of ``{"md5": ..., "relpath": ...}``
+    entries (the ``md5`` key holds the value for both ``md5`` and
+    ``md5-dos2unix`` hashes). It is parsed directly so no assumption about the
+    source layout leaks into the object database.
+
+    Args:
+        dir_hash: The directory hash (with .dir suffix).
+        source_cache: Path to the source cache/remote root.
+
+    Returns:
+        List of ``(child_hash, relpath)`` tuples if the manifest was located
+        and parsed (possibly empty for a genuinely empty directory), or
+        ``None`` if the manifest blob could not be found or read.
+    """
+    manifest_path = cache_ops.find_source_file(dir_hash, source_cache)
+    if manifest_path is None:
+        return None
+    try:
+        entries = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return None
+
+    children: List[Tuple[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        child_hash = entry.get('md5')
+        relpath = entry.get('relpath', '')
+        if child_hash:
+            children.append((child_hash, relpath))
+    return children
+
+
 def _expand_dir_hash(
     dir_hash: str,
-    source_db,
+    source_db=None,
     base_path: str = None,
     fallback_db=None,
+    source_path: Optional[Path] = None,
 ) -> List[Tuple[str, str]]:
     """Expand a .dir hash to get all child file hashes with their paths.
-    
-    Uses DVC's Tree.load() to read the directory manifest.
-    
+
+    First tries to read the ``.dir`` manifest directly from the source
+    cache/remote root (``source_path``), checking both the v3 and legacy v2
+    layouts (issue #195). Falls back to DVC's ``Tree.load()`` against an
+    object database (e.g. the destination cache) when the manifest isn't
+    present at the source.
+
     Args:
         dir_hash: The directory hash (with .dir suffix).
         source_db: LocalHashFileDB to read the .dir file from.
         base_path: Base path to prepend to child paths.
         fallback_db: Optional fallback DB to try if source_db doesn't have the .dir.
-        
+        source_path: Source cache/remote root, searched in both layouts for the
+            manifest blob before falling back to the object databases.
+
     Returns:
         List of (hash, path) tuples for child files.
     """
     from dvc_data.hashfile.tree import Tree
     from dvc_data.hashfile.hash_info import HashInfo
-    
-    child_files = []
-    loaded = False  # True once any db successfully loaded the manifest
 
-    # Try source_db first
+    child_files = []
+    loaded = False  # True once any source successfully loaded the manifest
+
+    # 1. Read the manifest directly from the source cache/remote, covering
+    #    both the v3 (files/md5/<ab>/<rest>) and legacy v2 (<ab>/<rest>)
+    #    layouts so a mixed-layout source resolves legacy .dir manifests too.
+    if source_path is not None:
+        manifest = _read_dir_manifest_from_path(dir_hash, Path(source_path))
+        if manifest is not None:
+            loaded = True
+            for child_hash, rel_path in manifest:
+                if base_path:
+                    full_path = f"{base_path}/{rel_path}" if rel_path else base_path
+                else:
+                    full_path = rel_path
+                child_files.append((child_hash, full_path))
+            if child_files:
+                return child_files
+
+    # 2. Fall back to Tree.load against an object database (source_db, then
+    #    the destination/fallback db for a manifest only present downstream).
     for db in [source_db, fallback_db]:
         if db is None:
             continue
@@ -496,7 +568,7 @@ def build_fetch_plan(
                     plan.v2_hashes.add(h)
                 # Expand directory hashes
                 if h.endswith('.dir') and source_db and not dir_only:
-                    child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
+                    child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db, source_path=source_path)
                     group.add_hashes_with_paths(child_files, stage_name=stage_name)
                     if is_v2:
                         for child_hash, _ in child_files:
@@ -537,7 +609,7 @@ def build_fetch_plan(
                             plan.v2_hashes.add(h)
                         # Expand directory hashes
                         if h.endswith('.dir') and source_db and not dir_only:
-                            child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
+                            child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db, source_path=source_path)
                             group.add_hashes_with_paths(child_files, stage_name=stage_name)
                             if is_v2:
                                 for child_hash, _ in child_files:
@@ -567,7 +639,7 @@ def build_fetch_plan(
                         plan.v2_hashes.add(h)
                     # Expand directory hashes
                     if h.endswith('.dir') and source_db and not dir_only:
-                        child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db)
+                        child_files = _expand_dir_hash(h, source_db, base_path=path, fallback_db=destination_db, source_path=source_path)
                         group.add_hashes_with_paths(child_files, stage_name=stage_name)
                         if is_v2:
                             for child_hash, _ in child_files:
