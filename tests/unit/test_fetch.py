@@ -478,6 +478,146 @@ class TestExpandDirHash:
         assert 'could not read' not in out
 
 
+def _stage_blob(root, md5, content, layout):
+    """Write a blob into ``root`` in v2 (<ab>/<rest>) or v3
+    (files/md5/<ab>/<rest>) layout. ``content`` may be str or JSON-able."""
+    if md5.endswith('.dir'):
+        h = md5[:-4]
+        fname = h[2:] + '.dir'
+    else:
+        h = md5
+        fname = h[2:]
+    if layout == 'v3':
+        p = Path(root) / 'files' / 'md5' / h[:2] / fname
+    else:
+        p = Path(root) / h[:2] / fname
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, (list, dict)):
+        p.write_text(json.dumps(content))
+    else:
+        p.write_text(content)
+    return p
+
+
+class TestLegacyLayoutDirManifest:
+    """Resolving legacy-layout (<ab>/<rest>) .dir manifests and their
+    children from pure-v2, pure-v3 and mixed-layout sources (issue #195)."""
+
+    DIR_HASH = 'd41d8cd98f00b204e9800998ecf8427e.dir'
+    CHILD_A = 'a' * 32
+    CHILD_B = 'b' * 32
+
+    def _manifest(self):
+        return [
+            {'md5': self.CHILD_A, 'relpath': 'a.txt'},
+            {'md5': self.CHILD_B, 'relpath': 'sub/b.txt'},
+        ]
+
+    def _expected(self):
+        return sorted([(self.CHILD_A, 'a.txt'), (self.CHILD_B, 'sub/b.txt')])
+
+    def test_read_manifest_from_v2_layout(self, tmp_path):
+        _stage_blob(tmp_path, self.DIR_HASH, self._manifest(), 'v2')
+        children = fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path)
+        assert sorted(children) == self._expected()
+
+    def test_read_manifest_from_v3_layout(self, tmp_path):
+        _stage_blob(tmp_path, self.DIR_HASH, self._manifest(), 'v3')
+        children = fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path)
+        assert sorted(children) == self._expected()
+
+    def test_read_manifest_missing_returns_none(self, tmp_path):
+        assert fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path) is None
+
+    def test_read_manifest_empty_dir_returns_empty_list(self, tmp_path):
+        _stage_blob(tmp_path, self.DIR_HASH, [], 'v2')
+        assert fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path) == []
+
+    def test_expand_resolves_legacy_manifest_when_db_cannot(self, tmp_path, capsys):
+        """A mixed source: the object DB is rooted at files/md5 (v3) and so
+        cannot load a legacy-layout .dir, but source_path can — no warning."""
+        _stage_blob(tmp_path, self.DIR_HASH, self._manifest(), 'v2')
+        with patch('dvc_data.hashfile.tree.Tree.load',
+                   side_effect=Exception('not in v3 db')):
+            children = fetch._expand_dir_hash(
+                self.DIR_HASH,
+                source_db=MagicMock(),
+                base_path='data',
+                source_path=tmp_path,
+            )
+        assert (self.CHILD_A, 'data/a.txt') in children
+        assert (self.CHILD_B, 'data/sub/b.txt') in children
+        assert 'could not read' not in capsys.readouterr().out
+
+    def test_expand_resolves_v3_manifest_via_source_path(self, tmp_path):
+        _stage_blob(tmp_path, self.DIR_HASH, self._manifest(), 'v3')
+        children = fetch._expand_dir_hash(
+            self.DIR_HASH, source_db=None, base_path='d', source_path=tmp_path)
+        assert (self.CHILD_A, 'd/a.txt') in children
+        assert (self.CHILD_B, 'd/sub/b.txt') in children
+
+    def test_expand_warns_when_truly_absent(self, tmp_path, capsys):
+        """Nothing in the source and no db can load it → single clear warning."""
+        result = fetch._expand_dir_hash(
+            self.DIR_HASH, source_db=None, source_path=tmp_path)
+        assert result == []
+        assert 'could not read .dir manifest' in capsys.readouterr().out
+
+    def _dir_stage(self, dir_hash, addressing, hash_name='md5', fspath='data/pbmc'):
+        out = MagicMock()
+        out.use_cache = True
+        out.hash_info.value = dir_hash
+        out.hash_info.name = hash_name
+        out.fspath = fspath
+        stage = MagicMock()
+        stage.outs = [out]
+        stage.addressing = addressing
+        stage.repo = None
+        return stage
+
+    def _assert_children_in_plan(self, plan):
+        all_hashes = set()
+        for grp in plan.sources.values():
+            all_hashes.update(grp.hashes)
+        assert self.DIR_HASH in all_hashes
+        assert self.CHILD_A in all_hashes
+        assert self.CHILD_B in all_hashes
+
+    def test_build_plan_explicit_source_v2(self, tmp_path):
+        _stage_blob(tmp_path, self.DIR_HASH, self._manifest(), 'v2')
+        _stage_blob(tmp_path, self.CHILD_A, 'aaa', 'v2')
+        _stage_blob(tmp_path, self.CHILD_B, 'bbb', 'v2')
+        cat = fetch.StageCategorization()
+        cat.regular_stages = [self._dir_stage(self.DIR_HASH, 'pbmc.dvc')]
+        plan = fetch.build_fetch_plan(cat, explicit_source=tmp_path)
+        self._assert_children_in_plan(plan)
+
+    def test_build_plan_explicit_source_v3(self, tmp_path):
+        _stage_blob(tmp_path, self.DIR_HASH, self._manifest(), 'v3')
+        _stage_blob(tmp_path, self.CHILD_A, 'aaa', 'v3')
+        _stage_blob(tmp_path, self.CHILD_B, 'bbb', 'v3')
+        cat = fetch.StageCategorization()
+        cat.regular_stages = [self._dir_stage(self.DIR_HASH, 'pbmc.dvc')]
+        plan = fetch.build_fetch_plan(cat, explicit_source=tmp_path)
+        self._assert_children_in_plan(plan)
+
+    def test_build_plan_explicit_source_mixed(self, tmp_path):
+        """Mixed source: an unrelated v3 blob makes files/md5 exist (so the
+        object DB roots there), while the target dataset lives in legacy
+        layout. The legacy .dir and its children must still be planned."""
+        _stage_blob(tmp_path, 'c' * 32, 'unrelated-v3', 'v3')
+        _stage_blob(tmp_path, self.DIR_HASH, self._manifest(), 'v2')
+        _stage_blob(tmp_path, self.CHILD_A, 'aaa', 'v2')
+        _stage_blob(tmp_path, self.CHILD_B, 'bbb', 'v2')
+        cat = fetch.StageCategorization()
+        cat.regular_stages = [self._dir_stage(self.DIR_HASH, 'pbmc.dvc')]
+        plan = fetch.build_fetch_plan(cat, explicit_source=tmp_path)
+        self._assert_children_in_plan(plan)
+        # The children must be locatable in the source (so fetch can link them).
+        assert fetch.cache_ops.find_source_file(self.CHILD_A, tmp_path) is not None
+        assert fetch.cache_ops.find_source_file(self.CHILD_B, tmp_path) is not None
+
+
 class TestVerifyCachedHashes:
     """Tests for post-fetch cache verification (#151)."""
 

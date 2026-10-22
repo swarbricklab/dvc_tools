@@ -336,6 +336,14 @@ Unless `--cache-type` forces one method, linking is attempted in the order
 **reflink → hardlink → symlink → copy**, so in the common case files appear in
 your cache without using additional disk space.
 
+Blobs are resolved from a source cache/remote by checking **both** the current
+DVC v3 layout (`files/md5/<ab>/<rest>`) and the legacy DVC v2 layout
+(`<ab>/<rest>`). This applies to `.dir` manifests as well as the child files
+they reference, so pure-v2, pure-v3 and **mixed-layout** source remotes (where
+some datasets are stored new-layout and others legacy) all fetch correctly. A
+legacy-layout `.dir` is read directly from whichever layout holds it rather
+than being silently skipped.
+
 ## Workflow: Fetch + Checkout
 
 The DVC model separates "fetch" (remote/cache → cache) from "checkout" (cache → workspace):
