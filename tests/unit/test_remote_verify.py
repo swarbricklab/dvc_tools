@@ -486,3 +486,266 @@ class TestVerifyCliFlags:
             result = self._runner().invoke(cli, ['remote', 'verify', '--status'])
         assert result.exit_code == 0, result.output
         assert 'Verified OK' in result.output
+
+
+# =============================================================================
+# No-egress size verification for cloud remotes (issue #196)
+# =============================================================================
+
+def _v3_key(md5: str) -> str:
+    """Remote-relative v3 blob path for an md5 (e.g. files/md5/ab/cdef...)."""
+    return f"files/md5/{md5[:2]}/{md5[2:]}"
+
+
+class TestMd5FromCloudKey:
+    def test_v3_path(self):
+        md5 = "a" * 32
+        rel = _v3_key(md5)
+        got, prefix, is_dir, is_blob = rv._md5_from_cloud_key(rel)
+        assert got == md5
+        assert prefix == "aa"
+        assert is_dir is False
+        assert is_blob is True
+
+    def test_v2_path(self):
+        md5 = "b" * 32
+        got, prefix, is_dir, is_blob = rv._md5_from_cloud_key(
+            f"{md5[:2]}/{md5[2:]}")
+        assert got == md5
+        assert is_blob is True
+
+    def test_dir_suffix(self):
+        md5 = "c" * 32
+        got, _p, is_dir, is_blob = rv._md5_from_cloud_key(
+            f"files/md5/{md5[:2]}/{md5[2:]}.dir")
+        assert got == md5
+        assert is_dir is True
+        assert is_blob is True
+
+    def test_non_blob_path_ignored(self):
+        # Ledger / metadata files under the remote root are not blob paths.
+        _md5, _p, _d, is_blob = rv._md5_from_cloud_key(".dt-verify/bad.json")
+        assert is_blob is False
+
+
+class TestCompareRemoteSizes:
+    def test_matching_sizes_pass(self):
+        md5 = "d" * 32
+        expected = {md5: 100}
+        objs = [(_v3_key(md5), 100)]
+        totals, bad, incomplete = rv.compare_remote_sizes(expected, objs)
+        assert totals["objects"] == 1
+        assert totals["ok"] == 1
+        assert totals["bad"] == 0
+        assert bad == []
+        assert totals["bytes"] == 100
+
+    def test_truncated_object_flagged(self):
+        md5 = "e" * 32
+        expected = {md5: 1000}
+        objs = [(_v3_key(md5), 512)]  # truncated: remote size < expected
+        totals, bad, incomplete = rv.compare_remote_sizes(expected, objs)
+        assert totals["bad"] == 1
+        assert len(bad) == 1
+        e = bad[0]
+        assert e["status"] == rv.STATUS_SIZE_MISMATCH
+        assert e["expected_size"] == 1000
+        assert e["size_bytes"] == 512
+        assert e["expected_md5"] == md5
+
+    def test_oversize_object_flagged(self):
+        md5 = "f" * 32
+        expected = {md5: 10}
+        totals, bad, _ = rv.compare_remote_sizes(expected, [(_v3_key(md5), 99)])
+        assert totals["bad"] == 1
+        assert bad[0]["status"] == rv.STATUS_SIZE_MISMATCH
+
+    def test_unknown_blob_is_skipped_not_bad(self):
+        md5 = "1" * 32
+        # No expected size known for this md5 -> unchecked, not flagged.
+        totals, bad, _ = rv.compare_remote_sizes({}, [(_v3_key(md5), 50)])
+        assert totals["objects"] == 1
+        assert totals["skipped"] == 1
+        assert totals["bad"] == 0
+
+    def test_dir_manifest_is_skipped(self):
+        md5 = "2" * 32
+        rel = f"files/md5/{md5[:2]}/{md5[2:]}.dir"
+        # Even with an (erroneous) expected size, .dir objects aren't checked.
+        totals, bad, _ = rv.compare_remote_sizes({md5: 5}, [(rel, 999)])
+        assert totals["skipped"] == 1
+        assert totals["bad"] == 0
+
+    def test_stray_tmp_reported_incomplete(self):
+        rel = "files/md5/ab/cdef0123.tmp"  # not a valid md5 under a hex prefix
+        totals, bad, incomplete = rv.compare_remote_sizes({}, [(rel, 7)])
+        assert totals["incomplete"] == 1
+        assert incomplete[0]["status"] == rv.STATUS_INCOMPLETE
+        assert bad == []
+
+    def test_missing_size_reported_unreadable(self):
+        md5 = "3" * 32
+        totals, bad, _ = rv.compare_remote_sizes(
+            {md5: 42}, [(_v3_key(md5), None)])
+        assert totals["bad"] == 1
+        assert bad[0]["status"] == rv.STATUS_UNREADABLE
+
+    def test_ledger_metadata_ignored(self):
+        # A file under the remote root (not a hex prefix dir) is not counted.
+        totals, bad, incomplete = rv.compare_remote_sizes(
+            {}, [(".dt-verify/bad.json", 10)])
+        assert totals["objects"] == 0
+        assert bad == [] and incomplete == []
+
+    def test_mixed_batch(self):
+        ok_md5 = "4" * 32
+        bad_md5 = "5" * 32
+        expected = {ok_md5: 100, bad_md5: 100}
+        objs = [
+            (_v3_key(ok_md5), 100),         # ok
+            (_v3_key(bad_md5), 10),         # truncated
+            (_v3_key("6" * 32), 100),       # unknown -> skipped
+        ]
+        totals, bad, _ = rv.compare_remote_sizes(expected, objs)
+        assert totals["objects"] == 3
+        assert totals["ok"] == 1
+        assert totals["bad"] == 1
+        assert totals["skipped"] == 1
+
+
+class TestListRemoteObjectSizes:
+    class _FakeFS:
+        def __init__(self, detail):
+            self._detail = detail
+
+        def find(self, base, detail=True):
+            return self._detail
+
+    class _FakeODB:
+        def __init__(self, path, fs):
+            self.path = path
+            self.fs = fs
+
+    def test_dict_detail_with_sizes(self):
+        base = "bucket/wgs/files/md5"
+        detail = {
+            f"{base}/ab/cdef": {"size": 123, "type": "file"},
+            f"{base}/ab/0011": {"size": 7, "type": "file"},
+        }
+        odb = self._FakeODB(base, self._FakeFS(detail))
+        got = sorted(rv.list_remote_object_sizes(odb))
+        assert got == [("ab/0011", 7), ("ab/cdef", 123)]
+
+    def test_capital_size_key(self):
+        base = "bucket/x"
+        detail = {f"{base}/ab/cdef": {"Size": 55}}
+        odb = self._FakeODB(base, self._FakeFS(detail))
+        got = list(rv.list_remote_object_sizes(odb))
+        assert got == [("ab/cdef", 55)]
+
+    def test_list_detail_form(self):
+        base = "bucket/x"
+        detail = [{"name": f"{base}/ab/cdef", "size": 9}]
+        odb = self._FakeODB(base, self._FakeFS(detail))
+        got = list(rv.list_remote_object_sizes(odb))
+        assert got == [("ab/cdef", 9)]
+
+
+class TestVerifyCloudRemote:
+    """Orchestrator: mock DVC/S3 plumbing, assert truncation is flagged."""
+
+    def test_flags_truncated_blob_end_to_end(self):
+        good = "7" * 32
+        truncated = "8" * 32
+        expected = {good: 500, truncated: 500}
+        listing = [(_v3_key(good), 500), (_v3_key(truncated), 128)]
+
+        fake_odb = type("ODB", (), {"path": "bucket/wgs/files/md5",
+                                    "fs": None})()
+        with patch("dt.remote_verify.resolve_cloud_remote",
+                   return_value=("wgs", "s3://wgs", fake_odb)), \
+             patch("dt.remote_verify.build_expected_sizes",
+                   return_value=expected), \
+             patch("dt.remote_verify.list_remote_object_sizes",
+                   return_value=iter(listing)):
+            totals, bad, incomplete, layout, name, url = \
+                rv.verify_cloud_remote("wgs")
+
+        assert layout == "dvc-v3"
+        assert name == "wgs"
+        assert totals["objects"] == 2
+        assert totals["ok"] == 1
+        assert totals["bad"] == 1
+        assert bad[0]["status"] == rv.STATUS_SIZE_MISMATCH
+        assert bad[0]["expected_md5"] == truncated
+
+    def test_all_good_passes(self):
+        md5 = "9" * 32
+        with patch("dt.remote_verify.resolve_cloud_remote",
+                   return_value=("r", "s3://r",
+                                 type("O", (), {"path": "r/files/md5"})())), \
+             patch("dt.remote_verify.build_expected_sizes",
+                   return_value={md5: 42}), \
+             patch("dt.remote_verify.list_remote_object_sizes",
+                   return_value=iter([(_v3_key(md5), 42)])):
+            totals, bad, _inc, _layout, _n, _u = rv.verify_cloud_remote("r")
+        assert totals["bad"] == 0
+        assert bad == []
+
+
+class TestResolveCloudRemote:
+    def test_local_remote_rejected(self):
+        with patch("dt.remote.list_remotes",
+                   return_value=[("a", "/local/path", True)]):
+            with pytest.raises(RemoteError, match="locally-accessible"):
+                rv.resolve_cloud_remote("a")
+
+    def test_no_remotes(self):
+        with patch("dt.remote.list_remotes", return_value=[]):
+            with pytest.raises(RemoteError, match="No remotes configured"):
+                rv.resolve_cloud_remote(None)
+
+
+class TestNoEgressReport:
+    def test_build_report_no_egress_has_no_caveat(self):
+        totals = {"objects": 1, "ok": 0, "bad": 1, "incomplete": 0,
+                  "skipped": 0, "bytes": 128}
+        bad = [{"path": _v3_key("8" * 32), "expected_md5": "8" * 32,
+                "actual_md5": None, "size_bytes": 128, "expected_size": 500,
+                "status": rv.STATUS_SIZE_MISMATCH}]
+        # v2 layout would normally carry the dos2unix caveat; size-only must not.
+        rep = rv.build_report("wgs", "s3://wgs", "dvc-v2", totals, bad, [],
+                              jobs=0, ledger_used=False, size_only=True)
+        assert rep["size_only"] is True
+        assert rep["mode"] == "no-egress"
+        assert rep["legacy_hash_caveat"] is False
+        out = rv.format_report_summary(rep)
+        assert "no-egress" in out
+        assert "size mismatch" in out
+        assert "expected_size=500" in out
+        assert "actual_size=128" in out
+
+
+class TestNoEgressCliFlag:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_no_egress_flag_routes_to_cloud_verify(self):
+        from dt.cli import cli
+        good = "a" * 32
+        bad_md5 = "b" * 32
+        fake_odb = type("ODB", (), {"path": "bucket/wgs/files/md5"})()
+        with patch("dt.remote_verify.resolve_cloud_remote",
+                   return_value=("wgs", "s3://wgs", fake_odb)), \
+             patch("dt.remote_verify.build_expected_sizes",
+                   return_value={good: 100, bad_md5: 100}), \
+             patch("dt.remote_verify.list_remote_object_sizes",
+                   return_value=iter([(_v3_key(good), 100),
+                                      (_v3_key(bad_md5), 5)])):
+            result = self._runner().invoke(
+                cli, ['remote', 'verify', 'wgs', '--no-egress'])
+        # Bad blobs -> non-zero exit, same as a full verify.
+        assert result.exit_code == 1, result.output
+        assert "no-egress" in result.output
+        assert "Bad:      1" in result.output
