@@ -291,6 +291,101 @@ mixed layouts and the case where the bad blob *is* a `.dir`.
 Quarantined blobs land in `<remote>/.dt-verify/quarantine/<timestamp>/<rel-path>`
 with a `manifest.json` restore map.
 
+## dt remote diff
+
+Compare the blob sets of two locally-accessible remotes.
+
+```
+dt remote diff REMOTE_A REMOTE_B [--list] [--json] [-j N]
+```
+
+Each argument is either a configured remote **name** or a filesystem **path**.
+A bare token that matches a configured remote resolves to that remote; anything
+containing a `/` (or any non-remote token) is treated as a path — so the *old*
+location, which is usually not a configured remote, can be compared directly.
+
+The report gives, for each side, the object count and total size, plus how many
+objects are **only in A**, **only in B**, and **common**:
+
+```
+A: /g/data/a56/dvc/analysis/brca_mega_atlas  (dvc-v2)
+   79,783 object(s), 2.1T
+B: nci  (dvc-v3)
+   240,612 object(s), 5.4T
+  Common:    79,779 (2.1T)
+  Only in A: 4 (199G)
+  Only in B: 160,833 (3.3T)
+  B is a subset of A (top-up B with: dt remote merge A B).
+```
+
+Blob identity is **content-addressed and layout-independent**: the same object
+stored under a v2 layout (`ab/cdef…`) in one remote and a v3 layout
+(`files/md5/ab/cdef…`) in the other is counted as *common*, not differing. This
+is what diagnoses a half-finished migration — the case where blobs are split
+across an old and a new location with neither a superset of the other, so
+`dvc pull` against the configured remote fails for the handful that only ever
+reached the old location and they look simply "missing". `--list` prints the
+differing blob keys; `--json` emits the full machine-readable structure.
+
+## dt remote merge
+
+Top-up one remote from another: copy the blobs present in `SRC` but missing from
+`DST`, so `DST` becomes a superset.
+
+```
+dt remote merge SRC DST [--dry-run] [--verify] [--group-writable] [-j N]
+```
+
+This is the fix for the half-migrated remote diagnosed by `dt remote diff`.
+Unlike `dt remote move` — which relocates a remote and **deletes the source**,
+repointing `.dvc/config` — `merge` touches neither the config nor the source, so
+other repos still pointing at `SRC` are unaffected. Unlike `dt remote copy`,
+which refuses a non-empty destination, `merge` is designed to add into a
+destination that already holds most of the data.
+
+Properties:
+
+- **Additive** — never deletes or overwrites a blob already in `DST`.
+- **Atomic** — each blob is written to a `.tmp` sibling and `os.replace()`d onto
+  its final name, so a concurrent reader never sees a partial blob.
+- **Verifying** (`--verify`) — re-hash each copied blob against its
+  content-addressed filename *before* publishing it; a mismatch is reported and
+  the blob is **not** copied, so corruption is never propagated.
+- **Idempotent / resumable** — a second run, or a run after an interruption,
+  only copies what is still missing.
+- Works on a `SRC`/`DST` **path** that is not a configured remote.
+
+`--dry-run` reports how many objects and bytes *would* transfer and writes
+nothing — the recommended first step on shared, multi-TB storage:
+
+```
+dt remote diff /g/data/a56/dvc/analysis/brca_mega_atlas nci   # see the gap
+dt remote merge /g/data/a56/dvc/analysis/brca_mega_atlas nci --dry-run
+dt remote merge /g/data/a56/dvc/analysis/brca_mega_atlas nci --verify
+dt remote verify nci --recheck     # optional: confirm the newly-landed blobs
+```
+
+If `DST` does not exist yet it is created and every `SRC` blob is treated as
+missing (a plain full copy); `--group-writable` makes any newly-created prefix
+directories group-writable + setgid for shared access. On the same filesystem
+the copy is a real byte copy (content-addressed stores are not reflinked here to
+keep the destination independent of the soon-to-be-retired source).
+
+### Deferred (issue #166 follow-ups)
+
+Two asks from the originating issue are intentionally **not** in this command and
+are tracked as follow-ups:
+
+- **Pull-safety / availability diagnosis.** `dt pull --dry` classifies a remote
+  by reachability, not object presence, so a target whose blobs are entirely
+  absent can still read as "✓ local". And a `dt pull` on a partially-missing
+  target can remove the workspace copy before a failed fetch. Making pull check
+  object presence (and fetch-then-checkout only what verified) is a separate
+  change to the pull path.
+- **Cloud (non-local) remotes.** `diff`/`merge` require both endpoints on a
+  locally-accessible filesystem; an S3/GCS source or destination would need the
+  object-store transfer path.
+
 ## dt remote perms
 
 Check and repair directory permissions on a shared remote.
