@@ -181,3 +181,127 @@ class TestRestoreAndList:
         result = q.restore_quarantine(remote, "20260702T020000Z")
         assert bad_rel in result['skipped']
         assert result['restored'] == []
+
+
+class TestReadListFile:
+    def test_strips_blanks_comments_and_columns(self, tmp_path):
+        listfile = tmp_path / "bad.txt"
+        listfile.write_text(
+            "# externally-identified bad R2 blobs\n"
+            "\n"
+            "   \n"
+            "aa" + "1" * 30 + "\n"
+            "bb" + "2" * 30 + "   1234   # truncated upstream\n"
+            "files/md5/cc/" + "3" * 30 + "\n"
+            "  # another comment\n"
+        )
+        tokens = q.read_list_file(listfile)
+        assert tokens == [
+            "aa" + "1" * 30,
+            "bb" + "2" * 30,
+            "files/md5/cc/" + "3" * 30,
+        ]
+
+    def test_missing_file_raises(self, tmp_path):
+        from dt.errors import RemoteError
+        with pytest.raises(RemoteError):
+            q.read_list_file(tmp_path / "does-not-exist.txt")
+
+
+class TestEntriesFromList:
+    def test_md5_token_maps_to_v3_path(self, tmp_path):
+        remote = tmp_path / "remote"
+        md5 = _place_blob(remote, b"member\n")  # real v3 blob
+        entries, rejected = q.entries_from_list(remote, [md5])
+        assert rejected == []
+        assert entries == [{
+            'path': f"files/md5/{md5[:2]}/{md5[2:]}",
+            'expected_md5': md5,
+            'status': rv.STATUS_MISMATCH,
+        }]
+
+    def test_dir_md5_token_keeps_suffix_and_strips_for_md5(self, tmp_path):
+        remote = tmp_path / "remote"
+        child = _place_blob(remote, b"member\n")
+        dir_rel = _place_dir_manifest(remote, [(child, "sub/m.txt")])
+        dir_md5 = dir_rel.split('/')[-1][:-4]  # strip .dir
+        # reconstruct full 32-hex (prefix + rest)
+        dir_md5 = dir_rel.split('/')[-2] + dir_md5
+        entries, rejected = q.entries_from_list(remote, [dir_md5 + ".dir"])
+        assert rejected == []
+        assert entries[0]['path'] == dir_rel
+        assert entries[0]['expected_md5'] == dir_md5
+
+    def test_blob_path_token(self, tmp_path):
+        remote = tmp_path / "remote"
+        md5 = _place_blob(remote, b"member\n")
+        rel = f"files/md5/{md5[:2]}/{md5[2:]}"
+        entries, rejected = q.entries_from_list(remote, [rel])
+        assert rejected == []
+        assert entries[0] == {'path': rel, 'expected_md5': md5,
+                              'status': rv.STATUS_MISMATCH}
+
+    def test_absolute_path_under_remote(self, tmp_path):
+        remote = tmp_path / "remote"
+        md5 = _place_blob(remote, b"member\n")
+        rel = f"files/md5/{md5[:2]}/{md5[2:]}"
+        entries, rejected = q.entries_from_list(remote, [str(remote / rel)])
+        assert rejected == []
+        assert entries[0]['path'] == rel
+
+    def test_garbage_is_rejected(self, tmp_path):
+        remote = tmp_path / "remote"
+        _place_blob(remote, b"member\n")  # gives remote a detectable layout
+        entries, rejected = q.entries_from_list(
+            remote, ["not-an-md5", "zz" + "0" * 30, "README.md"])
+        assert entries == []
+        assert {t for t, _ in rejected} == {"not-an-md5", "zz" + "0" * 30,
+                                            "README.md"}
+
+    def test_absolute_path_outside_remote_rejected(self, tmp_path):
+        remote = tmp_path / "remote"
+        _place_blob(remote, b"member\n")
+        entries, rejected = q.entries_from_list(
+            remote, ["/etc/passwd"])
+        assert entries == []
+        assert rejected and "outside" in rejected[0][1]
+
+    def test_dedup_by_path(self, tmp_path):
+        remote = tmp_path / "remote"
+        md5 = _place_blob(remote, b"member\n")
+        rel = f"files/md5/{md5[:2]}/{md5[2:]}"
+        entries, _ = q.entries_from_list(remote, [md5, rel])
+        assert len(entries) == 1
+
+
+class TestExternalListQuarantineEndToEnd:
+    def test_external_member_pulls_enclosing_dir(self, tmp_path):
+        """An externally-known bad member quarantines itself AND its .dir."""
+        remote = tmp_path / "remote"
+        # A truncated member: content differs but the key stays correct, so we
+        # register it at a forced md5 name (as the real truncated blob would be).
+        bad_md5 = "ff" + "0" * 30
+        _place_blob(remote, b"truncated", name=bad_md5)
+        dir_rel = _place_dir_manifest(remote, [(bad_md5, "data/x.bin")])
+        bad_rel = f"files/md5/{bad_md5[:2]}/{bad_md5[2:]}"
+
+        # External list naming just the bad member md5.
+        listfile = tmp_path / "bad.txt"
+        listfile.write_text(bad_md5 + "\n")
+        tokens = q.read_list_file(listfile)
+        entries, rejected = q.entries_from_list(remote, tokens)
+        assert rejected == []
+
+        result = q.quarantine(remote, entries, timestamp="20260801T000000Z")
+        moved_paths = {m['path'] for m in result['moved']}
+        assert bad_rel in moved_paths
+        assert dir_rel in moved_paths          # enclosing .dir pulled in
+        assert not (remote / bad_rel).exists()
+        assert not (remote / dir_rel).exists()
+
+        # Reversible.
+        restored = q.restore_quarantine(remote, "20260801T000000Z")
+        assert bad_rel in restored['restored']
+        assert dir_rel in restored['restored']
+        assert (remote / bad_rel).exists()
+        assert (remote / dir_rel).exists()

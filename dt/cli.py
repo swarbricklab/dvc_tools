@@ -1538,6 +1538,11 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
               type=click.Path(),
               help='Bad-blob report to act on (default: the remote\'s '
                    '.dt-verify/bad.json written by dt remote verify).')
+@click.option('--from-list', 'from_list', default=None,
+              type=click.Path(),
+              help='Plain-text list of externally-known bad blobs (one md5 or '
+                   'blob path per line; blanks/# comments ignored) to '
+                   'quarantine without a prior dt remote verify.')
 @click.option('--verify', 'run_verify', is_flag=True,
               help='Run a fresh verify first and quarantine what it finds, '
                    'instead of reading a saved report.')
@@ -1552,8 +1557,9 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
 @click.option('--jobs', '-j', type=int, default=None,
               help='Hashing threads for an inline --verify.')
 @click.option('--verbose', '-v', is_flag=True, help='Print detailed progress.')
-def remote_quarantine(remote_name, from_report, run_verify, restore_ts,
-                      list_batches, dry_run, json_output, jobs, verbose):
+def remote_quarantine(remote_name, from_report, from_list, run_verify,
+                      restore_ts, list_batches, dry_run, json_output, jobs,
+                      verbose):
     """Move corrupt/incomplete blobs aside so `dvc push` re-uploads them.
 
     Reads the bad-blob report left by `dt remote verify` (or runs a fresh
@@ -1575,6 +1581,15 @@ def remote_quarantine(remote_name, from_report, run_verify, restore_ts,
         dt remote verify --recheck          # confirm just those
         dt remote quarantine --list         # list quarantine batches
         dt remote quarantine --restore 20260702T101500Z
+
+    When the bad set is already known from an external source of truth (e.g.
+    comparing remote blob sizes against an intact upstream bucket) you can skip
+    the verify pass and feed the list straight in:
+
+    \b
+        dt remote quarantine myremote --from-list bad_md5s.txt
+        dvc push
+        dt remote verify --recheck
     """
     import json as _json
     from pathlib import Path as _Path
@@ -1608,8 +1623,28 @@ def remote_quarantine(remote_name, from_report, run_verify, restore_ts,
                                f"present in the remote (kept in quarantine).")
             return
 
-        # Gather the bad entries: fresh verify, or a saved report.
-        if run_verify:
+        if sum(bool(x) for x in (run_verify, from_report, from_list)) > 1:
+            raise click.ClickException(
+                "Use only one of --verify, --from-report, --from-list.")
+
+        # Gather the bad entries: fresh verify, a saved report, or an
+        # externally-supplied list of known-bad md5s/paths.
+        if from_list:
+            tokens = remote_quarantine_mod.read_list_file(_Path(from_list))
+            entries, rejected = remote_quarantine_mod.entries_from_list(
+                path, tokens)
+            if rejected:
+                click.echo(f"Skipped {len(rejected)} unrecognised line(s) in "
+                           f"{from_list}:", err=True)
+                for tok, reason in rejected[:10]:
+                    click.echo(f"  {tok!r}: {reason}", err=True)
+                if len(rejected) > 10:
+                    click.echo(f"  ... and {len(rejected) - 10} more.",
+                               err=True)
+            if not entries:
+                raise click.ClickException(
+                    f"No valid bad-blob entries found in {from_list}.")
+        elif run_verify:
             totals, bad_entries, incomplete_entries, layout = \
                 remote_verify_mod.verify_remote(
                     path, jobs=jobs, progress=verbose)

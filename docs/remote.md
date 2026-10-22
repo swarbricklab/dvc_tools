@@ -244,8 +244,39 @@ dt remote quarantine --restore <ts>    # move a batch back (reversible)
 ```
 
 Options: `--from-report <path>` (default `<remote>/.dt-verify/bad.json`),
-`--verify` (run a fresh scan first), `--dry-run`, `--restore <timestamp>`,
-`--list`, `--json`.
+`--from-list <path>` (externally-known bad set, see below), `--verify` (run a
+fresh scan first), `--dry-run`, `--restore <timestamp>`, `--list`, `--json`.
+`--verify`, `--from-report` and `--from-list` are mutually exclusive.
+
+**Acting on an externally-known bad set (`--from-list`).** Sometimes the bad
+blobs are already known from a source of truth other than `dt remote verify` —
+e.g. on `bcarc_wgs` 310 bad R2 blobs were identified by comparing remote blob
+sizes against the intact upstream S3 objects. Running a full `dt remote verify`
+just to regenerate that list could egress terabytes. `--from-list` feeds the
+known set straight into the same quarantine machinery:
+
+```bash
+dt remote quarantine [remote] --from-list bad_md5s.txt
+dvc push                                # re-upload good copies
+dt remote verify --recheck              # confirm just those
+```
+
+The list is plain text, **one entry per line**, where each entry is either:
+
+- a bare **md5** (32 lowercase hex), optionally with a `.dir` suffix for a
+  directory manifest object (e.g. `a1b2…`), or
+- a **blob path** relative to the remote root (e.g. `files/md5/a1/b2…`, or the
+  v2 form `a1/b2…`), or an absolute path under the remote.
+
+Blank lines and `#` comments are ignored, and only the first whitespace-delimited
+field on each line is read — so `<md5> <size>` columns (or a trailing
+`# note`) from a size-comparison tool feed in directly. Each md5 is resolved to
+its blob path under the remote's detected layout (v2/v3/mixed), normalised into
+the same bad-entry record `dt remote verify` writes (`{path, expected_md5,
+status: mismatch}`), and then driven through the identical move-aside logic —
+including pulling in each enclosing `.dir` object (essential, see below).
+Lines that are neither a valid md5 nor a blob path reconstructing a valid md5
+are reported and skipped.
 
 **Why the enclosing `.dir` is quarantined too.** By default `dvc push` does not
 examine a directory's member files if the directory's `.dir` object is already
