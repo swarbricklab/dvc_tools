@@ -283,6 +283,7 @@ Manage remote storage.
 | `dt remote clean` | Remove abandoned .tmp files from interrupted transfers |
 | `dt remote perms` | Check/repair permissions (sticky bit on by default) |
 | `dt remote verify` | Re-hash every blob and report corrupt/incomplete objects |
+| `dt remote verify --no-egress` | Cloud (s3/R2): size-check blobs from store metadata, no download |
 | `dt remote quarantine` | Move bad blobs (and their `.dir`) aside so `dvc push` re-uploads them |
 | `dt remote fsck` | Find symlinked blobs in a remote and optionally repair them |
 | `dt remote copy` | Duplicate a remote's blob tree to a new path |

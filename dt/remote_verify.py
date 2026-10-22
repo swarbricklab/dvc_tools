@@ -46,6 +46,10 @@ STATUS_MISMATCH = 'mismatch'
 STATUS_UNREADABLE = 'unreadable'
 STATUS_INCOMPLETE = 'incomplete'
 STATUS_MISSING = 'missing'
+# No-egress size check: the remote object's size disagrees with the size DVC
+# recorded for that blob (truncation / interrupted transfer). Detected from
+# object-store metadata only, without downloading the blob (issue #196).
+STATUS_SIZE_MISMATCH = 'size_mismatch'
 
 REPORT_VERSION = 2
 
@@ -368,14 +372,24 @@ def build_report(
     incomplete_entries: List[dict],
     jobs: int,
     ledger_used: bool = True,
+    size_only: bool = False,
 ) -> dict:
-    """Assemble the machine-readable verification report."""
+    """Assemble the machine-readable verification report.
+
+    ``size_only`` marks a no-egress run (issue #196): object sizes were
+    compared to the expected sizes from DVC metadata without downloading any
+    blob content. Such a run cannot hash, so the dos2unix ``legacy_hash_caveat``
+    never applies.
+    """
     return {
         'report_version': REPORT_VERSION,
         'remote': remote_name,
         'url': url,
         'layout': layout,
-        'legacy_hash_caveat': layout in ('dvc-v2', 'dvc-mixed'),
+        'mode': 'no-egress' if size_only else 'hash',
+        'size_only': size_only,
+        'legacy_hash_caveat': (not size_only
+                               and layout in ('dvc-v2', 'dvc-mixed')),
         'ledger_used': ledger_used,
         'scanned_at': _dt.datetime.now(_dt.timezone.utc).isoformat(
             timespec='seconds'),
@@ -389,16 +403,25 @@ def build_report(
 def format_report_summary(report: dict, show_bad: bool = True) -> str:
     """Render a verification report as a human-readable summary."""
     t = report['totals']
+    size_only = report.get('size_only')
+    header = f"Remote: {report.get('remote') or report.get('url')}  " \
+        f"({report['layout']})"
+    if size_only:
+        header += "  [no-egress size check]"
     lines = [
-        f"Remote: {report.get('remote') or report.get('url')}  "
-        f"({report['layout']})",
+        header,
         f"  Objects:  {t['objects']:,}",
-        f"  Verified: {t['ok']:,}",
+        f"  Verified: {t['ok']:,}"
+        + ("  (size matches expected)" if size_only else ''),
     ]
-    if report.get('ledger_used') and t.get('skipped'):
+    if size_only and t.get('skipped'):
+        lines.append(f"  Unchecked:{t['skipped']:,} (no expected size — .dir "
+                     f"manifests or blobs not in this checkout)")
+    elif report.get('ledger_used') and t.get('skipped'):
         lines.append(f"  Skipped:  {t['skipped']:,} (unchanged since last "
                      f"verify)")
-    lines.append(f"  Bad:      {t['bad']:,}")
+    lines.append(f"  Bad:      {t['bad']:,}"
+                 + ("  (size mismatch / truncation)" if size_only else ''))
     if t.get('incomplete'):
         lines.append(f"  Incomplete: {t['incomplete']:,} (stray/*.tmp files — "
                      f"possible interrupted transfer)")
@@ -412,14 +435,297 @@ def format_report_summary(report: dict, show_bad: bool = True) -> str:
     if show_bad and report['bad']:
         lines.append("  Corrupt / unreadable objects:")
         for e in report['bad']:
-            lines.append(
-                f"    [{e['status']}] {e['path']}  "
-                f"expected={e['expected_md5']} actual={e['actual_md5']}")
+            if e.get('status') == STATUS_SIZE_MISMATCH:
+                lines.append(
+                    f"    [{e['status']}] {e['path']}  "
+                    f"expected_size={e.get('expected_size')} "
+                    f"actual_size={e.get('size_bytes')}")
+            else:
+                lines.append(
+                    f"    [{e['status']}] {e['path']}  "
+                    f"expected={e['expected_md5']} actual={e['actual_md5']}")
     if show_bad and report.get('incomplete'):
         lines.append("  Incomplete / stray files:")
         for e in report['incomplete']:
             lines.append(f"    [{e['status']}] {e['path']}")
     return "\n".join(lines)
+
+
+# =============================================================================
+# No-egress size verification for cloud remotes (issue #196)
+# =============================================================================
+#
+# Re-hashing a blob on an object store (S3 / Cloudflare R2) means downloading
+# it -- egressing the whole remote, which is cost- and time-prohibitive at TB
+# scale. The dominant corruption class, though -- a truncated object left at
+# the intact file's md5 path by an interrupted transfer -- is always a size
+# mismatch, and an object's size is available from store metadata (a LIST /
+# HEAD giving ContentLength) with no content download at all.
+#
+# This mode lists the remote's objects with their sizes and compares each to
+# the "expected" size DVC recorded for that blob (derived from the repo's
+# tracked .dir manifests / .dvc outs). A size that differs from expected is a
+# definitive corruption signal at zero egress. It does NOT catch same-size
+# content corruption -- that still needs a full re-hash verify.
+
+# A content-addressed blob lives under a 2-char hex prefix directory; anything
+# else under the remote root (e.g. the .dt-verify ledger) is not a blob.
+_PREFIX_RE = re.compile(r'^[0-9a-f]{2}$')
+
+
+def _md5_from_cloud_key(rel: str) -> Tuple[str, str, bool, bool]:
+    """Reconstruct a blob's md5 from its remote-relative path.
+
+    Only the last two path components matter, so this works for both v3
+    (``files/md5/ab/cdef...``) and v2 (``ab/cdef...``) layouts. Returns
+    ``(md5, prefix, is_dir, is_blob_path)`` where ``is_blob_path`` is True only
+    when the parent is a 2-hex prefix directory (so ledger/metadata files under
+    the remote root are ignored rather than mis-flagged).
+    """
+    parts = rel.strip('/').split('/')
+    name = parts[-1]
+    prefix = parts[-2] if len(parts) >= 2 else ''
+    if not _PREFIX_RE.match(prefix):
+        return '', prefix, False, False
+    is_dir = name.endswith('.dir')
+    md5 = expected_md5_for_blob(prefix, name)
+    return md5, prefix, is_dir, True
+
+
+def compare_remote_sizes(
+    expected_sizes: Dict[str, int],
+    remote_objects,
+) -> Tuple[Dict[str, int], List[dict], List[dict]]:
+    """Compare listed remote object sizes against DVC's recorded sizes.
+
+    ``expected_sizes`` maps blob md5 -> expected size in bytes.
+    ``remote_objects`` is an iterable of ``(rel_path, size)`` where ``size`` is
+    the object's byte size from store metadata (or ``None`` if the listing did
+    not report one). Pure function -- no I/O -- so the whole classification is
+    unit-testable without touching an object store.
+
+    Returns ``(totals, bad_entries, incomplete_entries)`` in the same shape as
+    :func:`verify_remote`, so the result feeds :func:`build_report` and
+    ``dt remote quarantine`` unchanged. ``totals['skipped']`` counts objects
+    we could not size-check (``.dir`` manifests, or blobs with no expected size
+    because they are not tracked in this checkout).
+    """
+    totals = _zero_totals()
+    bad_entries: List[dict] = []
+    incomplete_entries: List[dict] = []
+
+    for rel, size in remote_objects:
+        md5, _prefix, is_dir, is_blob = _md5_from_cloud_key(rel)
+        if not is_blob:
+            continue  # not a content-addressed object (e.g. ledger metadata)
+
+        totals['objects'] += 1
+        if size:
+            totals['bytes'] += size
+
+        # A name under a hex prefix that doesn't reconstruct a valid md5 (e.g. a
+        # ``*.tmp`` left by a killed multipart upload) is a stray artefact.
+        if not _HASH_RE.match(md5):
+            totals['incomplete'] += 1
+            incomplete_entries.append({'path': rel,
+                                       'status': STATUS_INCOMPLETE})
+            continue
+
+        # .dir manifests are tiny JSON indexes; DVC records no standalone size
+        # for them, so there is nothing to compare -- leave them to a full
+        # re-hash verify.
+        if is_dir:
+            totals['skipped'] += 1
+            continue
+
+        expected = expected_sizes.get(md5)
+        if expected is None:
+            # Blob not tracked in this checkout (other branch/repo sharing the
+            # bucket, or metadata unavailable). Can't size-check it here.
+            totals['skipped'] += 1
+            continue
+
+        if size is None:
+            totals['bad'] += 1
+            bad_entries.append({
+                'path': rel, 'expected_md5': md5, 'actual_md5': None,
+                'size_bytes': None, 'expected_size': expected,
+                'status': STATUS_UNREADABLE,
+            })
+        elif size == expected:
+            totals['ok'] += 1
+        else:
+            totals['bad'] += 1
+            bad_entries.append({
+                'path': rel, 'expected_md5': md5, 'actual_md5': None,
+                'size_bytes': size, 'expected_size': expected,
+                'status': STATUS_SIZE_MISMATCH,
+            })
+
+    bad_entries.sort(key=lambda e: e['path'])
+    incomplete_entries.sort(key=lambda e: e['path'])
+    return totals, bad_entries, incomplete_entries
+
+
+def build_expected_sizes(
+    remote_name: Optional[str] = None,
+    targets: Optional[List[str]] = None,
+) -> Dict[str, int]:
+    """Map blob md5 -> expected byte size from the repo's tracked metadata.
+
+    Reuses :func:`dt.utils.collect_tracked_entries` (DVC's index) and walks each
+    index's data tree, which expands tracked directories into their per-file
+    entries -- so the map covers directory *members* as well as single-file
+    outs. ``.dir`` manifest objects are omitted (their recorded size is the
+    directory total, not the manifest's own size, so it isn't a size to check).
+    """
+    result = utils.collect_tracked_entries(
+        targets=targets, remote=remote_name, push=True)
+    indexes = result.get('indexes') or {}
+
+    expected: Dict[str, int] = {}
+    for idx in indexes.values():
+        repo_data = idx.data.get('repo')
+        if repo_data is None:
+            continue
+        for _key, entry in repo_data.iteritems():
+            hi = getattr(entry, 'hash_info', None)
+            if not hi or not hi.value:
+                continue
+            md5 = hi.value
+            if md5.endswith('.dir'):
+                continue
+            meta = getattr(entry, 'meta', None)
+            size = getattr(meta, 'size', None) if meta else None
+            if size is not None:
+                expected[md5] = size
+    return expected
+
+
+def resolve_cloud_remote(remote_name: Optional[str]):
+    """Resolve a remote name to ``(name, url, odb)`` for a cloud object store.
+
+    The object database (``odb``) comes from DVC's own cloud plumbing
+    (``repo.cloud.get_remote``), so the remote's credentials, endpoint and R2
+    settings are read from ``.dvc/config`` exactly as push/pull use them -- no
+    separate boto3/credential handling here. Raises :class:`RemoteError` if the
+    remote is local (use the full re-hash verify) or does not exist.
+    """
+    remotes = remote_mod.list_remotes(project_only=False)
+    if not remotes:
+        raise RemoteError("No remotes configured.")
+
+    if remote_name:
+        matches = [r for r in remotes if r[0] == remote_name]
+        if not matches:
+            raise RemoteError(f"No remote named '{remote_name}'")
+        name, url, _ = matches[0]
+    else:
+        defaults = [r for r in remotes if r[2]]
+        if not defaults:
+            raise RemoteError(
+                "No default remote configured; pass a remote name.")
+        name, url, _ = defaults[0]
+
+    if remote_mod.extract_local_path(url) is not None:
+        raise RemoteError(
+            f"Remote '{name}' ({url}) is on a locally-accessible filesystem; "
+            f"--no-egress is for cloud (s3://, R2) remotes. Run a plain "
+            f"'dt remote verify' to re-hash a local remote.")
+
+    try:
+        from dvc.repo import Repo
+    except ImportError as e:  # pragma: no cover - dvc is a hard dependency
+        raise RemoteError(f"DVC internals not available: {e}")
+    try:
+        repo = Repo()
+        remote_obj = repo.cloud.get_remote(name=name)
+        odb = remote_obj.odb
+    except Exception as e:
+        raise RemoteError(
+            f"Could not open cloud remote '{name}' ({url}): {e}")
+    return name, url, odb
+
+
+def list_remote_object_sizes(odb, progress: bool = False):
+    """Yield ``(rel_path, size)`` for every object under a remote's blob root.
+
+    A single recursive LIST over the store (``fs.find(..., detail=True)``)
+    returns every object's size from metadata -- no blob content is downloaded.
+    ``rel_path`` is relative to the blob root so it reconstructs the blob md5
+    and matches the report paths a local verify would produce.
+    """
+    fs = odb.fs
+    base = str(odb.path)
+    try:
+        detail = fs.find(base, detail=True)
+    except Exception as e:
+        raise RemoteError(f"Could not list remote objects under {base}: {e}")
+
+    # fsspec may return a {path: info} dict or (with detail) a list of infos.
+    if isinstance(detail, dict):
+        items = detail.items()
+    else:
+        items = ((info.get('name') if isinstance(info, dict) else info, info)
+                 for info in detail)
+
+    base_strip = base.rstrip('/')
+    count = 0
+    for path, info in items:
+        path = str(path)
+        if path.startswith(base_strip):
+            rel = path[len(base_strip):].lstrip('/')
+        else:
+            rel = path.lstrip('/')
+        if not rel:
+            continue
+        size = None
+        if isinstance(info, dict):
+            size = info.get('size')
+            if size is None:
+                size = info.get('Size')
+        count += 1
+        yield rel, size
+    if progress:
+        print(f"  listed {count} remote object(s)", file=sys.stderr,
+              flush=True)
+
+
+def _layout_for_odb_path(path: str) -> str:
+    """Infer the on-store layout from the blob root path."""
+    return 'dvc-v3' if 'files/md5' in str(path).replace('\\', '/') \
+        else 'dvc-v2'
+
+
+def verify_cloud_remote(
+    remote_name: Optional[str] = None,
+    targets: Optional[List[str]] = None,
+    progress: bool = False,
+) -> Tuple[Dict[str, int], List[dict], List[dict], str, str, str]:
+    """No-egress size verification of a cloud remote (issue #196).
+
+    Lists the remote's objects and their sizes from store metadata and compares
+    each to the size DVC recorded, flagging truncation / size-mismatch without
+    downloading any blob. Returns
+    ``(totals, bad_entries, incomplete_entries, layout, name, url)``.
+    """
+    name, url, odb = resolve_cloud_remote(remote_name)
+    layout = _layout_for_odb_path(getattr(odb, 'path', ''))
+
+    if progress:
+        print(f"Building expected sizes from tracked metadata ...",
+              file=sys.stderr, flush=True)
+    expected_sizes = build_expected_sizes(remote_name=name, targets=targets)
+    if progress:
+        print(f"  {len(expected_sizes):,} blob size(s) known locally",
+              file=sys.stderr, flush=True)
+        print(f"Listing objects on {url} (metadata only, no egress) ...",
+              file=sys.stderr, flush=True)
+
+    objects = list_remote_object_sizes(odb, progress=progress)
+    totals, bad_entries, incomplete_entries = compare_remote_sizes(
+        expected_sizes, objects)
+    return totals, bad_entries, incomplete_entries, layout, name, url
 
 
 # =============================================================================
@@ -703,7 +1009,10 @@ def resolve_local_remote(remote_name: Optional[str]) -> Tuple[str, str, Path]:
     if not local_path:
         raise RemoteError(
             f"Remote '{name}' ({url}) is not on a locally-accessible "
-            f"filesystem; verify requires direct file access.")
+            f"filesystem; full (re-hash) verify requires direct file access.\n"
+            f"For a cloud remote (s3://, R2) use 'dt remote verify --no-egress' "
+            f"to check object sizes from store metadata without downloading "
+            f"blobs.")
 
     path = Path(local_path)
     if not path.exists():

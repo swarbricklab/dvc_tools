@@ -148,6 +148,7 @@ dt remote verify [remote]              # verify (incremental via ledger)
 dt remote verify --full                # ignore ledger, re-hash everything
 dt remote verify --report r.json       # also write a JSON report
 dt remote verify --workers 32          # distribute over 32 compute nodes
+dt remote verify --no-egress           # cloud: size check, no download (see below)
 dt remote verify --status              # instant status, no hashing (see below)
 dt remote verify --recheck             # re-check only the last bad blobs
 dt remote verify --recheck-report r.json  # ...from a specific report file
@@ -156,6 +157,42 @@ dt remote verify --recheck-report r.json  # ...from a specific report file
 Verified blobs are recorded in a per-prefix ledger under `<remote>/.dt-verify/`
 so later runs skip anything unchanged since it last passed; `--full` forces a
 full re-hash and `--no-ledger` disables the ledger entirely.
+
+### `--no-egress` / `--size-only` — cloud remotes, zero download
+
+The full re-hash above reads every blob, so it only works on a
+locally-accessible remote. On an **object-store remote (`s3://`, Cloudflare
+R2)** re-hashing means **downloading every blob** — egressing the whole remote,
+which is cost- and time-prohibitive at TB scale.
+
+`--no-egress` verifies a cloud remote **without downloading any blob content**.
+It lists the remote's objects and their sizes from store metadata (a single
+recursive `LIST`, giving each object's `ContentLength`) and compares each to the
+**expected size** DVC recorded for that blob (derived from the repo's tracked
+`.dir` manifests / `.dvc` outs). A size that differs from expected is a
+definitive corruption signal at zero egress.
+
+```bash
+dt remote verify wgs --no-egress               # size check the s3://wgs remote
+dt remote verify wgs --no-egress --report r.json  # feed quarantine via a report
+```
+
+**What it catches:** truncation / interrupted-transfer corruption — a partial
+object sitting at the intact file's md5 path (`remote size != expected size`).
+This is exactly the failure that made `dt remote verify` necessary, and on R2 it
+is now detectable for ~free instead of egressing the whole remote.
+
+**What it does *not* catch:** same-size content corruption (wrong bytes at the
+right length). Detecting that still requires a full re-hash verify, because the
+only way to confirm content on an object store is to download it. Objects with
+no locally-known expected size (`.dir` manifests, or blobs not tracked in the
+current checkout) are reported as *unchecked*, not bad.
+
+Credentials, endpoint and R2 settings are read from `.dvc/config` via DVC's own
+cloud plumbing — the same path `dvc push`/`pull` use — so no extra configuration
+is needed. The report is the same shape as a full verify (and so feeds
+`dt remote quarantine` via `--report`), with `size_mismatch` as the bad-blob
+status.
 
 ### Persisted bad-blob report
 
