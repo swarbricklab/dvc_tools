@@ -1323,6 +1323,11 @@ def remote_status(remote_name, show_all, deep, json_output):
 @click.option('--no-ledger', is_flag=True,
               help='Do not read or write the incremental verification ledger '
                    'in the remote.')
+@click.option('--no-egress', '--size-only', 'no_egress', is_flag=True,
+              help='Cloud (s3://, R2) remotes: verify object SIZES against '
+                   'DVC metadata without downloading blobs. Catches '
+                   'truncation/interrupted-transfer corruption at zero egress '
+                   '(but not same-size content corruption).')
 @click.option('--status', 'status_flag', is_flag=True,
               help='Instant status from the ledger + a stat-only scan (no '
                    'hashing): verified/bad/unscanned counts and last scan time.')
@@ -1345,8 +1350,9 @@ def remote_status(remote_name, show_all, deep, json_output):
               help='Partial-report directory (internal, used by jobs).')
 @click.option('--verbose', '-v', is_flag=True, help='Print detailed progress.')
 def remote_verify(remote_name, jobs, workers, report, json_output, full,
-                  no_ledger, status_flag, recheck, recheck_report, no_wait,
-                  worker, num_workers, remote_dir, report_dir, verbose):
+                  no_ledger, no_egress, status_flag, recheck, recheck_report,
+                  no_wait, worker, num_workers, remote_dir, report_dir,
+                  verbose):
     """Exhaustively verify that each blob in a remote matches its checksum.
 
     Hashes every object in the remote and compares it to the md5 implied by
@@ -1362,8 +1368,12 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
     later runs skip anything unchanged since it last passed; --full forces a
     full re-hash and --no-ledger disables the ledger entirely.
 
-    Verification reads blobs directly, so the remote must be on a
-    locally-accessible filesystem.
+    Full (re-hash) verification reads blobs directly, so the remote must be on
+    a locally-accessible filesystem. For a cloud remote (s3://, R2) use
+    --no-egress to compare object SIZES against DVC metadata without
+    downloading blobs: this catches truncation / interrupted-transfer
+    corruption (size != expected) at zero egress, but NOT same-size content
+    corruption (that still needs a full re-hash verify).
 
     \b
     Examples:
@@ -1371,6 +1381,7 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
         dt remote verify myremote -j 16        # 16 hashing threads
         dt remote verify --report verify.json  # Write JSON report
         dt remote verify --full                # Ignore ledger, re-hash all
+        dt remote verify --no-egress           # Cloud: size check, no download
         dt remote verify --status              # Instant status, no hashing
         dt remote verify --recheck             # Re-check just the last bad blobs
         dt remote verify --recheck-report r.json  # ...from a specific report
@@ -1382,6 +1393,28 @@ def remote_verify(remote_name, jobs, workers, report, json_output, full,
     use_ledger = not no_ledger
 
     try:
+        # --no-egress: size-only verification of a CLOUD remote from object-store
+        # metadata, without downloading any blob (issue #196). Catches
+        # truncation / interrupted-transfer corruption (size != expected).
+        if no_egress:
+            totals, bad_entries, incomplete_entries, layout, name, url = \
+                remote_verify_mod.verify_cloud_remote(
+                    remote_name, progress=verbose)
+            rep = remote_verify_mod.build_report(
+                name, url, layout, totals, bad_entries, incomplete_entries,
+                jobs or 0, ledger_used=False, size_only=True)
+            if report:
+                with open(report, 'w') as f:
+                    _json.dump(rep, f, indent=2)
+                click.echo(f"Report written to {report}")
+            if json_output:
+                click.echo(_json.dumps(rep, indent=2))
+            else:
+                click.echo(remote_verify_mod.format_report_summary(rep))
+            if rep['totals']['bad'] > 0:
+                raise SystemExit(1)
+            return
+
         # --status: instant ledger + stat-only summary, no hashing.
         if status_flag:
             name, url, path = remote_verify_mod.resolve_local_remote(
