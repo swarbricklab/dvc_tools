@@ -288,6 +288,8 @@ Manage remote storage.
 | `dt remote fsck` | Find symlinked blobs in a remote and optionally repair them |
 | `dt remote copy` | Duplicate a remote's blob tree to a new path |
 | `dt remote move` | Relocate a remote and repoint `.dvc/config` |
+| `dt remote diff <A> <B>` | Report which blobs each of two remotes holds that the other lacks |
+| `dt remote merge <SRC> <DST>` | Top-up DST with blobs present in SRC but missing (half-migrated remotes) |
 | `dt remote archive create <name>` | Archive a remote (stage + deposit in one go) |
 | `dt remote archive stage <name>` | Build inner tarballs in staging (compute-node phase) |
 | `dt remote archive deposit <name>` | Upload staged tarballs to backend (data-mover phase) |
