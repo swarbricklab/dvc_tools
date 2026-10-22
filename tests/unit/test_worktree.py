@@ -319,3 +319,81 @@ class TestAddCachePath:
 
         cache_cmds = [c for c in captured if c[:3] == ['dvc', 'cache', 'dir']]
         assert cache_cmds[0][-1] == "/cache"
+
+
+class TestAddHookOrdering:
+    """Issue #188: the shared post-checkout hook must not relink the new
+    worktree against the not-yet-configured cache.
+
+    The fix is to suppress git hooks for the initial ``git worktree add``, then
+    configure the shared cache, then reconcile exactly once (``dvc checkout``)
+    with the correct cache in place. These tests assert that ordering via the
+    sequence of subprocess calls.
+    """
+
+    def _run_add(self, tmp_path, odb_path):
+        worktree_path = tmp_path / "wt"
+        captured = []
+
+        def capture(cmd, **kwargs):
+            captured.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("dt.worktree.utils.get_cache_dir", return_value=odb_path):
+            with patch("subprocess.run", side_effect=capture):
+                add(str(worktree_path), branch="main")
+        return captured
+
+    def test_worktree_add_suppresses_hooks_when_cache_configured(self, tmp_path):
+        """`git worktree add` must disable hooks so the post-checkout hook does
+        not relink against the unconfigured cache."""
+        captured = self._run_add(tmp_path, Path("/cache/files/md5"))
+
+        add_cmds = [
+            c for c in captured
+            if c[0] == "git" and "worktree" in c and "add" in c
+        ]
+        assert add_cmds, f"no git worktree add call in {captured}"
+        assert "core.hooksPath=/dev/null" in add_cmds[0], (
+            f"git worktree add did not suppress hooks: {add_cmds[0]}"
+        )
+
+    def test_cache_configured_before_relink(self, tmp_path):
+        """`dvc cache dir` (configuring the shared cache) must run before the
+        reconciling `dvc checkout`, so the relink targets the real cache."""
+        captured = self._run_add(tmp_path, Path("/cache/files/md5"))
+
+        def index_of(predicate):
+            for i, c in enumerate(captured):
+                if predicate(c):
+                    return i
+            return None
+
+        worktree_add_idx = index_of(
+            lambda c: c[0] == "git" and "worktree" in c and "add" in c
+        )
+        cache_dir_idx = index_of(lambda c: c[:3] == ["dvc", "cache", "dir"])
+        checkout_idx = index_of(lambda c: c[:2] == ["dvc", "checkout"])
+
+        assert worktree_add_idx is not None
+        assert cache_dir_idx is not None, f"no `dvc cache dir` in {captured}"
+        assert checkout_idx is not None, f"no reconciling `dvc checkout` in {captured}"
+
+        # Cache is configured before the (single) relink, and the relink runs
+        # after the checkout that created the worktree.
+        assert worktree_add_idx < cache_dir_idx < checkout_idx
+
+    def test_no_hook_suppression_or_relink_without_cache(self, tmp_path):
+        """With no shared cache to configure, keep plain behaviour: do not
+        suppress hooks and do not run an extra reconcile."""
+        captured = self._run_add(tmp_path, None)
+
+        add_cmds = [
+            c for c in captured
+            if c[0] == "git" and "worktree" in c and "add" in c
+        ]
+        assert add_cmds
+        assert "core.hooksPath=/dev/null" not in add_cmds[0]
+
+        checkout_cmds = [c for c in captured if c[:2] == ["dvc", "checkout"]]
+        assert not checkout_cmds, f"unexpected reconcile without cache: {checkout_cmds}"

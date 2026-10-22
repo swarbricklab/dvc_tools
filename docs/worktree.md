@@ -32,9 +32,20 @@ own is rejected.
 ### What it does
 
 1. Gets the current DVC cache path from the main repository
-2. Creates the git worktree at the specified path
+2. Creates the git worktree at the specified path, with git hooks suppressed
+   for that initial checkout
 3. Configures DVC in the new worktree to use the same cache
-4. Initializes git submodules recursively
+4. Reconciles DVC-tracked files once (`dvc checkout`) against that shared cache
+5. Initializes git submodules recursively
+
+Git hooks live in the common git directory shared by every worktree, so
+`git worktree add` would otherwise fire the shared `post-checkout` hook inside
+the new worktree *before* its cache is configured. At that point DVC resolves
+the local cache to the default `<worktree>/.dvc/cache` — a directory that never
+exists — and relinks every tracked output to a dangling symlink (issue #188).
+To avoid this, `dt worktree add` disables hooks for the initial checkout,
+configures the shared cache, and then reconciles the workspace exactly once so
+all symlinks point at the real shared cache.
 
 A worktree is a project root in its own right: it has a `.git` file, so `dt`
 treats it as the root and reads and writes `.dt/` inside the worktree. The
