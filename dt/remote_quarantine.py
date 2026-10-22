@@ -21,8 +21,9 @@ with a ``manifest.json`` recording each original path, md5, status and reason.
 import datetime as _dt
 import json
 import os
+import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import remote_verify
 from . import utils
@@ -31,6 +32,135 @@ from .errors import RemoteError
 QUARANTINE_DIRNAME = 'quarantine'
 MANIFEST_FILENAME = 'manifest.json'
 REASON_DIR_ENCLOSING = 'enclosing .dir (forces dvc push to re-examine members)'
+
+# A bare md5 token in an external list: 32 lowercase hex, optionally with a
+# trailing ``.dir`` (DVC directory manifest objects). Inline trailing comments
+# (``<token>  # note``) are stripped before matching.
+_MD5_TOKEN_RE = re.compile(r'^([0-9a-f]{32})(\.dir)?$')
+# Externally-supplied entries carry the verifier's 'mismatch' status: the key
+# is correct but the content is known-wrong (truncated/corrupt), which is
+# exactly what the enclosing-.dir quarantine logic keys off of.
+STATUS_EXTERNAL = remote_verify.STATUS_MISMATCH
+
+
+def read_list_file(path: Path) -> List[str]:
+    """Read an external bad-blob list into raw tokens.
+
+    Format: one md5 or blob path per line. Blank lines and ``#`` comments are
+    ignored, as are inline trailing comments (``<token>  # note``). Only the
+    first whitespace-delimited field on each line is kept, so output from tools
+    that emit ``<md5> <size>`` columns feeds in directly (DVC blob paths never
+    contain spaces).
+    """
+    try:
+        text = Path(path).read_text()
+    except OSError as exc:
+        raise RemoteError(f"Cannot read bad-blob list {path}: {exc}")
+    tokens: List[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith('#'):
+            continue
+        s = re.split(r'\s+#', s, maxsplit=1)[0]  # strip inline comment
+        s = s.split()[0] if s.split() else ''    # first field only
+        if s:
+            tokens.append(s)
+    return tokens
+
+
+def _md5_blob_path(remote_dir: Path, md5: str, is_dir: bool,
+                   layout: str) -> str:
+    """Remote-relative blob path for an md5 under the detected layout.
+
+    For a mixed remote the same md5 could live under either the v3
+    (``files/md5/..``) or v2 (``<prefix>/..``) tree, so prefer whichever path
+    actually exists, defaulting to v3.
+    """
+    prefix, rest = md5[:2], md5[2:]
+    suffix = '.dir' if is_dir else ''
+    v3 = f'files/md5/{prefix}/{rest}{suffix}'
+    v2 = f'{prefix}/{rest}{suffix}'
+    if layout == 'dvc-v2':
+        return v2
+    if layout == 'dvc-mixed':
+        if not (remote_dir / v3).exists() and (remote_dir / v2).exists():
+            return v2
+        return v3
+    return v3  # dvc-v3 (and the sensible default)
+
+
+def entries_from_list(
+    remote_dir: Path,
+    tokens: List[str],
+    layout: Optional[str] = None,
+) -> Tuple[List[dict], List[Tuple[str, str]]]:
+    """Normalise external tokens into the verifier's bad-entry schema.
+
+    Each token is either a bare md5 (32 lowercase hex, optional ``.dir``
+    suffix) or a remote-relative/absolute-under-remote blob path. Every
+    accepted token becomes a ``{path, expected_md5, status}`` dict identical in
+    shape to what ``dt remote verify`` records in ``bad.json`` — so the same
+    ``plan_quarantine`` machinery (including pulling in enclosing ``.dir``
+    objects for bad members) drives it, with no forked logic.
+
+    Returns ``(entries, rejected)``; ``rejected`` is ``[(token, reason), ..]``
+    for tokens that aren't a valid md5 or a path reconstructing a valid md5.
+    Entries are deduplicated by path.
+    """
+    from .archive import operations as ops
+
+    if layout is None:
+        try:
+            layout = ops.detect_source_layout(remote_dir)
+        except Exception:
+            layout = 'dvc-v3'
+
+    entries: List[dict] = []
+    rejected: List[Tuple[str, str]] = []
+    seen_paths = set()
+
+    def _emit(rel: str, md5: Optional[str]):
+        if rel in seen_paths:
+            return
+        seen_paths.add(rel)
+        entries.append({'path': rel, 'expected_md5': md5,
+                        'status': STATUS_EXTERNAL})
+
+    for raw in tokens:
+        tok = raw.strip()
+        if not tok:
+            continue
+        m = _MD5_TOKEN_RE.match(tok.lower())
+        if m:
+            md5 = m.group(1)
+            is_dir = bool(m.group(2))
+            rel = _md5_blob_path(remote_dir, md5, is_dir, layout)
+            _emit(rel, md5)
+            continue
+
+        # Otherwise treat it as a blob path.
+        rel = tok
+        if os.path.isabs(rel):
+            try:
+                rel = str(Path(rel).resolve().relative_to(
+                    remote_dir.resolve()))
+            except ValueError:
+                rejected.append((raw, 'absolute path outside the remote'))
+                continue
+        rel = rel.lstrip('./').rstrip('/')
+        if not rel:
+            rejected.append((raw, 'empty path'))
+            continue
+        name = rel.split('/')[-1]
+        hex_prefix = remote_verify._prefix_key_for_rel(rel, layout)[0][-2:]
+        expected = remote_verify.expected_md5_for_blob(hex_prefix, name)
+        if not remote_verify._HASH_RE.match(expected):
+            rejected.append(
+                (raw, 'not an md5 and not a blob path reconstructing an md5'))
+            continue
+        _emit(rel, expected)
+
+    return entries, rejected
 
 
 def _quarantine_root(remote_dir: Path) -> Path:
