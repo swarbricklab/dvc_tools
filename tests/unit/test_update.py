@@ -387,6 +387,25 @@ class TestMixedTreeRefusal:
         assert [e['relpath'] for e in entries] == ['in_house/a.txt']
         assert unhashed == ['.gitignore'], "the .dvc file is not a divergence"
 
+    def test_listing_terminates_options_before_positionals(self):
+        with patch('dt.update.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='[]')
+            update._get_file_listing('repo', 'p', 'rev')
+        cmd = mock_run.call_args[0][0]
+        assert cmd[-3:] == ['--', 'repo', 'p']
+        assert cmd.index('--rev') < cmd.index('--')
+
+    def test_listing_rejects_option_like_path(self):
+        with patch('dt.update.subprocess.run') as mock_run:
+            with pytest.raises(update.UpdateError, match='invalid import path'):
+                update._get_file_listing('repo', '--cprofile-dump=x', 'rev')
+        mock_run.assert_not_called()
+
+    def test_resolve_rev_rejects_option_like_rev(self, tmp_path):
+        with patch('dt.update.subprocess.run') as mock_run:
+            assert update._resolve_rev(tmp_path, '--all') is None
+        mock_run.assert_not_called()
+
     def test_change_detection_reports_the_mixed_tree(self):
         with patch.object(update, '_compute_source_hash',
                           return_value=(None, 0, ['.gitignore'])):

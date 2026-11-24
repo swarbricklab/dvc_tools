@@ -146,15 +146,21 @@ def construct_dir_from_dvc_list(
         print(f"    Path: {path}")
         print(f"    Revision: {revision[:12]}...")
     
+    if not utils.is_valid_repo_path(path):
+        if verbose:
+            print(f"  ERROR: invalid import path: {path!r}")
+        return None
+
     # Run dvc list to get file listing with hashes
     cmd = [
         'dvc', 'list',
         '--json',
         '--show-hash',
         '--recursive',
+        '--rev', revision,
+        '--',
         repo_url,
         path,
-        '--rev', revision,
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)

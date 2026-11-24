@@ -1406,6 +1406,29 @@ class TestRunRepoImportNetworkFetch:
         stage.is_repo_import = True
         return stage
 
+    @pytest.mark.parametrize('rev,path', [
+        ('--upload-pack=x', 'data.csv'),
+        ('-ofoo', 'data.csv'),
+        ('dead beef', 'data.csv'),
+        ('deadbeef', '-r'),
+    ])
+    def test_rejects_malformed_import_metadata(self, tmp_path, rev, path):
+        """A malformed rev/path fails the stage before any subprocess runs."""
+        stage = self._make_stage(tmp_path)
+        import_info = {'url': 'git@github.com:org/repo.git', 'rev': rev, 'path': path}
+
+        with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('dt.fetch._run_dvc_fetch') as mock_fetch, \
+             patch('dt.tmp.clone_repo') as mock_clone, \
+             patch('subprocess.run') as mock_run:
+            success, message = fetch._run_repo_import_network_fetch(stage, update=True)
+
+        assert success is False
+        assert 'invalid import' in message
+        mock_run.assert_not_called()
+        mock_clone.assert_not_called()
+        mock_fetch.assert_not_called()
+
     def test_default_materialises_via_dvc_fetch_no_mutation(self, tmp_path):
         """Default (no --update): pull via dvc fetch; never run mutating dvc update."""
         stage = self._make_stage(tmp_path)
@@ -1534,8 +1557,20 @@ class TestRecoverImportViaSourceClone:
         mock_cfg.assert_called_once_with(clone_path, '/my/cache')
         # dvc fetch runs inside the clone, targeting the source path.
         cmd = mock_run.call_args[0][0]
-        assert cmd == ['dvc', 'fetch', 'data/dir']
+        assert cmd == ['dvc', 'fetch', '--', 'data/dir']
         assert mock_run.call_args.kwargs.get('cwd') == clone_path
+
+    @pytest.mark.parametrize('rev,path', [('-x', 'data/dir'), ('deadbeef', '--all')])
+    def test_rejects_malformed_args(self, rev, path):
+        """Malformed rev/path never reach clone_repo or dvc fetch."""
+        with patch('dt.tmp.clone_repo') as mock_clone, \
+             patch('subprocess.run') as mock_run:
+            success, msg = fetch._recover_import_via_source_clone(
+                'git@github.com:org/repo.git', path, rev, '/my/cache'
+            )
+        assert success is False
+        mock_clone.assert_not_called()
+        mock_run.assert_not_called()
 
     def test_failure_when_source_fetch_fails(self, tmp_path):
         """A failing dvc fetch in the clone returns failure, not an exception."""

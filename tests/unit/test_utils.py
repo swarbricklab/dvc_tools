@@ -944,3 +944,25 @@ class TestUnresolvableTargetsInsideTrackedDir:
     def test_file_under_untracked_dir_is_unresolvable(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         assert utils.unresolvable_targets(['dir/b.txt']) == ['dir/b.txt']
+
+
+class TestRevAndPathValidation:
+    @pytest.mark.parametrize('rev', [
+        'deadbeef', 'a' * 40, 'main', 'feature/x-y_z', 'v1.2.3', 'HEAD~1',
+        'v1^{commit}', 'release@2024', 'fix#123', 'release=1',
+    ])
+    def test_accepts_normal_revs(self, rev):
+        assert utils.is_valid_git_rev(rev)
+
+    @pytest.mark.parametrize('rev', [
+        None, '', '-x', '--upload-pack=x', 'a b', 'a:b', 'a..b', 'a\nb', 'abc\n', 'a' * 256,
+    ])
+    def test_rejects_malformed_revs(self, rev):
+        assert not utils.is_valid_git_rev(rev)
+
+    @pytest.mark.parametrize('path,ok', [
+        ('data/x.csv', True), ('data', True), ('', False), ('-r', False),
+        ('--all', False), ('a\nb', False), (None, False),
+    ])
+    def test_repo_path(self, path, ok):
+        assert utils.is_valid_repo_path(path) is ok

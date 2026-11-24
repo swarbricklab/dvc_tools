@@ -131,6 +131,8 @@ def _resolve_rev(clone_path: Path, rev: str) -> Optional[str]:
     Returns:
         The full 40-char sha, or None if the spec does not resolve.
     """
+    if not utils.is_valid_git_rev(rev):
+        return None
     for candidate in (rev, f'origin/{rev}'):
         result = subprocess.run(
             ['git', 'rev-parse', '--verify', '--quiet', f'{candidate}^{{commit}}'],
@@ -372,15 +374,19 @@ def _get_file_listing(
     if verbose:
         print(f"  Querying source: dvc list {repo_url} {path} --rev {revision[:12]}...")
     
+    if not utils.is_valid_repo_path(path):
+        raise UpdateError(f"invalid import path: {path!r}")
+
     cmd = [
         'dvc', 'list',
         '--json',
         '--show-hash',
         '--size',
         '--recursive',
+        '--rev', revision,
+        '--',
         repo_url,
         path,
-        '--rev', revision,
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)

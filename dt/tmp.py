@@ -138,6 +138,9 @@ def clone_repo(
     except utils.DependencyError as e:
         raise TmpError(str(e))
 
+    if rev is not None and not utils.is_valid_git_rev(rev):
+        raise TmpError(f"Invalid git revision: {rev!r}")
+
     url = resolve_repository_url(repo_spec, owner)
     repo_id = get_repo_id(repo_spec, owner)
 
@@ -164,7 +167,7 @@ def clone_repo(
 
         # Full clone for dvc.yaml etc and to support dvc diff against any revision
         result = subprocess.run(
-            ['git', 'clone', url, str(repo_path)],
+            ['git', 'clone', '--', url, str(repo_path)],
             capture_output=True,
             text=True,
         )
@@ -199,25 +202,28 @@ def _checkout_rev(repo_path: Path, rev: str, verbose: bool = True) -> Path:
     Raises:
         TmpError: If the revision cannot be fetched or checked out.
     """
+    if not utils.is_valid_git_rev(rev):
+        raise TmpError(f"Invalid git revision: {rev!r}")
+
     if verbose:
         print(f"Checking out revision {rev}...")
 
     # Fetch the specific rev (may not be present in a shallow clone). Try a
     # shallow fetch first, then a full fetch as a fallback.
     fetched = subprocess.run(
-        ['git', 'fetch', '--depth', '1', 'origin', rev],
+        ['git', 'fetch', '--depth', '1', '--end-of-options', 'origin', rev],
         cwd=repo_path, capture_output=True, text=True,
     )
     if fetched.returncode != 0:
         fetched = subprocess.run(
-            ['git', 'fetch', 'origin', rev],
+            ['git', 'fetch', '--end-of-options', 'origin', rev],
             cwd=repo_path, capture_output=True, text=True,
         )
 
     # Prefer checking out the named rev; fall back to FETCH_HEAD (covers the
     # case where the rev was only reachable via the explicit fetch above).
     checkout = subprocess.run(
-        ['git', 'checkout', rev],
+        ['git', 'checkout', '--end-of-options', rev],
         cwd=repo_path, capture_output=True, text=True,
     )
     if checkout.returncode != 0:
@@ -390,12 +396,17 @@ def checkout_path_at_revision(
     Returns:
         True if successful, False otherwise.
     """
+    if not utils.is_valid_git_rev(revision):
+        if verbose:
+            print(f"  Error: invalid revision {revision!r}")
+        return False
+
     # First, fetch the specific commit (it may not be in our shallow clone)
     if verbose:
         print(f"  Fetching revision {revision[:12]}...")
     
     result = subprocess.run(
-        ['git', 'fetch', '--depth', '1', 'origin', revision],
+        ['git', 'fetch', '--depth', '1', '--end-of-options', 'origin', revision],
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -406,7 +417,7 @@ def checkout_path_at_revision(
             print(f"  Warning: Could not fetch revision: {result.stderr.strip()}")
         # Try without depth in case it's already available
         result = subprocess.run(
-            ['git', 'fetch', 'origin', revision],
+            ['git', 'fetch', '--end-of-options', 'origin', revision],
             cwd=repo_path,
             capture_output=True,
             text=True,
@@ -433,7 +444,7 @@ def checkout_path_at_revision(
         print(f"  Checking out revision {revision[:12]}...")
     
     result = subprocess.run(
-        ['git', 'checkout', revision],
+        ['git', 'checkout', '--end-of-options', revision],
         cwd=repo_path,
         capture_output=True,
         text=True,

@@ -1798,6 +1798,11 @@ def _recover_import_via_source_clone(
     from . import tmp as tmp_mod
     from . import import_data as import_mod
 
+    if not utils.is_valid_git_rev(rev_lock):
+        return (False, f"invalid import revision: {rev_lock!r}")
+    if not utils.is_valid_repo_path(source_path):
+        return (False, f"invalid import path: {source_path!r}")
+
     try:
         # Clone (or reuse) the source repo checked out at the pinned rev.
         clone_path = tmp_mod.clone_repo(url, refresh=False, verbose=False, rev=rev_lock)
@@ -1810,7 +1815,7 @@ def _recover_import_via_source_clone(
     except Exception as e:
         return (False, f"could not configure source clone cache: {e}")
 
-    cmd = ['dvc', 'fetch', source_path]
+    cmd = ['dvc', 'fetch', '--', source_path]
     if verbose:
         print(f"  Running (in source clone): {' '.join(cmd)}")
 
@@ -1902,6 +1907,11 @@ def _run_repo_import_network_fetch(
     url = import_info.get('url') if import_info else None
     source_path = import_info.get('path') if import_info else None
 
+    if not utils.is_valid_git_rev(rev_lock):
+        return (False, f"invalid import revision in {stage_path}: {rev_lock!r}")
+    if source_path is not None and not utils.is_valid_repo_path(source_path):
+        return (False, f"invalid import path in {stage_path}: {source_path!r}")
+
     # Parse the .dvc file once and resolve the destination cache up front so
     # the cache-presence check and both fetch attempts can share the result.
     # If the file can't be read here (e.g. unit tests mock import_info but
@@ -1932,7 +1942,7 @@ def _run_repo_import_network_fetch(
 
             # Ensure the specific commit is available in the (possibly shallow) clone
             subprocess.run(
-                ['git', 'fetch', '--depth', '1', 'origin', rev_lock],
+                ['git', 'fetch', '--depth', '1', '--end-of-options', 'origin', rev_lock],
                 cwd=clone_path,
                 capture_output=True,
             )
@@ -1941,7 +1951,7 @@ def _run_repo_import_network_fetch(
                 print(f"  git show {rev_lock[:8]}:{source_path}")
 
             show = subprocess.run(
-                ['git', 'show', f'{rev_lock}:{source_path}'],
+                ['git', 'show', '--end-of-options', f'{rev_lock}:{source_path}'],
                 cwd=clone_path,
                 capture_output=True,
             )

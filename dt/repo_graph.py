@@ -210,7 +210,7 @@ def _clone_or_refresh(
         print(f"  cloning {repo_id}...")
 
     result = subprocess.run(
-        ['git', 'clone', '--quiet', url, str(repo_path)],
+        ['git', 'clone', '--quiet', '--', url, str(repo_path)],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -222,10 +222,12 @@ def _clone_or_refresh(
 
 def _ensure_rev(repo_path: Path, rev: str) -> bool:
     """Make ``rev`` readable in the clone, fetching it if needed."""
+    if not utils.is_valid_git_rev(rev):
+        return False
     if dvc_deps.resolve_ref(rev, repo_path):
         return True
     subprocess.run(
-        ['git', 'fetch', '--quiet', 'origin', rev],
+        ['git', 'fetch', '--quiet', '--end-of-options', 'origin', rev],
         cwd=str(repo_path), capture_output=True, text=True,
     )
     return dvc_deps.resolve_ref(rev, repo_path) is not None

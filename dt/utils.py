@@ -497,6 +497,31 @@ def is_repo_import(dvc_path: Path, repo: Optional[Any] = None) -> bool:
         return False
 
 
+# A git revision: commit id, branch/tag name, or simple rev expression
+# (``HEAD~1``, ``v1^{commit}``). Must not start with '-'; no whitespace or ':'.
+_GIT_REV_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./@{}^~+#=,-]*')
+
+
+def is_valid_git_rev(rev: Any) -> bool:
+    """True if ``rev`` is a well-formed git revision name."""
+    return (
+        isinstance(rev, str)
+        and len(rev) <= 255
+        and bool(_GIT_REV_RE.fullmatch(rev))
+        and '..' not in rev
+    )
+
+
+def is_valid_repo_path(path: Any) -> bool:
+    """True if ``path`` is a usable repo-relative path argument."""
+    return (
+        isinstance(path, str)
+        and bool(path)
+        and not path.startswith('-')
+        and not any(ord(c) < 32 for c in path)
+    )
+
+
 def get_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict[str, Any]]:
     """Extract import information from a .dvc file.
     
@@ -505,9 +530,11 @@ def get_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict
     Args:
         dvc_path: Path to the .dvc file.
         repo: Optional DVC Repo object.
-        
+
     Returns:
         Dictionary with 'url', 'rev', and 'path' keys, or None if not an import.
+        Values are returned as written; check them with :func:`is_valid_git_rev`
+        / :func:`is_valid_repo_path` before handing them to a subprocess.
     """
     try:
         dvc_file = load_dvc_file(dvc_path, repo)

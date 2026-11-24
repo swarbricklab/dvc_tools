@@ -213,7 +213,40 @@ class TestCloneRepo:
         # git clone, then a fetch of the rev, then a checkout of the rev.
         assert calls[0][0:2] == ['git', 'clone']
         assert any(c[0:2] == ['git', 'fetch'] and 'dev' in c for c in calls)
-        assert any(c[0:3] == ['git', 'checkout', 'dev'] for c in calls)
+        assert any(c[0:2] == ['git', 'checkout'] and c[-1] == 'dev' for c in calls)
+
+    @pytest.mark.parametrize('rev', ['--upload-pack=x', '-b', 'a b', 'a:b', 'a..b', ''])
+    def test_rejects_malformed_rev(self, tmp_path, monkeypatch, rev):
+        """clone_repo refuses a malformed rev before git runs."""
+        monkeypatch.chdir(tmp_path)
+        with patch('subprocess.run') as mock_run, \
+             patch('dt.tmp.utils.check_git'):
+            with pytest.raises(TmpError, match="Invalid git revision"):
+                tmp.clone_repo('git@github.com:org/repo.git', refresh=False,
+                               verbose=False, rev=rev)
+        mock_run.assert_not_called()
+
+    def test_checkout_path_at_revision_rejects_malformed_rev(self, tmp_path):
+        with patch('subprocess.run') as mock_run:
+            assert tmp.checkout_path_at_revision(tmp_path, 'x', '-x') is False
+        mock_run.assert_not_called()
+
+    def test_git_args_are_terminated(self, tmp_path, monkeypatch):
+        """User-derived url/rev are placed after an option terminator."""
+        monkeypatch.chdir(tmp_path)
+        calls = []
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stderr='')
+        with patch('subprocess.run', side_effect=run), \
+             patch('dt.tmp.utils.check_git'):
+            tmp.clone_repo('git@github.com:org/repo.git', refresh=False,
+                           verbose=False, rev='v1.0')
+        clone = calls[0]
+        assert clone.index('--') < clone.index('git@github.com:org/repo.git')
+        for c in calls[1:]:
+            if 'v1.0' in c:
+                assert c.index('--end-of-options') < c.index('v1.0')
 
     def test_checkout_rev_falls_back_to_fetch_head(self, tmp_path, monkeypatch):
         """If `git checkout <rev>` fails, fall back to FETCH_HEAD."""
@@ -223,7 +256,7 @@ class TestCloneRepo:
             r = MagicMock()
             r.stderr = ''
             # Only `git checkout <rev>` (named) fails; everything else succeeds.
-            if cmd[0:2] == ['git', 'checkout'] and cmd[2] == 'abc123':
+            if cmd[0:2] == ['git', 'checkout'] and cmd[-1] == 'abc123':
                 r.returncode = 1
                 r.stderr = 'pathspec did not match'
             else:
