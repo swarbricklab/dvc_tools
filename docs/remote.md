@@ -173,7 +173,7 @@ recursive `LIST`, giving each object's `ContentLength`) and compares each to the
 definitive corruption signal at zero egress.
 
 ```bash
-dt remote verify wgs --no-egress               # size check the s3://wgs remote
+dt remote verify wgs --no-egress               # size check the s3://demo-wgs remote
 dt remote verify wgs --no-egress --report r.json  # feed quarantine via a report
 ```
 

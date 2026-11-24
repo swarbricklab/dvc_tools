@@ -663,7 +663,7 @@ class TestVerifyCloudRemote:
         fake_odb = type("ODB", (), {"path": "bucket/wgs/files/md5",
                                     "fs": None})()
         with patch("dt.remote_verify.resolve_cloud_remote",
-                   return_value=("wgs", "s3://wgs", fake_odb)), \
+                   return_value=("wgs", "s3://demo-wgs", fake_odb)), \
              patch("dt.remote_verify.build_expected_sizes",
                    return_value=expected), \
              patch("dt.remote_verify.list_remote_object_sizes",
@@ -714,7 +714,7 @@ class TestNoEgressReport:
                 "actual_md5": None, "size_bytes": 128, "expected_size": 500,
                 "status": rv.STATUS_SIZE_MISMATCH}]
         # v2 layout would normally carry the dos2unix caveat; size-only must not.
-        rep = rv.build_report("wgs", "s3://wgs", "dvc-v2", totals, bad, [],
+        rep = rv.build_report("wgs", "s3://demo-wgs", "dvc-v2", totals, bad, [],
                               jobs=0, ledger_used=False, size_only=True)
         assert rep["size_only"] is True
         assert rep["mode"] == "no-egress"
@@ -737,7 +737,7 @@ class TestNoEgressCliFlag:
         bad_md5 = "b" * 32
         fake_odb = type("ODB", (), {"path": "bucket/wgs/files/md5"})()
         with patch("dt.remote_verify.resolve_cloud_remote",
-                   return_value=("wgs", "s3://wgs", fake_odb)), \
+                   return_value=("wgs", "s3://demo-wgs", fake_odb)), \
              patch("dt.remote_verify.build_expected_sizes",
                    return_value={good: 100, bad_md5: 100}), \
              patch("dt.remote_verify.list_remote_object_sizes",
