@@ -133,7 +133,12 @@ def clone_repository(
             )
 
         if is_current_dir:
-            # Minimal safe support for cloning into '.': only when empty.
+            # Minimal safe support for cloning into '.': only when empty,
+            # and only into a directory of this user's own.
+            try:
+                utils._require_trusted_root(target_dir.resolve())
+            except DTError as e:
+                raise CloneError(str(e))
             if any(target_dir.iterdir()):
                 raise CloneError(
                     "Destination path '.' is not empty. "

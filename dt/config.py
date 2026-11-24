@@ -67,6 +67,40 @@ def get_config_paths() -> dict[str, Path]:
     return paths
 
 
+def _scope_usable(scope: str, root: Optional[Path] = None) -> bool:
+    """Repository scopes count only under a root this user owns; see
+    :func:`utils.is_trusted_root`."""
+    return scope not in ('project', 'local') or utils.is_trusted_root(
+        root if root is not None else utils.find_project_root())
+
+
+_warned_files: set = set()
+
+
+def _repo_file_ok(path: Path) -> bool:
+    """A repository-scope config file counts only if it belongs to this user
+    (not some other group member with write access to the clone)."""
+    try:
+        owner = os.lstat(path).st_uid
+    except OSError:
+        return False
+    if owner == os.geteuid():
+        return True
+    if str(path) not in _warned_files:
+        _warned_files.add(str(path))
+        import sys
+        print(f"Warning: ignoring {path}: it belongs to another user",
+              file=sys.stderr)
+    return False
+
+
+def _require_usable_scope(scope: str) -> None:
+    if not _scope_usable(scope):
+        from .errors import DTError
+        raise DTError(f"Refusing to change {scope} config: "
+                      f"{utils.find_project_root()} belongs to another user")
+
+
 def load_config() -> confuse.Configuration:
     """Load configuration from all scopes in precedence order.
     
@@ -75,12 +109,17 @@ def load_config() -> confuse.Configuration:
     """
     config = confuse.Configuration(APP_NAME, read=False)
     paths = get_config_paths()
+    root = paths['project'].parent.parent
     
     # Load in reverse precedence order (lowest first, so higher overrides)
+    repo_ok = _scope_usable('project', root)
     for scope in reversed(SCOPES):
         path = paths.get(scope)
-        if path and path.exists():
-            config.set_file(path)
+        if not (path and path.exists()):
+            continue
+        if scope in ('project', 'local') and not (repo_ok and _repo_file_ok(path)):
+            continue
+        config.set_file(path)
     
     return config
 
@@ -96,8 +135,10 @@ def load_scope_config(scope: str) -> dict:
     """
     paths = get_config_paths()
     path = paths.get(scope)
+    root = paths['project'].parent.parent
     
-    if path and path.exists():
+    if path and path.exists() and _scope_usable(scope, root) and (
+            scope not in ('project', 'local') or _repo_file_ok(path)):
         with open(path) as f:
             return yaml.safe_load(f) or {}
     return {}
@@ -245,6 +286,7 @@ def set_values(values: dict, scope: str = 'user') -> None:
             :func:`set_value`)
         scope: One of 'local', 'project', 'user', 'system'
     """
+    _require_usable_scope(scope)
     paths = get_config_paths()
     path = paths[scope]
 
@@ -283,6 +325,7 @@ def unset_value(key: str, scope: str = 'user') -> bool:
     Returns:
         True if key was found and removed, False otherwise
     """
+    _require_usable_scope(scope)
     paths = get_config_paths()
     path = paths[scope]
     
@@ -560,6 +603,7 @@ def add_list_value(key: str, value: str, scope: str = 'local') -> bool:
     Returns:
         True if added, False if already exists in that scope
     """
+    _require_usable_scope(scope)
     paths = get_config_paths()
     path = paths[scope]
     
@@ -613,6 +657,7 @@ def remove_list_value(key: str, value: str, scope: str = 'local') -> bool:
     Returns:
         True if removed, False if not found
     """
+    _require_usable_scope(scope)
     paths = get_config_paths()
     path = paths[scope]
     

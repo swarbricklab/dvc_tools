@@ -14,6 +14,16 @@ The `dt` configuration system uses hierarchical scopes, similar to git and DVC.
 The local and project paths are relative to the project root — the git root if
 there is one, else the DVC root, else the current directory.
 
+Each person works in their own clone (the DVC cache is what is shared). dt
+reads a project's `.dt` config and keeps `.dt/` state only if the project root
+(and its `.git`/`.dvc`) belongs to you. Under a root that belongs to someone
+else, dt ignores its `.dt/config.yaml` and `.dt/config.local.yaml` and refuses
+to write `.dt/` state there; a `.dt` config file in your own clone that
+belongs to someone else is ignored too.
+
+Settings that decide where your credentials or secrets go (`secrets.*`) are
+read from user and system config first; see [auth](auth.md).
+
 **Precedence:** local > project > user > system
 
 When a key exists in multiple scopes, the more specific scope wins. Local overrides project, which overrides user, which overrides system.

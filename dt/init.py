@@ -292,6 +292,8 @@ def init_project(
     check_dependencies(require_dvc=not no_dvc, require_git=not no_git)
     
     repo_path = repo_path or Path.cwd()
+    # Each person sets up their own clone; not someone else's directory.
+    utils._require_trusted_root(Path(repo_path))
     project_name = name or utils.get_project_name()
     
     result = {

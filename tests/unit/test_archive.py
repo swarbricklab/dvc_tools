@@ -1536,3 +1536,17 @@ class TestManifestCompressionDefault:
         loaded = manifest_mod.ArchiveManifest.from_dict(data)
 
         assert loaded.compression == 'zstd'
+
+
+def test_registry_rebuild_skips_other_users_project(tmp_path, monkeypatch):
+    """One colleague's clone among the roots does not stop the rebuild."""
+    from dt import utils
+    from dt.archive import registry
+    mine = tmp_path / 'mine'
+    theirs = tmp_path / 'theirs'
+    for root in (mine, theirs):
+        (root / '.dt' / 'archives').mkdir(parents=True)
+    monkeypatch.setattr(utils, 'is_trusted_root',
+                        lambda p: Path(p).resolve() != theirs.resolve())
+    stats = registry.sync_from_roots([theirs, mine])
+    assert stats['skipped_roots'] == 1

@@ -75,6 +75,7 @@ def archives_dir(repo_root: Optional[Path] = None) -> Path:
     namespace.
     """
     root = repo_root or utils.find_project_root()
+    utils._require_trusted_root(Path(root))
     return root / '.dt' / ARCHIVE_DIR_NAME
 
 
@@ -86,6 +87,7 @@ def archives_dir_legacy(repo_root: Optional[Path] = None) -> Path:
     :func:`archives_dir`.
     """
     root = repo_root or utils.find_project_root()
+    utils._require_trusted_root(Path(root))
     return root / '.dvc' / ARCHIVE_DIR_NAME
 
 

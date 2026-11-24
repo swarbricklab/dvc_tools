@@ -1151,6 +1151,48 @@ def create_md5_subdirs(
 # Project root discovery
 # =============================================================================
 
+_warned_untrusted: Set[str] = set()
+_trusted_cache: Dict[Tuple[str, int], bool] = {}
+
+
+def is_trusted_root(path: Path) -> bool:
+    """Whether ``path`` may serve as this user's project root.
+
+    Each person works in their own clone, so the directory, and its
+    ``.git`` / ``.dvc`` entry if present, must belong to this user. A root
+    that does not exist yet (about to be created by this user) qualifies.
+    """
+    euid = os.geteuid()
+    key = (os.path.abspath(str(path)), euid)
+    if key in _trusted_cache:
+        return _trusted_cache[key]
+    try:
+        trusted = os.stat(path).st_uid == euid
+        for marker in ('.git', '.dvc'):
+            if trusted:
+                try:
+                    trusted = os.lstat(Path(path) / marker).st_uid == euid
+                except FileNotFoundError:
+                    pass
+    except FileNotFoundError:
+        trusted = True
+    except OSError:
+        trusted = False
+    if not trusted:
+        _note_untrusted(Path(path))
+    _trusted_cache[key] = trusted
+    return trusted
+
+
+def _note_untrusted(path: Path) -> None:
+    key = str(path)
+    if key not in _warned_untrusted:
+        _warned_untrusted.add(key)
+        import sys
+        print(f"dt: ignoring {path} as a project: it belongs to another user "
+              f"(work in your own clone)", file=sys.stderr)
+
+
 def find_dvc_root(start: Optional[Path] = None) -> Optional[Path]:
     """Find the DVC project root using DVC internals.
     
@@ -1199,6 +1241,9 @@ def find_git_root(start: Optional[Path] = None) -> Optional[Path]:
 
 def find_project_root(start: Optional[Path] = None) -> Path:
     """Find the project root (git root preferred, then DVC root, then cwd).
+
+    This locates the root only; whether dt may read its ``.dt`` config or
+    keep state there is :func:`is_trusted_root`'s question.
     
     Args:
         start: Starting path for the search. Defaults to cwd.
@@ -1233,11 +1278,20 @@ def get_dt_dir(create: bool = True) -> Path:
         Path to the .dt directory.
     """
     root = find_project_root()
+    _require_trusted_root(root)
     dt_dir = root / '.dt'
     _require_real_dir(dt_dir)
     if create:
         dt_dir.mkdir(parents=True, exist_ok=True)
     return dt_dir
+
+
+def _require_trusted_root(root: Path) -> None:
+    """Refuse to keep dt state under a directory another user controls."""
+    if not is_trusted_root(root):
+        from .errors import DTError
+        raise DTError(f"Refusing to use {root}/.dt: {root} belongs to another "
+                      f"user (work in your own clone)")
 
 
 def _require_real_dir(path: Path) -> None:
@@ -1262,7 +1316,9 @@ def dt_subdir(*parts: str, root: Optional[Path] = None, create: bool = True) -> 
     Repository content can commit links under ``.dt``; this never follows
     one. ``root`` defaults to the project root.
     """
-    cur = Path(root if root is not None else find_project_root()) / '.dt'
+    base = Path(root if root is not None else find_project_root())
+    _require_trusted_root(base)
+    cur = base / '.dt'
     for part in (None, *parts):
         if part is not None:
             cur = cur / part
@@ -1295,6 +1351,7 @@ def ensure_dt_gitignore(repo_path: Optional[Path] = None) -> Path:
     """
     if repo_path is None:
         repo_path = find_project_root()
+    _require_trusted_root(Path(repo_path))
     dt_dir = repo_path / '.dt'
     gitignore = dt_dir / '.gitignore'
     if os.path.islink(dt_dir) or os.path.islink(gitignore) or (

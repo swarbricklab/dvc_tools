@@ -31,7 +31,7 @@ import yaml
 
 from .. import config as cfg
 from .. import utils
-from ..errors import ArchiveError
+from ..errors import ArchiveError, DTError
 from .manifest import ArchiveManifest, list_manifests
 
 
@@ -333,7 +333,7 @@ def sync_from_roots(roots: List[Path]) -> Dict[str, int]:
             continue
         try:
             manifests = list_manifests(repo_root=root)
-        except ArchiveError:
+        except DTError:  # incl. ArchiveError, and a root of another user's
             skipped += 1
             continue
         for m in manifests:

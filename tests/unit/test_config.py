@@ -1017,3 +1017,20 @@ class TestTrustedValues:
                     'secrets:\n  prefix: steer-\n')
         assert secret_store_set_by_repo() is False
         assert _configured_source('r') == 'gcp:site/dvc-remote-r'
+
+    def test_repo_config_planted_by_third_user_is_ignored(self, isolated_config, monkeypatch):
+        d = isolated_config
+        local = os.path.join(d['project'], '.dt', 'config.local.yaml')
+        self._write(local, 'owner: planted\n')
+        real_lstat = os.lstat
+
+        class _St:
+            def __init__(self, st):
+                self.st_uid = os.geteuid() + 7
+                self.st_mode = st.st_mode
+
+        monkeypatch.setattr(cfg.os, 'lstat',
+                            lambda p, *a, **k: _St(real_lstat(p)) if str(p) == local
+                            else real_lstat(p, *a, **k))
+        assert cfg.get_value('owner') != 'planted'
+        assert cfg.load_scope_config('local') == {}

@@ -1173,3 +1173,82 @@ class TestDtDirLinksAreRefused:
             with pytest.raises(DTError):
                 cfg.set_values({'owner': 'x'}, scope='local')
         assert list(outside.iterdir()) == []
+
+
+class TestProjectRootMustBeTrusted:
+    """A .git/.dt in someone else's directory is not this user's project."""
+
+    @pytest.fixture
+    def foreign(self, tmp_path, monkeypatch):
+        """tmp_path with a .git and .dt/config.yaml, made to look foreign."""
+        (tmp_path / '.git').mkdir()
+        (tmp_path / '.dt').mkdir()
+        (tmp_path / '.dt' / 'config.yaml').write_text('owner: someone-else\n')
+        sub = tmp_path / 'work'
+        sub.mkdir()
+        monkeypatch.chdir(sub)
+        real = os.geteuid()
+        monkeypatch.setattr(utils.os, 'geteuid', lambda: real + 1)
+        monkeypatch.setattr(utils, '_trusted_cache', {})
+        return tmp_path
+
+    def test_foreign_root_is_located_but_not_trusted(self, foreign):
+        assert utils.find_project_root() == foreign.resolve()
+        assert utils.is_trusted_root(foreign.resolve()) is False
+
+    def test_foreign_project_config_is_ignored(self, foreign):
+        from dt import config as cfg
+        assert cfg.get_value('owner') != 'someone-else'
+        assert cfg.load_scope_config('project') == {}
+
+    def test_no_dt_state_or_config_writes_there(self, foreign):
+        """Not in the foreign root, and not in the user's own subfolder of it."""
+        from dt import config as cfg
+        from dt.errors import DTError
+        for call in (utils.get_dt_dir, lambda: utils.dt_subdir('tmp'),
+                     utils.ensure_dt_gitignore,
+                     lambda: cfg.set_value('owner', 'x', scope='project'),
+                     lambda: cfg.set_value('owner', 'x', scope='local'),
+                     lambda: cfg.unset_value('owner', scope='project')):
+            with pytest.raises(DTError):
+                call()
+        assert not (foreign / '.dt' / 'tmp').exists()
+        assert not (foreign / '.dt' / '.gitignore').exists()
+        assert not (foreign / 'work' / '.dt').exists()
+
+    def test_init_refuses_before_doing_anything(self, foreign):
+        from dt import init as init_mod
+        from dt.errors import DTError
+        with patch.object(init_mod, 'init_git') as git:
+            with pytest.raises(DTError):
+                init_mod.init_project(repo_path=foreign, verbose=False)
+        git.assert_not_called()
+
+
+class TestTrustedRootDetails:
+    def test_foreign_marker_in_own_dir(self, tmp_path, monkeypatch):
+        (tmp_path / '.git').mkdir()
+        real_lstat = os.lstat
+        st = real_lstat(tmp_path)
+
+        class _Other:
+            st_uid = os.geteuid() + 1
+            st_mode = st.st_mode
+        monkeypatch.setattr(utils, '_trusted_cache', {})
+        monkeypatch.setattr(utils.os, 'lstat', lambda p, *a, **k: _Other()
+                            if str(p).endswith('/.git') else real_lstat(p, *a, **k))
+        assert utils.is_trusted_root(tmp_path) is False
+
+    def test_root_not_yet_created_is_ours(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(utils, '_trusted_cache', {})
+        assert utils.is_trusted_root(tmp_path / 'new') is True
+
+    def test_untrusted_note_printed_once(self, tmp_path, monkeypatch, capsys):
+        real = os.geteuid()
+        monkeypatch.setattr(utils.os, 'geteuid', lambda: real + 1)
+        monkeypatch.setattr(utils, '_trusted_cache', {})
+        monkeypatch.setattr(utils, '_warned_untrusted', set())
+        for _ in range(3):
+            utils.is_trusted_root(tmp_path)
+            utils._trusted_cache.clear()
+        assert capsys.readouterr().err.count('ignoring') == 1
