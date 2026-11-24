@@ -18,12 +18,14 @@ fails that hash check, cannot be safely recovered from the link alone and are
 reported for manual rebuild (e.g. ``dt update`` from a repo that has the data).
 """
 
+import errno
+import hashlib
 import os
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from . import utils
 from .errors import RemoteError
 
 
@@ -230,45 +232,66 @@ def _repair_one(
         return
 
     real = p.resolve()
-    tmp = p.with_name(p.name + ".fsck-tmp")
+    tmp = None
     try:
-        # Copy the dereferenced content to a temp file in the same directory.
-        with open(real, 'rb') as src, open(tmp, 'wb') as dst:
-            while True:
-                chunk = src.read(1024 * 1024)
-                if not chunk:
-                    break
-                dst.write(chunk)
+        # Exclusive, no-follow temp file under an unpredictable name in the
+        # same directory; everything after creation works on its descriptor.
+        fd, tmp = _create_temp_beside(p)
+        try:
+            h = hashlib.md5()
+            with open(real, 'rb') as src:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    os.write(fd, chunk)
+                    h.update(chunk)
+            actual = h.hexdigest()
 
-        # Verify the copy matches the md5 implied by the object's path before
-        # we let it stand in a hash-named slot.
-        if finding.expected_md5 is not None:
-            actual = utils.md5_file(tmp)
-            finding.md5_ok = (actual == finding.expected_md5)
-            if not finding.md5_ok:
-                tmp.unlink(missing_ok=True)
-                finding.outcome = (
-                    f"skipped: target content md5 {actual[:12]}… != "
-                    f"path-implied {finding.expected_md5[:12]}…"
-                )
-                return
+            # Verify the copy matches the md5 implied by the object's path
+            # before we let it stand in a hash-named slot.
+            if finding.expected_md5 is not None:
+                finding.md5_ok = (actual == finding.expected_md5)
+                if not finding.md5_ok:
+                    finding.outcome = (
+                        f"skipped: target content md5 {actual[:12]}… != "
+                        f"path-implied {finding.expected_md5[:12]}…"
+                    )
+                    return
 
-        # Read-only, like every other remote blob.
-        os.chmod(tmp, 0o444)
+            # Read-only, like every other remote blob.
+            os.fchmod(fd, 0o444)
+        finally:
+            os.close(fd)
         # Atomic swap: replaces the symlink with the real file.
         os.replace(tmp, p)
+        tmp = None
         finding.repaired = True
         finding.outcome = "repaired: replaced symlink with real copy"
         if verbose:
             print(f"  repaired {finding.rel}")
     except OSError as e:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         finding.outcome = f"error: {e}"
         if verbose:
             print(f"  FAILED {finding.rel}: {e}")
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _create_temp_beside(p: Path):
+    """Create a new, empty file next to ``p``: random name, O_EXCL, no-follow."""
+    for _ in range(16):
+        tmp = p.with_name(f".{p.name}.fsck-{secrets.token_hex(8)}")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            return fd, tmp
+        except FileExistsError:
+            continue
+    raise OSError(errno.EEXIST, "could not create a temporary file")
 
 
 def fsck_remote(

@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -153,3 +154,29 @@ class TestReport:
         summary = report.other_owners()
         assert summary == {"alice": {"total": 2, "repairable": 1}}
         assert len(report.owned_by_others) == 2
+
+
+class TestRepairTempFile:
+    def test_planted_tmp_link_is_never_written_through(self, remote_with_symlinks, tmp_path):
+        remote, _cache, md5s = remote_with_symlinks
+        _layout, findings = remote_fsck.scan_remote_symlinks(remote)
+        ok = next(f for f in findings if f.expected_md5 == md5s["ok"])
+        sentinel = tmp_path / "sentinel.txt"
+        sentinel.write_text("keep me")
+        os.chmod(sentinel, 0o640)
+        # The old predictable temp name, planted as a link to the sentinel.
+        os.symlink(sentinel, ok.path.with_name(ok.path.name + ".fsck-tmp"))
+        remote_fsck._repair_one(ok, os.getuid())
+        assert sentinel.read_text() == "keep me"
+        assert stat.S_IMODE(os.stat(sentinel).st_mode) == 0o640
+        assert ok.repaired is True
+        assert not os.path.islink(ok.path)
+        assert stat.S_IMODE(os.stat(ok.path).st_mode) == 0o444
+
+    def test_failed_verify_leaves_no_temp_file(self, remote_with_symlinks):
+        remote, _cache, md5s = remote_with_symlinks
+        _layout, findings = remote_fsck.scan_remote_symlinks(remote)
+        bad = next(f for f in findings if f.expected_md5 == md5s["bad"])
+        before = set(os.listdir(bad.path.parent))
+        remote_fsck._repair_one(bad, os.getuid())
+        assert set(os.listdir(bad.path.parent)) == before
