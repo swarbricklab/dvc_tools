@@ -257,16 +257,44 @@ def _walk(dir_fd: int, rel_dir: str, create: bool = False,
         raise
 
 
-def _move_entry(sdir: int, name: str, ddir: int) -> None:
+_RENAME_NOREPLACE = 1
+
+
+def _rename_noreplace(sdir: int, name: str, ddir: int) -> bool:
+    """``renameat2(..., RENAME_NOREPLACE)``. True when done; False when the
+    system or filesystem does not offer it. Raises ``FileExistsError`` if
+    the destination exists, and other errors as ``OSError``."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        fn = libc.renameat2
+    except (OSError, AttributeError):
+        return False
+    raw = os.fsencode(name)
+    if fn(sdir, raw, ddir, raw, _RENAME_NOREPLACE) == 0:
+        return True
+    err = ctypes.get_errno()
+    if err in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+        return False
+    raise OSError(err, os.strerror(err), name)
+
+
+def _move_entry(sdir: int, name: str, ddir: int, noreplace: bool = False) -> None:
     """Move entry ``name`` from directory fd ``sdir`` to ``ddir`` (same name).
 
     A plain rename moves the entry itself (a link stays a link). Only a
     genuine cross-filesystem rename falls back to copy+unlink: a regular file
     is copied through a descriptor opened without following links, a link is
     recreated as a link; nothing's mode is changed. Any other error (e.g. a
-    sticky directory) is raised.
+    sticky directory) is raised. With ``noreplace`` an existing destination
+    is never replaced (``FileExistsError``) where the filesystem allows
+    checking that atomically.
     """
     try:
+        if noreplace and _rename_noreplace(sdir, name, ddir):
+            return
+        if noreplace and _lexists_in(ddir, name):
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), name)
         os.rename(name, name, src_dir_fd=sdir, dst_dir_fd=ddir)
         return
     except OSError as e:
@@ -581,7 +609,7 @@ def list_quarantines(remote_dir: Path) -> List[dict]:
         return []
     out = []
     for d in sorted(root.iterdir(), reverse=True):
-        if not d.is_dir():
+        if d.is_symlink() or not d.is_dir():
             continue
         manifest = d / MANIFEST_FILENAME
         info = {'timestamp': d.name, 'path': str(d), 'count': None,
@@ -667,10 +695,11 @@ def _restore_batch(rfd: int, qfd: int, qdir: Path, manifest_path: Path,
                 continue
             ddir = _walk(rfd, rel_dir, create=True)
             try:
-                if _lexists_in(ddir, name):
+                try:
+                    _move_entry(sdir, name, ddir, noreplace=True)
+                except FileExistsError:
                     skipped.append(rel)  # already re-pushed; leave quarantine copy
                     continue
-                _move_entry(sdir, name, ddir)
                 restored.append(rel)
                 if verbose:
                     print(f"  restored {rel}")
