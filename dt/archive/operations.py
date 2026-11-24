@@ -47,6 +47,7 @@ import json
 import os
 import shutil
 import subprocess
+import stat
 import sys
 import threading
 import time
@@ -825,8 +826,8 @@ def _archive_qxub_config() -> Dict[str, str]:
         or cfg.get_value('qxub.walltime', DEFAULT_STAGE_WALLTIME)
     )
     return {
-        'env':      str(cfg.get_value('archive.qxub_env')
-                        or cfg.get_value('qxub.env', 'dt')),
+        'env':      str(cfg.get_own_value('archive.qxub_env')
+                        or cfg.get_own_value('qxub.env', 'dt')),
         'queue':    str(cfg.get_value('archive.qxub_queue')
                         or cfg.get_value('qxub.queue', 'normal')),
         'walltime': _normalize_walltime(walltime_raw),
@@ -1890,13 +1891,21 @@ def restore_archive(
     # leave it alone (the archive is still the canonical copy of
     # everything the user didn't ask for).
     stale_signpost = to_path / _signpost.SIGNPOST_FILENAME
-    if stale_signpost.is_file():
-        try:
-            stale_signpost.unlink()
+    try:
+        root_fd = os.open(str(to_path), _OPEN_DIR)
+    except OSError:
+        return written
+    try:
+        st = os.stat(_signpost.SIGNPOST_FILENAME, dir_fd=root_fd,
+                     follow_symlinks=False)
+        if stat.S_ISREG(st.st_mode):
+            os.unlink(_signpost.SIGNPOST_FILENAME, dir_fd=root_fd)
             if verbose:
                 print(f"  removed stale signpost {stale_signpost}", flush=True)
-        except OSError:
-            pass
+    except OSError:
+        pass
+    finally:
+        os.close(root_fd)
     return written
 
 
@@ -2066,7 +2075,7 @@ def _extract_inner(local_tar: Path, to_path: Path, compression: str,
 def _open_blob_dir(to_path: Path, parts: List[str]) -> int:
     """Open ``to_path/<parts>``, creating missing parts, never following a link."""
     flags = os.O_RDONLY | os.O_DIRECTORY
-    fd = os.open(to_path, flags)
+    fd = os.open(to_path, flags | os.O_NOFOLLOW)
     try:
         for part in parts:
             try:
@@ -2178,13 +2187,37 @@ def _manifest_remote_path(manifest: ArchiveManifest, action: str) -> Path:
 _OPEN_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
 
 
-def _remove_tree_under(root: Path, parts) -> None:
+def _dir_identity(st) -> Tuple[int, int]:
+    if not stat.S_ISDIR(st.st_mode):
+        raise ArchiveError("not a directory")
+    return (st.st_dev, st.st_ino)
+
+
+def _require_same_dir(path: Path, expect: Tuple[int, int]) -> None:
+    """*path* must still be the directory that was checked."""
+    try:
+        same = _dir_identity(os.lstat(path)) == expect
+    except (OSError, ArchiveError):
+        same = False
+    if not same:
+        raise ArchiveError(
+            f"Refusing to continue: {path} changed while it was being checked.")
+
+
+_MAX_PRUNE_DEPTH = 8
+
+
+def _remove_tree_under(root: Path, parts, expect=None) -> None:
     """Delete ``root/<parts...>`` and everything in it, reaching each
     directory through a handle opened without following links, so a link
-    planted anywhere below *root* cannot redirect the delete."""
+    planted anywhere below *root* cannot redirect the delete. With
+    *expect*, *root* must still be that ``(st_dev, st_ino)``."""
     *parents, last = parts
     fd = os.open(str(root), _OPEN_DIR)
     try:
+        if expect is not None and _dir_identity(os.fstat(fd)) != expect:
+            raise ArchiveError(
+                f"Refusing to continue: {root} changed while it was being checked.")
         for part in parents:
             nfd = os.open(part, _OPEN_DIR, dir_fd=fd)
             os.close(fd)
@@ -2194,14 +2227,16 @@ def _remove_tree_under(root: Path, parts) -> None:
         os.close(fd)
 
 
-def _remove_entry_tree(parent_fd: int, name: str) -> None:
+def _remove_entry_tree(parent_fd: int, name: str, depth: int = 0) -> None:
+    if depth > _MAX_PRUNE_DEPTH:
+        raise OSError(f"directories nested deeper than a DVC remote's at {name!r}")
     fd = os.open(name, _OPEN_DIR, dir_fd=parent_fd)
     try:
         with os.scandir(fd) as it:
             entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
         for entry, is_dir in entries:
             if is_dir:
-                _remove_entry_tree(fd, entry)
+                _remove_entry_tree(fd, entry, depth + 1)
             else:
                 os.unlink(entry, dir_fd=fd)
     finally:
@@ -2442,6 +2477,10 @@ def prune_archive(
     manifest = load_manifest(name, repo_root=repo_root)
     source_remote = _manifest_remote_path(manifest, 'prune')
     layout = manifest.source_layout or LAYOUT_DVC_V3
+    try:
+        root_id = _dir_identity(os.lstat(source_remote))
+    except OSError as exc:
+        raise ArchiveError(f"Nothing to prune: cannot read {source_remote} ({exc})")
     _require_project_remote(source_remote, repo_root, 'prune')
     _refuse_project_cache(source_remote, repo_root, 'prune')
     if source is not None:
@@ -2544,6 +2583,7 @@ def prune_archive(
 
     # Drop the signpost BEFORE rmtree so anyone who lists the remote
     # mid-delete sees the explanation rather than an empty-ish dir.
+    _require_same_dir(source_remote, root_id)
     signpost_path = _signpost.write_signpost(
         source_remote, manifest,
         pruned_by=_current_user(),
@@ -2551,8 +2591,16 @@ def prune_archive(
     )
     print(f"Wrote signpost {signpost_path}", flush=True)
 
-    for target in prune_targets:
-        _remove_tree_under(source_remote, target.relative_to(source_remote).parts)
+    try:
+        for target in prune_targets:
+            _remove_tree_under(source_remote,
+                               target.relative_to(source_remote).parts,
+                               expect=root_id)
+    except (OSError, RecursionError) as exc:
+        raise ArchiveError(
+            f"Prune stopped part-way through deleting under {source_remote} "
+            f"({exc}); the signpost is in place and the archive is intact. "
+            f"Check the directory, then rerun prune.")
     repo = repo_root or utils.find_project_root()
     _registry.record_pruned(name, repo, now_iso())
     return PruneResult(

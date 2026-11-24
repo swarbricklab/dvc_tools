@@ -1806,6 +1806,30 @@ class TestRestoreAndPruneStayInTheProjectsRemote:
             ops._refuse_project_cache(tmp_path / '.dvc' / 'cache', tmp_path, 'prune')
         ops._refuse_project_cache(tmp_path / 'remote', tmp_path, 'prune')
 
+    def test_tree_removal_refuses_swapped_root(self, tmp_path):
+        from dt.errors import ArchiveError
+        a = tmp_path / 'a' / 'files' / 'md5' / 'ab'
+        a.mkdir(parents=True)
+        b = tmp_path / 'b' / 'files' / 'md5' / 'ab'
+        b.mkdir(parents=True)
+        (b / 'obj').write_text('keep')
+        checked = ops._dir_identity(os.lstat(tmp_path / 'a'))
+        os.rename(tmp_path / 'a', tmp_path / 'a.moved')
+        os.rename(tmp_path / 'b', tmp_path / 'a')
+        with pytest.raises(ArchiveError, match='changed'):
+            ops._remove_tree_under(tmp_path / 'a', ('files', 'md5'), expect=checked)
+        with pytest.raises(ArchiveError, match='changed'):
+            ops._require_same_dir(tmp_path / 'a', checked)
+        assert (tmp_path / 'a' / 'files' / 'md5' / 'ab' / 'obj').exists()
+
+    def test_tree_removal_stops_at_unusual_depth(self, tmp_path):
+        deep = tmp_path / 'r' / 'files' / 'md5'
+        for i in range(12):
+            deep = deep / 'd'
+        deep.mkdir(parents=True)
+        with pytest.raises(OSError, match='nested deeper'):
+            ops._remove_tree_under(tmp_path / 'r', ('files', 'md5'))
+
     def test_project_cache_unreadable_is_refused(self, tmp_path, monkeypatch):
         from dt.errors import ArchiveError
         import dvc.repo
