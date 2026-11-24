@@ -629,7 +629,7 @@ def _lock_out_paths(rev: str) -> Optional[set]:
         return None
 
     result = subprocess.run(
-        ['git', 'show', f'{rev}:dvc.lock'],
+        ['git', 'show', '--end-of-options', f'{rev}:dvc.lock'],
         capture_output=True, text=True,
     )
     if result.returncode != 0:

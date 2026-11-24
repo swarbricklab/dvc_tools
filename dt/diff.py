@@ -1342,7 +1342,7 @@ def content_diff(
             if verbose:
                 print(f"Fetching    : {path!r} @ {rev!r}", file=sys.stderr)
             result = subprocess.run(
-                ['dvc', 'get', '--rev', rev, '.', path, '--out', str(dest)],
+                ['dvc', 'get', f'--rev={rev}', f'--out={dest}', '--', '.', path],
                 capture_output=True, text=True, cwd=repo_abs,
             )
             if result.returncode != 0:
@@ -1350,7 +1350,7 @@ def content_diff(
                 # Use `dvc list` rather than checking for a .dvc file, since the
                 # file may be a pipeline output (dvc.yaml/dvc.lock) with no .dvc file.
                 probe = subprocess.run(
-                    ['dvc', 'list', '--rev', rev, '.', path],
+                    ['dvc', 'list', f'--rev={rev}', '--', '.', path],
                     capture_output=True, cwd=repo_abs,
                 )
                 if probe.returncode != 0:

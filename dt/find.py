@@ -163,17 +163,16 @@ def find_hash_in_repo(
         print(f"  Searching for hash {search_hash[:12]}... at {rev_str}...")
     
     # Build command
-    cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', str(repo), '.']
-    if revision:
-        cmd.extend(['--rev', revision])
-    
+    rev_opt = [f'--rev={revision}'] if revision else []
+    cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', *rev_opt,
+           '--', str(repo), '.']
+
     # If repo is a local path, run from that directory
     cwd = str(repo) if Path(repo).is_dir() else None
     if cwd:
         # For local repos, use '.' as the repo arg
-        cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', '.']
-        if revision:
-            cmd.extend(['--rev', revision])
+        cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', *rev_opt,
+               '--', '.']
     
     result = subprocess.run(
         cmd,
