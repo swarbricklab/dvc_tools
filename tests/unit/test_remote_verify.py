@@ -316,6 +316,33 @@ class TestBadReport:
     def test_load_missing_returns_none(self, tmp_path):
         assert rv.load_bad_report(tmp_path / "nope.json") is None
 
+    def test_report_write_leaves_planted_links_alone(self, tmp_path):
+        import os, stat
+        remote = tmp_path / "remote"
+        (remote / "files" / "md5").mkdir(parents=True)
+        ledger = remote / rv.LEDGER_DIRNAME
+        ledger.mkdir()
+        mine = tmp_path / "mine.txt"
+        mine.write_text("keep")
+        mine.chmod(0o600)
+        os.symlink(mine, ledger / f'.{rv.BAD_REPORT_FILENAME}.tmp')
+        rep = {'report_version': 2, 'bad': [], 'incomplete': []}
+        assert rv.write_bad_report(remote, rep) is True
+        assert mine.read_text() == "keep"
+        assert stat.S_IMODE(mine.stat().st_mode) == 0o600
+        assert not (ledger / rv.BAD_REPORT_FILENAME).is_symlink()
+
+    def test_ledger_write_leaves_planted_links_alone(self, tmp_path):
+        import os
+        ledger = tmp_path / "ledger"
+        ledger.mkdir()
+        mine = tmp_path / "mine.txt"
+        mine.write_text("keep")
+        os.symlink(mine, ledger / '.ab.json.tmp')
+        assert rv._write_prefix_ledger(ledger, 'ab', {'x': [1, 2]}) is True
+        assert mine.read_text() == "keep"
+        assert rv._load_prefix_ledger(ledger, 'ab') == {'x': [1, 2]}
+
 
 # =============================================================================
 # recheck_entries (issue #152)

@@ -171,23 +171,52 @@ def _load_prefix_ledger(ledger_dir: Path, key: str) -> Dict[str, list]:
         return {}
 
 
+def _write_ledger_json(ledger_dir: Path, name: str, text: str) -> bool:
+    """Atomically replace ``ledger_dir/name`` with ``text`` (mode 0o664).
+
+    The ledger dir is shared, so the temporary file gets a random name and is
+    created exclusively, and both it and the final name are reached through
+    the directory's own descriptor without following links.
+    """
+    import secrets
+    try:
+        dfd = os.open(ledger_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    tmp = f'.{name}.{secrets.token_hex(8)}.tmp'
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=dfd)
+        try:
+            with os.fdopen(fd, 'w') as f:
+                fd = None
+                f.write(text)
+                f.flush()
+                try:
+                    os.fchmod(f.fileno(), 0o664)  # group-writable for shared remotes
+                except OSError:
+                    pass
+        finally:
+            if fd is not None:
+                os.close(fd)
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+        return False
+    finally:
+        os.close(dfd)
+
+
 def _write_prefix_ledger(
     ledger_dir: Path, key: str, mapping: Dict[str, list],
 ) -> bool:
     """Atomically write a per-prefix ledger. Best-effort: returns success."""
-    final = _ledger_file(ledger_dir, key)
-    tmp = ledger_dir / f'.{key}.json.tmp'
-    try:
-        with open(tmp, 'w') as f:
-            json.dump(mapping, f)
-        os.replace(tmp, final)
-        try:
-            os.chmod(final, 0o664)  # group-writable for shared remotes
-        except OSError:
-            pass
-        return True
-    except OSError:
-        return False
+    return _write_ledger_json(ledger_dir, _ledger_file(ledger_dir, key).name,
+                              json.dumps(mapping))
 
 
 # =============================================================================
@@ -218,19 +247,8 @@ def write_bad_report(remote_dir: Path, report: dict) -> bool:
         'bad': report.get('bad', []),
         'incomplete': report.get('incomplete', []),
     }
-    final = bad_report_file(remote_dir)
-    tmp = ledger_dir / f'.{BAD_REPORT_FILENAME}.tmp'
-    try:
-        with open(tmp, 'w') as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, final)
-        try:
-            os.chmod(final, 0o664)
-        except OSError:
-            pass
-        return True
-    except OSError:
-        return False
+    return _write_ledger_json(ledger_dir, BAD_REPORT_FILENAME,
+                              json.dumps(payload, indent=2))
 
 
 def load_bad_report(path: Path) -> Optional[dict]:
