@@ -34,7 +34,7 @@ from . import hpc
 from . import remote as remote_mod
 from . import tmp as tmp_mod
 from . import utils
-from .errors import GetError
+from .errors import DTError, GetError
 
 # What to try, in order, when the source repo has no cache.type configured --
 # which is the normal case for someone outside our setup. Deliberately excludes
@@ -1366,4 +1366,11 @@ def _require_dvc_clone(clone: Path) -> None:
     try:
         tmp_mod.require_dvc_root(clone)
     except tmp_mod.TmpError as e:
+        raise GetError(str(e))
+    problem = utils.dvc_local_config_problem(clone)
+    if problem:
+        raise GetError(f"Refusing to use source clone {clone}: {problem}")
+    try:
+        utils.pin_clone_site_cache(clone)
+    except DTError as e:
         raise GetError(str(e))

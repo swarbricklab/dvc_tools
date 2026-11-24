@@ -221,6 +221,9 @@ def repoint_remotes(
     ``dvc remote modify``, in whichever scope (project or local) the remote
     is defined. Returns ``[(name, old_url, new_url), ...]``.
     """
+    problem = utils.dvc_local_config_problem(repo_path)
+    if problem:
+        raise RemoteError(f"Refusing to write DVC config in {repo_path}: {problem}")
     old_resolved = str(Path(old_path))
     project_names = {n for n, _, _ in remote_mod.list_remotes(project_only=True)}
     changed: List[Tuple[str, str, str]] = []

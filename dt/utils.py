@@ -522,6 +522,119 @@ def is_valid_repo_path(path: Any) -> bool:
     )
 
 
+def _find_dvc_root(start: Path) -> Optional[Path]:
+    """Nearest ancestor of ``start`` (inclusive) containing ``.dvc``, as DVC finds it."""
+    cur = Path(os.path.abspath(start))
+    for d in (cur, *cur.parents):
+        if os.path.lexists(d / '.dvc'):
+            return d
+    return None
+
+
+def dvc_local_config_problem(repo_path: Optional[Path] = None) -> Optional[str]:
+    """Why ``dvc ... --local`` writes in ``repo_path`` would be unsafe, or None.
+
+    DVC writes ``.dvc/config.local`` (and files under ``.dvc/tmp``) by path,
+    so these must be ordinary, untracked files inside the repository:
+    ``.dvc`` and ``.dvc/tmp`` real directories, ``.dvc/config.local`` absent
+    or a regular file, no links directly under ``.dvc/tmp``, and none of them
+    tracked in git. ``repo_path`` defaults to the DVC root above the cwd.
+    """
+    import stat as stat_mod
+
+    if repo_path is None:
+        root = _find_dvc_root(Path.cwd())
+        if root is None:
+            return None  # not in a DVC repo; the dvc command itself will report it
+    else:
+        root = Path(repo_path)
+    dvc_dir = root / '.dvc'
+    try:
+        st = os.lstat(dvc_dir)
+    except FileNotFoundError:
+        return None
+    if not stat_mod.S_ISDIR(st.st_mode):
+        return f"{dvc_dir} is not a directory"
+
+    project_cfg = dvc_dir / 'config'
+    if os.path.lexists(project_cfg) and (
+            os.path.islink(project_cfg) or not os.path.isfile(project_cfg)):
+        return f"{project_cfg} is not a regular file"
+
+    local = dvc_dir / 'config.local'
+    try:
+        st = os.lstat(local)
+        if not stat_mod.S_ISREG(st.st_mode):
+            return f"{local} is not a regular file"
+        if st.st_nlink > 1:
+            return f"{local} has multiple hard links"
+    except FileNotFoundError:
+        pass
+
+    tmp = dvc_dir / 'tmp'
+    try:
+        st = os.lstat(tmp)
+    except FileNotFoundError:
+        st = None
+    if st is not None:
+        if not stat_mod.S_ISDIR(st.st_mode):
+            return f"{tmp} is not a directory"
+        # DVC writes its lock/state files directly in .dvc/tmp.
+        for entry in os.scandir(tmp):
+            if entry.is_symlink():
+                return f"{entry.path} is a link"
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    if os.path.isdir(root / '.git') and not os.path.islink(root / '.git'):
+        where = [f'--git-dir={root / ".git"}', f'--work-tree={root}']
+    else:
+        # Worktree (.git is a file) or a DVC subdir project inside a larger
+        # repo: let git find it. No repository at all (dvc init --no-scm)
+        # means nothing can be tracked.
+        where = ['-C', str(root)]
+        try:
+            probe = subprocess.run(['git', *where, 'rev-parse', '--git-dir'],
+                                   capture_output=True, text=True, env=env)
+        except FileNotFoundError:
+            probe = None
+        if probe is not None and probe.returncode != 0 and \
+                'not a git repository' in probe.stderr:
+            return None
+    try:
+        tracked = subprocess.run(
+            ['git', *where, '-c', 'core.fsmonitor=false',
+             'ls-files', '-z', '--', '.dvc/config.local', '.dvc/tmp'],
+            capture_output=True, text=True, env=env, cwd=str(root),
+        )
+    except FileNotFoundError:
+        return "git is not available to check tracked DVC files"
+    if tracked.returncode != 0:
+        return f"could not check tracked files: {tracked.stderr.strip()}"
+    if tracked.stdout.strip('\0'):
+        names = ', '.join(tracked.stdout.strip('\0').split('\0')[:3])
+        return (f"the repository tracks DVC local state ({names}); "
+                f"remove it from git (git rm --cached) first")
+    return None
+
+
+def pin_clone_site_cache(clone_path: Path) -> None:
+    """Keep DVC's site cache for a source clone inside the clone.
+
+    A source repo's committed ``.dvc/config`` could otherwise set
+    ``core.site_cache_dir`` to any path; the local setting takes precedence.
+    Callers must have checked :func:`dvc_local_config_problem` first.
+    """
+    site = Path(clone_path) / '.dvc' / 'tmp' / 'site-cache'
+    result = subprocess.run(
+        ['dvc', 'config', '--local', 'core.site_cache_dir', str(site)],
+        cwd=clone_path, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        from .errors import DTError
+        raise DTError(f"Could not configure source clone {clone_path}: "
+                      f"{result.stderr.strip() or result.stdout.strip()}")
+
+
 def get_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict[str, Any]]:
     """Extract import information from a .dvc file.
     
@@ -1125,9 +1238,15 @@ def ensure_dt_gitignore(repo_path: Optional[Path] = None) -> Path:
     if repo_path is None:
         repo_path = find_project_root()
     dt_dir = repo_path / '.dt'
-    dt_dir.mkdir(parents=True, exist_ok=True)
-
     gitignore = dt_dir / '.gitignore'
+    if os.path.islink(dt_dir) or os.path.islink(gitignore) or (
+            os.path.lexists(gitignore) and not os.path.isfile(gitignore)):
+        from .errors import DTError
+        raise DTError(
+            f"Refusing to write {gitignore}: .dt and .dt/.gitignore must be "
+            f"a regular directory and file in the repository"
+        )
+    dt_dir.mkdir(parents=True, exist_ok=True)
 
     if gitignore.exists():
         existing = gitignore.read_text()

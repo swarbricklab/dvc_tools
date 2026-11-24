@@ -22,7 +22,7 @@ from . import cache_ops
 from . import remote as remote_mod
 from . import tmp as tmp_mod
 from . import utils
-from .errors import ImportError_ as ImportError
+from .errors import DTError, ImportError_ as ImportError
 
 
 def populate_primary_cache(
@@ -481,6 +481,13 @@ def configure_clone_cache(clone_path: Path, cache_path: str) -> None:
         cache_path: Path to the cache directory.
     """
     tmp_mod.require_dvc_root(clone_path)
+    problem = utils.dvc_local_config_problem(clone_path)
+    if problem:
+        raise ImportError(f"Refusing to configure source clone {clone_path}: {problem}")
+    try:
+        utils.pin_clone_site_cache(clone_path)
+    except DTError as e:
+        raise ImportError(str(e))
     subprocess.run(
         ['dvc', 'cache', 'dir', '--local', cache_path],
         cwd=clone_path,
@@ -511,6 +518,9 @@ def list_files(
         tmp_mod.require_dvc_root(clone_path)
     except tmp_mod.TmpError as e:
         raise ImportError(str(e))
+    problem = utils.dvc_local_config_problem(clone_path)
+    if problem:
+        raise ImportError(f"Refusing to use source clone {clone_path}: {problem}")
     cmd = ['dvc', 'list', '--json', '--show-hash']
     if recursive:
         cmd.append('-R')

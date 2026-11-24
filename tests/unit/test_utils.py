@@ -966,3 +966,126 @@ class TestRevAndPathValidation:
     ])
     def test_repo_path(self, path, ok):
         assert utils.is_valid_repo_path(path) is ok
+
+
+class TestDvcLocalConfigProblem:
+    def _repo(self, tmp_path):
+        repo = tmp_path / 'repo'
+        (repo / '.dvc').mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        return repo
+
+    def test_clean_repo_is_fine(self, tmp_path):
+        repo = self._repo(tmp_path)
+        assert utils.dvc_local_config_problem(repo) is None
+        (repo / '.dvc' / 'config.local').write_text('[core]\n')
+        (repo / '.dvc' / 'tmp').mkdir()
+        assert utils.dvc_local_config_problem(repo) is None
+
+    def test_not_a_dvc_repo_is_left_to_dvc(self, tmp_path):
+        assert utils.dvc_local_config_problem(tmp_path) is None
+
+    def test_symlinked_config_local(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config.local').symlink_to(tmp_path / 'elsewhere')
+        assert 'not a regular file' in utils.dvc_local_config_problem(repo)
+
+    def test_hard_linked_config_local(self, tmp_path):
+        repo = self._repo(tmp_path)
+        other = tmp_path / 'other'
+        other.write_text('')
+        os.link(other, repo / '.dvc' / 'config.local')
+        assert 'hard links' in utils.dvc_local_config_problem(repo)
+
+    def test_symlinked_dvc_dir(self, tmp_path):
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        (repo / '.dvc').symlink_to(tmp_path)
+        assert 'not a directory' in utils.dvc_local_config_problem(repo)
+
+    def test_symlinked_tmp_dir_and_links_inside(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'tmp').symlink_to(tmp_path)
+        assert 'not a directory' in utils.dvc_local_config_problem(repo)
+        (repo / '.dvc' / 'tmp').unlink()
+        (repo / '.dvc' / 'tmp').mkdir()
+        (repo / '.dvc' / 'tmp' / 'lock').symlink_to(tmp_path / 'x')
+        assert 'is a link' in utils.dvc_local_config_problem(repo)
+
+    def test_tracked_config_local(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config.local').write_text('[core]\n')
+        subprocess.run(['git', '-C', str(repo), 'add', '-f', '.dvc/config.local'], check=True)
+        assert 'tracks DVC local state' in utils.dvc_local_config_problem(repo)
+
+    def test_found_from_a_subdirectory(self, tmp_path, monkeypatch):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config.local').symlink_to(tmp_path / 'x')
+        (repo / 'sub').mkdir()
+        monkeypatch.chdir(repo / 'sub')
+        assert 'not a regular file' in utils.dvc_local_config_problem()
+
+    def test_symlinked_project_config(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config').symlink_to(tmp_path / 'x')
+        assert 'not a regular file' in utils.dvc_local_config_problem(repo)
+
+    def test_git_failure_fails_closed(self, tmp_path):
+        repo = tmp_path / 'repo'
+        (repo / '.dvc').mkdir(parents=True)
+        (repo / '.git').mkdir()  # not a valid git dir
+        assert 'could not check' in utils.dvc_local_config_problem(repo)
+
+    def test_nested_links_under_tmp_are_not_flagged(self, tmp_path):
+        repo = self._repo(tmp_path)
+        exp = repo / '.dvc' / 'tmp' / 'exps' / 'tmpabc'
+        exp.mkdir(parents=True)
+        (exp / 'ref').symlink_to(tmp_path)
+        assert utils.dvc_local_config_problem(repo) is None
+
+    def test_inherited_git_env_is_ignored(self, tmp_path, monkeypatch):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config.local').write_text('')
+        subprocess.run(['git', '-C', str(repo), 'add', '-f', '.dvc/config.local'], check=True)
+        other = tmp_path / 'other'
+        subprocess.run(['git', 'init', '-q', str(other)], check=True)
+        monkeypatch.setenv('GIT_DIR', str(other / '.git'))
+        assert 'tracks DVC local state' in utils.dvc_local_config_problem(repo)
+
+    def test_ensure_dt_gitignore_refuses_symlinked_dt(self, tmp_path):
+        from dt.errors import DTError
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (repo / '.dt').symlink_to(outside)
+        with pytest.raises(DTError, match='Refusing'):
+            utils.ensure_dt_gitignore(repo)
+        assert list(outside.iterdir()) == []
+
+    def test_tracked_in_subdir_dvc_project(self, tmp_path):
+        outer = tmp_path / 'mono'
+        sub = outer / 'proj'
+        (sub / '.dvc').mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q', str(outer)], check=True)
+        (sub / '.dvc' / 'config.local').write_text('')
+        subprocess.run(['git', '-C', str(outer), 'add', '-f', 'proj/.dvc/config.local'], check=True)
+        assert 'tracks DVC local state' in utils.dvc_local_config_problem(sub)
+
+    def test_no_scm_repo_is_fine(self, tmp_path):
+        repo = tmp_path / 'noscm'
+        (repo / '.dvc').mkdir(parents=True)
+        assert utils.dvc_local_config_problem(repo) is None
+
+    def test_committed_symlink_never_written_through(self, tmp_path):
+        """End to end: a source clone's committed config.local link."""
+        from dt import import_data
+        from dt.errors import ImportError_
+        target = tmp_path / 'victim-config.local'
+        target.write_text('[core]\n    remote = mine\n')
+        clone = self._repo(tmp_path)
+        (clone / '.dvc' / 'config.local').symlink_to(target)
+        subprocess.run(['git', '-C', str(clone), 'add', '-f', '.dvc/config.local'], check=True)
+        with pytest.raises(ImportError_, match='Refusing'):
+            import_data.configure_clone_cache(clone, str(tmp_path / 'attacker-cache'))
+        assert target.read_text() == '[core]\n    remote = mine\n'

@@ -16,7 +16,7 @@ from . import remote as remote_mod
 from . import site_cache as site_cache_mod
 from . import utils
 from .auth import setup as auth_setup_mod
-from .errors import CloneError
+from .errors import CloneError, DTError
 
 
 def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:
@@ -188,8 +188,20 @@ def clone_repository(
             cwd=target_dir
         )
     
+    # dt writes workspace-local DVC config below; that must stay in this repo.
+    if not no_init:
+        problem = utils.dvc_local_config_problem(target_dir)
+        if problem:
+            raise CloneError(
+                f"Cloned to {target_dir}, but not configuring DVC there: {problem}. "
+                f"Fix the repository, or re-run with --no-init."
+            )
+
     # Ensure .dt/.gitignore is up to date
-    utils.ensure_dt_gitignore(target_dir)
+    try:
+        utils.ensure_dt_gitignore(target_dir)
+    except DTError as e:
+        raise CloneError(f"Cloned to {target_dir}, but {e}")
 
     # Set up cache using the cache module
     if not no_init:

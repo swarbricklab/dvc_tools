@@ -118,6 +118,10 @@ def configure_dvc_cache(repo_path: Path, cache_dir: Path, verbose: bool = True) 
         cache_dir: Path to the cache directory
         verbose: Print progress messages
     """
+    problem = utils.dvc_local_config_problem(repo_path)
+    if problem:
+        raise CacheError(f"Refusing to write DVC local config in {repo_path}: {problem}")
+
     if verbose:
         print(f"Configuring DVC cache: {cache_dir}")
     

@@ -264,6 +264,10 @@ def enable(verbose: bool = False) -> Tuple[List[str], List[str]]:
             "Use 'dt tmp clone <repo>' to clone a repository first."
         )
     
+    problem = utils.dvc_local_config_problem()
+    if problem:
+        raise OfflineError(f"Refusing to write DVC local config: {problem}")
+
     enabled_repos = []
     
     # Enable git URL redirects for temp clones
@@ -336,6 +340,10 @@ def disable(verbose: bool = False) -> Tuple[List[str], List[str]]:
     Returns:
         Tuple of (disabled_repos, disabled_remotes).
     """
+    problem = utils.dvc_local_config_problem()
+    if problem:
+        raise OfflineError(f"Refusing to write DVC local config: {problem}")
+
     # Load saved state
     state = load_offline_state()
     git_redirects = state.get('git_redirects', [])
@@ -549,6 +557,10 @@ def enable_remote_overrides(verbose: bool = False) -> List[str]:
     Returns:
         List of remote names that were enabled.
     """
+    problem = utils.dvc_local_config_problem()
+    if problem:
+        raise OfflineError(f"Refusing to write DVC local config: {problem}")
+
     ssh_remotes = get_ssh_remotes()
     
     if not ssh_remotes:
@@ -587,6 +599,9 @@ def disable_remote_overrides(verbose: bool = False) -> List[str]:
     Returns:
         List of remote names that were disabled.
     """
+    problem = utils.dvc_local_config_problem()
+    if problem:
+        raise OfflineError(f"Refusing to write DVC local config: {problem}")
     overrides = get_remote_overrides()
     
     if not overrides:

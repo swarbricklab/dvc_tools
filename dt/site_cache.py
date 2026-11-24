@@ -458,6 +458,10 @@ def apply_to_repo(
     Raises:
         SiteCacheError: If the directory is unsafe or ``dvc config`` fails.
     """
+    problem = utils.dvc_local_config_problem(repo_path)
+    if problem:
+        raise SiteCacheError(f"Refusing to write DVC local config in {repo_path}: {problem}")
+
     site_cache_dir = _prepare_dir(site_cache_dir, verbose=verbose, root=site_cache_root)
 
     if verbose:

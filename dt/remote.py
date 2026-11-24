@@ -157,6 +157,10 @@ def configure_dvc_remote(
         remote_name: Name for the remote (defaults to project name)
         verbose: Print progress messages
     """
+    problem = utils.dvc_local_config_problem(repo_path)
+    if problem:
+        raise RemoteError(f"Refusing to write DVC config in {repo_path}: {problem}")
+
     project_name = remote_name or remote_dir.name
     
     # Get SSH host from config
@@ -239,6 +243,10 @@ def configure_local_override(
         return None
 
     remote_name, local_path = result
+
+    problem = utils.dvc_local_config_problem(repo_path)
+    if problem:
+        raise RemoteError(f"Refusing to write DVC local config in {repo_path}: {problem}")
 
     if verbose:
         print(f"Configuring local remote from '{remote_name}': {local_path}")

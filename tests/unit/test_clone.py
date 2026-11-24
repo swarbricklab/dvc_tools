@@ -585,3 +585,61 @@ class TestCloneNoInit:
             CliRunner().invoke(cli, ['clone', 'org/repo'])
 
         assert mock_clone.call_args.kwargs['no_init'] is False
+
+
+class TestCloneRefusesUnsafeDvcLocalState:
+    def test_tracked_config_local_stops_dvc_setup(self, tmp_path):
+        from unittest.mock import patch, MagicMock
+        from dt import clone as clone_mod
+        from dt.errors import CloneError
+        target = tmp_path / 'proj'
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ['git', 'clone']:
+                (target / '.dvc').mkdir(parents=True)
+                (target / '.dvc' / 'config.local').symlink_to(tmp_path / 'x')
+            return MagicMock(returncode=0, stdout='', stderr='')
+
+        with patch('dt.clone.subprocess.run', side_effect=fake_run), \
+             patch('dt.clone.cache_mod.init_cache') as init_cache, \
+             patch('dt.clone.site_cache_mod.init_site_cache') as init_site:
+            with pytest.raises(CloneError, match='not configuring DVC'):
+                clone_mod.clone_repository('git@github.com:org/repo.git', path=str(target),
+                                           verbose=False, no_submodules=True, no_auth=True,
+                                           no_hooks=True)
+        init_cache.assert_not_called()
+        init_site.assert_not_called()
+
+
+class TestCloneWithTrackedDvcLocalState:
+    """Real git clone of a local source repo that tracks DVC local state."""
+
+    def _source(self, tmp_path, as_link):
+        src = tmp_path / 'src'
+        (src / '.dvc').mkdir(parents=True)
+        (src / '.dvc' / 'config').write_text('[core]\n')
+        if as_link:
+            (src / '.dvc' / 'config.local').symlink_to('../../victim-config')
+        else:
+            (src / '.dvc' / 'config.local').write_text('[cache]\n    dir = /elsewhere\n')
+        run = lambda *a: subprocess.run(['git', '-C', str(src), *a], check=True,
+                                        capture_output=True)
+        run('init', '-q')
+        run('add', '-f', '.')
+        run('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'x')
+        return src
+
+    @pytest.mark.parametrize('as_link', [True, False])
+    def test_refused_before_any_dvc_write(self, tmp_path, as_link):
+        src = self._source(tmp_path, as_link)
+        victim = tmp_path / 'victim-config'
+        victim.write_text('mine\n')
+        target = tmp_path / 'proj'
+        with patch('dt.clone.cache_mod.init_cache') as init_cache, \
+             patch('dt.clone.site_cache_mod.init_site_cache') as init_site:
+            with pytest.raises(CloneError, match='not configuring DVC'):
+                clone.clone_repository(str(src), path=str(target), verbose=False,
+                                       no_submodules=True, no_auth=True, no_hooks=True)
+        init_cache.assert_not_called()
+        init_site.assert_not_called()
+        assert victim.read_text() == 'mine\n'
