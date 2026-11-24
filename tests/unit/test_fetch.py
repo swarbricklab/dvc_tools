@@ -10,6 +10,7 @@ Organized by the new fetch flow:
 """
 
 import os
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from dt import cache_ops
 from dt import fetch
 from dt import import_data
 from dt import utils
@@ -474,18 +476,36 @@ class TestExpandDirHash:
         out = capsys.readouterr().out
         assert 'could not read .dir manifest 0123456789abcdef0123456789abcdef.dir' in out
 
-    def test_no_warning_for_genuinely_empty_dir(self, capsys):
+    def test_no_warning_for_genuinely_empty_dir(self, tmp_path, capsys):
         """An empty-but-readable manifest does not warn."""
-        mock_db = MagicMock()
-        empty_tree = MagicMock()
-        empty_tree.iteritems.return_value = []
+        dir_hash = hashlib.md5(b'[]').hexdigest() + '.dir'
+        path = tmp_path / dir_hash
+        path.write_bytes(b'[]')
+        db = MagicMock()
+        db.oid_to_path.return_value = str(path)
 
-        with patch('dvc_data.hashfile.tree.Tree.load', return_value=empty_tree):
-            result = fetch._expand_dir_hash('abc123.dir', mock_db)
+        result = fetch._expand_dir_hash(dir_hash, db)
 
         assert result == []
         out = capsys.readouterr().out
         assert 'could not read' not in out
+
+    def test_db_manifest_must_match_its_name(self, tmp_path):
+        """A db copy whose content differs is skipped for the next db."""
+        good = [{'md5': 'a' * 32, 'relpath': 'a.txt'}]
+        raw = json.dumps(good).encode()
+        dir_hash = hashlib.md5(raw).hexdigest() + '.dir'
+        other = tmp_path / 'other'
+        other.write_bytes(json.dumps(good + [{'md5': 'c' * 32, 'relpath': 'x'}]).encode())
+        same = tmp_path / 'same'
+        same.write_bytes(raw)
+        first, second = MagicMock(), MagicMock()
+        first.oid_to_path.return_value = str(other)
+        second.oid_to_path.return_value = str(same)
+
+        result = fetch._expand_dir_hash(dir_hash, first, fallback_db=second)
+
+        assert result == [('a' * 32, 'a.txt')]
 
 
 def _stage_blob(root, md5, content, layout):
@@ -513,15 +533,18 @@ class TestLegacyLayoutDirManifest:
     """Resolving legacy-layout (<ab>/<rest>) .dir manifests and their
     children from pure-v2, pure-v3 and mixed-layout sources (issue #195)."""
 
-    DIR_HASH = 'd41d8cd98f00b204e9800998ecf8427e.dir'
     CHILD_A = 'a' * 32
     CHILD_B = 'b' * 32
+    MANIFEST = [
+        {'md5': CHILD_A, 'relpath': 'a.txt'},
+        {'md5': CHILD_B, 'relpath': 'sub/b.txt'},
+    ]
+    # Named by its content hash, as a real .dir object is.
+    DIR_HASH = hashlib.md5(json.dumps(MANIFEST).encode()).hexdigest() + '.dir'
+    EMPTY_DIR_HASH = hashlib.md5(b'[]').hexdigest() + '.dir'
 
     def _manifest(self):
-        return [
-            {'md5': self.CHILD_A, 'relpath': 'a.txt'},
-            {'md5': self.CHILD_B, 'relpath': 'sub/b.txt'},
-        ]
+        return list(self.MANIFEST)
 
     def _expected(self):
         return sorted([(self.CHILD_A, 'a.txt'), (self.CHILD_B, 'sub/b.txt')])
@@ -540,8 +563,23 @@ class TestLegacyLayoutDirManifest:
         assert fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path) is None
 
     def test_read_manifest_empty_dir_returns_empty_list(self, tmp_path):
-        _stage_blob(tmp_path, self.DIR_HASH, [], 'v2')
-        assert fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path) == []
+        _stage_blob(tmp_path, self.EMPTY_DIR_HASH, [], 'v2')
+        assert fetch._read_dir_manifest_from_path(self.EMPTY_DIR_HASH, tmp_path) == []
+
+    @pytest.mark.parametrize('layout', ['v2', 'v3'])
+    def test_manifest_not_matching_its_name_is_ignored(self, tmp_path, capsys, layout):
+        changed = self._manifest() + [{'md5': 'c' * 32, 'relpath': 'x'}]
+        _stage_blob(tmp_path, self.DIR_HASH, changed, layout)
+        assert fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path) is None
+        assert 'does not match its name' in capsys.readouterr().out
+
+    def test_matching_copy_in_other_layout_is_used(self, tmp_path):
+        changed = self._manifest() + [{'md5': 'c' * 32, 'relpath': 'x'}]
+        _stage_blob(tmp_path, self.DIR_HASH, changed, 'v3')
+        _stage_blob(tmp_path, self.DIR_HASH, self._manifest(), 'v2')
+        children = fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path)
+        assert ('c' * 32, 'x') not in children
+        assert (self.CHILD_A, 'a.txt') in children
 
     def test_expand_resolves_legacy_manifest_when_db_cannot(self, tmp_path, capsys):
         """A mixed source: the object DB is rooted at files/md5 (v3) and so
@@ -988,6 +1026,73 @@ class TestPopulateCacheFile:
         assert result is True
         dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / md5[:2] / md5[2:]
         assert dest_file.exists()
+
+
+class TestPopulateDirObject:
+    """.dir objects are stored as checked copies of the source's bytes."""
+
+    MANIFEST = [{'md5': 'a' * 32, 'relpath': 'a.txt'}]
+    RAW = json.dumps(MANIFEST).encode()
+    DIR_HASH = hashlib.md5(RAW).hexdigest() + '.dir'
+
+    def _dest(self, root):
+        h = self.DIR_HASH[:-4]
+        return Path(root) / 'files' / 'md5' / h[:2] / (h[2:] + '.dir')
+
+    @pytest.mark.parametrize('cache_type', [None, 'symlink', 'hardlink'])
+    def test_dir_object_is_copied(self, tmp_path, cache_type):
+        src = _stage_blob(tmp_path / 'src', self.DIR_HASH, self.MANIFEST, 'v3')
+        result = cache_ops.populate_cache_file(
+            md5=self.DIR_HASH, source_cache=str(tmp_path / 'src'),
+            dest_cache=str(tmp_path / 'dst'), cache_type=cache_type)
+        dest = self._dest(tmp_path / 'dst')
+        assert result is True
+        assert not dest.is_symlink()
+        assert dest.stat().st_ino != src.stat().st_ino
+        assert dest.read_bytes() == self.RAW
+
+    @pytest.mark.parametrize('existing', ['symlink', 'hardlink', 'other'])
+    def test_existing_dest_is_replaced_with_own_copy(self, tmp_path, existing):
+        src = _stage_blob(tmp_path / 'src', self.DIR_HASH, self.MANIFEST, 'v3')
+        dest = self._dest(tmp_path / 'dst')
+        dest.parent.mkdir(parents=True)
+        if existing == 'symlink':
+            dest.symlink_to(src)
+        elif existing == 'hardlink':
+            os.link(src, dest)
+        else:
+            dest.write_bytes(b'[]')
+        result = cache_ops.populate_cache_file(
+            md5=self.DIR_HASH, source_cache=str(tmp_path / 'src'),
+            dest_cache=str(tmp_path / 'dst'))
+        assert result is True
+        assert not dest.is_symlink()
+        assert dest.stat().st_nlink == 1
+        assert dest.read_bytes() == self.RAW
+
+    def test_good_existing_dest_is_kept(self, tmp_path):
+        _stage_blob(tmp_path / 'src', self.DIR_HASH, self.MANIFEST, 'v3')
+        dest = self._dest(tmp_path / 'dst')
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(self.RAW)
+        result = cache_ops.populate_cache_file(
+            md5=self.DIR_HASH, source_cache=str(tmp_path / 'src'),
+            dest_cache=str(tmp_path / 'dst'))
+        assert result is False
+
+    def test_oversized_manifest_is_not_read(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cache_ops, 'MAX_DIR_MANIFEST_BYTES', 4)
+        src = _stage_blob(tmp_path, self.DIR_HASH, self.MANIFEST, 'v3')
+        assert cache_ops.read_dir_manifest(src, self.DIR_HASH) is None
+
+    def test_changed_dir_object_is_not_stored(self, tmp_path):
+        _stage_blob(tmp_path / 'src', self.DIR_HASH,
+                    self.MANIFEST + [{'md5': 'c' * 32, 'relpath': 'x'}], 'v3')
+        result = cache_ops.populate_cache_file(
+            md5=self.DIR_HASH, source_cache=str(tmp_path / 'src'),
+            dest_cache=str(tmp_path / 'dst'))
+        assert result is None
+        assert not os.path.lexists(self._dest(tmp_path / 'dst'))
 
 
 class TestBuildDirManifest:
@@ -2005,6 +2110,42 @@ class TestFetchDirOnlyFromRemote:
             results = _fetch_dir_only_from_remote('myremote', cat)
             assert results[0][1] is False
             assert 'error' in results[0][2]
+
+    @pytest.mark.parametrize('content_ok', [True, False])
+    def test_landed_dir_objects_are_checked(self, tmp_path, content_ok):
+        """A landed .dir is kept only as its own copy, and only if it matches."""
+        from dt.fetch import _fetch_dir_only_from_remote
+        from dvc_data.hashfile.hash_info import HashInfo
+
+        raw = json.dumps([{'md5': 'a' * 32, 'relpath': 'a'}]).encode()
+        h = hashlib.md5(raw).hexdigest() + '.dir'
+        remote_file = tmp_path / 'remote_obj'
+        remote_file.write_bytes(raw if content_ok else raw + b' ')
+        landed = tmp_path / 'cache' / h
+        landed.parent.mkdir()
+        landed.symlink_to(remote_file)
+
+        stage = self._make_stage('data.dvc', [h])
+        cat = self._make_categorization([stage])
+        mock_repo = MagicMock()
+        local_odb = mock_repo.cache.local
+        local_odb.exists.return_value = True
+        local_odb.oid_to_path.return_value = str(landed)
+        mock_result = MagicMock()
+        mock_result.transferred = {HashInfo('md5', h)}
+        mock_result.failed = set()
+
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dt.fetch._hash_in_odb', return_value=False), \
+             patch('dvc_data.hashfile.transfer.transfer', return_value=mock_result):
+            results = _fetch_dir_only_from_remote('myremote', cat)
+
+        assert results[0][1] is content_ok
+        if content_ok:
+            assert not landed.is_symlink()
+            assert landed.read_bytes() == raw
+        else:
+            assert not os.path.lexists(landed)
 
     def test_remote_open_error(self):
         """Error opening remote ODB reported cleanly."""

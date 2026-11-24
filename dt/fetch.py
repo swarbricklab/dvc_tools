@@ -16,6 +16,7 @@ This is the "dt" equivalent of `dvc fetch`, but works with local caches
 
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -351,6 +352,25 @@ def _create_source_cache_db(source_path: Path):
     return LocalHashFileDB(local_fs, cache_path, tmp_dir=source_path / "tmp")
 
 
+def _parse_dir_manifest(raw: bytes) -> Optional[List[Tuple[str, str]]]:
+    """``(md5, relpath)`` pairs from ``.dir`` manifest bytes, or None."""
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    children: List[Tuple[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        child_hash = entry.get('md5')
+        relpath = entry.get('relpath', '')
+        if child_hash:
+            children.append((child_hash, relpath))
+    return children
+
+
 def _read_dir_manifest_from_path(
     dir_hash: str,
     source_cache: Path,
@@ -377,25 +397,14 @@ def _read_dir_manifest_from_path(
         and parsed (possibly empty for a genuinely empty directory), or
         ``None`` if the manifest blob could not be found or read.
     """
-    manifest_path = cache_ops.find_source_file(dir_hash, source_cache)
-    if manifest_path is None:
+    if cache_ops.find_source_file(dir_hash, source_cache) is None:
         return None
-    try:
-        entries = json.loads(manifest_path.read_text())
-    except (OSError, ValueError):
+    raw = cache_ops.find_dir_manifest(dir_hash, source_cache)
+    if raw is None:
+        print(f"Warning: .dir manifest {dir_hash} in {source_cache} is unreadable "
+              f"or does not match its name; ignored")
         return None
-    if not isinstance(entries, list):
-        return None
-
-    children: List[Tuple[str, str]] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        child_hash = entry.get('md5')
-        relpath = entry.get('relpath', '')
-        if child_hash:
-            children.append((child_hash, relpath))
-    return children
+    return _parse_dir_manifest(raw)
 
 
 def _expand_dir_hash(
@@ -409,7 +418,7 @@ def _expand_dir_hash(
 
     First tries to read the ``.dir`` manifest directly from the source
     cache/remote root (``source_path``), checking both the v3 and legacy v2
-    layouts (issue #195). Falls back to DVC's ``Tree.load()`` against an
+    layouts (issue #195). Falls back to reading it from an
     object database (e.g. the destination cache) when the manifest isn't
     present at the source.
 
@@ -424,9 +433,6 @@ def _expand_dir_hash(
     Returns:
         List of (hash, path) tuples for child files.
     """
-    from dvc_data.hashfile.tree import Tree
-    from dvc_data.hashfile.hash_info import HashInfo
-
     if not utils.is_md5_oid(dir_hash):
         return []
 
@@ -449,23 +455,26 @@ def _expand_dir_hash(
             if child_files:
                 return child_files
 
-    # 2. Fall back to Tree.load against an object database (source_db, then
+    # 2. Fall back to the object databases (source_db, then
     #    the destination/fallback db for a manifest only present downstream).
     for db in [source_db, fallback_db]:
         if db is None:
             continue
         try:
-            hi = HashInfo("md5", dir_hash)
-            tree = Tree.load(db, hi)
+            raw = cache_ops.read_dir_manifest(Path(db.oid_to_path(dir_hash)), dir_hash)
+        except Exception:
+            raw = None
+        manifest = _parse_dir_manifest(raw) if raw is not None else None
+        if manifest is None:
+            continue
+        try:
             loaded = True
-            for key, (meta, hash_info) in tree.iteritems():
-                # key is a tuple of path components, e.g., ('subdir', 'file.txt')
-                rel_path = '/'.join(key) if key else ''
+            for child_hash, rel_path in manifest:
                 if base_path:
                     full_path = f"{base_path}/{rel_path}" if rel_path else base_path
                 else:
                     full_path = rel_path
-                child_files.append((hash_info.value, full_path))
+                child_files.append((child_hash, full_path))
             # Successfully loaded from this db, return early
             if child_files:
                 return child_files
@@ -1571,6 +1580,29 @@ def _fetch_dir_only_from_remote(
         # Verify expected hashes actually landed in local cache.
         still_missing = [h for h in to_fetch if not local_odb.exists(h)]
         n_missing = len(still_missing)
+
+        # Keep only .dir objects whose content matches their id, each as
+        # this cache's own copy (not a link back to the remote's file).
+        for h in to_fetch:
+            if h in still_missing:
+                continue
+            try:
+                obj_path = Path(local_odb.oid_to_path(h))
+            except Exception:
+                continue
+            if not os.path.lexists(obj_path):
+                continue
+            raw = cache_ops.read_dir_manifest(obj_path, h)
+            if raw is not None and cache_ops.place_dir_object(obj_path, h, raw) is not None:
+                continue
+            print(f"Warning: .dir manifest {h} from '{remote_name}' does not "
+                  f"match its name; removed")
+            try:
+                os.unlink(obj_path)
+            except OSError:
+                pass
+            n_ok = max(0, n_ok - 1)
+            n_fail += 1
 
         if verbose:
             print(f"    Transferred: {n_ok}, Failed: {n_fail}")

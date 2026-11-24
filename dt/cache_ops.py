@@ -6,6 +6,7 @@ Uses the DVC-preferred order: reflink → hardlink → symlink → copy.
 
 import errno
 import fcntl
+import hashlib
 import os
 import secrets
 import shutil
@@ -377,6 +378,104 @@ def find_source_file(
     return None
 
 
+# Upper bound on a .dir manifest read into memory.
+MAX_DIR_MANIFEST_BYTES = 2 << 30
+
+
+def read_dir_manifest(path: Path, md5: str) -> Optional[bytes]:
+    """Bytes of the ``.dir`` object at ``path``, if they hash to ``md5``.
+
+    A ``.dir`` object's name is the md5 of its bytes, so content that does
+    not match is not that object and is not returned.
+    """
+    if not md5.endswith('.dir'):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_DIR_MANIFEST_BYTES:
+            return None
+        chunks = []
+        remaining = MAX_DIR_MANIFEST_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1 << 20, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    raw = b''.join(chunks)
+    if hashlib.md5(raw).hexdigest() != md5[:-4]:
+        return None
+    return raw
+
+
+def place_dir_object(dest: Path, md5: str, data: bytes) -> Optional[bool]:
+    """Make ``dest`` this user's own copy of the checked ``.dir`` bytes.
+
+    An existing object is kept only if it is a regular, unshared file
+    holding the right bytes; otherwise (a link, a file shared with another
+    path, other content) it is replaced by a fresh copy.
+
+    Returns:
+        True if written, False if a good copy was already there, None if
+        it could not be written.
+    """
+    try:
+        if write_object(dest, data):
+            return True
+    except OSError:
+        pass
+    try:
+        st = os.lstat(dest)
+        if (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+                and read_dir_manifest(dest, md5) is not None):
+            return False
+    except OSError:
+        pass
+    tmp = dest.with_name(f".{dest.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, 0o444)
+        finally:
+            os.close(fd)
+        os.rename(tmp, dest)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return None
+    return True
+
+
+def find_dir_manifest(md5: str, source_cache: Path) -> Optional[bytes]:
+    """Read the ``.dir`` object ``md5`` from ``source_cache`` (either layout).
+
+    Only content matching ``md5`` is returned; see :func:`read_dir_manifest`.
+    """
+    try:
+        prefix, filename = utils.oid_path_parts(md5)
+    except ValueError:
+        return None
+    for path in (source_cache / 'files' / 'md5' / prefix / filename,
+                 source_cache / prefix / filename):
+        raw = read_dir_manifest(path, md5)
+        if raw is not None:
+            return raw
+    return None
+
+
 def object_size(md5: str, *cache_roots: Optional[str]) -> Optional[int]:
     """Size of a cache object, searched across roots and both layouts.
 
@@ -446,6 +545,16 @@ def populate_cache_file(
         return None
     
     dest_path = get_cache_file_path(md5, Path(dest_cache), use_v3_layout)
+
+    if md5.endswith('.dir'):
+        # Manifests are small and are read back later: store the checked
+        # bytes themselves rather than a link to the source's file.
+        raw = find_dir_manifest(md5, Path(source_cache))
+        if raw is None:
+            if verbose:
+                print(f"  {md5[:12]}...: .dir content does not match its name")
+            return None
+        return place_dir_object(dest_path, md5, raw)
     
     # Note: We don't check dest_path.exists() here - it's slow on network
     # filesystems. link_file() handles existing files efficiently by catching
