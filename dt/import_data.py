@@ -247,9 +247,13 @@ def construct_dir_from_dvc_list(
     else:
         dest_file = Path(dest_cache) / prefix / fname
     
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
+    try:
+        created = cache_ops.write_object(dest_file, manifest_content)
+    except OSError as e:
+        if verbose:
+            print(f"  ERROR: {e}")
+        return None
+    if created:
         if verbose:
             print(f"  Created .dir file: {dest_file}")
     
@@ -384,9 +388,13 @@ def construct_dir_file(
     else:
         dest_file = Path(dest_cache) / prefix / fname
     
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
+    try:
+        created = cache_ops.write_object(dest_file, manifest_content)
+    except OSError as e:
+        if verbose:
+            print(f"  ERROR: {e}")
+        return None
+    if created:
         if verbose:
             print(f"  Constructed .dir file: {expected_hash[:12]}...")
     
@@ -454,9 +462,13 @@ def _construct_dir_file_fallback(
     else:
         dest_file = Path(dest_cache) / prefix / fname
     
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
+    try:
+        created = cache_ops.write_object(dest_file, manifest_content)
+    except OSError as e:
+        if verbose:
+            print(f"  ERROR: {e}")
+        return None
+    if created:
         if verbose:
             print(f"  Constructed .dir file (fallback): {expected_hash[:12]}...")
     
@@ -683,21 +695,15 @@ def create_dir_file(
     # overwrite an object another member wrote first, and the import failed
     # with EACCES on exactly the sections a colleague had imported before
     # (#175). The other .dir writers in this file already guard this way.
-    if dir_file.exists():
+    if dir_file.is_file() and not dir_file.is_symlink():
         _warn_if_dir_size_differs(dir_file, content)
         return f"{dir_hash}.dir", len(content)
 
-    dir_path.mkdir(parents=True, exist_ok=True)
-
+    # Created exclusively; a concurrent writer of the same (identical) object
+    # counts as success, anything else at the name is refused.
     try:
-        dir_file.write_bytes(content)
+        cache_ops.write_object(dir_file, content)
     except OSError as e:
-        # Another writer may have created it between the check above and here,
-        # which is normal when several imports populate one registry at once.
-        # The content is identical either way, so an object that now exists is
-        # success rather than a collision.
-        if dir_file.exists():
-            return f"{dir_hash}.dir", len(content)
         raise ImportError(f"Failed to write .dir file: {e}")
 
     return f"{dir_hash}.dir", len(content)

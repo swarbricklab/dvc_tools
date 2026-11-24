@@ -524,13 +524,13 @@ def _write_dir_to_cache(
     # Take the workspace lock around the cache write so a concurrent `dvc`
     # process cannot observe a half-written .dir manifest.
     with dvc_lock.repo_lock():
-        if not dest_file.exists():
-            dest_file.parent.mkdir(parents=True, exist_ok=True)
-            dest_file.write_bytes(manifest_content)
-            if verbose:
-                print(f"  Created .dir file: {dest_file}")
-        elif verbose:
-            print(f"  .dir file already exists: {dest_file}")
+        try:
+            created = cache_ops.write_object(dest_file, manifest_content)
+        except OSError as e:
+            raise UpdateError(f"Cannot write .dir file: {e}")
+        if verbose:
+            print(f"  Created .dir file: {dest_file}" if created
+                  else f"  .dir file already exists: {dest_file}")
     
     return dir_hash, dest_file
 

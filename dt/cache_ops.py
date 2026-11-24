@@ -7,6 +7,7 @@ Uses the DVC-preferred order: reflink → hardlink → symlink → copy.
 import errno
 import fcntl
 import os
+import secrets
 import shutil
 import stat
 from pathlib import Path
@@ -135,6 +136,58 @@ def _try_copy(source: Path, dest: Path) -> bool:
         return ok
     finally:
         os.close(src_fd)
+
+
+def write_object(dest: Path, data: bytes) -> bool:
+    """Create the cache object ``dest`` holding ``data``, read-only.
+
+    The bytes go to a private temporary file (random name, exclusive, no
+    links followed) that is then published with ``link(2)``, which never
+    follows or replaces whatever is at ``dest``.
+
+    Returns:
+        True if created; False if a regular object already existed there.
+
+    Raises:
+        OSError: If something other than a regular file (e.g. a link,
+            dangling or not) occupies ``dest``, or the write fails.
+    """
+    def existing() -> bool:
+        st = os.lstat(dest)
+        if stat.S_ISREG(st.st_mode):
+            return True
+        raise OSError(errno.EEXIST, f"{dest} exists and is not a regular file")
+
+    try:
+        if existing():
+            return False
+    except FileNotFoundError:
+        pass
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, 0o444)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, dest)
+        except FileExistsError:
+            # A concurrent writer got there first (fine), or something was
+            # planted (refused).
+            existing()
+            return False
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return True
 
 
 def _make_readonly(path: Path) -> None:

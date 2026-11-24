@@ -981,30 +981,25 @@ class TestCreateDirFileSkipsExisting:
 
     def test_a_genuine_write_failure_still_raises(self, tmp_path):
         """Skipping must not swallow errors for objects that are really absent."""
-        with patch.object(Path, 'write_bytes',
-                          side_effect=PermissionError('nope')):
+        with patch('dt.cache_ops.os.write',
+                   side_effect=PermissionError('nope')):
             with pytest.raises(ImportError, match='Failed to write .dir file'):
                 import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
 
     def test_loses_a_write_race_gracefully(self, tmp_path):
         """Concurrent --csv imports into one registry both target the same object.
 
-        If another writer lands between our existence check and our write, the
+        If another writer publishes it between our check and our link, the
         content is identical, so an object that now exists is success.
         """
-        real_exists = Path.exists
-        state = {'calls': 0}
+        import os as _os
+        real_link = _os.link
 
-        def exists_then_appears(self):
-            # Absent on the pre-write check, present once the write has failed.
-            if self.name.endswith('.dir'):
-                state['calls'] += 1
-                return state['calls'] > 1
-            return real_exists(self)
+        def other_writer_wins(src, dst, *a, **k):
+            Path(dst).write_bytes(Path(src).read_bytes())
+            return real_link(src, dst, *a, **k)  # now raises FileExistsError
 
-        with patch.object(Path, 'exists', exists_then_appears), \
-             patch.object(Path, 'write_bytes',
-                          side_effect=PermissionError('raced')):
+        with patch('dt.cache_ops.os.link', side_effect=other_writer_wins):
             dir_hash, size = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
 
         assert dir_hash.endswith('.dir')
@@ -1014,6 +1009,7 @@ class TestCreateDirFileSkipsExisting:
         """A truncated .dir keeps its name, so it still looks like the right object."""
         dir_hash, _ = import_mod.create_dir_file(self.ENTRIES, str(tmp_path))
         target = self._dir_path(tmp_path, dir_hash.replace('.dir', ''))
+        target.chmod(0o644)  # objects are created read-only
         target.write_bytes(b'[')
 
         import_mod.create_dir_file(self.ENTRIES, str(tmp_path))

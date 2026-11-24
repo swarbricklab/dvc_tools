@@ -1984,9 +1984,10 @@ def _run_repo_import_network_fetch(
                     return (False, "Could not resolve primary cache location")
 
                 dest = cache_ops.get_cache_file_path(expected_md5, Path(_cache_base), use_v3_layout=True)
-                if not dest.exists():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(show.stdout)
+                try:
+                    cache_ops.write_object(dest, show.stdout)
+                except OSError as e:
+                    return (False, f"cannot write cache object: {e}")
                 return (True, "Fetched via git show (network)")
             # else: file not in git at this rev — fall through to dvc update
         except Exception as e:

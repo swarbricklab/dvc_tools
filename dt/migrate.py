@@ -146,9 +146,7 @@ def ensure_v3_cache_entry(
     dest = cache_ops.get_cache_file_path(
         md5 + suffix, cache_root, use_v3_layout=True,
     )
-    if not dest.exists():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(content)
+    cache_ops.write_object(dest, content)
     return dest
 
 
