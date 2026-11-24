@@ -608,7 +608,11 @@ def ssh_setup(
 
     # -- 1. Discover endpoints and collect hosts ---------------------------
     ssh_git_types = {'ssh', 'git'}
-    endpoints = discover_endpoints(type_filter=ssh_git_types, verbose=verbose)
+    from .setup import contact_gate
+    decisions: Dict[str, bool] = {}
+    endpoints = discover_endpoints(
+        type_filter=ssh_git_types, verbose=verbose,
+        may_contact=contact_gate({}, config_file, add_new_hosts, decisions))
 
     all_eps: List[Endpoint] = []
     for ep in endpoints:
@@ -633,11 +637,15 @@ def ssh_setup(
 
     from .setup import _approve_new_hosts
     new_hosts = [h for h in all_hosts if not _host_in_ssh_config(h, config_file)]
-    if new_hosts and not _approve_new_hosts(new_hosts, config_file, add_new_hosts):
-        for host in new_hosts:
+    undecided = [h for h in new_hosts if h not in decisions]
+    if undecided:
+        agreed = _approve_new_hosts(undecided, config_file, add_new_hosts)
+        decisions.update({h: agreed for h in undecided})
+    for host in new_hosts:
+        if not decisions[host]:
             del all_hosts[host]
-        if not all_hosts:
-            return []
+    if not all_hosts:
+        return []
 
     # -- 2. Resolve usernames BEFORE any SSH connections -------------------
     host_users: Dict[str, str] = {}

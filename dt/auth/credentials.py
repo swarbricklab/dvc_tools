@@ -773,8 +773,13 @@ class RepoCredentialInfo:
     remote_types: List[str]
 
 
-def _get_repos_needing_credentials(verbose: bool = False) -> List[RepoCredentialInfo]:
-    """Get list of repos that may need S3 credentials."""
+def _get_repos_needing_credentials(verbose: bool = False,
+                                   may_contact=None) -> List[RepoCredentialInfo]:
+    """Get list of repos that may need S3 credentials.
+
+    *may_contact* (``url -> bool``) decides which import sources may be
+    cloned to read their remotes.
+    """
     repos: List[RepoCredentialInfo] = []
     seen_names: Set[str] = set()
 
@@ -814,7 +819,7 @@ def _get_repos_needing_credentials(verbose: bool = False) -> List[RepoCredential
         types_str = ', '.join(primary_types) if primary_types else 'none'
         print(f"Primary repo: {primary_name} (remotes: {types_str}, no s3)")
 
-    source_eps = _discover_import_sources(verbose=False)
+    source_eps = _discover_import_sources(verbose=False, may_contact=may_contact)
 
     for ep in source_eps:
         name = _extract_repo_name_from_url(ep.url)
@@ -888,6 +893,7 @@ def install_credentials(
     repo_name: Optional[str] = None,
     replace: bool = False,
     allow_repo_store: bool = False,
+    may_contact=None,
 ) -> Dict[str, bool]:
     """Install S3 credentials from the secret manager into AWS shared files.
 
@@ -928,7 +934,8 @@ def install_credentials(
         if verbose:
             print(f"Installing credentials for '{repo_name}' only...")
     else:
-        repos = _get_repos_needing_credentials(verbose=verbose)
+        repos = _get_repos_needing_credentials(verbose=verbose,
+                                               may_contact=may_contact)
 
     if not repos:
         if verbose:

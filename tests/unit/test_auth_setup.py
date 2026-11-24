@@ -1,7 +1,7 @@
 """Tests for ``dt auth setup``, in particular its ``--repo`` mode."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -209,7 +209,9 @@ class TestAuthSetupRepo:
                    return_value={'proj': True}) as m:
             auth_setup(ssh_config_file=Path('/tmp/nope'))
 
-        m.assert_called_once_with(verbose=False)
+        m.assert_called_once()
+        assert m.call_args.kwargs['verbose'] is False
+        assert callable(m.call_args.kwargs['may_contact'])
 
     def test_repo_chosen_secret_store_is_not_used_automatically(self, no_ssh_or_gcp):
         with patch('dt.auth.setup.discover_endpoints', return_value=[_s3()]), \
@@ -410,3 +412,52 @@ class TestImportSourcesAskedFirst:
         monkeypatch.setattr(setup_mod, '_do_ssh_setup', lambda **kw: [])
         setup_mod.auth_setup(ssh_config_file=tmp_path / 'cfg', add_ssh_hosts=True)
         assert cloned == ['git@new.example.org:o/r.git']
+
+
+class TestContactGate:
+    @pytest.mark.parametrize('url', [
+        'git+ssh://evil.example.org/o/r.git',
+        'ssh+git://evil.example.org/o/r.git',
+        'ssh://[evil.example.org]/o/r.git',
+        '[evil.example.org]:o/r.git',
+        'ssh://a@b@evil.example.org/o/r',
+        'git@new.example.org:o/r.git',
+        'ssh://new.example.org/o/r.git',
+        'foo::bar',
+    ])
+    def test_unknown_or_new_hosts_need_a_yes(self, tmp_path, url, monkeypatch):
+        from dt.auth import setup as setup_mod
+        monkeypatch.setattr(setup_mod.sys.stdin, 'isatty', lambda: False)
+        gate = setup_mod.contact_gate({}, tmp_path / 'cfg', None, {})
+        assert gate(url) is False
+
+    @pytest.mark.parametrize('url', [
+        'https://github.com/o/r.git', '/g/data/x/repo', 'file:///x/repo', '../repo',
+    ])
+    def test_local_and_https_are_fine(self, tmp_path, url):
+        from dt.auth import setup as setup_mod
+        gate = setup_mod.contact_gate({}, tmp_path / 'cfg', None, {})
+        assert gate(url) is True
+
+    def test_known_host_is_fine(self, tmp_path):
+        from dt.auth import setup as setup_mod
+        cfg = tmp_path / 'cfg'
+        cfg.write_text('Host known.example.org\n    User u\n')
+        gate = setup_mod.contact_gate({}, cfg, None, {})
+        assert gate('git@known.example.org:o/r.git') is True
+
+    def test_credential_step_does_not_clone_refused_sources(self, tmp_path, monkeypatch):
+        from dt.auth import credentials, setup as setup_mod
+        from dt import remote as remote_mod
+        monkeypatch.setattr('dt.auth._helpers._get_import_urls',
+                            lambda repo_path=None: {'git@new.example.org:o/r.git': ['a.dvc']})
+        cloned = []
+        monkeypatch.setattr(remote_mod, 'list_remotes_from_repo',
+                            lambda url, **k: cloned.append(url) or [])
+        monkeypatch.setattr(credentials.utils, 'get_project_name', lambda: 'p')
+        monkeypatch.setattr(credentials.subprocess, 'run',
+                            lambda *a, **k: MagicMock(returncode=1, stdout=''))
+        monkeypatch.setattr(setup_mod.sys.stdin, 'isatty', lambda: False)
+        gate = setup_mod.contact_gate({}, tmp_path / 'cfg', None, {})
+        credentials._get_repos_needing_credentials(may_contact=gate)
+        assert cloned == []

@@ -181,18 +181,8 @@ def auth_setup(
     # import-source scan below and the SSH setup step, so each is asked once
     # and none is contacted before the user agrees.
     decisions: Dict[str, bool] = {}
-
-    def may_contact(url: str) -> bool:
-        if classify_url(url) not in ('ssh', 'git'):
-            return True
-        host = _extract_ssh_host(url)
-        if host is None or host in host_configs or _host_in_ssh_config(
-                host, ssh_config_file):
-            return True
-        if host not in decisions:
-            decisions[host] = _approve_new_hosts(
-                [host], ssh_config_file, add_ssh_hosts)
-        return decisions[host]
+    may_contact = contact_gate(host_configs, ssh_config_file, add_ssh_hosts,
+                               decisions)
 
     if repo_url:
         all_endpoints = discover_endpoints_from_repo(
@@ -270,7 +260,8 @@ def auth_setup(
                     verbose=verbose,
                 )
             else:
-                report.credentials_installed = install_credentials(verbose=verbose)
+                report.credentials_installed = install_credentials(
+                    verbose=verbose, may_contact=may_contact)
         except AuthError as exc:
             report.errors.append(f"Credential install error: {exc}")
             if verbose:
@@ -366,6 +357,48 @@ def _prompt_username(host: str) -> str:
             f"--config file."
         )
     return click.prompt(f"SSH username for {host}", type=str)
+
+
+def _ssh_target(url: str):
+    """How git would reach *url*: ``('local', None)``, ``('https', None)``,
+    ``('ssh', host)``, or ``('unknown', None)`` for anything else."""
+    s = str(url).strip()
+    if s.startswith(('https://', 'http://')):
+        return 'https', None
+    if s.startswith('file://') or s.startswith('/'):
+        return 'local', None
+    if '://' not in s and '::' not in s and ':' not in s.split('/', 1)[0]:
+        return 'local', None
+    if s.startswith('ssh://') or '://' not in s:
+        host = _extract_ssh_host(s)
+        if host:
+            return 'ssh', host
+    return 'unknown', None
+
+
+def contact_gate(host_configs: Dict, ssh_config_file: Path,
+                 add_new_hosts: Optional[bool], decisions: Dict[str, bool]):
+    """A ``url -> bool`` check for whether a repository URL may be fetched.
+
+    Local paths and https URLs are fine. An SSH host already in the SSH
+    config (or the ``--config`` file) is fine; any other host is asked about
+    once (see :func:`_approve_new_hosts`), with the answer kept in
+    *decisions*. A URL whose host cannot be made out is asked about as is,
+    and never fetched without a yes.
+    """
+    def may_contact(url: str) -> bool:
+        kind, host = _ssh_target(url)
+        if kind in ('local', 'https'):
+            return True
+        if kind == 'ssh' and (host in host_configs
+                              or _host_in_ssh_config(host, ssh_config_file)):
+            return True
+        key = host if kind == 'ssh' else str(url)
+        if key not in decisions:
+            decisions[key] = _approve_new_hosts(
+                [key], ssh_config_file, add_new_hosts)
+        return decisions[key]
+    return may_contact
 
 
 def _approve_new_hosts(hosts: List[str], ssh_config_file: Path,
