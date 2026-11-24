@@ -24,6 +24,8 @@ env:
   GCP_REGION: ${{ secrets.GCP_REGION }}
   GCP_ZONE: ${{ secrets.GCP_ZONE }}
   QXUB_VENV: ${{ secrets.QXUB_VENV }}
+  GHCR_TOKEN_SECRET: ${{ secrets.GHCR_TOKEN_SECRET }}
+  GHCR_USERNAME_SECRET: ${{ secrets.GHCR_USERNAME_SECRET }}
 
 jobs:
   publish:
@@ -54,7 +56,7 @@ jobs:
 
       - name: Check deployment settings
         run: |
-          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV; do
+          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV GHCR_TOKEN_SECRET GHCR_USERNAME_SECRET; do
             if [[ -z "${!v}" ]]; then
               echo "::error::Repository secret $v is not set" >&2
               exit 1
@@ -201,7 +203,7 @@ jobs:
 
       - name: Check deployment settings
         run: |
-          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV; do
+          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV GHCR_TOKEN_SECRET GHCR_USERNAME_SECRET; do
             if [[ -z "${!v}" ]]; then
               echo "::error::Repository secret $v is not set" >&2
               exit 1
@@ -242,10 +244,10 @@ jobs:
       - name: Fetch GHCR token from Secret Manager
         run: |
           GHCR_TOKEN=$(gcloud secrets versions access latest \
-            --secret=absconda-github-token \
+            --secret="$GHCR_TOKEN_SECRET" \
             --project="$GCP_PROJECT")
           GHCR_USERNAME=$(gcloud secrets versions access latest \
-            --secret=absconda-github-username \
+            --secret="$GHCR_USERNAME_SECRET" \
             --project="$GCP_PROJECT")
           echo "::add-mask::$GHCR_TOKEN"
           echo "::add-mask::$GHCR_USERNAME"

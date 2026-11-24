@@ -19,7 +19,7 @@ This directory contains the GitHub Actions workflows for `dvc_tools`.
 
 ## Configuration
 
-Deployment-specific values are repository secrets so they are masked in public run logs: `REMOTE_BUILDER_NAME`, `REMOTE_BUILDER_HOST`, `REMOTE_BUILDER_WORKSPACE`, `GCP_REGION`, `GCP_ZONE`, `QXUB_VENV` (plus the org-level `WIF_PROVIDER`, `SERVICE_ACCOUNT`, `PROJECT_ID`, and `USER_NAME`). The runner label is the repository variable `RUNNER_LABEL` (`runs-on` cannot read secrets).
+Deployment-specific values are repository secrets so they are masked in public run logs: `REMOTE_BUILDER_NAME`, `REMOTE_BUILDER_HOST`, `REMOTE_BUILDER_WORKSPACE`, `GCP_REGION`, `GCP_ZONE`, `QXUB_VENV`, and `GHCR_TOKEN_SECRET` / `GHCR_USERNAME_SECRET` (the Secret Manager secret names holding the GHCR PAT and its username) (plus the org-level `WIF_PROVIDER`, `SERVICE_ACCOUNT`, `PROJECT_ID`, and `USER_NAME`). The runner label is the repository variable `RUNNER_LABEL` (`runs-on` cannot read secrets).
 
 ## Operational notes / learnings
 
@@ -40,8 +40,8 @@ These are non-obvious things we hit while bringing the pipeline up. Keep this li
   3. runs `singularity remote login docker://ghcr.io` inside `qxub exec --mod singularity` on a compute node; and
   4. removes the staged files in an `if: always()` cleanup step.
 
-  The token never appears on the `qsub` command line or in `qstat -f` output. To rotate the PAT, update `absconda-github-token` and `absconda-github-username` in Secret Manager — no manual `singularity remote login` needed.
-- **GHCR username is a bot user, not the org name.** `SINGULARITY_DOCKER_USERNAME` must be a real GitHub user account that owns the PAT, not the org name. The username is stored in the `absconda-github-username` secret. That account must have Write access on the `ghcr.io/swarbricklab/dt` package (Packages → dt → Package settings → Manage access).
+  The token never appears on the `qsub` command line or in `qstat -f` output. To rotate the PAT, update the Secret Manager secrets named by `GHCR_TOKEN_SECRET` and `GHCR_USERNAME_SECRET` — no manual `singularity remote login` needed.
+- **GHCR username is a bot user, not the org name.** `SINGULARITY_DOCKER_USERNAME` must be a real GitHub user account that owns the PAT, not the org name. The username is stored in the Secret Manager secret named by `GHCR_USERNAME_SECRET`. That account must have Write access on the `ghcr.io/swarbricklab/dt` package (Packages → dt → Package settings → Manage access).
 
 ## Open questions
 
