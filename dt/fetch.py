@@ -918,7 +918,7 @@ def fetch_from_plan(
     if verbose:
         try:
             idx_len = len(idx)
-            print(f"  Cache index: {idx_len} entries ({idx._db_dir})")
+            print(f"  Cache index: {idx_len} entries ({idx.path})")
         except Exception:
             print("  Cache index: new (will be created)")
     

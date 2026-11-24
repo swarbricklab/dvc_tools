@@ -233,8 +233,17 @@ Use `dt cache validate` separately if you need to verify checksum integrity. The
 
 Manage the **cache index** — a lightweight SQLite database recording which
 OIDs exist in the DVC cache, so `dt fetch` can skip already-cached objects
-without a `stat()` per file (expensive on network filesystems). It lives at
-`<cache_root>/.dt/cache.db/` and is shared by every repo using that cache.
+without a `stat()` per file (expensive on network filesystems).
+
+It is **per user**: each user's index lives in their own cache directory,
+`${XDG_CACHE_HOME:-~/.cache}/dt/oid-index/<hash>.sqlite` (keyed by the DVC
+cache's path, owner-only), never inside the DVC cache. A shared cache is
+writable by other users, and SQLite cannot be safely opened read-write in a
+directory others can write. Each user's index fills as they fetch
+(self-healing), or immediately with `dt index cache rebuild`. An
+unreadable or unexpected index file is ignored with a warning — the index
+is advisory. Older versions kept a shared index under
+`<cache_root>/.dt/`; it is no longer read and can be deleted.
 
 This is a separate thing from the `site_cache_dir` index and the archive
 mirror above; `dt index push|pull` do not touch it.
