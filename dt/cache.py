@@ -3,6 +3,8 @@
 Handles external shared cache setup and configuration for HPC environments.
 """
 
+import os
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -531,7 +533,7 @@ def remove_cache_files(
         else:
             # Actually delete the file
             try:
-                cache_path.unlink()
+                _unlink_object(cache_path)
                 deleted.append((workspace_path, file_hash, size))
                 if verbose:
                     size_str = f" ({utils.format_size(size)})" if show_size else ""
@@ -596,6 +598,39 @@ def expected_hash_from_path(cache_file: Path) -> str:
     # File name is rest of hash (possibly with .dir suffix)
     suffix = cache_file.name.replace('.dir', '')
     return prefix + suffix
+
+
+def _is_prefix_dir(p: Path) -> bool:
+    """A real (not linked) two-hex-character object prefix directory."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(st.st_mode) and len(p.name) == 2
+            and all(c in '0123456789abcdef' for c in p.name))
+
+
+def _unlink_object(cache_path: Path) -> None:
+    """Remove the object entry ``<prefix>/<name>`` inside its cache directory.
+
+    The prefix directory is opened relative to the cache directory without
+    following links, so the removal can only ever act inside the cache (a link
+    entry itself is removed, never its target).
+    """
+    prefix_dir = cache_path.parent
+    cache_dir = prefix_dir.parent
+    if not _is_prefix_dir(prefix_dir):
+        raise OSError(f"{prefix_dir} is not a cache prefix directory")
+    cfd = os.open(cache_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        pfd = os.open(prefix_dir.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                      dir_fd=cfd)
+        try:
+            os.unlink(cache_path.name, dir_fd=pfd)
+        finally:
+            os.close(pfd)
+    finally:
+        os.close(cfd)
 
 
 def validate_cache_file(cache_file: Path) -> Tuple[bool, str, str]:
@@ -693,6 +728,9 @@ def validate_cache(
                 continue  # only md5 objects are validated (and deleted by --fix)
             cache_path = hash_to_cache_path(cache_dir, file_hash)
             workspace_path = hash_to_path.get(file_hash, file_hash)
+            if not _is_prefix_dir(cache_path.parent):
+                missing.append((workspace_path, file_hash))
+                continue
             if cache_path.exists():
                 files_to_check.append((cache_path, file_hash, workspace_path))
             else:
@@ -701,7 +739,8 @@ def validate_cache(
         # Validate entire cache
         files_to_check = []
         for subdir in cache_dir.iterdir():
-            if not subdir.is_dir():
+            # Only real object prefix dirs: a link here could point anywhere.
+            if not _is_prefix_dir(subdir):
                 continue
             for cache_file in subdir.iterdir():
                 if cache_file.name.endswith('.tmp'):
@@ -748,7 +787,7 @@ def validate_cache(
                     if fix:
                         # Delete the corrupted file
                         try:
-                            cache_path.unlink()
+                            _unlink_object(cache_path)
                             fixed.append((workspace_path, file_hash))
                             deleted_paths.add(str(cache_path))
                             if verbose:

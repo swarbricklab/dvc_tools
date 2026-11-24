@@ -391,3 +391,58 @@ class TestHashToCachePath:
         
         expected = cache_dir / 'ab' / 'cdef1234567890abcdef1234567890.dir'
         assert result == expected
+
+
+class TestValidateNeverLeavesCache:
+    """A linked prefix dir in a shared cache is never entered or cleaned."""
+
+    def test_linked_prefix_is_not_hashed_or_deleted(self, tmp_path):
+        import hashlib
+        import os
+        from unittest.mock import patch
+        from dt import cache as cache_mod
+        cache_dir = tmp_path / 'cache' / 'files' / 'md5'
+        cache_dir.mkdir(parents=True)
+        # A genuinely corrupt object that --fix should remove.
+        good = hashlib.md5(b'right').hexdigest()
+        (cache_dir / good[:2]).mkdir()
+        bad_obj = cache_dir / good[:2] / good[2:]
+        bad_obj.write_bytes(b'wrong')
+        # An outside dir, linked in as a prefix, holding an object-shaped file.
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        victim = outside / ('c' * 30)
+        victim.write_bytes(b'precious')
+        link_name = 'ab' if good[:2] != 'ab' else 'cd'
+        (cache_dir / link_name).symlink_to(outside)
+
+        hashed = []
+        real_hash = cache_mod.compute_file_hash
+
+        def spy(p):
+            hashed.append(str(p))
+            return real_hash(p)
+
+        with patch.object(cache_mod, 'get_cache_dir', return_value=cache_dir, create=True), \
+             patch('dt.cache.utils.get_cache_dir', return_value=cache_dir), \
+             patch.object(cache_mod, 'compute_file_hash', side_effect=spy), \
+             patch.object(cache_mod, 'get_parent_dir_hash', return_value=None):
+            result = cache_mod.validate_cache(fix=True, progress=False)
+        assert victim.read_bytes() == b'precious'
+        assert not any(str(outside) in h or link_name + '/' in h for h in hashed)
+        assert not bad_obj.exists()  # real corruption still fixed
+        assert len(result['fixed']) == 1
+
+    def test_unlink_object_refuses_linked_prefix(self, tmp_path):
+        import os
+        import pytest as _pytest
+        from dt import cache as cache_mod
+        cache_dir = tmp_path / 'cache'
+        cache_dir.mkdir()
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (outside / 'x').write_text('keep')
+        (cache_dir / 'ab').symlink_to(outside)
+        with _pytest.raises(OSError):
+            cache_mod._unlink_object(cache_dir / 'ab' / 'x')
+        assert (outside / 'x').exists()
