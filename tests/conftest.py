@@ -25,6 +25,9 @@ def pytest_configure(config):
         "markers", "requires_dvc: marks tests requiring DVC to be installed"
     )
     config.addinivalue_line(
+        "markers", "real_dvc_check: don't stub the source-clone DVC check in get tests"
+    )
+    config.addinivalue_line(
         "markers", "requires_git: marks tests requiring git to be installed"
     )
     config.addinivalue_line(

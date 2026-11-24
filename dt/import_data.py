@@ -480,6 +480,7 @@ def configure_clone_cache(clone_path: Path, cache_path: str) -> None:
         clone_path: Path to the cloned repository.
         cache_path: Path to the cache directory.
     """
+    tmp_mod.require_dvc_root(clone_path)
     subprocess.run(
         ['dvc', 'cache', 'dir', '--local', cache_path],
         cwd=clone_path,
@@ -506,6 +507,10 @@ def list_files(
     Raises:
         ImportError: If listing fails.
     """
+    try:
+        tmp_mod.require_dvc_root(clone_path)
+    except tmp_mod.TmpError as e:
+        raise ImportError(str(e))
     cmd = ['dvc', 'list', '--json', '--show-hash']
     if recursive:
         cmd.append('-R')

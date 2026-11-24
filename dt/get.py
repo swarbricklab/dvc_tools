@@ -849,6 +849,7 @@ def distributed_upload_to_s3(
     clone = tmp_mod.clone_repo(
         repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
     )
+    _require_dvc_clone(clone)
 
     resolved = _resolve_rows(
         clone, [row_path for row_path, _ in targets], rev, jobs, path_col
@@ -1054,6 +1055,7 @@ def _resolve_source(
     clone = tmp_mod.clone_repo(
         repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
     )
+    _require_dvc_clone(clone)
 
     found = remote_mod.find_local_remote_from_repo(repository, owner=owner)
     if found:
@@ -1111,6 +1113,7 @@ def get_data(
         clone = tmp_mod.clone_repo(
             repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
         )
+        _require_dvc_clone(clone)
         _, placed = upload_to_s3(
             clone, [(path, dest)], rev, jobs, force, resume, check,
             chunk_size, verbose,
@@ -1199,6 +1202,7 @@ def get_from_csv(
         clone = tmp_mod.clone_repo(
             repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
         )
+        _require_dvc_clone(clone)
         s3_targets = [
             (row_path, root.under(row_out or Path(row_path or '.').name))
             for row_path, row_out in targets
@@ -1355,3 +1359,11 @@ def _tally(results: List[Tuple[str, bool, str]], verbose: bool) -> Tuple[int, in
             if not ok:
                 print(f"  ✗ {relpath}: {message}")
     return written, failed
+
+
+def _require_dvc_clone(clone: Path) -> None:
+    """The source clone must be a DVC repository in its own right."""
+    try:
+        tmp_mod.require_dvc_root(clone)
+    except tmp_mod.TmpError as e:
+        raise GetError(str(e))

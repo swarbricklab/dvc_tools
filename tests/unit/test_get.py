@@ -23,6 +23,16 @@ from dt.errors import GetError
 # Link type resolution
 # =============================================================================
 
+@pytest.fixture(autouse=True)
+def _clone_is_dvc_repo(request):
+    """clone_repo is mocked in these tests; skip the source-clone DVC check
+    (except in tests marked ``real_dvc_check``)."""
+    if request.node.get_closest_marker('real_dvc_check'):
+        yield
+        return
+    with patch('dt.get._require_dvc_clone'):
+        yield
+
 class TestResolveLinkTypes:
     """Which link types dt get will attempt, in order."""
 
@@ -1096,3 +1106,15 @@ class TestResumeOnRemotePath:
              patch.object(get_mod.subprocess, 'run', side_effect=fake_run):
             with pytest.raises(GetError, match='CHECKSUM MISMATCH after download'):
                 get_mod.fetch_via_remote(clone, 'p', dest, check=True)
+
+
+@pytest.mark.real_dvc_check
+class TestSourceCloneMustBeDvcRepo:
+    def test_clone_without_dvc_dir_is_refused(self, tmp_path):
+        from dt import get as get_mod
+        clone = tmp_path / 'clone'
+        clone.mkdir()
+        with pytest.raises(get_mod.GetError, match='not a DVC repository'):
+            get_mod._require_dvc_clone(clone)
+        (clone / '.dvc').mkdir()
+        get_mod._require_dvc_clone(clone)

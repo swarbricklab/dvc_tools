@@ -13,6 +13,7 @@ instead of being dropped, so an incomplete graph never renders as a complete
 one.
 """
 
+import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from . import dvc_deps
 from . import tmp as tmp_mod
 from . import utils
 from .dvc_deps import RepoEdge
-from .errors import DepsError
+from .errors import DepsError, TmpError
 
 
 # How the revision of each source repo is chosen.
@@ -188,13 +189,18 @@ def _clone_or_refresh(
     Returns:
         ``(path, status, detail)``. ``path`` is None unless status is ``ok``.
     """
-    repo_path = tmp_mod.get_tmp_dir() / repo_id
+    try:
+        repo_path = tmp_mod.clone_path_for(repo_id)
+        if os.path.lexists(repo_path):
+            tmp_mod._require_clone_root(repo_path)
+    except TmpError as e:
+        return None, STATUS_CLONE_FAILED, str(e)
 
     if repo_path.exists():
         if not refresh:
             return repo_path, STATUS_OK, None
         result = subprocess.run(
-            ['git', 'fetch', '--all', '--prune', '--quiet'],
+            tmp_mod._git(repo_path, 'fetch', '--all', '--prune', '--quiet'),
             cwd=str(repo_path), capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -205,7 +211,10 @@ def _clone_or_refresh(
             return repo_path, STATUS_OK, result.stderr.strip() or None
         return repo_path, STATUS_OK, None
 
-    repo_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        repo_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return None, STATUS_CLONE_FAILED, str(e)
     if verbose:
         print(f"  cloning {repo_id}...")
 
