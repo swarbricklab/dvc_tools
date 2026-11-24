@@ -229,7 +229,7 @@ def submit_via_qxub(
         threads, file_count=file_count, config_prefix=config_prefix,
     )
 
-    conda_env = cfg.get_value('qxub.env', DEFAULT_ENV)
+    conda_env = cfg.get_own_value('qxub.env', DEFAULT_ENV)
     queue = cfg.get_value('qxub.queue', DEFAULT_COMPUTE_QUEUE)
     walltime = cfg.get_value('qxub.walltime', DEFAULT_WALLTIME)
 

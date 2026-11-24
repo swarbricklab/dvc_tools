@@ -56,7 +56,7 @@ def get_qxub_config() -> dict:
         Dictionary with qxub settings.
     """
     return {
-        'env': cfg.get_value('qxub.env', DEFAULT_ENV),
+        'env': cfg.get_own_value('qxub.env', DEFAULT_ENV),
         'queue': cfg.get_value('qxub.queue', DEFAULT_TRANSFER_QUEUE),
         'walltime': cfg.get_value('qxub.walltime', DEFAULT_WALLTIME),
         'mem': cfg.get_value('qxub.mem', DEFAULT_MEM),

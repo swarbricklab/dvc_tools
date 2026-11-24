@@ -249,6 +249,28 @@ def get_trusted_value_with_scope(key: str, default: Any = None):
     return default, None
 
 
+def get_own_value(key: str, default: Any = None) -> Any:
+    """Get *key* from user or system config only.
+
+    For settings that choose what software runs on the user's behalf, a
+    repository's value is ignored (with a one-time warning), even when
+    neither the user nor the site sets the key.
+    """
+    value = get_value(key)
+    scopes = scopes_defining(key)
+    if scopes and scopes[0] in REPO_SCOPES:
+        trusted = [s for s in scopes if s in TRUSTED_SCOPES]
+        if key not in _warned_overrides:
+            _warned_overrides.add(key)
+            import sys
+            print(f"Warning: ignoring {key} from {scopes[0]} config "
+                  f"(set it in user or system config)", file=sys.stderr)
+        if not trusted:
+            return default
+        found, value = _scope_lookup(trusted[0], key)
+    return default if value is None else value
+
+
 def _assign(data: dict, key: str, value: Any) -> None:
     """Write *value* at the dot-separated *key* inside *data*, creating parents."""
     parts = key.split('.')

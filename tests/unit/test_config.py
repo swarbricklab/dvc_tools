@@ -984,6 +984,17 @@ class TestTrustedValues:
         assert cfg.get_trusted_value_with_scope('secrets.gcp.project') == ('theirs', 'project')
         assert cfg.get_trusted_value('secrets.prefix', 'dflt') == 'dflt'
 
+    def test_own_value_ignores_repository(self, isolated_config, capsys):
+        d = isolated_config
+        self._write(os.path.join(d['project'], '.dt', 'config.yaml'),
+                    'qxub:\n  env: /scratch/other/env\n')
+        cfg._warned_overrides.clear()
+        assert cfg.get_own_value('qxub.env', 'dt') == 'dt'
+        assert 'qxub.env' in capsys.readouterr().err
+        self._write(os.path.join(d['system'], 'dt', 'config.yaml'),
+                    'qxub:\n  env: site-env\n')
+        assert cfg.get_own_value('qxub.env', 'dt') == 'site-env'
+
     def test_secret_store_set_by_repo(self, isolated_config):
         from dt.auth.credentials import secret_store_set_by_repo
         d = isolated_config
