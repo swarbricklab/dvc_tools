@@ -10,6 +10,7 @@ remotes in .dvc/config.local.
 Offline state is tracked in .dt/config.local.yaml under the 'offline' key.
 """
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -127,22 +128,24 @@ def list_temp_clones() -> List[Tuple[str, Path]]:
         return []
     
     clones = []
-    
-    # Look for repos: .dt/tmp/<host>/<owner>/<repo>
-    for host_dir in tmp_dir.iterdir():
-        if not host_dir.is_dir():
-            continue
-        for owner_dir in host_dir.iterdir():
-            if not owner_dir.is_dir():
-                continue
-            for repo_dir in owner_dir.iterdir():
-                if not repo_dir.is_dir():
+
+    def _subdirs(d):
+        return [e for e in os.scandir(d) if e.is_dir(follow_symlinks=False)]
+
+    # Look for repos: .dt/tmp/clones/<host>/<owner>/<repo> (dt-created clones only)
+    for host_dir in _subdirs(tmp_dir):
+        for owner_dir in _subdirs(host_dir.path):
+            for repo_dir in _subdirs(owner_dir.path):
+                repo_id = f"{host_dir.name}/{owner_dir.name}/{repo_dir.name}"
+                path = Path(repo_dir.path)
+                try:
+                    if tmp_mod.clone_path_for(repo_id, tmp_dir) != path:
+                        continue
+                    tmp_mod._require_clone_root(path)
+                except tmp_mod.TmpError:
                     continue
-                # Check if it's a git repo
-                if (repo_dir / '.git').exists() or (repo_dir / 'HEAD').exists():
-                    repo_id = f"{host_dir.name}/{owner_dir.name}/{repo_dir.name}"
-                    clones.append((repo_id, repo_dir.resolve()))
-    
+                clones.append((repo_id, Path(os.path.abspath(path))))
+
     return sorted(clones)
 
 
@@ -161,16 +164,19 @@ def repo_id_to_urls(repo_id: str) -> List[str]:
         return []
     
     host, owner, repo = parts
-    
+    if not all(tmp_mod._ID_COMPONENT.fullmatch(p) for p in parts):
+        return []
+    host = host.lower()
+
     urls = []
-    if 'github.com' in host:
+    if host == 'github.com':
         urls.extend([
             f"git@github.com:{owner}/{repo}.git",
             f"git@github.com:{owner}/{repo}",
             f"https://github.com/{owner}/{repo}.git",
             f"https://github.com/{owner}/{repo}",
         ])
-    elif 'gitlab.com' in host:
+    elif host == 'gitlab.com':
         urls.extend([
             f"git@gitlab.com:{owner}/{repo}.git",
             f"git@gitlab.com:{owner}/{repo}",
@@ -187,6 +193,71 @@ def repo_id_to_urls(repo_id: str) -> List[str]:
         ])
     
     return urls
+
+
+def _origin_mismatch(repo_id: str, local_path: Path) -> Optional[str]:
+    """Why ``local_path`` must not stand in for ``repo_id``, or None.
+
+    The clone's own ``origin`` must normalise to the same host/owner/repo
+    (case-insensitively) as the URLs that would be redirected to it.
+    """
+    result = subprocess.run(
+        tmp_mod._git(local_path, 'config', '--local', '--get-all', 'remote.origin.url'),
+        capture_output=True, text=True,
+    )
+    values = [v for v in result.stdout.splitlines() if v.strip()]
+    if result.returncode != 0 or not values:
+        return "clone has no origin URL"
+    if len(values) != 1:
+        return "clone has more than one origin URL"
+    origin = values[0].strip()
+    if origin.lower().startswith('http://'):
+        return f"clone's origin {origin!r} is not a secure URL"
+    try:
+        origin_id = tmp_mod.get_repo_id(origin)
+    except tmp_mod.TmpError as e:
+        return f"cannot parse origin URL {origin!r}: {e}"
+    if origin_id.lower() != repo_id.lower():
+        return f"clone's origin is {origin!r}, not {repo_id}"
+    return None
+
+
+def _clear_clone_redirects(tmp_dir: Path) -> List[str]:
+    """Remove every ``url.<path>.insteadOf`` pointing into the clones dir.
+
+    Covers redirects written by earlier versions that the saved state may
+    no longer list. Returns the removed paths.
+    """
+    roots = {os.path.abspath(tmp_dir), os.path.realpath(tmp_dir)}
+    removed = []
+    for local_path in get_current_redirects():
+        if any(local_path == r or local_path.startswith(r + os.sep) for r in roots):
+            subprocess.run(
+                ['git', 'config', '--local', '--unset-all', get_config_key(Path(local_path))],
+                capture_output=True, text=True,
+            )
+            removed.append(local_path)
+    return removed
+
+
+def _prefix_sibling(repo_id: str, local_path: Path, verified: set) -> Optional[str]:
+    """A sibling dir that git's prefix-matching insteadOf would also reach.
+
+    ``url.<clone>.insteadOf https://host/owner/repo`` rewrites any URL that
+    starts with that string, e.g. ``.../repo-x`` to ``<clone>-x``. Every such
+    sibling must itself be a verified clone (whose longer prefix then wins).
+    """
+    repo = local_path.name
+    host, owner, _ = repo_id.split('/')
+    try:
+        entries = list(os.scandir(local_path.parent))
+    except OSError as e:
+        return str(e)
+    for e in entries:
+        if e.name != repo and e.name.startswith(repo) and \
+                f"{host}/{owner}/{e.name}" not in verified:
+            return e.path
+    return None
 
 
 def get_config_key(local_path: Path) -> str:
@@ -270,8 +341,24 @@ def enable(verbose: bool = False) -> Tuple[List[str], List[str]]:
 
     enabled_repos = []
     
-    # Enable git URL redirects for temp clones
+    # Drop any redirects into the clones dir (including ones left by older
+    # versions), then add back only verified ones.
+    _clear_clone_redirects(get_tmp_dir())
+
+    verified = {}
     for repo_id, local_path in clones:
+        mismatch = _origin_mismatch(repo_id, local_path)
+        if mismatch:
+            print(f"Skipping {repo_id}: {mismatch}")
+            continue
+        verified[repo_id] = local_path
+
+    # Enable git URL redirects for temp clones
+    for repo_id, local_path in verified.items():
+        sibling = _prefix_sibling(repo_id, local_path, set(verified))
+        if sibling:
+            print(f"Skipping {repo_id}: {sibling} would also match its URLs")
+            continue
         urls = repo_id_to_urls(repo_id)
         
         if verbose:
@@ -351,6 +438,7 @@ def disable(verbose: bool = False) -> Tuple[List[str], List[str]]:
     
     tmp_dir = get_tmp_dir()
     disabled_repos = []
+    _clear_clone_redirects(tmp_dir)
     
     # Remove git redirects from saved state
     for repo_id in git_redirects:
