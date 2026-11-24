@@ -287,7 +287,8 @@ class TestNewSshHostsNeedApproval:
                  patch.object(setup_mod, '_find_existing_key',
                               return_value=tmp_path / 'id'), \
                  patch.object(setup_mod, '_key_has_passphrase', return_value=False), \
-                 patch.object(setup_mod, 'check_endpoints', return_value=[]), \
+                 patch.object(setup_mod, 'check_endpoints',
+                              return_value=[]) as checked, \
                  patch.object(setup_mod, '_key_accepted_by_host', return_value=True), \
                  patch.object(setup_mod, '_deploy_keys_and_report',
                               side_effect=lambda hosts, **kw: list(hosts)), \
@@ -300,6 +301,7 @@ class TestNewSshHostsNeedApproval:
                     verbose=False, add_new_hosts=add_new_hosts,
                     skipped_hosts=skipped)
             text = config.read_text() if config.exists() else ''
+            self.checked = checked
             return out, skipped, text, confirm
         return run
 
@@ -313,6 +315,8 @@ class TestNewSshHostsNeedApproval:
     def test_interactive_asks_and_respects_no(self, run_setup, capsys):
         out, skipped, text, confirm = run_setup(tty=True, answer=False)
         confirm.assert_called_once()
+        assert not self.checked.called or \
+            self.checked.call_args.kwargs['endpoints'] == []
         assert 'hpc.example.org' in capsys.readouterr().out
         assert out == [] and 'hpc.example.org' not in text
 
@@ -338,3 +342,30 @@ class TestNewSshHostsNeedApproval:
             existing='Host hpc.example.org\n    User xy1234\n')
         confirm.assert_not_called()
         assert out == ['hpc.example.org'] and skipped == []
+
+    def test_declined_host_is_not_contacted(self, tmp_path):
+        from dt.auth import setup as setup_mod
+        config = tmp_path / 'config'
+        config.write_text('Host known.example.org\n    User xy1234\n')
+        known = Endpoint(type='ssh', url='ssh://xy1234@known.example.org/d',
+                         source='r1')
+        known.children = [Endpoint(type='ssh', url='ssh://xy1234@new.example.org/e',
+                                   source='child')]
+        new = Endpoint(type='ssh', url='ssh://xy1234@new.example.org/d',
+                       source='r2')
+        with patch.object(setup_mod, '_ensure_ssh_dir'), \
+             patch.object(setup_mod, '_find_existing_key',
+                          return_value=tmp_path / 'id'), \
+             patch.object(setup_mod, '_key_has_passphrase', return_value=False), \
+             patch.object(setup_mod, 'check_endpoints', return_value=[]) as checked, \
+             patch.object(setup_mod, '_key_accepted_by_host', return_value=True), \
+             patch.object(setup_mod, '_deploy_keys_and_report',
+                          side_effect=lambda hosts, **kw: list(hosts)), \
+             patch.object(setup_mod.sys.stdin, 'isatty', return_value=False):
+            out = setup_mod._do_ssh_setup(
+                endpoints=[known, new], host_configs={}, default_username=None,
+                ssh_config_file=config, verbose=False)
+        assert out == ['known.example.org']
+        eps = checked.call_args.kwargs['endpoints']
+        urls = [e.url for e in eps] + [c.url for e in eps for c in e.children]
+        assert urls == ['ssh://xy1234@known.example.org/d']

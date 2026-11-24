@@ -22,7 +22,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -476,8 +476,15 @@ def _do_ssh_setup(
                 print(f"  SSH config stanza for {host} already exists \u2014 skipping")
 
     # Check connectivity
+    # Only hosts that are being set up are contacted.
+    def _kept(ep: Endpoint) -> bool:
+        return (ep.type not in ssh_git_types
+                or _extract_ssh_host(ep.url) in all_hosts)
+
+    check_eps = [replace(ep, children=[c for c in ep.children if _kept(c)])
+                 for ep in ssh_eps if _kept(ep)]
     results_check = check_endpoints(
-        endpoints=ssh_eps,
+        endpoints=check_eps,
         type_filter=ssh_git_types,
         verbose=False,
     )
