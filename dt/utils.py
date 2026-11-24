@@ -729,12 +729,25 @@ def dvc_local_config_problem(repo_path: Optional[Path] = None) -> Optional[str]:
     except FileNotFoundError:
         return "git is not available to check tracked DVC files"
     if tracked.returncode != 0:
+        if 'dubious ownership' in tracked.stderr:
+            return _not_own_clone_hint(root)
         return f"could not check tracked files: {tracked.stderr.strip()}"
     if tracked.stdout.strip('\0'):
         names = ', '.join(tracked.stdout.strip('\0').split('\0')[:3])
         return (f"the repository tracks DVC local state ({names}); "
                 f"remove it from git (git rm --cached) first")
     return None
+
+
+def _not_own_clone_hint(root: Path) -> str:
+    """Message for a repository that belongs to another user."""
+    try:
+        import pwd
+        owner = pwd.getpwuid(os.stat(root).st_uid).pw_name
+    except (OSError, KeyError):
+        owner = 'another user'
+    return (f"{root} belongs to {owner}, not you. dt works only in your own "
+            f"clone of a project; make one with `dt clone <repository>`.")
 
 
 def pin_clone_site_cache(clone_path: Path) -> None:

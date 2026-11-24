@@ -1355,3 +1355,22 @@ class TestGitNetEnv:
             env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
+
+
+def test_other_users_repo_gets_plain_hint(tmp_path, monkeypatch):
+    import subprocess
+    from unittest.mock import MagicMock
+    from dt import utils
+    (tmp_path / '.dvc').mkdir()
+    (tmp_path / '.dvc' / 'config').write_text('')
+    (tmp_path / '.git').mkdir()
+    real_run = subprocess.run
+
+    def fake_run(cmd, *a, **k):
+        if 'ls-files' in cmd:
+            return MagicMock(returncode=128, stdout='',
+                             stderr="fatal: detected dubious ownership in repository")
+        return real_run(cmd, *a, **k)
+    monkeypatch.setattr(utils.subprocess, 'run', fake_run)
+    msg = utils.dvc_local_config_problem(tmp_path)
+    assert 'your own clone' in msg and 'dt clone' in msg
