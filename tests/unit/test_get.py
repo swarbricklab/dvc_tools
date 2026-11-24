@@ -148,6 +148,19 @@ class TestListSourceFiles:
         assert cmd.index('--rev') < cmd.index('--')
         assert 'data/fq/AF013-A' in cmd
 
+    @pytest.mark.parametrize('relpath,md5', [
+        ('../../.bashrc', 'a' * 32),
+        ('/etc/x', 'a' * 32),
+        ('a//b', 'a' * 32),
+        ('ok\nname', 'a' * 32),
+        ('fine', 'not-a-hash'),
+    ])
+    def test_refuses_unusable_entries(self, tmp_path, relpath, md5):
+        listing = [{'path': relpath, 'md5': md5, 'size': 1, 'isout': False, 'isdir': False}]
+        with patch.object(get_mod.subprocess, 'run', return_value=_dvc_list_json(listing)):
+            with pytest.raises(get_mod.GetError, match='unusable'):
+                get_mod.list_source_files(tmp_path, 'data/x')
+
     def test_skips_the_dir_entry_itself(self, tmp_path):
         """The .dir output is metadata, not a file to place."""
         listing = [

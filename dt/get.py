@@ -148,6 +148,16 @@ def _run_dvc_list(cmd: List[str], attempts: int = 4) -> subprocess.CompletedProc
     return result
 
 
+def _plain_relpath(relpath) -> bool:
+    """A relative path that stays below its root: no absolute path, no
+    empty, ``.`` or ``..`` component, no control characters."""
+    if not isinstance(relpath, str) or not relpath.isprintable():
+        return False
+    if relpath.startswith('/'):
+        return False
+    return all(part not in ('', '.', '..') for part in relpath.split('/'))
+
+
 def list_source_files(
     source: Path,
     path: str,
@@ -198,8 +208,12 @@ def list_source_files(
             continue
         md5 = entry.get('md5')
         relpath = entry.get('path')
-        if not md5 or not relpath or md5.endswith('.dir'):
+        if not md5 or not relpath or str(md5).endswith('.dir'):
             continue
+        if not utils.is_md5_oid(md5) or not _plain_relpath(relpath):
+            raise GetError(
+                f"The listing of {path} names an unusable file entry "
+                f"{relpath!r} ({md5!r}); refusing to copy from it.")
         files.append({
             'relpath': relpath,
             'md5': md5,
