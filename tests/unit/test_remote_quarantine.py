@@ -53,6 +53,15 @@ class TestReverseMap:
         assert dir_rel in rev[child]
 
 
+    def test_ignores_manifest_not_matching_its_name(self, tmp_path):
+        remote = tmp_path / "remote"
+        child = _place_blob(remote, b"member\n")
+        dir_rel = _place_dir_manifest(remote, [(child, "sub/member.txt")])
+        (remote / dir_rel).write_bytes(
+            json.dumps([{"md5": child, "relpath": "other"}]).encode())
+        assert q.build_dir_reverse_map(remote) == {}
+
+
 class TestPlanQuarantine:
     def test_bad_member_pulls_in_enclosing_dir(self, tmp_path):
         remote = tmp_path / "remote"

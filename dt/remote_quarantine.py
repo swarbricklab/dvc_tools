@@ -329,7 +329,8 @@ def build_dir_reverse_map(
 
     layout = layout or ops.detect_source_layout(remote_dir)
     rev: Dict[str, List[str]] = {}
-    for _key, _hexp, dir_path in remote_verify._prefix_dirs(remote_dir, layout):
+    from . import cache_ops
+    for _key, hexp, dir_path in remote_verify._prefix_dirs(remote_dir, layout):
         try:
             children = list(dir_path.iterdir())
         except OSError:
@@ -338,9 +339,13 @@ def build_dir_reverse_map(
             if not f.name.endswith('.dir') or not f.is_file():
                 continue
             rel = str(f.relative_to(remote_dir))
+            # Only a manifest whose bytes match its name is believed.
+            raw = cache_ops.read_dir_manifest(f, hexp + f.name)
+            if raw is None:
+                continue
             try:
-                entries = json.loads(f.read_bytes())
-            except (OSError, ValueError):
+                entries = json.loads(raw)
+            except ValueError:
                 continue
             if not isinstance(entries, list):
                 continue

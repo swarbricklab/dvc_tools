@@ -282,7 +282,13 @@ def migrate_directory_output(
         out['hash'] = 'md5'
         return out
 
-    old_manifest = json.loads(dir_cache_path.read_bytes())
+    from .cache_ops import read_dir_manifest
+    raw = read_dir_manifest(dir_cache_path, old_md5)
+    if raw is None:
+        raise MigrateError(
+            f"{rel_path}: the cached directory manifest {old_md5[:12]}… does not "
+            f"match its hash; not migrating from it.")
+    old_manifest = json.loads(raw)
 
     # Re-hash each child file from cache, building a new Tree
     new_tree = Tree()
