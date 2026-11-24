@@ -353,6 +353,39 @@ class TestCheckCommandScope:
         assert install.hook_run('pre-commit') is True
         assert not marker.exists()
 
+    def test_user_command_survives_repo_settings_for_check(self, repo, tmp_path):
+        root, write = repo
+        write(tmp_path / 'xdg_home' / 'dt' / 'config.yaml',
+              {'black': {'command': 'black --check .'}})
+        write(root / '.dt' / 'config.yaml', {'black': {'mode': 'async'}})
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        assert checks['black']['command'] == 'black --check .'
+        assert checks['black']['mode'] == 'async'
+
+    def test_user_check_survives_repo_settings_for_other_checks(self, repo, tmp_path):
+        root, write = repo
+        write(tmp_path / 'xdg_home' / 'dt' / 'config.yaml',
+              {'black': {'command': 'black --check .'}})
+        write(root / '.dt' / 'config.yaml', {'large-files': {'max_size': '5MB'}})
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        assert checks['black']['command'] == 'black --check .'
+        assert checks['large-files']['max_size'] == '5MB'
+
+    def test_dotted_user_check_name_runs(self, repo, tmp_path):
+        root, write = repo
+        write(tmp_path / 'xdg_home' / 'dt' / 'config.yaml',
+              {'lint.py': {'command': 'true'}})
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        assert checks['lint.py']['command'] == 'true'
+
+    def test_note_omits_suggestion_for_unprintable_command(self, repo, capsys):
+        root, write = repo
+        write(root / '.dt' / 'config.yaml',
+              {'x': {'command': 'true\x1b[2K\rrm -rf ~'}})
+        install._get_checks('pre-commit')
+        err = capsys.readouterr().err
+        assert '\x1b' not in err and 'dt config set' not in err
+
     def test_hook_list_shows_repo_command_as_not_run(self, repo):
         root, write = repo
         write(root / '.dt' / 'config.yaml',
