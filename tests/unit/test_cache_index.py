@@ -48,8 +48,8 @@ def cache_root(tmp_path):
 
 
 @pytest.fixture
-def victim(tmp_path):
-    f = tmp_path / 'victim' / 'important.txt'
+def outside_file(tmp_path):
+    f = tmp_path / 'outside_file' / 'important.txt'
     f.parent.mkdir()
     f.write_text('keep me')
     return f
@@ -119,12 +119,12 @@ class TestBasics:
 
 
 class TestSharedCacheIsNeverOpened:
-    """Other users can write the shared cache; nothing there is trusted."""
+    """Nothing under the shared cache's .dt is read or written."""
 
-    def test_planted_files_in_cache_dt_are_ignored(self, cache_root, victim):
+    def test_foreign_files_in_cache_dt_are_ignored(self, cache_root, outside_file):
         dt_dir = cache_root / '.dt'
         dt_dir.mkdir()
-        # Old diskcache-style store naming a victim file, plus a hot-journal-
+        # Old diskcache-style store naming a outside_file file, plus a hot-journal-
         # like file: neither is read, so neither can trigger a deletion.
         old = dt_dir / 'cache.db'
         old.mkdir()
@@ -132,7 +132,7 @@ class TestSharedCacheIsNeverOpened:
         conn.executescript(f"""
             CREATE TABLE Cache (rowid INTEGER PRIMARY KEY, key BLOB, raw INTEGER,
                 expire_time REAL, mode INTEGER, filename TEXT, value BLOB);
-            INSERT INTO Cache VALUES (1, 'k', 1, 0, 2, '{victim}', NULL);
+            INSERT INTO Cache VALUES (1, 'k', 1, 0, 2, '{outside_file}', NULL);
         """)
         conn.commit()
         conn.close()
@@ -140,7 +140,7 @@ class TestSharedCacheIsNeverOpened:
         before = sorted(os.listdir(dt_dir))
         with CacheIndex(cache_root) as idx:
             _exercise(idx)
-        assert victim.read_text() == 'keep me'
+        assert outside_file.read_text() == 'keep me'
         assert sorted(os.listdir(dt_dir)) == before
 
     def test_symlinked_cache_dt_dir_is_not_chmodded(self, cache_root, tmp_path):
@@ -154,7 +154,7 @@ class TestSharedCacheIsNeverOpened:
         assert os.listdir(private) == []
 
 
-class TestUntrustedIndexFile:
+class TestUnexpectedIndexFile:
     def _plant(self, cache_root, sql):
         db = cache_index.index_path_for(cache_root)
         db.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -177,14 +177,14 @@ class TestUntrustedIndexFile:
         conn = sqlite3.connect(db)
         assert conn.execute('SELECT count(*) FROM log').fetchone()[0] == 0
 
-    def test_symlinked_index_file_is_not_followed(self, cache_root, victim):
+    def test_symlinked_index_file_is_not_followed(self, cache_root, outside_file):
         db = cache_index.index_path_for(cache_root)
         db.parent.mkdir(parents=True, mode=0o700)
-        db.symlink_to(victim)
+        db.symlink_to(outside_file)
         with CacheIndex(cache_root) as idx:
             idx.add('ab')
             len(idx)
-        assert victim.read_text() == 'keep me'
+        assert outside_file.read_text() == 'keep me'
 
     def test_group_writable_index_dir_refused_for_read(self, cache_root):
         d = cache_index.index_path_for(cache_root).parent

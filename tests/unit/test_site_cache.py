@@ -132,7 +132,7 @@ class TestApplyToRepo:
             _apply(tmp_path, root)
         assert _configured(dvc_ok) is None
 
-    def test_refuses_symlink_planted_by_another_user(self, tmp_path, root, fs, dvc_ok):
+    def test_refuses_symlink_foreign_by_another_user(self, tmp_path, root, fs, dvc_ok):
         elsewhere = tmp_path / 'elsewhere'
         elsewhere.mkdir()
         (root / USER).symlink_to(elsewhere)
@@ -190,9 +190,9 @@ class TestAdoptionContents:
     def test_refuses_owned_dir_with_writable_contents(self, tmp_path, root, dvc_ok):
         target = root / USER / 'proj'
         target.mkdir(parents=True)
-        (target / 'state.db').write_text('planted')
+        (target / 'state.db').write_text('foreign')
         os.chmod(target / 'state.db', 0o664)
-        with pytest.raises(SiteCacheError, match='other users could have'):
+        with pytest.raises(SiteCacheError, match='not private to you'):
             _apply(tmp_path, root)
         assert (target / 'state.db').exists()  # never deleted
         assert _configured(dvc_ok) is None
@@ -245,11 +245,11 @@ class TestMigrate:
         copy.assert_not_called()
         cur.assert_not_called()
 
-    def test_does_not_copy_untrusted_source(self, tmp_path, root, dvc_ok):
+    def test_does_not_copy_non_private_source(self, tmp_path, root, dvc_ok):
         old = tmp_path / 'old'
         old.mkdir()
         os.chmod(old, 0o2775)
-        (old / 'state').write_text('planted')
+        (old / 'state').write_text('foreign')
         target = root / USER / 'proj'
         with self._current(old):
             site_cache.migrate(target, repo_path=tmp_path, verbose=False,

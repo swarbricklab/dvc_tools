@@ -6,13 +6,10 @@ filesystems like Lustre, where metadata operations can dominate fetch time.
 
 The index is **per user and per cache**: it lives in the user's own cache
 directory (``${XDG_CACHE_HOME:-~/.cache}/dt/oid-index/<hash>.sqlite``, keyed
-by the cache's real path), never inside the DVC cache itself.  A shared DVC
-cache is writable by other users, and SQLite cannot be opened read-write
-safely in a directory others can write: a planted journal file can make
-SQLite's crash recovery delete arbitrary files.  Keeping the index private
-avoids that entirely.  The store is also kept inert — a single table of
-plain OID strings, schema code disabled — and any problem with it falls
-back to an empty in-memory index, since the index is only advisory.
+by the cache's real path), never inside the DVC cache itself, and only in a
+directory that is private to the user.  It holds a single table of plain
+OID strings, and any problem with it falls back to an empty in-memory
+index, since the index is only advisory.
 
 Staleness model
 ───────────────
@@ -381,13 +378,9 @@ class _transaction:
 
 
 def _ensure_private_dir(path: Path, create: bool) -> None:
-    """Require ``path`` to be a real dir owned by us, writable by no one else,
-    reached through a chain no other user can rename or replace.
-
-    SQLite looks up its journal by path on every transaction, and a planted
-    journal can make it delete arbitrary files, so the whole chain up to ``/``
-    matters: every ancestor must be owned by us or root and not writable by
-    others unless sticky.
+    """Require ``path`` to be a real dir owned by us and writable by no one
+    else, with every ancestor up to ``/`` owned by us or root and not
+    writable by others unless sticky.
     """
     _check_chain(path.parent if not os.path.lexists(path) else path)
     if create and not os.path.lexists(path):

@@ -43,8 +43,7 @@ CONFIG_KEY_ENABLED = 'site_cache.enabled'
 # dir is then group-writable (never other-writable).
 CONFIG_KEY_GROUP_SHARED = 'site_cache.group_shared'
 
-# DVC trusts (and may deserialize) what it reads from site_cache_dir, so the
-# per-repo dir is private to its owner unless group sharing is opted into.
+# The per-repo dir is private to its owner unless group sharing is opted into.
 PRIVATE_DIR_MODE = 0o700
 GROUP_DIR_MODE = 0o2770
 # The per-user level under a shared root: never writable by anyone else.
@@ -59,9 +58,9 @@ def _current_user() -> str:
         raise SiteCacheError(f"Cannot determine user name for uid {os.geteuid()}")
 
 
-# Keys that decide who can write the state dir. They are honoured only from
-# user/system config (or the CLI): project config is tracked in git and local
-# config lives in the workspace, so a collaborator could set them there.
+# Keys that decide where the state dir lives and who can write it. They are
+# per-user settings, so they are read only from user/system config (or the
+# CLI), not from repo-level config.
 _TRUSTED_SCOPES = ('user', 'system')
 
 
@@ -90,7 +89,7 @@ def _abs(path) -> Path:
     return Path(os.path.abspath(os.path.expanduser(str(path))))
 
 
-def _untrusted_write_bits(shared: bool) -> int:
+def _other_write_bits(shared: bool) -> int:
     return stat.S_IWOTH | (0 if shared else stat.S_IWGRP)
 
 
@@ -109,7 +108,7 @@ def _configured_root(root: Optional[str]) -> Optional[Path]:
 
 
 def _check_symlinks(path: Path, trusted_uids: set) -> None:
-    """Refuse a path containing a symlink planted by an untrusted user."""
+    """Refuse a path containing a symlink owned by another user."""
     for comp in (path, *path.parents):
         try:
             st = comp.lstat()
@@ -125,17 +124,15 @@ def _check_symlinks(path: Path, trusted_uids: set) -> None:
 def _check_ancestors(
     path: Path, shared: bool, trusted_uids: set, start: Path, verbose: bool = True,
 ) -> None:
-    """Refuse ``path`` if an untrusted user could rename/replace it or a parent.
+    """Check the parent chain of ``path``.
 
-    Anyone who can write a directory without the sticky bit — or who owns
-    it — can rename the entries inside it and put their own in place. Walk up
-    the real (symlink-resolved) chain from ``start`` and require each
-    directory to be owned by a trusted uid and not writable by untrusted users
+    Walk up the real (symlink-resolved) chain from ``start`` and require each
+    directory to be owned by an allowed uid and not writable by other users
     unless sticky. The walk stops at the first root-owned directory:
     system/site-managed directories are outside dt's control, so if one of
     those is itself open to renames we can only warn.
     """
-    bad = _untrusted_write_bits(shared)
+    bad = _other_write_bits(shared)
     real = Path(os.path.realpath(start))
     for parent in (real, *real.parents):
         try:
@@ -152,12 +149,12 @@ def _check_ancestors(
         if pst.st_uid not in trusted_uids:
             raise SiteCacheError(
                 f"Refusing site_cache_dir {path}: parent {parent} is owned by another "
-                f"user (uid {pst.st_uid}), who could replace its contents."
+                f"user (uid {pst.st_uid})."
             )
         if (pst.st_mode & bad) and not (pst.st_mode & stat.S_ISVTX):
             raise SiteCacheError(
                 f"Refusing site_cache_dir {path}: {parent} is writable by other users "
-                f"without the sticky bit, so they could replace its contents.\n"
+                f"without the sticky bit.\n"
                 f"  Fix (as its owner): chmod +t {parent}"
             )
 
@@ -169,8 +166,7 @@ def _ensure_owned_dir(
     directory owned by the caller and set it to ``mode``.
 
     With ``check_contents`` (the state dir itself), an existing dir is only
-    adopted if everything already in it is private to the caller — another
-    user may have planted files while it was writable by them.
+    adopted if everything already in it is private to the caller.
     """
     try:
         path.mkdir(mode=mode)
@@ -186,8 +182,8 @@ def _ensure_owned_dir(
             )
         if check_contents and not shared and not _tree_is_private(path, check_top=False):
             raise SiteCacheError(
-                f"Refusing {path}: it contains files that other users could have "
-                f"written, so DVC should not trust them. It is a rebuildable cache: "
+                f"Refusing {path}: it contains files not private to you. "
+                f"It is a rebuildable cache: "
                 f"remove it (rm -rf {path}) and re-run."
             )
         if verbose and st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
@@ -207,8 +203,8 @@ def _prepare_dir(
     The dir (and, under a shared root, the ``{root}/{user}`` level) is
     created owned by the caller with a private mode — group-only if
     ``site_cache.group_shared`` is set. An existing dir is adopted only if the
-    caller owns it. Symlinks planted by other users, and parents that other
-    users could rename, are refused.
+    caller owns it. Symlinks owned by other users, and parent directories
+    writable by others without the sticky bit, are refused.
 
     Raises:
         SiteCacheError: If the dir is unsafe to use.
@@ -227,7 +223,7 @@ def _prepare_dir(
             pass
 
     try:
-        # Only trusted symlinks may appear in the literal path; after that it
+        # Only allowed symlinks may appear in the literal path; after that it
         # is safe to work on the real path.
         _check_symlinks(_abs(site_cache_dir), trusted_uids)
         site_cache_dir = Path(os.path.realpath(_abs(site_cache_dir)))
@@ -296,7 +292,7 @@ def describe_risk(path: Path) -> Optional[str]:
         return None
     if st.st_uid != os.geteuid():
         return f"{path} is owned by another user (uid {st.st_uid})"
-    if st.st_mode & _untrusted_write_bits(_group_shared()):
+    if st.st_mode & _other_write_bits(_group_shared()):
         return f"{path} is writable by other users ({stat.filemode(st.st_mode)})"
     return None
 
@@ -329,7 +325,7 @@ def _check_shared_perms(parent: Path, verbose: bool = True) -> None:
     """Warn if ``parent`` (the site_cache root) looks unsuitable for shared use.
 
     A shared root must let each user create their own per-repo subdir
-    (group-writable) without letting them rename or replace anyone else's
+    (group-writable) without letting them rename anyone else's
     (sticky bit). A default ACL granting group write is flagged because it
     would make new per-repo state writable by the whole group. All findings
     are warnings; nothing is fatal.
@@ -574,11 +570,11 @@ def migrate(
             print(f"site_cache_dir already set to {target}; nothing to do.")
         return target
     elif not _tree_is_private(current):
-        # Contents another user could have written can't be trusted; the
-        # index is a rebuildable cache, so start empty instead.
+        # Only private contents are copied; the index is a rebuildable
+        # cache, so otherwise start empty.
         if verbose:
-            print(f"Not copying {current}: it is not private to you, so its "
-                  f"contents cannot be trusted. DVC will rebuild the index.")
+            print(f"Not copying {current}: it is not private to you. "
+                  f"DVC will rebuild the index.")
     else:
         if verbose:
             print(f"Copying {current} -> {target}")
