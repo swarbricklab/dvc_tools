@@ -8,6 +8,7 @@ import errno
 import fcntl
 import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Dict, Literal, Optional, Tuple
 
@@ -95,37 +96,67 @@ def _try_symlink(source: Path, dest: Path) -> bool:
 
 
 def _try_copy(source: Path, dest: Path) -> bool:
-    """Try to copy the file."""
-    # Unlike link(2)/symlink(2), shutil.copy2 does not fail on an existing
-    # destination -- it truncates and rewrites it in place, and with it every
-    # hardlink to that inode, including the shared remote object the cache
-    # entry was linked from. So this is the one primitive that needs an
-    # explicit existence check to honour link_file's skip-if-present contract.
-    # The stat only costs anything on the copy fallback, which a new file
-    # never reaches.
-    if dest.exists():
-        return False
+    """Try to copy the file into a newly created ``dest``.
+
+    ``dest`` is created exclusively and without following links, so anything
+    already at that name -- a file, or a link, dangling or not -- makes this
+    fail rather than be written through or truncated. Everything after the
+    create works on the open descriptor.
+    """
     try:
-        shutil.copy2(source, dest)
-        return True
+        src_fd = os.open(source, os.O_RDONLY)
     except OSError:
         return False
+    try:
+        try:
+            dest_fd = os.open(
+                dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        except OSError:
+            return False
+        ok = False
+        try:
+            with os.fdopen(src_fd, 'rb', closefd=False) as fsrc, \
+                    os.fdopen(dest_fd, 'wb', closefd=False) as fdst:
+                shutil.copyfileobj(fsrc, fdst, 1 << 20)
+            st = os.fstat(src_fd)
+            os.utime(dest_fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+            ok = True
+        except OSError:
+            pass
+        finally:
+            os.close(dest_fd)
+            if not ok:
+                try:
+                    os.unlink(dest)
+                except OSError:
+                    pass
+        return ok
+    finally:
+        os.close(src_fd)
 
 
 def _make_readonly(path: Path) -> None:
     """Make a file read-only (matching DVC cache protection).
     
     Sets permissions to 0o444 (read-only for user, group, and others).
-    This matches DVC's cache file protection behavior.
+    This matches DVC's cache file protection behavior. Only a regular file
+    at ``path`` itself is changed; a link there is left alone.
     
     Args:
         path: Path to the file to protect.
     """
     try:
-        os.chmod(path, 0o444)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            os.fchmod(fd, 0o444)
     except OSError:
         # Best effort - don't fail if chmod fails (e.g., on some network filesystems)
         pass
+    finally:
+        os.close(fd)
 
 
 def link_file(
