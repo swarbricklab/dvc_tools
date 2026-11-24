@@ -245,6 +245,25 @@ def read_dir_entries(cache_dir: Path, dir_hash: str) -> Optional[list]:
             if isinstance(e, dict) and is_md5_oid(e.get('md5'))]
 
 
+def strip_url_credentials(url: Any) -> str:
+    """*url* without any ``user:password@`` part (scp-style ``user@host:``
+    git addresses carry no secret and are kept)."""
+    import urllib.parse
+    url = '' if url is None else str(url).strip()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme and '@' in parts.netloc:
+            host = parts.netloc.rsplit('@', 1)[1]
+            url = urllib.parse.urlunsplit(parts._replace(netloc=host))
+    except ValueError:
+        pass
+    # Whatever the parser made of it: after a scheme, nothing up to an '@'
+    # survives (a password may hold characters the parser splits on).
+    if '@' in url and re.match(r'^[A-Za-z][\w+.-]*:', url):
+        url = re.sub(r'^([A-Za-z][\w+.-]*:/*)[^@]*@', r'\1', url, count=1)
+    return url
+
+
 def oid_to_path(file_hash: str) -> Optional[Path]:
     """Convert a file hash to its cache path using DVC's cache object.
     

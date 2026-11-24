@@ -85,7 +85,7 @@ class RegistryEntry:
             'created_at': self.created_at,
             'created_by': self.created_by,
             'git_ref': self.git_ref,
-            'git_url': self.git_url,
+            'git_url': utils.strip_url_credentials(self.git_url),
             'dt_version': self.dt_version,
             'status': asdict(self.status),
         }
@@ -108,7 +108,7 @@ class RegistryEntry:
             created_at=data.get('created_at', ''),
             created_by=data.get('created_by', ''),
             git_ref=data.get('git_ref', ''),
-            git_url=data.get('git_url', ''),
+            git_url=utils.strip_url_credentials(data.get('git_url', '')),
             dt_version=data.get('dt_version', ''),
             status=RegistryStatus(
                 verified_at=status_raw.get('verified_at'),
@@ -192,7 +192,7 @@ def entry_from_manifest(
         created_at=manifest.created_at,
         created_by=manifest.created_by,
         git_ref=manifest.git_ref,
-        git_url=manifest.git_url,
+        git_url=utils.strip_url_credentials(manifest.git_url),
         dt_version=manifest.dt_version,
     )
 

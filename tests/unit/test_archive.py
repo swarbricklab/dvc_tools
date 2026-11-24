@@ -1550,3 +1550,74 @@ def test_registry_rebuild_skips_other_users_project(tmp_path, monkeypatch):
                         lambda p: Path(p).resolve() != theirs.resolve())
     stats = registry.sync_from_roots([theirs, mine])
     assert stats['skipped_roots'] == 1
+
+
+class TestOriginCredentialsAreNotRecorded:
+    URL = 'https://alice:ghp_SECRETTOKEN@github.com/org/repo.git'
+
+    @pytest.mark.parametrize('url,expected', [
+        ('https://alice:tok@github.com/o/r.git', 'https://github.com/o/r.git'),
+        ('https://tok@host:8443/o/r', 'https://host:8443/o/r'),
+        ('ssh://git@host/o/r', 'ssh://host/o/r'),
+        ('git@github.com:o/r.git', 'git@github.com:o/r.git'),
+        ('/local/path', '/local/path'),
+        ('', ''),
+        ('https://alice:to/k@github.com/o/r', 'https://github.com/o/r'),
+        (' https://alice:tok@github.com/o/r', 'https://github.com/o/r'),
+        ('https://alice:tok@[::1', 'https://[::1'),
+        ('https://a:p%40x@[::1]:8443/o/r', 'https://[::1]:8443/o/r'),
+        ('alice:tok@github.com:o/r.git', 'alice:github.com:o/r.git'),
+    ])
+    def test_strip(self, url, expected):
+        from dt import utils
+        assert utils.strip_url_credentials(url) == expected
+
+    def test_manifest_register_and_signpost_omit_token(self):
+        from dt.archive.manifest import ArchiveManifest
+        from dt.archive import registry, signpost
+        m = ArchiveManifest.from_dict({'archive_name': 'n', 'source_remote': 'r',
+                                       'backend': 'b', 'backend_dir': 'd', 'git_url': self.URL})
+        assert 'SECRETTOKEN' not in str(m.to_dict())
+        m.git_url = self.URL  # set after loading, as stage_archive may
+        assert 'SECRETTOKEN' not in str(m.to_dict())
+        base = {k: 'x' for k in ('project_slug', 'project_path', 'project_name',
+                                 'archive_name', 'manifest_path', 'backend', 'backend_dir')}
+        assert 'SECRETTOKEN' not in str(registry.RegistryEntry.from_dict(
+            {**base, 'git_url': self.URL}).to_dict())
+        sp = signpost.ArchiveSignpost(
+            archive_name='n', backend='b', backend_dir='d', source_layout='v3',
+            source_remote='r', git_url=self.URL, git_ref='x', manifest_in_repo='m',
+            pruned_at='t', pruned_by='u', path=Path('/x'))
+        assert 'SECRETTOKEN' not in signpost.format_message(sp)
+
+    def test_signpost_file_omits_token(self, tmp_path):
+        from dt.archive import signpost
+        from dt.archive.manifest import ArchiveManifest
+        m = ArchiveManifest.from_dict({'archive_name': 'n', 'source_remote': 'r',
+                                       'backend': 'b', 'backend_dir': 'd'})
+        m.git_url = self.URL
+        path = signpost.write_signpost(tmp_path, m, pruned_by='u')
+        assert 'SECRETTOKEN' not in path.read_text()
+        # An older signpost that still holds the token is cleaned when read.
+        path.write_text(path.read_text().replace(
+            'git_url: https://github.com/org/repo.git', f'git_url: {self.URL}'))
+        assert 'SECRETTOKEN' in path.read_text()
+        found = signpost.detect(tmp_path)
+        assert found is not None and 'SECRETTOKEN' not in found.git_url
+
+
+def test_repo_ids_carry_no_credentials():
+    from dt import tmp
+    assert tmp.get_repo_id('https://alice:ghp_X@github.com/org/repo.git') == 'github.com/org/repo'
+
+
+def test_access_request_output_carries_no_credentials():
+    from dt.auth.request import AccessRequest, format_request_text, format_request_json
+    from dt.auth.checks import CheckResult
+    from dt.auth.endpoints import Endpoint
+    ep = Endpoint(type='git', url='https://alice:ghp_X@github.com/o/r.git', source='git remote')
+    req = AccessRequest(user='a', project='p', platform_name='h', dt_version='v',
+                        request_date='d',
+                        items=[CheckResult(endpoint=ep, status='fail', summary='x')])
+    assert 'ghp_X' not in format_request_text(req)
+    assert 'ghp_X' not in format_request_json(req)

@@ -92,7 +92,8 @@ def get_repo_id(repo_spec: str, owner: Optional[str] = None) -> str:
         path = ssh_match.group(2)
         return f"{host}/{path}"
     
-    # Handle HTTPS format: https://github.com/owner/repo
+    # Handle HTTPS format: https://github.com/owner/repo (credentials dropped)
+    url = utils.strip_url_credentials(url)
     https_match = re.match(r'https?://([^/]+)/(.+?)(?:\.git)?$', url)
     if https_match:
         host = https_match.group(1)

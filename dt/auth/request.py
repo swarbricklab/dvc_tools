@@ -25,6 +25,16 @@ from .endpoints import Endpoint
 from .identity import Identity, get_identities, own_config_value
 
 
+def _without_credentials(data):
+    """Copy of a result/endpoint dict with credentials removed from URLs."""
+    if isinstance(data, dict):
+        return {k: (utils.strip_url_credentials(v) if k == 'url' and isinstance(v, str)
+                    else _without_credentials(v)) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_without_credentials(v) for v in data]
+    return data
+
+
 @dataclass
 class AccessRequest:
     """An access-request template generated from check failures."""
@@ -45,7 +55,7 @@ class AccessRequest:
             'dt_version': self.dt_version,
             'date': self.request_date,
             'identities': [i.to_dict() for i in self.identities],
-            'items': [r.to_dict() for r in self.items],
+            'items': [_without_credentials(r.to_dict()) for r in self.items],
         }
 
 
@@ -106,7 +116,7 @@ def format_request_text(req: AccessRequest) -> str:
     for i, r in enumerate(req.items, 1):
         ep = r.endpoint
         type_label = ep.type.capitalize()
-        lines.append(f'  {i}. {type_label}: {ep.url}')
+        lines.append(f'  {i}. {type_label}: {utils.strip_url_credentials(ep.url)}')
         lines.append(f'     Status: {r.summary}')
 
         if ep.type == 'filesystem':
@@ -167,7 +177,7 @@ def format_request_markdown(req: AccessRequest) -> str:
     for i, r in enumerate(req.items, 1):
         ep = r.endpoint
         status_icon = '\U0001f534' if r.status == STATUS_FAIL else '\U0001f7e1'
-        lines.append(f'### {i}. {ep.type} — `{ep.url}`')
+        lines.append(f'### {i}. {ep.type} — `{utils.strip_url_credentials(ep.url)}`')
         lines.append('')
         lines.append(f'- **Status:** {status_icon} {r.summary}')
         lines.append(f'- **Source:** {ep.source}')
@@ -248,7 +258,8 @@ def _format_slack_blocks(req: AccessRequest) -> dict:
         for i, r in enumerate(req.items, 1):
             ep = r.endpoint
             icon = ':red_circle:' if r.status == STATUS_FAIL else ':large_yellow_circle:'
-            text = f'{icon} *{i}. {ep.type}* — `{ep.url}`\n_{r.summary}_'
+            text = (f'{icon} *{i}. {ep.type}* — `{utils.strip_url_credentials(ep.url)}`'
+                    f'\n_{r.summary}_')
             if r.hints:
                 text += '\n' + '\n'.join(f'> :bulb: {h}' for h in r.hints)
             blocks.append({

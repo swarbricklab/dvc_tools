@@ -1088,7 +1088,8 @@ def stage_archive(
             created_at=now_iso(),
             created_by=_current_user(),
             git_ref=_git_ref(repo_root),
-            git_url=git_url if git_url is not None else _git_url(repo_root),
+            git_url=utils.strip_url_credentials(
+                git_url if git_url is not None else _git_url(repo_root)),
             dt_version=_dt_version(),
         )
         return CreateResult(manifest=manifest, manifest_path=target_manifest)
@@ -1295,7 +1296,8 @@ def stage_archive(
             created_at=now_iso(),
             created_by=_current_user(),
             git_ref=_git_ref(repo_root),
-            git_url=git_url if git_url is not None else _git_url(repo_root),
+            git_url=utils.strip_url_credentials(
+                git_url if git_url is not None else _git_url(repo_root)),
             dt_version=_dt_version(),
         )
         path_written = save_manifest(manifest, repo_root=repo_root)
@@ -1468,6 +1470,9 @@ def deposit_archive(
         # Upload the sidecar last — its presence is what marks the
         # archive complete.
         local_manifest = manifest_path(name, repo_root=repo_root)
+        # Rewrite it first so a manifest staged by an older dt goes up with
+        # its origin URL cleaned.
+        save_manifest(manifest, repo_root=repo_root)
         sidecar = bdir + sidecar_name(name)
         print(f"Deposit: uploading sidecar {sidecar}", flush=True)
         be.put_file(local_manifest, sidecar)
