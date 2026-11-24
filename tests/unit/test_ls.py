@@ -516,7 +516,7 @@ class TestBuildTree:
     def test_empty_items_gives_empty_root(self):
         """An empty listing yields a root node with no files or subdirs."""
         tree = build_tree([])
-        assert tree == {"_files": []}
+        assert tree == {"/files": []}
 
     @staticmethod
     def _names(entries):
@@ -531,8 +531,8 @@ class TestBuildTree:
         ]
         tree = build_tree(items)
 
-        assert self._names(tree["_files"]) == ["README.md"]
-        assert self._names(tree["data"]["raw"]["_files"]) == ["a.csv", "b.csv"]
+        assert self._names(tree["/files"]) == ["README.md"]
+        assert self._names(tree["data"]["raw"]["/files"]) == ["a.csv", "b.csv"]
 
     def test_directory_items_create_nodes(self):
         """An isdir item produces a directory node even with no files."""
@@ -540,14 +540,14 @@ class TestBuildTree:
         tree = build_tree(items)
 
         assert "empty_dir" in tree
-        assert tree["empty_dir"] == {"_files": []}
+        assert tree["empty_dir"] == {"/files": []}
 
     def test_ignores_items_without_path(self):
         """Items with an empty path are skipped."""
         items = [{"path": "", "isdir": False}, {"path": "keep.txt", "isdir": False}]
         tree = build_tree(items)
 
-        assert self._names(tree["_files"]) == ["keep.txt"]
+        assert self._names(tree["/files"]) == ["keep.txt"]
 
     def test_file_entries_carry_github_link(self):
         """A file's annotated ``_gh`` blob URL is stored on its entry."""
@@ -555,8 +555,8 @@ class TestBuildTree:
                   "_gh": "https://github.com/org/repo/blob/main/README.md"}]
         tree = build_tree(items)
 
-        assert tree["_files"][0]["name"] == "README.md"
-        assert tree["_files"][0]["gh"].endswith("/blob/main/README.md")
+        assert tree["/files"][0]["name"] == "README.md"
+        assert tree["/files"][0]["gh"].endswith("/blob/main/README.md")
 
 
 # =============================================================================
@@ -1010,6 +1010,17 @@ class TestRepositoryValuesStayText:
 
     def test_text_tree_names_cannot_break_lines(self):
         from dt.ls import _render_tree_text
-        tree = {'_files': [{'name': 'a\n```\n<img>'}]}
+        tree = {'/files': [{'name': 'a\n```\n<img>'}]}
         lines = _render_tree_text(tree)
         assert len(lines) == 1 and '\\n' in lines[0]
+
+
+
+def test_markdown_heading_link_is_escaped():
+    from dt import ls
+    md = ls._format_tree_md({'/files': []},
+                            {'web_url': 'https://h/o/r) [x](javascript:1', 'name': 'r'},
+                            '', None)
+    first = md.splitlines()[0]
+    assert ') [x](' not in first
+    assert '%29' in first

@@ -274,7 +274,7 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Build a nested directory tree from ``dvc list`` items.
 
     Each node is a dict mapping subdirectory names to child nodes, plus a
-    special ``_files`` key holding this level's file entries. A file entry is
+    special ``/files`` key holding this level's file entries. A file entry is
     ``{'name': str, 'gh': Optional[str]}`` where ``gh`` is the GitHub blob URL
     for a git-tracked file (set by :func:`_annotate_github`, else None).
     Directories are derived from the path components of each item, so a
@@ -286,7 +286,7 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     Returns:
         Nested dict representing the directory tree
     """
-    tree: Dict[str, Any] = {'_files': []}
+    tree: Dict[str, Any] = {'/files': []}
 
     for item in items:
         path = item.get('path', '')
@@ -300,7 +300,7 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         for part in parts[:-1]:
             child = current.get(part)
             if not isinstance(child, dict):
-                child = {'_files': []}
+                child = {'/files': []}
                 current[part] = child
             current = child
 
@@ -308,19 +308,19 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         if item.get('isdir'):
             # Ensure the directory node exists (it may otherwise be empty).
             if not isinstance(current.get(leaf), dict):
-                current[leaf] = {'_files': []}
+                current[leaf] = {'/files': []}
         else:
-            current['_files'].append({'name': leaf, 'gh': item.get('_gh')})
+            current['/files'].append({'name': leaf, 'gh': item.get('_gh')})
 
     return tree
 
 
 def _count_tree(tree: Dict[str, Any]) -> Tuple[int, int]:
     """Count (files, directories) contained in a tree, recursively."""
-    files = len(tree.get('_files', []))
+    files = len(tree.get('/files', []))
     dirs = 0
     for key, value in tree.items():
-        if key.startswith('_'):
+        if key.startswith('/'):
             continue
         dirs += 1
         sub_files, sub_dirs = _count_tree(value)
@@ -337,15 +337,15 @@ def _subtree_file_count(node: Dict[str, Any]) -> int:
     per ancestor -- super-linear on wide trees. Caching the result under the
     reserved ``_nf`` key makes the whole render O(number of nodes).
     """
-    cached = node.get('_nf')
+    cached = node.get('/nf')
     if cached is not None:
         return cached
-    n = len(node.get('_files', []))
+    n = len(node.get('/files', []))
     for key, value in node.items():
-        if key.startswith('_'):
+        if key.startswith('/'):
             continue
         n += _subtree_file_count(value)
-    node['_nf'] = n
+    node['/nf'] = n
     return n
 
 
@@ -356,8 +356,8 @@ def _n_files(n: int) -> str:
 
 def _tree_entries(tree: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any]]]:
     """Return (sorted subdirectory names, sorted file entries) for a node."""
-    subdirs = sorted(k for k in tree if not k.startswith('_'))
-    files = sorted(tree.get('_files', []), key=lambda f: f['name'])
+    subdirs = sorted(k for k in tree if not k.startswith('/'))
+    files = sorted(tree.get('/files', []), key=lambda f: f['name'])
     return subdirs, files
 
 
@@ -536,7 +536,12 @@ def _format_tree_md(
     """Format a tree as markdown (a fenced code block plus a summary line)."""
     files, dirs = _count_tree(tree)
     label = _root_label(repo, base, rev)
-    heading = f"[{label}]({repo['web_url']})" if repo['web_url'] else label
+    text = re.sub(r'([\\`*_{}\[\]<>()#+!|~])', r'\\\1', _printable(label))
+    if repo['web_url']:
+        url = urllib.parse.quote(_printable(repo['web_url']), safe=":/?#@!$&'*+,;=%~.-_")
+        heading = f"[{text}]({url})"
+    else:
+        heading = text
     lines = [f"**Repository tree:** {heading} — {dirs} directories, {files} files"]
     rline = _revision_line(revinfo)
     if rline:

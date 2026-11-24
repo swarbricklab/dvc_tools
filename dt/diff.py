@@ -191,7 +191,7 @@ def _build_tree(diff_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Nested dict representing directory tree with file info
     """
-    tree: Dict[str, Any] = {'_files': [], '_counts': defaultdict(int)}
+    tree: Dict[str, Any] = {'/files': [], '/counts': defaultdict(int)}
     
     for status in ['added', 'deleted', 'modified', 'renamed']:
         items = diff_data.get(status, [])
@@ -222,7 +222,7 @@ def _build_tree(diff_data: Dict[str, Any]) -> Dict[str, Any]:
             # Navigate/create directories
             for i, part in enumerate(parts[:-1]):
                 if part not in current:
-                    current[part] = {'_files': [], '_counts': defaultdict(int)}
+                    current[part] = {'/files': [], '/counts': defaultdict(int)}
                 current = current[part]
 
             # Add file to leaf directory
@@ -234,15 +234,15 @@ def _build_tree(diff_data: Dict[str, Any]) -> Dict[str, Any]:
             }
             if old_path:
                 file_entry['old_path'] = _printable(old_path)
-            current['_files'].append(file_entry)
+            current['/files'].append(file_entry)
             
             # Update counts up the tree
-            current['_counts'][status] += 1
+            current['/counts'][status] += 1
             
             # Propagate counts up
             current = tree
             for part in parts[:-1]:
-                current['_counts'][status] += 1
+                current['/counts'][status] += 1
                 current = current[part]
     
     # Remove leaf file entries that duplicate a subdirectory (DVC reports
@@ -264,28 +264,28 @@ def _dedup_dir_entries(node: Dict[str, Any]) -> None:
     """
     # Recurse into subdirectories first (bottom-up)
     for key, value in node.items():
-        if key.startswith('_') or not isinstance(value, dict):
+        if key.startswith('/') or not isinstance(value, dict):
             continue
         _dedup_dir_entries(value)
 
     # Remove file entries that duplicate a subdirectory name
     subdir_names = {
-        k for k in node if not k.startswith('_') and isinstance(node[k], dict)
+        k for k in node if not k.startswith('/') and isinstance(node[k], dict)
     }
     if subdir_names:
-        node['_files'] = [f for f in node.get('_files', [])
+        node['/files'] = [f for f in node.get('/files', [])
                           if f['name'] not in subdir_names]
 
     # Recalculate counts from files + child counts
     counts: Dict[str, int] = defaultdict(int)
-    for f in node.get('_files', []):
+    for f in node.get('/files', []):
         counts[f['status']] += 1
     for key, value in node.items():
-        if key.startswith('_') or not isinstance(value, dict):
+        if key.startswith('/') or not isinstance(value, dict):
             continue
-        for status, n in value.get('_counts', {}).items():
+        for status, n in value.get('/counts', {}).items():
             counts[status] += n
-    node['_counts'] = counts
+    node['/counts'] = counts
 
 
 def _count_tree_items(tree: Dict[str, Any]) -> Tuple[int, int]:
@@ -294,11 +294,11 @@ def _count_tree_items(tree: Dict[str, Any]) -> Tuple[int, int]:
     Returns:
         Tuple of (file_count, dir_count)
     """
-    files = len(tree.get('_files', []))
+    files = len(tree.get('/files', []))
     dirs = 0
     
     for key, value in tree.items():
-        if key.startswith('_'):
+        if key.startswith('/'):
             continue
         dirs += 1
         sub_files, sub_dirs = _count_tree_items(value)
@@ -346,9 +346,9 @@ def _render_tree(
     lines = []
     
     # Get subdirectories and files
-    subdirs = sorted([k for k in tree.keys() if not k.startswith('_')])
-    files = tree.get('_files', [])
-    counts = tree.get('_counts', {})
+    subdirs = sorted([k for k in tree.keys() if not k.startswith('/')])
+    files = tree.get('/files', [])
+    counts = tree.get('/counts', {})
     
     # Check if we should collapse this level
     if max_level is not None and current_level >= max_level:
@@ -370,7 +370,7 @@ def _render_tree(
         is_last_subdir = (i == len(subdirs) - 1)
         connector = "└── " if is_last_subdir else "├── "
         
-        subdir_counts = tree[subdir].get('_counts', {})
+        subdir_counts = tree[subdir].get('/counts', {})
         count_str = _format_counts(subdir_counts)
         count_display = f" ({count_str})" if count_str else ""
         
@@ -417,36 +417,47 @@ def _run_dvc_diff_md(
     new_rev: Optional[str] = None,
     targets: Optional[List[str]] = None,
 ) -> str:
-    """Run dvc diff with --md flag for markdown table output.
-    
+    """Markdown table of the changes (what ``dvc diff --md`` shows).
+
+    Built from ``dvc diff --json`` so that names from the repository are
+    written as plain table cells (escaped pipes, no line breaks or markup).
+
     Args:
         old_rev: Git revision for old version
         new_rev: Git revision for new version
         targets: Optional list of paths to filter
-        
+
     Returns:
         Markdown table string
-        
+
     Raises:
         DiffError: If dvc diff fails
     """
-    cmd = ["dvc", "diff", "--md"]
-    
-    if new_rev:
-        cmd.extend([old_rev, new_rev])
-    else:
-        cmd.append(old_rev)
-    
-    if targets:
-        cmd.extend(targets)
-    
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-        raise DiffError(f"dvc diff failed: {error_msg}")
-    
-    return result.stdout.strip() if result.stdout else "No changes detected."
+    return _format_table(_run_dvc_diff(old_rev, new_rev, targets))
+
+
+def _md_cell(text: str) -> str:
+    """*text* as a markdown table cell: plain text, pipes escaped."""
+    text = _printable(text)
+    text = re.sub(r'([\\`*_{}\[\]<>()#+!|~])', r'\\\1', text)
+    return text
+
+
+def _format_table(diff_data: Dict[str, Any]) -> str:
+    rows = []
+    for status in ['added', 'deleted', 'modified', 'renamed', 'not in cache']:
+        for item in diff_data.get(status, []) or []:
+            raw = item.get('path', '') if isinstance(item, dict) else item
+            if isinstance(raw, dict):
+                path = f"{raw.get('old', '')} -> {raw.get('new', '')}"
+            else:
+                path = str(raw)
+            rows.append((status, path))
+    if not rows:
+        return "No changes detected."
+    lines = ["| Status | Path |", "|--------|------|"]
+    lines.extend(f"| {status} | {_md_cell(path)} |" for status, path in rows)
+    return '\n'.join(lines)
 
 
 def _format_terminal(
@@ -457,7 +468,7 @@ def _format_terminal(
     max_level: int,
 ) -> str:
     """Format tree diff for terminal output."""
-    counts = tree.get('_counts', {})
+    counts = tree.get('/counts', {})
     summary_parts = []
     if counts.get('added', 0):
         summary_parts.append(f"{counts['added']} added")
@@ -487,6 +498,12 @@ def _format_json(diff_data: Dict[str, Any]) -> str:
     return json.dumps(diff_data, indent=2)
 
 
+def _csv_text(text) -> str:
+    """*text* for a CSV cell that a spreadsheet will not read as a formula."""
+    text = str(text)
+    return "'" + text if text[:1] in ('=', '+', '-', '@', '\t', '\r') else text
+
+
 def _format_csv(diff_data: Dict[str, Any]) -> str:
     """Format diff data as CSV with columns: change,path,old_hash,new_hash."""
     buf = io.StringIO()
@@ -506,7 +523,7 @@ def _format_csv(diff_data: Dict[str, Any]) -> str:
                 new_path = item.get('path', {}).get('new', '') if isinstance(item.get('path'), dict) else path
                 path = f"{old_path} -> {new_path}"
             
-            writer.writerow([status, path, old_hash, new_hash])
+            writer.writerow([status, _csv_text(path), old_hash, new_hash])
     
     return buf.getvalue().rstrip('\n')
 
@@ -519,7 +536,7 @@ def _format_md(
     max_level: int,
 ) -> str:
     """Format tree diff as markdown with diff code block for coloring."""
-    counts = tree.get('_counts', {})
+    counts = tree.get('/counts', {})
     summary_parts = []
     if counts.get('added', 0):
         summary_parts.append(f"+{counts['added']} added")
@@ -565,12 +582,12 @@ def _render_tree_diff_style(
     # Get subdirectories and files
     subdirs = []
     for key, value in tree.items():
-        if key.startswith('_'):
+        if key.startswith('/'):
             continue
-        if isinstance(value, dict) and '_counts' in value:
+        if isinstance(value, dict) and '/counts' in value:
             subdirs.append((key, value))
     
-    files = tree.get('_files', [])
+    files = tree.get('/files', [])
     
     # Sort entries
     subdirs.sort(key=lambda x: x[0])
@@ -583,7 +600,7 @@ def _render_tree_diff_style(
         is_last = i == len(items) - 1
         
         if item_type == 'dir':
-            counts = data.get('_counts', {})
+            counts = data.get('/counts', {})
             count_str = _format_counts(counts)
             
             # Determine diff prefix based on directory contents
@@ -632,7 +649,7 @@ def _format_html(
     new_rev: Optional[str],
 ) -> str:
     """Format tree diff as interactive HTML with collapsible sections."""
-    counts = tree.get('_counts', {})
+    counts = tree.get('/counts', {})
     summary_parts = []
     if counts.get('added', 0):
         summary_parts.append(f'<span class="added">+{counts["added"]} added</span>')
@@ -764,18 +781,18 @@ def _render_tree_html(
     
     subdirs = []
     for key, value in tree.items():
-        if key.startswith('_'):
+        if key.startswith('/'):
             continue
-        if isinstance(value, dict) and '_counts' in value:
+        if isinstance(value, dict) and '/counts' in value:
             subdirs.append((key, value))
     
-    files = tree.get('_files', [])
+    files = tree.get('/files', [])
     
     subdirs.sort(key=lambda x: x[0])
     files.sort(key=lambda x: x['name'])
     
     for name, data in subdirs:
-        counts = data.get('_counts', {})
+        counts = data.get('/counts', {})
         count_parts = []
         if counts.get('added', 0):
             count_parts.append(f'+{counts["added"]}')
