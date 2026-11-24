@@ -8,6 +8,7 @@ local cache symlinks. For data that requires network access, falls
 back to dvc fetch.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -90,8 +91,20 @@ def delete_dir_manifests(
         
         # Delete the .dir file from cache
         dir_hash = out.hash_info.value
-        hash_clean = dir_hash.replace('.dir', '')
-        cache_path = cache_dir / hash_clean[:2] / (hash_clean[2:] + '.dir')
+        if not (utils.is_md5_oid(dir_hash) and dir_hash.endswith('.dir')):
+            if verbose:
+                print(f"  Skipping invalid directory hash for {out.fs_path}: {dir_hash!r}")
+            continue
+        prefix, filename = utils.oid_path_parts(dir_hash)
+        cache_path = Path(cache_dir) / prefix / filename
+        # The manifest itself may legitimately be a link into a remote; the
+        # prefix dir holding it must be inside the cache. unlink() removes the
+        # entry, never what a link points to.
+        real_cache = os.path.realpath(cache_dir)
+        if not os.path.realpath(cache_path.parent).startswith(real_cache + os.sep):
+            if verbose:
+                print(f"  Skipping {cache_path}: prefix directory is outside the cache")
+            continue
         
         if cache_path.exists():
             try:

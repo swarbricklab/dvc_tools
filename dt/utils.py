@@ -173,6 +173,35 @@ def get_cache_root() -> Optional[Path]:
     return cache_root_from_odb_path(cache_dir)
 
 
+_MD5_OID = re.compile(r'[0-9a-f]{32}(?:\.dir)?')
+
+
+def is_md5_oid(oid: Any) -> bool:
+    """True for a DVC md5 object id: 32 lowercase hex, optional ``.dir``."""
+    return isinstance(oid, str) and bool(_MD5_OID.fullmatch(oid))
+
+
+def oid_path_parts(oid: str, strict: bool = True) -> Tuple[str, str]:
+    """Split an object id into its ``(prefix, filename)`` cache path parts.
+
+    With ``strict`` the id must be an md5 object id (see :func:`is_md5_oid`).
+    Either way each part must be a single, ordinary path component.
+
+    Raises:
+        ValueError: For an id that can't safely name a cache object.
+    """
+    if strict and not is_md5_oid(oid):
+        raise ValueError(f"invalid object id: {oid!r}")
+    if not isinstance(oid, str):
+        raise ValueError(f"invalid object id: {oid!r}")
+    base, suffix = (oid[:-4], '.dir') if oid.endswith('.dir') else (oid, '')
+    prefix, rest = base[:2], base[2:] + suffix
+    for part in (prefix, rest):
+        if not part or part in ('.', '..') or any(c in part for c in '/\\\0'):
+            raise ValueError(f"invalid object id: {oid!r}")
+    return prefix, rest
+
+
 def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
     """Convert a file hash to its cache file path.
     
@@ -186,13 +215,9 @@ def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
     Returns:
         Path to the cache file
     """
-    # Handle .dir suffix
-    hash_clean = file_hash.replace('.dir', '')
-    prefix = hash_clean[:2]
-    suffix = hash_clean[2:]
-    if file_hash.endswith('.dir'):
-        suffix += '.dir'
-    
+    # Not every output hash is an md5 (e.g. etags), so only require that the
+    # id maps to ordinary path components inside cache_dir.
+    prefix, suffix = oid_path_parts(file_hash, strict=False)
     return cache_dir / prefix / suffix
 
 

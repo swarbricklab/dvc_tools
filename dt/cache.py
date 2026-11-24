@@ -518,8 +518,8 @@ def remove_cache_files(
     for file_hash, cache_path, size in file_info:
         workspace_path = hash_to_path.get(file_hash, file_hash)
         
-        if size is None:
-            # File not in cache
+        if size is None or not utils.is_md5_oid(file_hash):
+            # File not in cache (or not a cache object id)
             missing.append((workspace_path, file_hash))
             continue
         
@@ -689,6 +689,8 @@ def validate_cache(
         file_hashes, hash_to_path = collect_target_hashes_via_index(targets)
         files_to_check = []
         for file_hash in file_hashes:
+            if not utils.is_md5_oid(file_hash):
+                continue  # only md5 objects are validated (and deleted by --fix)
             cache_path = hash_to_cache_path(cache_dir, file_hash)
             workspace_path = hash_to_path.get(file_hash, file_hash)
             if cache_path.exists():
@@ -705,6 +707,8 @@ def validate_cache(
                 if cache_file.name.endswith('.tmp'):
                     continue  # Skip temp files
                 file_hash = subdir.name + cache_file.name
+                if not utils.is_md5_oid(file_hash):
+                    continue  # not an object (e.g. another user's temp file)
                 files_to_check.append((cache_file, file_hash, file_hash))
     
     total = len(files_to_check)

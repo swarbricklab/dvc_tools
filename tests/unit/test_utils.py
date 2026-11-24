@@ -1089,3 +1089,28 @@ class TestDvcLocalConfigProblem:
         with pytest.raises(ImportError_, match='Refusing'):
             import_data.configure_clone_cache(clone, str(tmp_path / 'attacker-cache'))
         assert target.read_text() == '[core]\n    remote = mine\n'
+
+
+class TestObjectIdPaths:
+    @pytest.mark.parametrize('oid', ['0' * 32, 'a' * 32 + '.dir', '0123456789abcdef' * 2])
+    def test_valid_md5_ids(self, oid):
+        assert utils.is_md5_oid(oid)
+        prefix, rest = utils.oid_path_parts(oid)
+        assert prefix == oid[:2] and '/' not in rest
+
+    @pytest.mark.parametrize('oid', [
+        'ab/../../../../etc/x.dir', 'a/' + 'b' * 30 + '.dir', '..' + 'a' * 30,
+        'A' * 32, 'g' * 32, 'a' * 31, 'a' * 33, 'a' * 32 + '.dir\n', '', None,
+    ])
+    def test_invalid_md5_ids_rejected(self, oid):
+        assert not utils.is_md5_oid(oid)
+        with pytest.raises(ValueError):
+            utils.oid_path_parts(oid)
+
+    @pytest.mark.parametrize('oid', ['ab/c', '..cdef', 'a', 'ab..', 'x\0y'])
+    def test_non_strict_still_blocks_escape(self, oid, tmp_path):
+        with pytest.raises(ValueError):
+            utils.hash_to_cache_path(tmp_path, oid)
+
+    def test_non_strict_allows_other_hash_kinds(self, tmp_path):
+        assert utils.hash_to_cache_path(tmp_path, 'abc123etag-5') == tmp_path / 'ab' / 'c123etag-5'

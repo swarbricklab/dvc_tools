@@ -76,7 +76,7 @@ def _md5_blob_path(remote_dir: Path, md5: str, is_dir: bool,
     (``files/md5/..``) or v2 (``<prefix>/..``) tree, so prefer whichever path
     actually exists, defaulting to v3.
     """
-    prefix, rest = md5[:2], md5[2:]
+    prefix, rest = utils.oid_path_parts(md5)  # raises on a malformed id
     suffix = '.dir' if is_dir else ''
     v3 = f'files/md5/{prefix}/{rest}{suffix}'
     v2 = f'{prefix}/{rest}{suffix}'

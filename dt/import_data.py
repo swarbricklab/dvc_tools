@@ -74,7 +74,11 @@ def populate_primary_cache(
             continue
         
         # Cache file location (hash-based)
-        cache_file = cache_base / md5[:2] / md5[2:]
+        try:
+            prefix, fname = utils.oid_path_parts(md5)
+        except ValueError:
+            continue
+        cache_file = cache_base / prefix / fname
         
         # Resolve symlink to actual file and use shared link function
         actual_file = workspace_file.resolve()
@@ -232,10 +236,16 @@ def construct_dir_from_dvc_list(
     file_hash = new_hash if new_hash else expected_hash
     
     # Write .dir file to cache
+    try:
+        prefix, fname = utils.oid_path_parts(f"{file_hash}.dir")
+    except ValueError:
+        if verbose:
+            print(f"  ERROR: invalid directory hash {file_hash!r}")
+        return None
     if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / file_hash[:2] / f"{file_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / 'files' / 'md5' / prefix / fname
     else:
-        dest_file = Path(dest_cache) / file_hash[:2] / f"{file_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / prefix / fname
     
     if not dest_file.exists():
         dest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -363,10 +373,16 @@ def construct_dir_file(
         return None
     
     # Write .dir file to cache
+    try:
+        prefix, fname = utils.oid_path_parts(f"{expected_hash}.dir")
+    except ValueError:
+        if verbose:
+            print(f"  ERROR: invalid directory hash {expected_hash!r}")
+        return None
     if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / 'files' / 'md5' / prefix / fname
     else:
-        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / prefix / fname
     
     if not dest_file.exists():
         dest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -427,10 +443,16 @@ def _construct_dir_file_fallback(
         return None
     
     # Write .dir file to cache
+    try:
+        prefix, fname = utils.oid_path_parts(f"{expected_hash}.dir")
+    except ValueError:
+        if verbose:
+            print(f"  ERROR: invalid directory hash {expected_hash!r}")
+        return None
     if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / 'files' / 'md5' / prefix / fname
     else:
-        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / prefix / fname
     
     if not dest_file.exists():
         dest_file.parent.mkdir(parents=True, exist_ok=True)

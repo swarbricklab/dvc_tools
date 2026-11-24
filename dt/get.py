@@ -548,6 +548,8 @@ def _upload_one(
     if action == 'bad':
         return relpath, False, note
 
+    if not utils.is_md5_oid(md5):
+        return relpath, False, f"invalid object id {md5!r}"
     source = odb.oid_to_path(md5)
     try:
         if not odb.fs.exists(source):

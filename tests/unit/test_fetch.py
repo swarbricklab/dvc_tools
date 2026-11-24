@@ -191,6 +191,14 @@ class TestCategorizeStages:
 # Fetch Plan Tests
 # =============================================================================
 
+@pytest.fixture
+def _any_hash_ok():
+    """Plan-bookkeeping tests use placeholder hashes; skip id validation."""
+    with patch('dt.fetch._usable_hash', return_value=True):
+        yield
+
+
+@pytest.mark.usefixtures('_any_hash_ok')
 class TestSourceGroup:
     """Tests for SourceGroup dataclass."""
     
@@ -219,6 +227,7 @@ class TestSourceGroup:
         assert len(group.hashes) == 1
 
 
+@pytest.mark.usefixtures('_any_hash_ok')
 class TestFetchPlan:
     """Tests for FetchPlan dataclass."""
     
@@ -279,6 +288,7 @@ class TestFetchPlan:
         assert any('No local source: 2' in line for line in lines)
 
 
+@pytest.mark.usefixtures('_any_hash_ok')
 class TestBuildFetchPlan:
     """Tests for build_fetch_plan function."""
     
@@ -458,11 +468,11 @@ class TestExpandDirHash:
         mock_db = MagicMock()
 
         with patch('dvc_data.hashfile.tree.Tree.load', side_effect=Exception("Not found")):
-            result = fetch._expand_dir_hash('abc123.dir', mock_db)
+            result = fetch._expand_dir_hash('0123456789abcdef0123456789abcdef.dir', mock_db)
 
         assert result == []
         out = capsys.readouterr().out
-        assert 'could not read .dir manifest abc123.dir' in out
+        assert 'could not read .dir manifest 0123456789abcdef0123456789abcdef.dir' in out
 
     def test_no_warning_for_genuinely_empty_dir(self, capsys):
         """An empty-but-readable manifest does not warn."""
@@ -907,7 +917,7 @@ class TestPopulateCacheFile:
     
     def test_single_file_cached_via_hardlink(self, cache_dirs):
         """Single file is cached using hardlink."""
-        md5 = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
+        md5 = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
         
         source_dir = Path(cache_dirs['source']) / 'files' / 'md5' / md5[:2]
         source_dir.mkdir(parents=True)
@@ -962,7 +972,7 @@ class TestPopulateCacheFile:
 
     def test_dvc_v2_layout_fallback(self, cache_dirs):
         """Falls back to DVC v2 layout for source."""
-        md5 = 'v2layout1234567890abcdef12345678'
+        md5 = 'abcdef0123456789abcdef0123456789'
         
         source_dir = Path(cache_dirs['source']) / md5[:2]
         source_dir.mkdir(parents=True)
@@ -1618,7 +1628,7 @@ class TestFetchUrlImport:
     def test_already_in_cache_returns_success(self, dvc_project):
         """URL import already in cache returns success without running dvc update."""
         cache = dvc_project['cache']
-        md5 = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
+        md5 = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
         
         # Create cache file (in files/md5 subdirectory)
         cache_dir = cache / 'files' / 'md5' / md5[:2]
@@ -2131,3 +2141,15 @@ class TestFetchDirOnlyFromRemote:
             # transfer called twice with different ODB pairs
             assert mock_transfer.call_count == 2
 
+
+
+
+class TestPlanSkipsInvalidObjectIds:
+    def test_unsafe_ids_are_not_added(self, capsys):
+        g = fetch.SourceGroup(source_path=Path('/src'), source_name='src')
+        good = 'a' * 32
+        for h in ('ab/../../x', '../../etc', 'A' * 32, good, good[:31] + 'g'):
+            g.add_hash(h, stage_name='s.dvc')
+        g.add_hashes_with_paths([('..' + 'a' * 30, 'p'), ('b' * 32 + '.dir', 'q')])
+        assert g.hashes == {good, 'b' * 32 + '.dir'}
+        assert 'skipping invalid object id' in capsys.readouterr().out

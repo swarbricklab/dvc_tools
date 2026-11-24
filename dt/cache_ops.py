@@ -12,6 +12,8 @@ import stat
 from pathlib import Path
 from typing import Dict, Literal, Optional, Tuple
 
+from . import utils
+
 LinkType = Literal['reflink', 'hardlink', 'symlink', 'copy', 'skipped', 'failed']
 CacheType = Literal['reflink', 'hardlink', 'symlink', 'copy']
 
@@ -283,18 +285,12 @@ def get_cache_file_path(
     Returns:
         Path to the cache file.
     """
-    # Handle .dir suffix
-    if md5.endswith('.dir'):
-        hash_only = md5[:-4]
-        filename = hash_only[2:] + '.dir'
-    else:
-        hash_only = md5
-        filename = hash_only[2:]
-    
+    prefix, filename = utils.oid_path_parts(md5)
+
     if use_v3_layout:
-        return cache_root / 'files' / 'md5' / hash_only[:2] / filename
+        return cache_root / 'files' / 'md5' / prefix / filename
     else:
-        return cache_root / hash_only[:2] / filename
+        return cache_root / prefix / filename
 
 
 def find_source_file(
@@ -310,21 +306,18 @@ def find_source_file(
     Returns:
         Path to the source file if found, None otherwise.
     """
-    # Handle .dir suffix
-    if md5.endswith('.dir'):
-        hash_only = md5[:-4]
-        filename = hash_only[2:] + '.dir'
-    else:
-        hash_only = md5
-        filename = hash_only[2:]
-    
+    try:
+        prefix, filename = utils.oid_path_parts(md5)
+    except ValueError:
+        return None
+
     # Try v3 path first
-    v3_path = source_cache / 'files' / 'md5' / hash_only[:2] / filename
+    v3_path = source_cache / 'files' / 'md5' / prefix / filename
     if v3_path.exists():
         return v3_path
     
     # Fall back to v2 path
-    v2_path = source_cache / hash_only[:2] / filename
+    v2_path = source_cache / prefix / filename
     if v2_path.exists():
         return v2_path
     

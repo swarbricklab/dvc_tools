@@ -235,6 +235,15 @@ def categorize_stages(
 # Fetch Plan: Hash-based fetch model
 # =============================================================================
 
+def _usable_hash(h: str, stage_name: Optional[str] = None) -> bool:
+    """Only md5 object ids name cache objects; report and skip anything else."""
+    if utils.is_md5_oid(h):
+        return True
+    where = f" in {stage_name}" if stage_name else ""
+    print(f"Warning: skipping invalid object id{where}: {h!r}")
+    return False
+
+
 @dataclass
 class SourceGroup:
     """Group of hashes to fetch from a single source cache."""
@@ -247,7 +256,9 @@ class SourceGroup:
     hash_paths: Dict[str, str] = field(default_factory=dict)
     
     def add_hash(self, h: str, stage_name: str = None, path: str = None) -> None:
-        """Add a hash to fetch from this source."""
+        """Add a hash to fetch from this source (malformed ids are skipped)."""
+        if not _usable_hash(h, stage_name):
+            return
         self.hashes.add(h)
         if stage_name:
             self.hash_stages[h] = stage_name
@@ -257,6 +268,8 @@ class SourceGroup:
     def add_hashes_with_paths(self, hash_path_pairs: List[Tuple[str, str]], stage_name: str = None) -> None:
         """Add multiple hashes with their paths to fetch from this source."""
         for h, path in hash_path_pairs:
+            if not _usable_hash(h, stage_name):
+                continue
             self.hashes.add(h)
             if stage_name:
                 self.hash_stages[h] = stage_name
@@ -413,6 +426,9 @@ def _expand_dir_hash(
     """
     from dvc_data.hashfile.tree import Tree
     from dvc_data.hashfile.hash_info import HashInfo
+
+    if not utils.is_md5_oid(dir_hash):
+        return []
 
     child_files = []
     loaded = False  # True once any source successfully loaded the manifest
@@ -1693,7 +1709,7 @@ def _stage_outputs_fully_cached(
     dest_db = None
     for out in outs:
         md5 = out.get('md5')
-        if not md5:
+        if not md5 or not utils.is_md5_oid(md5):
             return False
         dest = cache_ops.get_cache_file_path(md5, cache_root, use_v3_layout=True)
         if not dest.exists():
@@ -1712,6 +1728,8 @@ def _stage_outputs_fully_cached(
                 # An empty manifest is unusual; treat as not-cached to be safe.
                 return False
             for child_hash, _child_path in children:
+                if not utils.is_md5_oid(child_hash):
+                    return False
                 child_dest = cache_ops.get_cache_file_path(
                     child_hash, cache_root, use_v3_layout=True
                 )
