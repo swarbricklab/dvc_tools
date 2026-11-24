@@ -564,9 +564,15 @@ class TestMixedRestoreErgonomics:
         v3 blob, so restoring --prefix XX must pull both halves."""
         remote = tmp_path / 'collide'
         v3 = b'data only in v3'
-        v2 = b'data only in v2'
         h3 = hashlib.md5(v3).hexdigest()
-        h2 = hashlib.md5(v2).hexdigest()
+        # A v2 payload whose real md5 shares the v3 object's prefix.
+        n = 0
+        while True:
+            v2 = b'data only in v2 %d' % n
+            h2 = hashlib.md5(v2).hexdigest()
+            if h2[:2] == h3[:2]:
+                break
+            n += 1
         # Force the two payloads to land in the same 2-char prefix dir.
         # The synthetic data above happens to differ in their hashes,
         # so we just take whichever prefix the v3 hash falls in and
@@ -576,7 +582,7 @@ class TestMixedRestoreErgonomics:
         (remote / 'files' / 'md5' / prefix / h3[2:]).write_bytes(v3)
         (remote / prefix).mkdir(parents=True)
         # use a synthetic v2-only object name in the same prefix dir
-        (remote / prefix / 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').write_bytes(v2)
+        (remote / prefix / h2[2:]).write_bytes(v2)
         return remote, prefix, v3, h3, v2
 
     def _archive(self, remote, project_root, local_backend, name):
@@ -600,7 +606,7 @@ class TestMixedRestoreErgonomics:
         )
         # Both v3 and v2 content land in their original tree shapes.
         assert (dest / 'files' / 'md5' / prefix / v3_hash[2:]).read_bytes() == v3_blob
-        assert (dest / prefix / 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').read_bytes() == v2_blob
+        assert (dest / prefix / hashlib.md5(v2_blob).hexdigest()[2:]).read_bytes() == v2_blob
 
     def test_explicit_namespaced_prefix_still_works(
         self, collision_remote, project_root, local_backend, staging_dir,
@@ -990,6 +996,13 @@ class TestRestore:
 # --------------------------------------------------------------------------- #
 
 class TestPrune:
+
+    @pytest.fixture(autouse=True)
+    def _remote_is_the_projects(self, monkeypatch):
+        """These tests archive a throwaway remote that no DVC project
+        configures; the destination check has its own tests."""
+        monkeypatch.setattr(ops, '_require_project_remote', lambda *a, **k: None)
+
     def test_prune_refuses_with_extras(self, sample_remote, project_root,
                                         local_backend, staging_dir):
         remote, _ = sample_remote
@@ -1391,6 +1404,13 @@ class TestMdssBackend:
 # --------------------------------------------------------------------------- #
 
 class TestSignpost:
+
+    @pytest.fixture(autouse=True)
+    def _remote_is_the_projects(self, monkeypatch):
+        """These tests archive a throwaway remote that no DVC project
+        configures; the destination check has its own tests."""
+        monkeypatch.setattr(ops, '_require_project_remote', lambda *a, **k: None)
+
     def _archive_and_prune(
         self, sample_remote, project_root, local_backend, name,
     ):
@@ -1695,3 +1715,202 @@ class TestArchiveNamesStayInTheirDirectory:
         os.mkfifo(fifo)
         with pytest.raises(OSError):
             registry._read_shared_file(fifo)
+
+
+
+class TestRestoreAndPruneStayInTheProjectsRemote:
+    def test_unconfigured_source_remote_is_refused(self, tmp_path, monkeypatch):
+        from dt.errors import ArchiveError
+        from dt import remote as remote_mod
+        monkeypatch.setattr(remote_mod, 'list_remotes',
+                            lambda **k: [('r', str(tmp_path / 'real'), True)])
+        with pytest.raises(ArchiveError, match="not one of this project's DVC remotes"):
+            ops._require_project_remote(tmp_path / 'home', tmp_path, 'restore into')
+        ops._require_project_remote(tmp_path / 'real', tmp_path, 'restore into')
+
+    def _tar(self, tmp_path, entries):
+        import tarfile, io
+        path = tmp_path / 't.tar'
+        with tarfile.open(path, 'w') as tf:
+            for name, data, kind in entries:
+                info = tarfile.TarInfo(name)
+                if kind == 'file':
+                    info.size = len(data)
+                    tf.addfile(info, io.BytesIO(data))
+                elif kind == 'link':
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = '/etc/passwd'
+                    tf.addfile(info)
+                else:
+                    info.type = tarfile.DIRTYPE
+                    tf.addfile(info)
+        return path
+
+    @staticmethod
+    def _obj(data):
+        h = hashlib.md5(data).hexdigest()
+        return h[:2], f'files/md5/{h[:2]}/{h[2:]}'
+
+    def test_extraction_writes_only_this_prefixes_objects(self, tmp_path):
+        prefix, good = self._obj(b'x')
+        t = self._tar(tmp_path, [('files', b'', 'dir'), ('files/md5', b'', 'dir'),
+                                 (f'files/md5/{prefix}', b'', 'dir'), (good, b'x', 'file')])
+        dest = tmp_path / 'dest'
+        dest.mkdir()
+        out = ops._extract_inner(t, dest, 'none', prefix, manifest_mod.LAYOUT_DVC_V3)
+        assert out == [dest / good] and (dest / good).read_bytes() == b'x'
+
+    @pytest.mark.parametrize('entry', [
+        ('../../.bashrc', b'x', 'file'),
+        ('files/md5/cd/' + 'c' * 30, b'x', 'file'),
+        ('files/md5/ab/' + 'c' * 30, b'', 'link'),
+        ('files/md5/ab/' + 'c' * 30, b'not matching', 'file'),
+        ('files/md5/ab/notahash', b'x', 'file'),
+        ('/etc/x', b'x', 'file'),
+    ])
+    def test_other_entries_are_skipped(self, tmp_path, entry, capsys):
+        t = self._tar(tmp_path, [entry])
+        dest = tmp_path / 'dest'
+        dest.mkdir()
+        assert ops._extract_inner(t, dest, 'none', 'ab', manifest_mod.LAYOUT_DVC_V3) == []
+        assert 'skipped' in capsys.readouterr().err
+        assert not (tmp_path / '.bashrc').exists()
+        assert not any(p.is_file() for p in dest.rglob('*'))
+
+    def test_existing_object_is_not_replaced(self, tmp_path):
+        prefix, good = self._obj(b'x')
+        t = self._tar(tmp_path, [(good, b'x', 'file')])
+        dest = tmp_path / 'dest'
+        (dest / good).parent.mkdir(parents=True)
+        (dest / good).write_bytes(b'mine')
+        assert ops._extract_inner(t, dest, 'none', prefix, manifest_mod.LAYOUT_DVC_V3) == []
+        assert (dest / good).read_bytes() == b'mine'
+
+    def test_extraction_does_not_follow_linked_prefix_dir(self, tmp_path):
+        from dt.errors import ArchiveError
+        prefix, good = self._obj(b'x')
+        t = self._tar(tmp_path, [(good, b'x', 'file')])
+        dest = tmp_path / 'dest'
+        (dest / 'files' / 'md5').mkdir(parents=True)
+        elsewhere = tmp_path / 'elsewhere'
+        elsewhere.mkdir()
+        (dest / 'files' / 'md5' / prefix).symlink_to(elsewhere)
+        with pytest.raises(ArchiveError):
+            ops._extract_inner(t, dest, 'none', prefix, manifest_mod.LAYOUT_DVC_V3)
+        assert list(elsewhere.iterdir()) == []
+
+    def test_prune_needs_a_tar_for_every_prefix(self, tmp_path):
+        remote = tmp_path / 'r'
+        (remote / 'files' / 'md5' / 'ab').mkdir(parents=True)
+        (remote / 'files' / 'md5' / 'ab' / ('c' * 30)).write_bytes(b'x')
+        (remote / 'files' / 'md5' / 'cd').mkdir()  # empty: fine
+        assert ops._uncovered_prefixes(remote, manifest_mod.LAYOUT_DVC_V3, {}) == ['files/md5/ab']
+        assert ops._uncovered_prefixes(remote, manifest_mod.LAYOUT_DVC_V3,
+                                       {'ab': object()}) == []
+
+
+def test_archive_locations_from_repository_config_are_ignored(monkeypatch, capsys):
+    monkeypatch.setattr(ops.cfg, 'get_value', lambda k, d=None: '/repo/chosen')
+    monkeypatch.setattr(ops.cfg, 'scopes_defining', lambda k: ['project'])
+    monkeypatch.setattr(ops.cfg, 'get_trusted_value', lambda k, d=None: '/repo/chosen')
+    assert ops._own_setting('archive.staging_dir') is None
+    assert 'ignoring archive.staging_dir' in capsys.readouterr().err
+    monkeypatch.setattr(ops.cfg, 'scopes_defining', lambda k: ['project', 'user'])
+    monkeypatch.setattr(ops.cfg, 'get_trusted_value', lambda k, d=None: '/mine')
+    assert ops._own_setting('archive.staging_dir') == '/mine'
+
+
+class TestInnerTarNamesAreGenerated:
+    def _load(self, key, filename, compression='none'):
+        return manifest_mod.ArchiveManifest.from_dict({
+            'archive_name': 'n', 'source_remote': 'r', 'backend': 'b',
+            'backend_dir': 'd', 'version': 2,
+            'contents': {'compression': compression, 'inner_tars': {
+                key: {'filename': filename, 'size_bytes': 1, 'sha256': 'x',
+                      'n_objects': 1}}}})
+
+    @pytest.mark.parametrize('key,filename', [
+        ('ab', '/home/v/.bashrc'), ('ab', '../ab.tar'), ('ab', 'cd.tar'),
+        ('../x', '../x.tar'), ('ab', 'ab.tar.gz'),
+    ])
+    def test_hostile_names_are_refused(self, key, filename):
+        from dt.errors import ArchiveError
+        with pytest.raises(ArchiveError):
+            self._load(key, filename)
+
+    @pytest.mark.parametrize('key,filename,comp', [
+        ('ab', 'ab.tar', 'none'), ('v2-ab', 'v2-ab.tar.zst', 'zstd'),
+        ('v3-0f', 'v3-0f.tar.gz', 'gzip'),
+    ])
+    def test_generated_names_load(self, key, filename, comp):
+        m = self._load(key, filename, comp)
+        assert m.inner_tars[key].filename == filename
+
+
+class TestArchiveHoldsOnlyRemoteObjects:
+    def _remote(self, tmp_path):
+        remote = tmp_path / 'remote'
+        pdir = remote / 'files' / 'md5' / 'ab'
+        pdir.mkdir(parents=True)
+        (pdir / ('c' * 30)).write_bytes(b'blob')
+        return remote, pdir
+
+    def test_linked_entry_is_refused_and_not_archived(self, tmp_path):
+        from dt.errors import ArchiveError
+        remote, pdir = self._remote(tmp_path)
+        secret = tmp_path / 'secret'
+        secret.write_bytes(b'TOPSECRET')
+        (pdir / ('d' * 30)).symlink_to(secret)
+        staging = tmp_path / 'staging'
+        with pytest.raises(ArchiveError, match='not plain DVC objects'):
+            ops.build_prefix_tarball(remote, 'ab', staging, 'none', 1,
+                                     manifest_mod.LAYOUT_DVC_V3)
+        for f in staging.rglob('*'):
+            assert b'TOPSECRET' not in f.read_bytes()
+
+    def test_plain_objects_are_archived(self, tmp_path):
+        import tarfile
+        remote, pdir = self._remote(tmp_path)
+        staging = tmp_path / 'staging'
+        ops.build_prefix_tarball(remote, 'ab', staging, 'none', 1,
+                                 manifest_mod.LAYOUT_DVC_V3)
+        with tarfile.open(staging / 'ab.tar') as tf:
+            assert tf.getnames() == ['files/md5/ab/' + 'c' * 30]
+
+    def test_scan_does_not_count_links(self, tmp_path):
+        remote, pdir = self._remote(tmp_path)
+        (pdir / ('d' * 30)).symlink_to(tmp_path / 'secret')
+        assert ops._scan_one_prefix(pdir) == (1, 4)
+
+
+class TestManifestFieldsAndPruneConsistency:
+    def _load(self, **extra):
+        data = {'archive_name': 'n', 'source_remote': 'r', 'backend': 'b',
+                'backend_dir': 'd/n/', 'version': 2}
+        data.update(extra)
+        return manifest_mod.ArchiveManifest.from_dict(data)
+
+    @pytest.mark.parametrize('bdir', ['../../other/', '-o/x/', 'a/../b', 'a\nb'])
+    def test_backend_dir_must_be_plain(self, bdir):
+        from dt.errors import ArchiveError
+        with pytest.raises(ArchiveError):
+            self._load(backend_dir=bdir)
+
+    def test_compression_inferred_for_older_manifests(self):
+        m = self._load(contents={'inner_tars': {'ab': {
+            'filename': 'ab.tar.gz', 'size_bytes': 1, 'sha256': 'x', 'n_objects': 1}}})
+        assert m.compression == 'gzip'
+
+    def test_unknown_compression_refused(self):
+        from dt.errors import ArchiveError
+        with pytest.raises(ArchiveError):
+            self._load(contents={'compression': 'lz4', 'inner_tars': {}})
+
+    def test_tar_digest_mismatch_refused(self, tmp_path):
+        from dt.errors import ArchiveError
+        f = tmp_path / 'ab.tar'
+        f.write_bytes(b'x')
+        inner = manifest_mod.InnerTar(filename='ab.tar', size_bytes=1,
+                                      sha256='0' * 64, n_objects=1)
+        with pytest.raises(ArchiveError, match='checksum'):
+            ops._require_tar_digest(f, inner)

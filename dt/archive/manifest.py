@@ -122,6 +122,37 @@ def is_plain_name(name: Any) -> bool:
             and '..' not in name)
 
 
+_TAR_EXT = {'none': '', 'gzip': '.gz', 'zstd': '.zst'}
+
+
+def _expected_tar_name(key: Any, filename: Any, compression: str) -> str:
+    """An inner tar is named ``<key>.tar[.gz|.zst]`` for a prefix key ``xx``
+    (or ``v2-xx`` / ``v3-xx``); anything else is not a manifest dt wrote."""
+    import re
+    if not (isinstance(key, str)
+            and re.fullmatch(r'(?:v[23]-)?[0-9a-f]{2}', key)):
+        raise ArchiveError(f"Invalid inner tar key: {key!r}")
+    expected = f"{key}.tar{_TAR_EXT.get(compression, '')}"
+    if filename != expected:
+        raise ArchiveError(
+            f"Invalid inner tar file name {filename!r} for {key} "
+            f"(expected {expected!r})")
+    return filename
+
+
+def _check_backend_dir(value: Any) -> Any:
+    """A backend folder path: no control characters, no dot-dot segments and
+    no segment that could read as an option."""
+    if value in (None, ''):
+        return value
+    if not isinstance(value, str) or any(not c.isprintable() for c in value):
+        raise ArchiveError(f"Invalid backend_dir: {value!r}")
+    for part in value.split('/'):
+        if part in ('.', '..') or part.startswith('-'):
+            raise ArchiveError(f"Invalid backend_dir: {value!r}")
+    return value
+
+
 def require_plain_name(name: Any, what: str = 'archive name') -> str:
     if not is_plain_name(name):
         raise ArchiveError(f"Invalid {what}: {name!r}")
@@ -229,19 +260,28 @@ class ArchiveManifest:
                 f"understands (max {MANIFEST_VERSION})."
             )
 
+        compression = contents.get('compression')
+        if compression is None:
+            # Older manifests: the inner tar names say how they were written.
+            names = [str((row or {}).get('filename', '')) for row in inner_raw.values()]
+            compression = ('gzip' if names and all(n.endswith('.tar.gz') for n in names)
+                           else 'zstd' if names and all(n.endswith('.tar.zst') for n in names)
+                           else 'none')
+        if compression not in _TAR_EXT:
+            raise ArchiveError(f"Unknown compression {compression!r}")
         return cls(
             archive_name=require_plain_name(data['archive_name']),
             source_remote=data['source_remote'],
             backend=data['backend'],
-            backend_dir=backend_dir,
+            backend_dir=_check_backend_dir(backend_dir),
             layout=layout_str,
             source_layout=data.get('source_layout', LAYOUT_DVC_V3),
             total_objects=int(contents.get('total_objects', 0)),
             total_bytes=int(contents.get('total_bytes', 0)),
-            compression=contents.get('compression', 'none'),
+            compression=compression,
             inner_tars={
                 prefix: InnerTar(
-                    filename=require_plain_name(row['filename'], 'inner tar file name'),
+                    filename=_expected_tar_name(prefix, row['filename'], compression),
                     size_bytes=int(row['size_bytes']),
                     sha256=row['sha256'],
                     n_objects=int(row['n_objects']),

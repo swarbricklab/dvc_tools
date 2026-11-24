@@ -529,7 +529,7 @@ class TestGatherRemoteStatus:
         remote_dir = tmp_path / "proj"
         prefix = remote_dir / "files" / "md5" / "00"
         prefix.mkdir(parents=True)
-        (prefix / "abc123").write_bytes(b"hello")  # 5 bytes
+        (prefix / ("a" * 30)).write_bytes(b"hello")  # 5 bytes
 
         info = gather_remote_status(("proj", str(remote_dir), True), deep=True)
 

@@ -125,7 +125,8 @@ class RegistryEntry:
 
 def registry_path() -> Optional[Path]:
     """Where the central register lives, or None if unconfigured."""
-    raw = cfg.get_value('archive.registry_path')
+    from .operations import _own_setting
+    raw = _own_setting('archive.registry_path')
     if not raw:
         return None
     return Path(str(raw)).expanduser()
