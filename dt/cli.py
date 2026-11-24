@@ -1748,6 +1748,9 @@ def remote_copy(args, as_name, force_copy, group_writable, jobs, verbose):
                f"{utils.format_size(result['bytes'])}"
                + (f", {result['skipped']:,} skipped"
                   if result['skipped'] else ""))
+    if result.get('links'):
+        click.echo(f"  Warning: {len(result['links'])} symbolic link(s) in the "
+                   f"source were not copied (e.g. {result['links'][0]})")
     if result['registered']:
         click.echo(f"  Registered DVC remote '{result['registered']}' "
                    f"-> {result['dest']}")

@@ -149,7 +149,7 @@ def _prefix_dirs(
     from .archive import operations as ops
 
     entries = []
-    for key, path in ops._enumerate_prefix_dirs(remote_dir, layout):
+    for key, path in ops._enumerate_prefix_dirs(remote_dir, layout, include_links=True):
         hex_prefix = key[-2:]
         if only_prefixes is not None and hex_prefix not in only_prefixes:
             continue

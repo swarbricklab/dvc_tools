@@ -308,10 +308,10 @@ def detect_source_layout(remote_dir: Path) -> str:
     """
     files_md5 = remote_dir / 'files' / 'md5'
     has_v3 = False
-    if files_md5.is_dir():
+    if _real_dir(remote_dir / 'files') and _real_dir(files_md5):
         try:
             for p in files_md5.iterdir():
-                if p.is_dir() and _is_hex_prefix(p.name):
+                if _real_dir(p) and _is_hex_prefix(p.name):
                     has_v3 = True
                     break
         except OSError:
@@ -319,7 +319,7 @@ def detect_source_layout(remote_dir: Path) -> str:
     has_v2 = False
     try:
         for p in remote_dir.iterdir():
-            if p.is_dir() and _is_hex_prefix(p.name):
+            if _real_dir(p) and _is_hex_prefix(p.name):
                 has_v2 = True
                 break
     except OSError:
@@ -337,39 +337,47 @@ def detect_source_layout(remote_dir: Path) -> str:
     )
 
 
+def _real_dir(p: Path) -> bool:
+    """A directory at ``p`` itself, not a link to one."""
+    return p.is_dir() and not p.is_symlink()
+
+
 def _enumerate_prefix_dirs(
-    remote_dir: Path, layout: str,
+    remote_dir: Path, layout: str, include_links: bool = False,
 ) -> List[Tuple[str, Path]]:
     """Return ``[(manifest_key, dir_path), ...]`` for the given layout.
 
     Pure layouts use bare 2-char hex keys (``'00'`` … ``'ff'``); mixed
     uses prefixed keys (``'v3-00'``, ``'v2-00'``) to disambiguate.
+
+    Only real directories are returned: a link in a shared remote could
+    point anywhere. ``include_links=True`` also returns linked prefix
+    entries (for callers that report them).
     """
+    def ok(p: Path) -> bool:
+        if not _is_hex_prefix(p.name):
+            return False
+        return (p.is_symlink() if include_links else False) or _real_dir(p)
+
     if layout == LAYOUT_DVC_V3:
         base = remote_dir / 'files' / 'md5'
-        if not base.is_dir():
+        if not (_real_dir(remote_dir / 'files') and _real_dir(base)):
             raise ArchiveError(
                 f"No files/md5 directory found at {base}. "
                 f"Is {remote_dir} actually a DVC v3 remote?"
             )
-        return [
-            (p.name, p) for p in sorted(base.iterdir())
-            if p.is_dir() and _is_hex_prefix(p.name)
-        ]
+        return [(p.name, p) for p in sorted(base.iterdir()) if ok(p)]
     if layout == LAYOUT_DVC_V2:
-        return [
-            (p.name, p) for p in sorted(remote_dir.iterdir())
-            if p.is_dir() and _is_hex_prefix(p.name)
-        ]
+        return [(p.name, p) for p in sorted(remote_dir.iterdir()) if ok(p)]
     if layout == LAYOUT_DVC_MIXED:
         entries: List[Tuple[str, Path]] = []
         v3_base = remote_dir / 'files' / 'md5'
-        if v3_base.is_dir():
+        if _real_dir(remote_dir / 'files') and _real_dir(v3_base):
             for p in sorted(v3_base.iterdir()):
-                if p.is_dir() and _is_hex_prefix(p.name):
+                if ok(p):
                     entries.append((f'v3-{p.name}', p))
         for p in sorted(remote_dir.iterdir()):
-            if p.is_dir() and _is_hex_prefix(p.name):
+            if ok(p):
                 entries.append((f'v2-{p.name}', p))
         return entries
     raise ArchiveError(
@@ -437,6 +445,14 @@ def scan_prefixes(
     ``stats[key] = (n_objects, total_bytes)``.
     """
     entries = _enumerate_prefix_dirs(remote_dir, layout)
+    linked = [str(p) for _k, p in
+              _enumerate_prefix_dirs(remote_dir, layout, include_links=True)
+              if p.is_symlink()]
+    if linked:
+        raise ArchiveError(
+            f"{len(linked)} blob prefix director{'ies are' if len(linked) != 1 else 'y is a'} "
+            f"symbolic link{'s' if len(linked) != 1 else ''} (e.g. {linked[0]}); "
+            f"replace them with real directories before archiving.")
     n_jobs = jobs if jobs and jobs > 0 else default_scan_jobs()
 
     if progress:

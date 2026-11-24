@@ -155,7 +155,8 @@ def scan_remote_symlinks(
     except ArchiveError as e:
         raise RemoteError(str(e))
 
-    entries = ops._enumerate_prefix_dirs(remote_path, layout)
+    # fsck looks for links, so it also walks linked prefix dirs.
+    entries = ops._enumerate_prefix_dirs(remote_path, layout, include_links=True)
     findings: List[SymlinkFinding] = []
 
     for _key, pdir in entries:
