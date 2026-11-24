@@ -980,7 +980,7 @@ def _run_perms(kind, do_fix, sticky, allow_other, jobs, json_output, verbose,
                 reports, fixed_mode=do_fix, sticky=sticky,
             ))
 
-        if do_fix and any(r.unfixed for r in reports):
+        if do_fix and any(r.unfixed or r.links or r.inaccessible for r in reports):
             raise SystemExit(1)
 
     except errors.CleanError as e:
