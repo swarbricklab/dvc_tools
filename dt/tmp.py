@@ -56,7 +56,7 @@ def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:
     
     # It's a short name - need owner
     if not owner:
-        owner = cfg.get_value('owner')
+        owner = cfg.get_trusted_value('owner')
     
     if not owner:
         raise TmpError(

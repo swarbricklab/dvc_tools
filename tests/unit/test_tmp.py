@@ -57,14 +57,14 @@ class TestResolveRepositoryUrl:
     
     def test_short_name_uses_config_owner(self):
         """Short name uses owner from config."""
-        with patch.object(cfg, 'get_value', return_value="swarbricklab"):
+        with patch.object(cfg, 'get_trusted_value', return_value="swarbricklab"):
             result = tmp.resolve_repository_url("dt-test-registry")
         
         assert result == "git@github.com:swarbricklab/dt-test-registry.git"
     
     def test_raises_error_when_owner_missing(self):
         """Raises TmpError when owner is needed but not configured."""
-        with patch.object(cfg, 'get_value', return_value=None):
+        with patch.object(cfg, 'get_trusted_value', return_value=None):
             with pytest.raises(TmpError, match="no owner is configured"):
                 tmp.resolve_repository_url("myrepo")
 

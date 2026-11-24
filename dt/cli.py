@@ -5788,7 +5788,7 @@ def deps():
               help='Branches to list per source repo with --show-refs')
 @click.option('--external', is_flag=True,
               help='Also report dvc import-url sources (s3://, https://, ...)')
-@click.option('--owner', default=lambda: cfg.get_value('owner'),
+@click.option('--owner', default=lambda: cfg.get_trusted_value('owner'),
               help='Owner used to expand short repo names')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def deps_list(ref, all_branches, include_paths, max_paths, show_refs, max_refs,
@@ -5874,7 +5874,7 @@ def deps_list(ref, all_branches, include_paths, max_paths, show_refs, max_refs,
               help='Use cached clones without fetching updates')
 @click.option('--strict', is_flag=True,
               help='Exit non-zero if any repo could not be resolved')
-@click.option('--owner', default=lambda: cfg.get_value('owner'),
+@click.option('--owner', default=lambda: cfg.get_trusted_value('owner'),
               help='Owner used to expand short repo names')
 @click.option('-v', '--verbose', is_flag=True, help='Print progress')
 def deps_graph(depth, mode, fmt, output, all_branches, downstream, org,
@@ -6126,7 +6126,7 @@ def deps_downstream(repository, org, depth, fmt, output, refresh):
               help='Use cached clones without fetching updates')
 @click.option('--strict', is_flag=True,
               help='Exit non-zero if any repo could not be resolved')
-@click.option('--owner', default=lambda: cfg.get_value('owner'),
+@click.option('--owner', default=lambda: cfg.get_trusted_value('owner'),
               help='Owner used to expand short repo names')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def deps_gaps(depth, jobs, no_refresh, strict, owner, json_output):

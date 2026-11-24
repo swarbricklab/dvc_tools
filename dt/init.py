@@ -383,7 +383,7 @@ def init_project(
     # Step 7: Check for GitHub remote
     if not no_git:
         # Get owner and team from argument or config
-        effective_owner = owner or cfg.get_value('owner')
+        effective_owner = owner or cfg.get_trusted_value('owner')
         effective_team = team or cfg.get_value('team')
         check_github_remote(repo_path, project_name, owner=effective_owner, team=effective_team, verbose=verbose)
     

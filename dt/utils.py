@@ -125,16 +125,18 @@ def format_size(size_bytes: int, human_readable: bool = True) -> str:
 GIT_NET_PROTOCOLS = 'https:http:ssh:git:file'
 
 
-def git_net_env() -> dict:
+def git_net_env(prompt: bool = False) -> dict:
     """Environment for git commands that reach a repository-supplied URL.
 
     Limits git to the ordinary transports (no ``ext::``/``fd::`` or other
-    remote helpers, whatever the user's git config allows) and keeps it from
+    remote helpers, whatever the user's git config allows). Unless *prompt*
+    (for commands the user runs at a terminal), it also keeps git from
     waiting on a terminal prompt.
     """
     env = dict(os.environ)
     env['GIT_ALLOW_PROTOCOL'] = GIT_NET_PROTOCOLS
-    env['GIT_TERMINAL_PROMPT'] = '0'
+    if not prompt:
+        env['GIT_TERMINAL_PROMPT'] = '0'
     return env
 
 

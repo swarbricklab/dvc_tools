@@ -142,7 +142,7 @@ def add(
     
     result = subprocess.run(
         ['git', 'submodule', 'update', '--init', '--recursive'],
-        cwd=worktree_path,
+        cwd=worktree_path, env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
     )

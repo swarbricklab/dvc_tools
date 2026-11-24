@@ -41,7 +41,7 @@ def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:
     
     # It's a short name - need owner
     if not owner:
-        owner = cfg.get_value('owner')
+        owner = cfg.get_own_value('owner')
     
     if not owner:
         raise CloneError(
@@ -175,7 +175,7 @@ def clone_repository(
     git_cmd.extend(['--', repository_url, str(target_dir)])
 
     # Execute git clone
-    result = subprocess.run(git_cmd)
+    result = subprocess.run(git_cmd, env=utils.git_net_env(prompt=True))
     if result.returncode != 0:
         raise CloneError("Git clone failed.")
 
@@ -195,7 +195,7 @@ def clone_repository(
             print("Updating submodules...")
         subprocess.run(
             ['git', 'submodule', 'update', '--init', '--recursive'],
-            cwd=target_dir
+            cwd=target_dir, env=utils.git_net_env(prompt=True),
         )
     
     # dt writes workspace-local DVC config below; that must stay in this repo.
