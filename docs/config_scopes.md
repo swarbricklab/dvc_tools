@@ -83,7 +83,7 @@ Note: cache.root is also set in project config (/path/to/repo/.dt/config.yaml), 
 Settings for your current workspace only. Not tracked by git (`.dt/config.local.yaml` is gitignored).
 
 ```bash
-dt config set --local ssh.host alternate-host.example.org
+dt config set --local hooks.verbosity quiet
 ```
 
 Use for: temporary overrides, testing, machine-specific paths.

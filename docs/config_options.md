@@ -118,7 +118,7 @@ to stay unambiguous.
 
 ### `ssh.host`
 
-Hostname used when configuring SSH remotes. This allows DVC to push/pull data from external machines.
+Hostname used when configuring SSH remotes. This allows DVC to push/pull data from external machines. Read only from user or system config (not a repo's `.dt/config.yaml` or `.dt/config.local.yaml`).
 
 ## Index Options
 

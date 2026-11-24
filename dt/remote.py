@@ -168,7 +168,7 @@ def configure_dvc_remote(
     project_name = remote_name or remote_dir.name
     
     # Get SSH host from config
-    ssh_host = cfg.get_value('ssh.host')
+    ssh_host = cfg.get_own_value('ssh.host')
     
     if ssh_host:
         # Set up SSH remote as default
@@ -518,7 +518,7 @@ def get_local_hosts() -> List[str]:
         pass
     
     # Configured SSH host (used for remote URLs)
-    ssh_host = cfg.get_value('ssh.host')
+    ssh_host = cfg.get_own_value('ssh.host')
     if ssh_host:
         hosts.append(ssh_host)
     

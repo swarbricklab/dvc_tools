@@ -5949,7 +5949,7 @@ def deps_graph(depth, mode, fmt, output, all_branches, downstream, org,
 
 
 @deps.command('index')
-@click.option('--org', default=lambda: cfg.get_value('owner'),
+@click.option('--org', default=lambda: cfg.get_trusted_value('owner'),
               help='GitHub organisation or user (default: configured owner)')
 @click.option('--jobs', '-j', type=int, default=8, show_default=True,
               help='Concurrent clone/scan workers')
@@ -6035,7 +6035,7 @@ def deps_index(org, jobs, force, include_archived, include_forks, limit,
 
 @deps.command('downstream')
 @click.argument('repository', required=False)
-@click.option('--org', default=lambda: cfg.get_value('owner'),
+@click.option('--org', default=lambda: cfg.get_trusted_value('owner'),
               help='GitHub organisation or user (default: configured owner)')
 @click.option('--depth', type=int, default=None,
               help='Maximum depth to expand (default: unlimited)')
