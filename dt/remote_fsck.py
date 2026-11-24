@@ -50,6 +50,7 @@ class SymlinkFinding:
     owner: str = ""                 # login name for owner_uid
     resolves: bool = False          # target exists and is a regular file
     md5_ok: Optional[bool] = None   # target content matches expected_md5 (None if not checked)
+    is_prefix_dir: bool = False     # a whole prefix directory is the link
     # Populated by repair():
     repaired: bool = False
     outcome: str = ""               # human-readable result of a repair attempt
@@ -73,7 +74,11 @@ class FsckReport:
 
     @property
     def dangling(self) -> List[SymlinkFinding]:
-        return [f for f in self.findings if not f.resolves]
+        return [f for f in self.findings if not f.resolves and not f.is_prefix_dir]
+
+    @property
+    def linked_prefix_dirs(self) -> List[SymlinkFinding]:
+        return [f for f in self.findings if f.is_prefix_dir]
 
     @property
     def owned_by_others(self) -> List[SymlinkFinding]:
@@ -112,6 +117,7 @@ class FsckReport:
                     'target': f.target,
                     'expected_md5': f.expected_md5,
                     'is_dir_object': f.is_dir_object,
+                    'is_prefix_dir': f.is_prefix_dir,
                     'owner': f.owner,
                     'resolves': f.resolves,
                     'md5_ok': f.md5_ok,
@@ -161,6 +167,20 @@ def scan_remote_symlinks(
 
     for _key, pdir in entries:
         prefix_hex = pdir.name  # always the bare 2-char hex, even for mixed keys
+        if pdir.is_symlink():
+            try:
+                target = os.readlink(pdir)
+                owner_uid = os.lstat(pdir).st_uid
+            except OSError:
+                target, owner_uid = "<unreadable>", -1
+            findings.append(SymlinkFinding(
+                path=pdir, rel=str(pdir.relative_to(remote_path)), target=target,
+                expected_md5=None, is_dir_object=False, owner_uid=owner_uid,
+                owner=_username(owner_uid) if owner_uid >= 0 else "?",
+                resolves=False, is_prefix_dir=True,
+            ))
+            if verbose:
+                print(f"  linked prefix directory {pdir.name} -> {target}")
         try:
             scan = list(os.scandir(pdir))
         except OSError:
@@ -222,6 +242,10 @@ def _repair_one(
     their own objects (their local cache is the authoritative source).
     """
     p = finding.path
+    if finding.is_prefix_dir:
+        finding.outcome = ("linked prefix directory: replace it with a real "
+                           "directory by hand")
+        return
     if finding.owner_uid != current_uid:
         finding.outcome = (
             f"skipped: owned by {finding.owner} — ask them to run "

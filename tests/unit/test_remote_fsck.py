@@ -180,3 +180,19 @@ class TestRepairTempFile:
         before = set(os.listdir(bad.path.parent))
         remote_fsck._repair_one(bad, os.getuid())
         assert set(os.listdir(bad.path.parent)) == before
+
+
+def test_linked_prefix_directory_is_reported_not_repaired(tmp_path):
+    remote = tmp_path / "remote"
+    real = _blob(remote, hashlib.md5(b"r").hexdigest())
+    real.write_bytes(b"r")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (remote / "files" / "md5" / "ee").symlink_to(elsewhere)
+    layout, findings = remote_fsck.scan_remote_symlinks(remote)
+    linked = [f for f in findings if f.is_prefix_dir]
+    assert [f.rel for f in linked] == ["files/md5/ee"]
+    remote_fsck._repair_one(linked[0], os.getuid())
+    assert not linked[0].repaired
+    assert "by hand" in linked[0].outcome
+    assert (remote / "files" / "md5" / "ee").is_symlink()

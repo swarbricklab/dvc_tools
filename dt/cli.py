@@ -2002,7 +2002,11 @@ def remote_fsck(remote_name, repair, json_output, verbose):
                 f"Remote '{report.remote_name}' ({report.layout}): "
                 f"{report.total} symlink(s) — "
                 f"{len(report.resolvable)} resolvable, "
-                f"{len(report.dangling)} dangling."
+                f"{len(report.dangling)} dangling"
+                + (f", {len(report.linked_prefix_dirs)} linked prefix "
+                   f"director{'y' if len(report.linked_prefix_dirs) == 1 else 'ies'}"
+                   if report.linked_prefix_dirs else '')
+                + "."
             )
             if repair:
                 click.echo(f"  Repaired: {repaired}")
@@ -2015,7 +2019,8 @@ def remote_fsck(remote_name, repair, json_output, verbose):
                                f"(use --json for the full list)")
             else:
                 for f in report.findings[:20]:
-                    state = "ok" if f.resolves else "DANGLING"
+                    state = ("LINKED DIR" if f.is_prefix_dir
+                             else "ok" if f.resolves else "DANGLING")
                     click.echo(f"  [{state}] {f.rel} ({f.owner}) -> {f.target}")
                 if report.total > 20:
                     click.echo(f"  ... and {report.total - 20} more "
