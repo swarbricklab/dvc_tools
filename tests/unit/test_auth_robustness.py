@@ -479,3 +479,27 @@ class TestFallbackPreservesTheRealCause:
         message = str(exc.value)
         assert 'Neither the google-cloud-secret-manager' in message
         assert 'Original error' not in message
+
+
+class TestSecretContentErrors:
+    def test_unparseable_aws_secret_is_reported(self):
+        from unittest.mock import MagicMock, patch
+        from dt.auth import credentials
+        backend = MagicMock()
+        backend.get_raw_config.return_value = '[default]\naws_access_key_id = a\n[default]\nx = y\n'
+        with patch.object(credentials, '_get_secret_backend', return_value=backend), \
+             patch.object(credentials, '_detect_secret_format', return_value='aws'):
+            info = credentials.check_secret('r')
+        assert info.error and 'could not be parsed' in info.error
+
+    def test_non_utf8_payload_is_a_secret_error(self):
+        from unittest.mock import MagicMock
+        import pytest
+        from dt.secrets import gcp, SecretError
+        backend = gcp.GCPSecretBackend(project='p')
+        client = MagicMock()
+        client.access_secret_version.return_value.payload.data = b'\xff\xfe'
+        backend._client = client
+        backend._use_cli = False
+        with pytest.raises(SecretError, match='UTF-8'):
+            backend.get_raw_config('r')

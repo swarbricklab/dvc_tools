@@ -1546,6 +1546,11 @@ def check_secret(repo_name: str) -> SecretInfo:
             repo_name=repo_name, exists=True, accessible=False,
             error=str(e),
         )
+    except configparser.Error as e:
+        return SecretInfo(
+            repo_name=repo_name, exists=True, accessible=True,
+            error=f"secret content could not be parsed: {e}",
+        )
 
 
 def set_secret(repo_name: str, content: str, allow_repo_store: bool = False) -> str:

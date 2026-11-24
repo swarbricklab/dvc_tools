@@ -685,7 +685,10 @@ class GCPSecretBackend(SecretBackend):
         
         # Return the payload as text, with line endings normalised the way
         # the gcloud CLI path (text mode) does, so both read the same.
-        text = response.payload.data.decode('utf-8')
+        try:
+            text = response.payload.data.decode('utf-8')
+        except UnicodeDecodeError as e:
+            raise SecretError(f"Secret '{repo_name}' is not UTF-8 text: {e}")
         return text.replace('\r\n', '\n').replace('\r', '\n')
 
     def list_secrets(self) -> list:
