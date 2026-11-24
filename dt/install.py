@@ -339,11 +339,17 @@ def uninstall(verbose: bool = False) -> List[str]:
 # =============================================================================
 
 def _scope_checks(scope: str, hook_name: str) -> Dict:
-    """``hooks.<hook_name>.checks`` from one config scope (empty if unset)."""
+    """``hooks.<hook_name>.checks`` from one config scope (empty if unset).
+
+    Only checks with a plain, printable name are kept.
+    """
     data = cfg.load_scope_config(scope)
     for part in ('hooks', hook_name, 'checks'):
         data = data.get(part) if isinstance(data, dict) else None
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    return {name: settings for name, settings in data.items()
+            if isinstance(name, str) and name and name.isprintable()}
 
 
 def _merge_check_settings(hook_name: str) -> Dict[str, Dict]:

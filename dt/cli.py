@@ -6369,6 +6369,12 @@ def hook_run(hook_name, args, verbose):
         raise SystemExit(1)
 
 
+def _shown(value) -> str:
+    """*value* as text, escaped if it holds control characters."""
+    text = str(value)
+    return text if text.isprintable() else repr(text)
+
+
 @hook.command('list')
 def hook_list():
     """Show configured checks for each git hook.
@@ -6389,7 +6395,7 @@ def hook_list():
             continue
         for check in checks:
             name = check['name']
-            mode = check.get('mode', 'sync')
+            mode = _shown(check.get('mode', 'sync'))
             source = check.get('source', '?')
             enabled = check.get('enabled', True)
 
@@ -6402,7 +6408,7 @@ def hook_list():
                 parts.append(f"  command (repository config, not run): "
                              f"{check['command_ignored']!r}")
             if name == 'large-files':
-                parts.append(f"  max_size={check.get('max_size', '1MB')}")
+                parts.append(f"  max_size={_shown(check.get('max_size', '1MB'))}")
             if not enabled:
                 parts.append("  DISABLED")
 

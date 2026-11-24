@@ -386,6 +386,15 @@ class TestCheckCommandScope:
         err = capsys.readouterr().err
         assert '\x1b' not in err and 'dt config set' not in err
 
+    def test_unprintable_check_name_is_dropped(self, repo):
+        root, write = repo
+        write(root / '.dt' / 'config.yaml',
+              {'ok\x1b[2Kx': {'enabled': True}, 1: {'enabled': True}})
+        names = {c['name'] for c in install._get_checks('pre-commit')}
+        assert names == {'dvc-status', 'large-files'}
+        names = {c['name'] for c in install.hook_list()['pre-commit']}
+        assert names == {'dvc-status', 'large-files'}
+
     def test_hook_list_shows_repo_command_as_not_run(self, repo):
         root, write = repo
         write(root / '.dt' / 'config.yaml',
