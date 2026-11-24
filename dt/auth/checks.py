@@ -419,7 +419,7 @@ def _resolve_s3_remote_settings(ep: Endpoint) -> Tuple[Optional[str], Optional[s
     if endpoint_url is None:
         try:
             from .. import config as cfg
-            endpoint_url = cfg.get_value('secrets.default_endpointurl') or None
+            endpoint_url = cfg.get_trusted_value('secrets.default_endpointurl') or None
         except Exception:
             pass
 

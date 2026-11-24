@@ -32,7 +32,7 @@ import yaml
 from ..errors import AuthError
 from ._helpers import _extract_repo_name_from_url, _short_repo_name
 from .checks import STATUS_FAIL, check_endpoints
-from .credentials import install_credentials
+from .credentials import install_credentials, secret_store_set_by_repo
 from .endpoints import (
     Endpoint,
     classify_url,
@@ -219,7 +219,13 @@ def auth_setup(
             print("\nNo SSH/git endpoints found — skipping SSH setup.")
 
     # -- 4. Credential install (if needed) ---------------------------------
-    if has_s3:
+    if has_s3 and secret_store_set_by_repo():
+        report.skipped_credentials = True
+        report.credentials_skip_reason = (
+            "the secret store is set only by this repository's config; "
+            "check it, then run `dt auth credentials install --allow-repo-store`")
+        print(f"Skipping credential install: {report.credentials_skip_reason}")
+    elif has_s3:
         if verbose:
             print("\n--- S3 credential setup ---")
         try:

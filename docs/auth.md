@@ -784,20 +784,37 @@ differed from a not-found would let anyone probe which secrets exist.
 So the first thing to check is not the grant but the project:
 
 ```bash
-dt config get secrets.gcp.project        # which project dt is asking
+dt auth credentials list                 # names the project dt is asking
 gcloud secrets list --project=<that>     # what is actually in it
 ```
 
-`secrets.gcp.project` resolves through system, user, and repo scope in that
-order of increasing precedence, so a personal override in
-`~/.config/dt/config.yaml` silently wins over the group's system config. Two
-people on the same machine can therefore be querying different projects, and
-an access grant made against the wrong one never takes effect no matter how
-many times it is repeated. Check the resolved value in the environment that is
-failing, not in your own.
+`secrets.gcp.project` resolves user scope first, then system scope; a value
+in the repository's `.dt/config.yaml` / `.dt/config.local.yaml` is used only
+when neither sets it (a differing repository value is reported and ignored).
+The same holds for `secrets.backend`, `secrets.prefix`, `secrets.gcp.locations`
+and `secrets.default_endpointurl`. A personal override in
+`~/.config/dt/config.yaml` therefore wins over the group's system config. Two
+people on the same machine can be querying different projects, and an access
+grant made against the wrong one never takes effect no matter how many times
+it is repeated. Check the resolved value in the environment that is failing,
+not in your own.
+
+When only the repository names the secret store, `dt auth setup` (and the
+setup `dt clone` runs) skips credential install, and `dt auth credentials
+install|migrate|set` refuse it; once you have checked the repository's config,
+pass `--allow-repo-store`. A repository `secrets.prefix` is ignored when the
+project comes from your own or the site config.
 
 ### Security
 
+- dt records the secret each profile came from (`dt_source` in
+  `~/.aws/credentials`) and only replaces or removes profiles it installed from
+  that same secret. It never writes the `default` profile. To take over an
+  existing profile of the same name, pass `--replace` with the repo name to
+  `dt auth credentials install` / `migrate`. A profile installed by an older
+  dt is adopted when it already holds the secret's key. Profiles defined only
+  in `~/.aws/config` with settings beyond `region`/`output` (SSO, roles,
+  endpoints) are left alone.
 - `~/.aws/credentials` and `~/.aws/config` are written with `600` permissions
   (owner only). Both honour the standard `AWS_SHARED_CREDENTIALS_FILE` /
   `AWS_CONFIG_FILE` environment overrides.

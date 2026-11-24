@@ -182,12 +182,42 @@ class TestInstallAwsProfile:
         assert cfg.has_section('profile myrepo')
         assert cfg.get('profile myrepo', 'region') == 'auto'
 
-    def test_default_profile_uses_bare_name_in_config(self, aws_dir):
-        _install_aws_profile('default', 'AKIA', 'SECRET')
-        cfg = _make_aws_parser()
-        cfg.read(aws_dir / 'config')
-        assert cfg.has_section('default')
-        assert not cfg.has_section('profile default')
+    def test_default_profile_is_never_written(self, aws_dir):
+        with pytest.raises(AuthError, match='cannot be used'):
+            _install_aws_profile('default', 'AKIA', 'SECRET')
+        assert not (aws_dir / 'credentials').exists()
+
+    @pytest.mark.parametrize('name', ['', '-x', 'a b', 'a]\n[b', 'x/y'])
+    def test_unusable_profile_names_refused(self, aws_dir, name):
+        with pytest.raises(AuthError):
+            _install_aws_profile(name, 'AKIA', 'SECRET')
+
+    def test_existing_profile_from_elsewhere_is_left_alone(self, aws_dir):
+        (aws_dir / 'credentials').write_text(
+            '[myrepo]\naws_access_key_id = MINE\naws_secret_access_key = S\n')
+        with pytest.raises(AuthError, match='left unchanged'):
+            _install_aws_profile('myrepo', 'AKIA', 'SECRET', source='gcp:p/dvc-remote-myrepo')
+        assert 'MINE' in (aws_dir / 'credentials').read_text()
+
+    def test_profile_from_same_source_is_updated(self, aws_dir):
+        src = 'gcp:p/dvc-remote-myrepo'
+        _install_aws_profile('myrepo', 'OLD', 'S', source=src)
+        _install_aws_profile('myrepo', 'NEW', 'S', source=src)
+        text = (aws_dir / 'credentials').read_text()
+        assert 'NEW' in text and 'OLD' not in text
+        with pytest.raises(AuthError):
+            _install_aws_profile('myrepo', 'X', 'S', source='gcp:other/dvc-remote-myrepo')
+
+    def test_replace_overwrites(self, aws_dir):
+        (aws_dir / 'credentials').write_text(
+            '[myrepo]\naws_access_key_id = MINE\naws_secret_access_key = S\n')
+        _install_aws_profile('myrepo', 'AKIA', 'SECRET', source='gcp:p/x', replace=True)
+        assert 'AKIA' in (aws_dir / 'credentials').read_text()
+
+    def test_discovered_removal_needs_matching_source(self, aws_dir):
+        _install_aws_profile('myrepo', 'A', 'B', source='gcp:p/x')
+        assert _remove_aws_profile('myrepo', source='gcp:q/x') == []
+        assert _remove_aws_profile('myrepo', source='gcp:p/x')
 
     def test_existing_profile_preserves_other_keys(self, aws_dir):
         # Pre-seed config with extra keys
@@ -209,7 +239,7 @@ class TestRemoveAwsProfile:
 
     def test_removes_from_both_files(self, aws_dir):
         _install_aws_profile('myrepo', 'AKIA', 'SECRET')
-        modified = _remove_aws_profile('myrepo')
+        modified = _remove_aws_profile('myrepo', force=True)
         assert len(modified) == 2
 
         creds = _make_aws_parser()
@@ -527,7 +557,7 @@ class TestConfigureRemotes:
     def test_no_endpoint_no_default_fails(self, tmp_path, monkeypatch):
         repo = self._make_repo(tmp_path)
         monkeypatch.chdir(repo)
-        monkeypatch.setattr('dt.config.get_value', lambda *a, **kw: None)
+        monkeypatch.setattr('dt.config.get_trusted_value', lambda *a, **kw: None)
         with pytest.raises(AuthError, match='No endpoint'):
             configure_remotes(endpoint=None)
 
@@ -541,7 +571,7 @@ class TestConfigureRemotes:
         monkeypatch.chdir(repo)
         monkeypatch.setattr('dt.auth.credentials.utils.get_project_name',
                             lambda: 'x')
-        monkeypatch.setattr('dt.config.get_value',
+        monkeypatch.setattr('dt.config.get_trusted_value',
                             lambda key, default=None: 'https://default'
                             if key == 'secrets.default_endpointurl' else default)
         result = configure_remotes()
@@ -650,3 +680,97 @@ class TestMigrateCredentials:
 
         result = migrate_credentials(repo_name='example_wts')
         assert result.stripped_remotes == ['example-wts']
+
+
+class TestProfilesThatAreNotDts:
+    """Profiles dt did not install are neither replaced nor removed."""
+
+    def test_config_only_profile_is_not_taken_over(self, aws_dir):
+        (aws_dir / 'config').write_text('[profile myrepo]\nsso_session = s\nregion = x\n')
+        with pytest.raises(AuthError, match='already defined'):
+            _install_aws_profile('myrepo', 'AKIA', 'S', source='gcp:p/x')
+        assert not (aws_dir / 'credentials').exists()
+
+    def test_config_only_profile_survives_discovered_uninstall(self, aws_dir):
+        (aws_dir / 'config').write_text('[profile myrepo]\nrole_arn = r\n')
+        assert _remove_aws_profile('myrepo', source='gcp:p/x') == []
+        assert 'role_arn' in (aws_dir / 'config').read_text()
+
+    def test_older_dt_profile_with_same_key_is_adopted(self, aws_dir):
+        (aws_dir / 'credentials').write_text(
+            '[myrepo]\naws_access_key_id = AKIA\naws_secret_access_key = OLD\n')
+        _install_aws_profile('myrepo', 'AKIA', 'NEW', source='gcp:p/x')
+        text = (aws_dir / 'credentials').read_text()
+        assert 'NEW' in text and 'dt_source = gcp:p/x' in text
+
+    def test_source_none_never_matches(self, aws_dir):
+        (aws_dir / 'credentials').write_text(
+            '[myrepo]\naws_access_key_id = MINE\naws_secret_access_key = S\n')
+        with pytest.raises(AuthError):
+            _install_aws_profile('myrepo', 'AKIA', 'S', source=None)
+
+    @pytest.mark.parametrize('name', ['Default', 'DEFAULT'])
+    def test_default_in_any_case_refused(self, aws_dir, name):
+        with pytest.raises(AuthError):
+            _install_aws_profile(name, 'AKIA', 'S', source='gcp:p/x')
+
+
+class TestRepoChosenStore:
+    def _backend(self):
+        b = MagicMock()
+        b._repo_scoped = True
+        b.project, b.prefix = 'theirs', 'dvc-remote-'
+        return b
+
+    def test_set_refuses_repo_only_store(self):
+        from dt.auth import credentials as c
+        b = self._backend()
+        with patch.object(c, '_get_secret_backend', return_value=b):
+            with pytest.raises(AuthError, match='allow-repo-store'):
+                c.set_secret('x', '[x]\naws_access_key_id = A\naws_secret_access_key = B\n')
+            b.set_secret.assert_not_called()
+            c.set_secret('x', '[x]\naws_access_key_id = A\naws_secret_access_key = B\n',
+                         allow_repo_store=True)
+            b.set_secret.assert_called_once()
+
+    def test_install_refuses_repo_only_store(self, aws_dir):
+        from dt.auth import credentials as c
+        b = self._backend()
+        with patch.object(c, '_get_secret_backend', return_value=b):
+            with pytest.raises(AuthError, match='allow-repo-store'):
+                c.install_credentials(repo_name='x')
+        b.get_raw_config.assert_not_called()
+
+
+class TestStripScope:
+    def test_other_projects_global_creds_are_kept(self, tmp_path, monkeypatch, fake_dvc_global):
+        from dt.auth import credentials as c
+        monkeypatch.setattr(c, '_get_project_s3_remotes', lambda *a: {
+            'storage': {'url': 's3://mine', 'profile': 'proj'},
+            'other': {'url': 's3://o', 'profile': 'unrelated'},
+        })
+        fake_dvc_global.write_text(
+            "['remote \"storage\"']\n    url = s3://elsewhere\n    access_key_id = K\n")
+        assert c._strippable_remotes({'proj'}) == set()
+        fake_dvc_global.write_text("['remote \"storage\"']\n    access_key_id = K\n")
+        assert c._strippable_remotes({'proj'}) == {'storage'}
+        assert c._strippable_remotes(set()) == set()
+
+
+class TestAdoptionAndPlainProfiles:
+    def test_older_profile_with_other_key_is_refused(self, aws_dir):
+        (aws_dir / 'credentials').write_text(
+            '[myrepo]\naws_access_key_id = OTHER\naws_secret_access_key = S\n')
+        with pytest.raises(AuthError, match='no record of its source'):
+            _install_aws_profile('myrepo', 'AKIA', 'S', source='gcp:p/x')
+        assert 'OTHER' in (aws_dir / 'credentials').read_text()
+
+    def test_config_profile_with_own_settings_is_left_alone(self, aws_dir):
+        (aws_dir / 'config').write_text('[profile myrepo]\nendpoint_url = https://e\n')
+        with pytest.raises(AuthError, match='already defined'):
+            _install_aws_profile('myrepo', 'AKIA', 'S', source='gcp:p/x')
+
+    def test_config_profile_with_region_only_is_used(self, aws_dir):
+        (aws_dir / 'config').write_text('[profile myrepo]\nregion = auto\n')
+        _install_aws_profile('myrepo', 'AKIA', 'S', source='gcp:p/x')
+        assert 'AKIA' in (aws_dir / 'credentials').read_text()

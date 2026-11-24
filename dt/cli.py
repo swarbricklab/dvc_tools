@@ -3381,7 +3381,7 @@ def auth_credentials_list():
     # secrets.gcp.project (system vs user vs repo scope), so a bare list is
     # ambiguous about which project it came from -- and that ambiguity is
     # exactly what makes a misdirected access grant so hard to spot.
-    project = cfg.get_value('secrets.gcp.project') or '<not configured>'
+    project = cfg.get_trusted_value('secrets.gcp.project') or '<not configured>'
 
     if not names:
         click.echo(f"No secrets visible in project '{project}'.")
@@ -3445,8 +3445,13 @@ def auth_credentials_status():
 @auth_credentials.command('install')
 @click.argument('repo_name', required=False, default=None,
                 metavar='[REPO_NAME]')
+@click.option('--replace', is_flag=True,
+              help='Overwrite an existing AWS profile dt did not install from '
+                   'this secret.')
+@click.option('--allow-repo-store', is_flag=True,
+              help="Use a secret store named only by this repository's config.")
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def auth_credentials_install(repo_name, verbose):
+def auth_credentials_install(repo_name, replace, allow_repo_store, verbose):
     """Fetch credentials from secret manager and install into DVC global config.
 
     Without REPO_NAME, discovers all repos with S3 remotes and installs all.
@@ -3456,8 +3461,12 @@ def auth_credentials_install(repo_name, verbose):
       dt auth credentials install               # all repos
       dt auth credentials install example_wgs     # one repo only
     """
+    if replace and not repo_name:
+        raise click.ClickException("--replace needs a REPO_NAME (one profile at a time)")
     try:
-        results = auth_mod.install_credentials(verbose=verbose, repo_name=repo_name)
+        results = auth_mod.install_credentials(verbose=verbose, repo_name=repo_name,
+                                               replace=replace,
+                                               allow_repo_store=allow_repo_store)
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 
@@ -3524,8 +3533,13 @@ def auth_credentials_configure_remotes(endpoint, verbose):
                 metavar='[REPO_NAME]')
 @click.option('--dry-run', is_flag=True,
               help='Show what would change without writing anything.')
+@click.option('--replace', is_flag=True,
+              help='Overwrite an existing AWS profile dt did not install from '
+                   'this secret.')
+@click.option('--allow-repo-store', is_flag=True,
+              help="Use a secret store named only by this repository's config.")
 @click.option('-v', '--verbose', is_flag=True)
-def auth_credentials_migrate(repo_name, dry_run, verbose):
+def auth_credentials_migrate(repo_name, dry_run, replace, allow_repo_store, verbose):
     """Migrate legacy secrets and credentials to the AWS-files layout.
 
     For each repo (or REPO_NAME if given):
@@ -3537,9 +3551,12 @@ def auth_credentials_migrate(repo_name, dry_run, verbose):
       3. Remove now-redundant credential keys from ``~/.config/dvc/config``
          for S3 remotes in the current project.
     """
+    if replace and not repo_name:
+        raise click.ClickException("--replace needs a REPO_NAME (one profile at a time)")
     try:
         result = auth_mod.migrate_credentials(
             repo_name=repo_name, dry_run=dry_run, verbose=verbose,
+            replace=replace, allow_repo_store=allow_repo_store,
         )
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
@@ -3551,7 +3568,9 @@ def auth_credentials_migrate(repo_name, dry_run, verbose):
 @click.option('--file', 'input_file', default=None,
               type=click.Path(exists=True, dir_okay=False),
               help='Read INI content from this file (default: stdin)')
-def auth_credentials_set(repo_name, input_file):
+@click.option('--allow-repo-store', is_flag=True,
+              help="Use a secret store named only by this repository's config.")
+def auth_credentials_set(repo_name, input_file, allow_repo_store):
     """Create or update the secret for REPO_NAME.
 
     Content must be raw AWS-INI format, e.g.:
@@ -3573,8 +3592,9 @@ def auth_credentials_set(repo_name, input_file):
         content = click.get_text_stream('stdin').read()
 
     try:
-        auth_mod.set_secret(repo_name, content)
-        click.echo(click.style(f"✓ Secret updated for '{repo_name}'", fg='green'))
+        destination = auth_mod.set_secret(repo_name, content,
+                                          allow_repo_store=allow_repo_store)
+        click.echo(click.style(f"✓ Updated {destination}", fg='green'))
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 

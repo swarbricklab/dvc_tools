@@ -152,6 +152,62 @@ def get_value(key: str, default: Any = None) -> Any:
         return default
 
 
+#: Scopes the user (or the site) controls; the others come with a repository.
+TRUSTED_SCOPES = ('user', 'system')
+REPO_SCOPES = ('local', 'project')
+
+_warned_overrides: set = set()
+
+
+def _scope_lookup(scope: str, key: str):
+    """``(True, value)`` if *scope* sets *key*, else ``(False, None)``."""
+    current = load_scope_config(scope)
+    for part in key.split('.'):
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def get_trusted_value(key: str, default: Any = None) -> Any:
+    """Get *key*, letting user and system config outrank the repository.
+
+    For settings that decide where the user's own identity or secrets are
+    sent, a value committed to a repository must not override the user's
+    or the site's. A repository value is used only where neither sets the
+    key; a differing one is reported and ignored.
+    """
+    value, _scope = get_trusted_value_with_scope(key, default)
+    return value
+
+
+def get_trusted_value_with_scope(key: str, default: Any = None):
+    """Like :func:`get_trusted_value`, also returning the scope it came from
+    (None when the default is used)."""
+    trusted = repo = None
+    for scope in TRUSTED_SCOPES:
+        found, value = _scope_lookup(scope, key)
+        if found and value is not None:
+            trusted = (value, scope)
+            break
+    for scope in REPO_SCOPES:
+        found, value = _scope_lookup(scope, key)
+        if found and value is not None:
+            repo = (value, scope)
+            break
+    if trusted is not None:
+        if repo is not None and repo[0] != trusted[0] and key not in _warned_overrides:
+            _warned_overrides.add(key)
+            import sys
+            print(f"Warning: ignoring {key}={repo[0]!r} from {repo[1]} config; "
+                  f"using {trusted[0]!r} from {trusted[1]} config",
+                  file=sys.stderr)
+        return trusted
+    if repo is not None:
+        return repo
+    return default, None
+
+
 def _assign(data: dict, key: str, value: Any) -> None:
     """Write *value* at the dot-separated *key* inside *data*, creating parents."""
     parts = key.split('.')

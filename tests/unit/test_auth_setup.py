@@ -211,6 +211,16 @@ class TestAuthSetupRepo:
 
         m.assert_called_once_with(verbose=False)
 
+    def test_repo_chosen_secret_store_is_not_used_automatically(self, no_ssh_or_gcp):
+        with patch('dt.auth.setup.discover_endpoints', return_value=[_s3()]), \
+             patch('dt.auth.setup.secret_store_set_by_repo', return_value=True), \
+             patch('dt.auth.setup.install_credentials') as m:
+            report = auth_setup(ssh_config_file=Path('/tmp/nope'))
+
+        m.assert_not_called()
+        assert report.skipped_credentials
+        assert 'repository' in report.credentials_skip_reason
+
     def test_repo_without_s3_skips_credentials(self, no_ssh_or_gcp):
         with patch('dt.auth.setup.discover_endpoints_from_repo',
                    return_value=[Endpoint(type='ssh', url='ssh://h/d',

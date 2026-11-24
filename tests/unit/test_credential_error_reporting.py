@@ -202,10 +202,10 @@ class TestBackendCarriesTheAuthCheckResult:
     """_get_secret_backend already paid for gcloud; hand the answer over."""
 
     def test_cli_account_is_passed_to_the_backend(self):
-        with patch('dt.config.get_value', side_effect=lambda k, *a: {
+        with patch('dt.config.get_trusted_value_with_scope', side_effect=lambda k, *a: ({
                     'secrets.backend': 'gcp',
                     'secrets.gcp.project': 'example-quota-123',
-                   }.get(k)), \
+                   }.get(k), 'system')), \
              patch.object(GCPSecretBackend, '_has_adc_credentials', return_value=False), \
              patch.object(GCPSecretBackend, 'gcloud_auth_status',
                           return_value=('ok', 'her@example.org')):
@@ -213,10 +213,10 @@ class TestBackendCarriesTheAuthCheckResult:
         assert backend._cli_account == 'her@example.org'
 
     def test_adc_path_leaves_cli_account_unset(self):
-        with patch('dt.config.get_value', side_effect=lambda k, *a: {
+        with patch('dt.config.get_trusted_value_with_scope', side_effect=lambda k, *a: ({
                     'secrets.backend': 'gcp',
                     'secrets.gcp.project': 'example-quota-123',
-                   }.get(k)), \
+                   }.get(k), 'system')), \
              patch.object(GCPSecretBackend, '_has_adc_credentials', return_value=True):
             backend = creds_mod._get_secret_backend()
         assert backend._cli_account is None
@@ -591,19 +591,19 @@ class TestCredentialsCliCommands:
 
     def test_list_names_the_project(self):
         with patch('dt.auth.list_repo_secrets', return_value=['example_wts']), \
-             patch('dt.config.get_value', return_value='example-quota-123'):
+             patch('dt.config.get_trusted_value', return_value='example-quota-123'):
             result = self._invoke(['auth', 'credentials', 'list'])
         assert 'example-quota-123' in result.output
 
     def test_empty_list_names_the_project_too(self):
         with patch('dt.auth.list_repo_secrets', return_value=[]), \
-             patch('dt.config.get_value', return_value='example-quota-123'):
+             patch('dt.config.get_trusted_value', return_value='example-quota-123'):
             result = self._invoke(['auth', 'credentials', 'list'])
         assert 'example-quota-123' in result.output
 
     def test_empty_list_admits_it_may_be_visibility(self):
         with patch('dt.auth.list_repo_secrets', return_value=[]), \
-             patch('dt.config.get_value', return_value='example-quota-123'):
+             patch('dt.config.get_trusted_value', return_value='example-quota-123'):
             result = self._invoke(['auth', 'credentials', 'list'])
         assert 'cannot see them' in result.output
 

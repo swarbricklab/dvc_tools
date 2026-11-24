@@ -75,6 +75,32 @@ def _no_credentials_message(reasons: Dict[str, str], identity: Optional[str]) ->
     return '\n'.join(lines)
 
 
+def _resolve_secret_store(warn: bool = True):
+    """``(backend_type, project, prefix, repo_keys)`` for the secret store.
+
+    User and system config outrank the repository's. A repository prefix is
+    ignored when the project is the user's/site's. *repo_keys* lists the keys
+    still chosen by repository config alone.
+    """
+    from .. import config as cfg
+
+    backend_type, backend_scope = cfg.get_trusted_value_with_scope('secrets.backend')
+    project, project_scope = cfg.get_trusted_value_with_scope('secrets.gcp.project')
+    prefix, prefix_scope = cfg.get_trusted_value_with_scope('secrets.prefix')
+    if prefix_scope in cfg.REPO_SCOPES and project_scope in cfg.TRUSTED_SCOPES:
+        # The store is the user's/site's; the repository does not get to
+        # choose which of its secrets are read.
+        if warn:
+            print(f"Warning: ignoring secrets.prefix={prefix!r} from "
+                  f"{prefix_scope} config", file=sys.stderr)
+        prefix, prefix_scope = None, None
+    repo_keys = [key for key, scope in (('secrets.backend', backend_scope),
+                                        ('secrets.gcp.project', project_scope),
+                                        ('secrets.prefix', prefix_scope))
+                 if scope in cfg.REPO_SCOPES]
+    return backend_type, project, prefix or 'dvc-remote-', repo_keys
+
+
 def _get_secret_backend():
     """Get the configured secret backend.
 
@@ -84,10 +110,9 @@ def _get_secret_backend():
     Raises:
         AuthError: If no backend is configured or configuration is invalid.
     """
-    from .. import config as cfg
     from ..secrets import GCPSecretBackend, SecretError
 
-    backend_type = cfg.get_value('secrets.backend')
+    backend_type, project, prefix, repo_keys = _resolve_secret_store()
     if not backend_type:
         raise AuthError(
             "No secret backend configured.\n"
@@ -99,7 +124,6 @@ def _get_secret_backend():
         )
 
     if backend_type == 'gcp':
-        project = cfg.get_value('secrets.gcp.project')
         if not project:
             raise AuthError(
                 "GCP project not configured for secrets.\n"
@@ -108,7 +132,10 @@ def _get_secret_backend():
                 "    gcp:\n"
                 "      project: <your-gcp-project>"
             )
-        prefix = cfg.get_value('secrets.prefix') or 'dvc-remote-'
+        if repo_keys:
+            print(f"Note: secret store (GCP project '{project}', prefix "
+                  f"'{prefix}'): {', '.join(repo_keys)} set only by this "
+                  f"repository's config", file=sys.stderr)
         # Quick auth check — fail fast instead of hanging on GCP calls
         account = None
         if not GCPSecretBackend._has_adc_credentials():
@@ -119,6 +146,8 @@ def _get_secret_backend():
                     + GCPSecretBackend.gcloud_auth_hint(status)
                 )
         backend = GCPSecretBackend(project=project, prefix=prefix)
+        backend._repo_scoped = bool(repo_keys)
+        backend._repo_keys = repo_keys
         # Hand over what this check already established, so reporting the
         # identity later does not pay for another gcloud round trip.
         backend._cli_account = account
@@ -128,6 +157,22 @@ def _get_secret_backend():
             f"Unknown secret backend: {backend_type}\n"
             f"Supported backends: gcp"
         )
+
+
+def secret_store_set_by_repo() -> bool:
+    """True if the secret store in use is chosen by repository config alone."""
+    return bool(_resolve_secret_store(warn=False)[3])
+
+
+def _require_trusted_store(backend, allow_repo_store: bool) -> None:
+    """Refuse a secret store chosen only by repository config, unless allowed."""
+    if getattr(backend, '_repo_scoped', False) is True and not allow_repo_store:
+        raise AuthError(
+            f"The secret store (GCP project '{backend.project}', prefix "
+            f"'{backend.prefix}') is set only by this repository's config.\n"
+            f"Check that it is right, then re-run with --allow-repo-store "
+            f"(or set {', '.join(getattr(backend, '_repo_keys', None) or ['secrets.gcp.project'])} "
+            f"in your own config).")
 
 
 def _get_dvc_config_local_path() -> Path:
@@ -217,27 +262,91 @@ def _aws_profile_section_name(profile: str, *, in_config_file: bool) -> str:
     return profile
 
 
+# Profile names dt will write: a plain repository name. ``default`` is the
+# profile every AWS tool falls back to, so it is never dt's to replace.
+_PROFILE_NAME_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$')
+_RESERVED_PROFILES = frozenset({'default'})
+# Recorded in each profile dt installs: which secret it came from.
+_PROFILE_SOURCE_KEY = 'dt_source'
+# A ~/.aws/config profile holding only these is one dt can add keys for;
+# anything else (SSO, roles, processes, logins...) is the user's own setup.
+_PLAIN_PROFILE_SETTINGS = frozenset({'region', 'output'})
+
+
+def _check_profile_name(profile: str) -> None:
+    if (not isinstance(profile, str) or not _PROFILE_NAME_RE.match(profile)
+            or profile.lower() in _RESERVED_PROFILES):
+        raise AuthError(f"'{profile}' cannot be used as an AWS profile name")
+
+
+def _secret_source(project: Optional[str], prefix: Optional[str], name: str) -> str:
+    """Identifier of the secret a profile is installed from."""
+    return f"gcp:{project}/{prefix or 'dvc-remote-'}{name}"
+
+
+def _configured_source(name: str) -> str:
+    """:func:`_secret_source` for the configured store (no network)."""
+    _type, project, prefix, _keys = _resolve_secret_store(warn=False)
+    return _secret_source(project, prefix, name)
+
+
 def _install_aws_profile(
     profile: str,
     access_key_id: str,
     secret_access_key: str,
     region: str = 'auto',
+    source: Optional[str] = None,
+    replace: bool = False,
 ) -> Tuple[Path, Path]:
     """Write/update *profile* in the AWS credentials and config files.
 
+    An existing profile is replaced only if dt installed it from the same
+    *source* (or with *replace*).
+
     Returns:
         Tuple of (credentials_path, config_path) that were written.
+
+    Raises:
+        AuthError: For a reserved/unusable name, or a profile dt did not
+            install from *source*.
     """
+    _check_profile_name(profile)
     creds_path = _get_aws_credentials_path()
     config_path = _get_aws_config_path()
+    retry = (f"if it should come from {source}, run "
+             f"`dt auth credentials install {profile} --replace`")
 
     # ~/.aws/credentials
     creds = _load_aws_ini(creds_path)
     section = _aws_profile_section_name(profile, in_config_file=False)
-    if not creds.has_section(section):
+    if creds.has_section(section):
+        marker = creds.get(section, _PROFILE_SOURCE_KEY, fallback=None)
+        same = source is not None and marker == source
+        # A profile from an older dt carries no marker; it is adopted only
+        # when it already holds this secret's key.
+        adopted = (marker is None and source is not None and
+                   creds.get(section, 'aws_access_key_id', fallback=None) == access_key_id)
+        if not (replace or same or adopted):
+            if marker is None:
+                why = "was not installed by this version of dt (no record of its source)"
+            else:
+                why = f"was installed from {marker}"
+            raise AuthError(f"AWS profile '{profile}' in {creds_path} {why}; "
+                            f"left unchanged ({retry})")
+    else:
+        # A profile defined only in ~/.aws/config (SSO, role, process...) is
+        # the user's own: credentials-file keys would take precedence over it.
+        existing = _load_aws_ini(config_path)
+        csection = _aws_profile_section_name(profile, in_config_file=True)
+        if not replace and existing.has_section(csection) and any(
+                k not in _PLAIN_PROFILE_SETTINGS for k in existing.options(csection)):
+            raise AuthError(f"AWS profile '{profile}' is already defined in "
+                            f"{config_path}; left unchanged ({retry})")
         creds.add_section(section)
     creds.set(section, 'aws_access_key_id', access_key_id)
     creds.set(section, 'aws_secret_access_key', secret_access_key)
+    if source:
+        creds.set(section, _PROFILE_SOURCE_KEY, source)
     _write_aws_ini(creds, creds_path)
 
     # ~/.aws/config
@@ -253,18 +362,36 @@ def _install_aws_profile(
     return creds_path, config_path
 
 
-def _remove_aws_profile(profile: str) -> List[str]:
-    """Remove *profile* from both AWS files. Returns list of files modified."""
+def _remove_aws_profile(profile: str, source: Optional[str] = None,
+                        force: bool = False) -> List[str]:
+    """Remove *profile* from both AWS files. Returns list of files modified.
+
+    Unless *force*, only a profile dt installed from *source* is removed.
+    """
     modified: List[str] = []
+    if not force:
+        try:
+            _check_profile_name(profile)
+        except AuthError:
+            return modified
 
     creds_path = _get_aws_credentials_path()
-    if creds_path.exists():
-        creds = _load_aws_ini(creds_path)
-        section = _aws_profile_section_name(profile, in_config_file=False)
-        if creds.has_section(section):
-            creds.remove_section(section)
-            _write_aws_ini(creds, creds_path)
-            modified.append(str(creds_path))
+    creds = _load_aws_ini(creds_path) if creds_path.exists() else None
+    section = _aws_profile_section_name(profile, in_config_file=False)
+    if not force:
+        # Only a profile dt installed from this secret; otherwise neither
+        # file is touched.
+        if creds is None or not creds.has_section(section):
+            return modified
+        marker = creds.get(section, _PROFILE_SOURCE_KEY, fallback=None)
+        if source is None or marker != source:
+            print(f"  Left AWS profile '{profile}': not installed by dt from "
+                  f"{source} (remove it with --repo {profile})", file=sys.stderr)
+            return modified
+    if creds is not None and creds.has_section(section):
+        creds.remove_section(section)
+        _write_aws_ini(creds, creds_path)
+        modified.append(str(creds_path))
 
     config_path = _get_aws_config_path()
     if config_path.exists():
@@ -392,6 +519,29 @@ def _get_project_s3_remotes(repo_path: Optional[Path] = None) -> Dict[str, Dict[
             continue
         out[m.group(1)] = dict(values)
     return out
+
+
+def _strippable_remotes(profiles: Set[str]) -> Set[str]:
+    """This project's S3 remotes whose old global DVC credentials can go.
+
+    Only a remote that uses one of *profiles* (just installed or removed),
+    and whose global section, if it names a url, names the same one -- a
+    remote name alone may belong to some other project of the user's.
+    """
+    if not profiles:
+        return set()
+    project = _get_project_s3_remotes()
+    config_path = _get_dvc_global_config_path()
+    sections = _parse_dvc_ini(config_path.read_text()) if config_path.exists() else {}
+    names: Set[str] = set()
+    for name, values in project.items():
+        if values.get('profile') not in profiles:
+            continue
+        global_url = sections.get(f"'remote \"{name}\"'", {}).get('url')
+        if global_url and global_url != values.get('url'):
+            continue
+        names.add(name)
+    return names
 
 
 def _strip_dvc_global_creds(remote_names: Set[str], verbose: bool = False) -> List[str]:
@@ -668,6 +818,8 @@ def _get_installed_credentials() -> Dict[str, Dict[str, str]]:
 def install_credentials(
     verbose: bool = False,
     repo_name: Optional[str] = None,
+    replace: bool = False,
+    allow_repo_store: bool = False,
 ) -> Dict[str, bool]:
     """Install S3 credentials from the secret manager into AWS shared files.
 
@@ -719,6 +871,7 @@ def install_credentials(
         print(f"\nFetching credentials for {len(repos)} repo(s) with S3 remotes...")
 
     backend = _get_secret_backend()
+    _require_trusted_store(backend, allow_repo_store)
 
     # Say who we are about to authenticate as, before anything can fail.
     # A denial is uninterpretable without it: "permission denied" and "I
@@ -761,9 +914,15 @@ def install_credentials(
             continue
 
         access_key, secret_key = _parse_aws_secret(raw, repo_info.name)
-        creds_path, config_path = _install_aws_profile(
-            repo_info.name, access_key, secret_key,
-        )
+        try:
+            creds_path, config_path = _install_aws_profile(
+                repo_info.name, access_key, secret_key,
+                source=_secret_source(backend.project, backend.prefix, repo_info.name),
+                replace=replace,
+            )
+        except AuthError as exc:
+            _failed(repo_info.name, str(exc))
+            continue
         results[repo_info.name] = True
         if verbose:
             print(f"  \u2713 {repo_info.name}: profile installed "
@@ -781,9 +940,9 @@ def install_credentials(
     if not any(results.values()):
         raise AuthError(_no_credentials_message(reasons, identity))
 
-    # Strip now-redundant credential keys from DVC global config, scoped to
-    # remotes in the current project.
-    project_remotes = set(_get_project_s3_remotes().keys())
+    # Strip now-redundant credential keys from DVC global config, for this
+    # project's remotes that use a profile just installed.
+    project_remotes = _strippable_remotes({n for n, ok in results.items() if ok})
     if project_remotes:
         stripped = _strip_dvc_global_creds(project_remotes, verbose=verbose)
         if stripped and verbose:
@@ -822,7 +981,10 @@ def uninstall_credentials(
         profiles = [r.name for r in repos]
 
     for profile in profiles:
-        modified = _remove_aws_profile(profile)
+        # A profile named on the command line is the user's call; one found by
+        # discovery is removed only if dt installed it from that secret.
+        modified = _remove_aws_profile(profile, source=_configured_source(profile),
+                                       force=bool(repo_name))
         if modified:
             touched.add(profile)
             if verbose:
@@ -832,11 +994,9 @@ def uninstall_credentials(
     # 2. Legacy DVC global config
     if remote:
         scope = {remote}
-    elif repo_name:
-        # Limit to the project's remotes when uninstalling for one repo
-        scope = set(_get_project_s3_remotes().keys())
     else:
-        scope = set(_get_project_s3_remotes().keys())
+        # This project's remotes that use a profile removed here (or named).
+        scope = _strippable_remotes(set(touched) | ({repo_name} if repo_name else set()))
 
     if scope:
         stripped = _strip_dvc_global_creds(scope, verbose=verbose)
@@ -952,7 +1112,7 @@ def configure_remotes(
     from .. import config as cfg
 
     if endpoint is None:
-        endpoint = cfg.get_value('secrets.default_endpointurl')
+        endpoint = cfg.get_trusted_value('secrets.default_endpointurl')
     if not endpoint:
         raise AuthError(
             "No endpoint URL provided and no `secrets.default_endpointurl` "
@@ -1055,6 +1215,8 @@ def migrate_credentials(
     repo_name: Optional[str] = None,
     dry_run: bool = False,
     verbose: bool = False,
+    replace: bool = False,
+    allow_repo_store: bool = False,
 ) -> MigrateResult:
     """One-shot migration from legacy DVC-INI secrets / global config to AWS files.
 
@@ -1089,6 +1251,7 @@ def migrate_credentials(
         return result
 
     backend = _get_secret_backend()
+    _require_trusted_store(backend, allow_repo_store)
 
     for repo_info in repos:
         name = repo_info.name
@@ -1112,6 +1275,8 @@ def migrate_credentials(
             # Legacy: extract from the secret directly
             access_key, secret_key = _extract_creds_from_dvc_secret(raw, name)
             new_content = _build_aws_secret(name, access_key, secret_key)
+            print(f"  {name}: secret {backend._get_secret_id(name)} in GCP "
+                  f"project '{backend.project}'")
             if dry_run:
                 if verbose:
                     print(f"  [dry-run] would re-upload secret for '{name}' "
@@ -1133,11 +1298,18 @@ def migrate_credentials(
             if verbose:
                 print(f"  [dry-run] would install AWS profile '{name}'")
         else:
-            _install_aws_profile(name, access_key, secret_key)
+            try:
+                _install_aws_profile(
+                    name, access_key, secret_key,
+                    source=_secret_source(backend.project, backend.prefix, name),
+                    replace=replace)
+            except AuthError as exc:
+                result.skipped.append((name, str(exc)))
+                continue
         result.installed.append(name)
 
     # Strip legacy creds from DVC global config (project-scope only)
-    project_remotes = set(_get_project_s3_remotes().keys())
+    project_remotes = _strippable_remotes(set(result.installed))
     if project_remotes:
         if dry_run:
             legacy = _get_installed_credentials()
@@ -1298,7 +1470,7 @@ def check_secret(repo_name: str) -> SecretInfo:
         )
 
 
-def set_secret(repo_name: str, content: str) -> None:
+def set_secret(repo_name: str, content: str, allow_repo_store: bool = False) -> str:
     """Create or update the secret for *repo_name* with raw INI *content*.
 
     Accepts either the new AWS-INI format (preferred) or the legacy
@@ -1328,7 +1500,12 @@ def set_secret(repo_name: str, content: str) -> None:
 
     try:
         backend = _get_secret_backend()
+        _require_trusted_store(backend, allow_repo_store)
+        destination = (f"secret {backend._get_secret_id(repo_name)} in GCP "
+                       f"project '{backend.project}'")
+        print(f"Writing {destination}", file=sys.stderr)
         backend.set_secret(repo_name, content)
     except SecretError as e:
         raise AuthError(f"Failed to set secret for '{repo_name}': {e}") from e
+    return destination
 

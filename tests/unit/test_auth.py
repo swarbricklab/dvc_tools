@@ -1134,7 +1134,7 @@ class TestResolveS3RemoteSettings:
                       source="DVC remote 'gadi' of chromium (default)")
         # No local .dvc/config match, so the profile comes from the source repo.
         with patch('dt.auth.credentials._get_project_s3_remotes', return_value={}), \
-             patch('dt.config.get_value', return_value=None):
+             patch('dt.config.get_trusted_value', return_value=None):
             endpoint_url, profile = _resolve_s3_remote_settings(ep)
         assert profile == 'chromium'
 
@@ -1145,7 +1145,7 @@ class TestResolveS3RemoteSettings:
         ep = Endpoint(type='s3', url='s3://demo-chromium',
                       source="DVC remote 'gadi' of example_chromium (default)")
         with patch('dt.auth.credentials._get_project_s3_remotes', return_value={}), \
-             patch('dt.config.get_value',
+             patch('dt.config.get_trusted_value',
                    return_value='https://acct.r2.cloudflarestorage.com'):
             endpoint_url, profile = _resolve_s3_remote_settings(ep)
         assert endpoint_url == 'https://acct.r2.cloudflarestorage.com'
@@ -1156,7 +1156,7 @@ class TestResolveS3RemoteSettings:
         default fallback only fills the gap."""
         ep = Endpoint(type='s3', url='s3://bucket', source="DVC remote 'cloud'")
         with patch('dt.auth.checks._get_dvc_remote_config') as mock_cfg, \
-             patch('dt.config.get_value', return_value='https://DEFAULT'):
+             patch('dt.config.get_trusted_value', return_value='https://DEFAULT'):
             mock_cfg.side_effect = lambda name, key: {
                 'endpointurl': 'https://OWN', 'profile': 'myrepo',
             }.get(key)
@@ -3091,14 +3091,14 @@ class TestGetSecretBackendAuthCheck:
            return_value=('unauthenticated', None))
     @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
            return_value=False)
-    @patch('dt.config.get_value')
+    @patch('dt.config.get_trusted_value_with_scope')
     def test_raises_when_not_authenticated(self, mock_get_value, mock_adc, mock_gcloud):
         from dt.auth.credentials import _get_secret_backend
-        mock_get_value.side_effect = lambda k: {
+        mock_get_value.side_effect = lambda k, *a: ({
             'secrets.backend': 'gcp',
             'secrets.gcp.project': 'my-project',
             'secrets.prefix': 'dvc-remote-',
-        }.get(k)
+        }.get(k), 'system')
         with pytest.raises(AuthError, match="gcloud auth login"):
             _get_secret_backend()
 
@@ -3106,15 +3106,15 @@ class TestGetSecretBackendAuthCheck:
            return_value=('timeout', None))
     @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
            return_value=False)
-    @patch('dt.config.get_value')
+    @patch('dt.config.get_trusted_value_with_scope')
     def test_timeout_does_not_blame_the_user(self, mock_get_value, mock_adc, mock_gcloud):
         """A slow filesystem is not a missing login; don't send them to re-auth."""
         from dt.auth.credentials import _get_secret_backend
-        mock_get_value.side_effect = lambda k: {
+        mock_get_value.side_effect = lambda k, *a: ({
             'secrets.backend': 'gcp',
             'secrets.gcp.project': 'my-project',
             'secrets.prefix': 'dvc-remote-',
-        }.get(k)
+        }.get(k), 'system')
         with pytest.raises(AuthError) as exc:
             _get_secret_backend()
         assert 'did not respond' in str(exc.value)
@@ -3124,14 +3124,14 @@ class TestGetSecretBackendAuthCheck:
            return_value=('ok', 'user@example.com'))
     @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
            return_value=False)
-    @patch('dt.config.get_value')
+    @patch('dt.config.get_trusted_value_with_scope')
     def test_passes_when_gcloud_authenticated(self, mock_get_value, mock_adc, mock_gcloud):
         from dt.auth.credentials import _get_secret_backend
-        mock_get_value.side_effect = lambda k: {
+        mock_get_value.side_effect = lambda k, *a: ({
             'secrets.backend': 'gcp',
             'secrets.gcp.project': 'my-project',
             'secrets.prefix': 'dvc-remote-',
-        }.get(k)
+        }.get(k), 'system')
         backend = _get_secret_backend()
         assert backend is not None
 

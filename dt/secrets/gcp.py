@@ -33,7 +33,7 @@ def _configured_secret_locations() -> Optional[str]:
     given region(s), which is required under a ``gcp.resourceLocations`` org
     policy that forbids creating secrets in ``global`` (issue #149).
     """
-    value = cfg.get_value('secrets.gcp.locations', None)
+    value = cfg.get_trusted_value('secrets.gcp.locations', None)
     if value is None:
         return None
     if isinstance(value, (list, tuple)):
