@@ -177,10 +177,29 @@ def auth_setup(
     # -- 2. Discover ALL endpoints -----------------------------------------
     if verbose:
         print("\nDiscovering endpoints ...")
+    # Answers about hosts not yet in the SSH config, shared between the
+    # import-source scan below and the SSH setup step, so each is asked once
+    # and none is contacted before the user agrees.
+    decisions: Dict[str, bool] = {}
+
+    def may_contact(url: str) -> bool:
+        if classify_url(url) not in ('ssh', 'git'):
+            return True
+        host = _extract_ssh_host(url)
+        if host is None or host in host_configs or _host_in_ssh_config(
+                host, ssh_config_file):
+            return True
+        if host not in decisions:
+            decisions[host] = _approve_new_hosts(
+                [host], ssh_config_file, add_ssh_hosts)
+        return decisions[host]
+
     if repo_url:
-        all_endpoints = discover_endpoints_from_repo(repo_url, verbose=verbose)
+        all_endpoints = discover_endpoints_from_repo(
+            repo_url, verbose=verbose, may_contact=may_contact)
     else:
-        all_endpoints = discover_endpoints(verbose=verbose)
+        all_endpoints = discover_endpoints(verbose=verbose,
+                                           may_contact=may_contact)
 
     # Flatten including children
     flat_eps: List[Endpoint] = []
@@ -218,6 +237,7 @@ def auth_setup(
                 verbose=verbose,
                 add_new_hosts=add_ssh_hosts,
                 skipped_hosts=report.ssh_hosts_skipped,
+                decisions=decisions,
             )
             report.ssh_results = ssh_results
         except Exception as exc:
@@ -373,6 +393,7 @@ def _do_ssh_setup(
     verbose: bool,
     add_new_hosts: Optional[bool] = None,
     skipped_hosts: Optional[List[str]] = None,
+    decisions: Optional[Dict[str, bool]] = None,
 ) -> List[SSHSetupResult]:
     """SSH setup that honours the YAML host configs."""
 
@@ -400,15 +421,19 @@ def _do_ssh_setup(
 
     # Hosts the user has not set up yet are added only with their say-so;
     # the list comes from the project's remotes, not from the user.
+    decisions = {} if decisions is None else decisions
     new_hosts = [h for h in all_hosts
                  if h not in host_configs
                  and not _host_in_ssh_config(h, ssh_config_file)]
-    if new_hosts and not _approve_new_hosts(
-            new_hosts, ssh_config_file, add_new_hosts):
-        for host in new_hosts:
-            del all_hosts[host]
-        if skipped_hosts is not None:
-            skipped_hosts.extend(new_hosts)
+    undecided = [h for h in new_hosts if h not in decisions]
+    if undecided:
+        agreed = _approve_new_hosts(undecided, ssh_config_file, add_new_hosts)
+        decisions.update({h: agreed for h in undecided})
+    refused = [h for h in new_hosts if not decisions[h]]
+    for host in refused:
+        del all_hosts[host]
+    if skipped_hosts is not None:
+        skipped_hosts.extend(refused)
     if not all_hosts:
         return []
 

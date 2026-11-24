@@ -249,8 +249,13 @@ def _discover_git_remotes(repo_path: Optional[Path] = None) -> List[Endpoint]:
 def _discover_import_sources(
     repo_path: Optional[Path] = None,
     verbose: bool = False,
+    may_contact=None,
 ) -> List[Endpoint]:
-    """Endpoints from import ``.dvc`` files (``deps.repo.url``)."""
+    """Endpoints from import ``.dvc`` files (``deps.repo.url``).
+
+    Each source repo is cloned to list its own remotes, unless
+    *may_contact* (a ``url -> bool`` callable) says no.
+    """
     from ._helpers import _get_import_urls, _short_repo_name
 
     endpoints: List[Endpoint] = []
@@ -267,6 +272,10 @@ def _discover_import_sources(
             url=url,
             source=source_label,
         )
+
+        if may_contact is not None and not may_contact(url):
+            endpoints.append(ep)
+            continue
 
         try:
             source_remotes = remote_mod.list_remotes_from_repo(
@@ -307,8 +316,13 @@ def discover_endpoints(
     repo_path: Optional[Path] = None,
     type_filter: Optional[Set[str]] = None,
     verbose: bool = False,
+    may_contact=None,
 ) -> List[Endpoint]:
-    """Discover every storage endpoint the current project relies on."""
+    """Discover every storage endpoint the current project relies on.
+
+    *may_contact* (``url -> bool``) decides whether an import source may be
+    cloned to find its remotes; by default every one is.
+    """
     from ._helpers import _apply_type_filter, _merge_children
 
     project_name = utils.get_project_name()
@@ -331,7 +345,8 @@ def discover_endpoints(
     if verbose and git_eps:
         print(f"  git remotes: {len(git_eps)} endpoint(s)")
 
-    import_eps = _discover_import_sources(repo_path, verbose=verbose)
+    import_eps = _discover_import_sources(repo_path, verbose=verbose,
+                                          may_contact=may_contact)
     all_eps.extend(import_eps)
     if verbose and import_eps:
         print(f"  import sources: {len(import_eps)} endpoint(s)")
@@ -369,6 +384,7 @@ def discover_endpoints_from_repo(
     repo_url: str,
     type_filter: Optional[Set[str]] = None,
     verbose: bool = False,
+    may_contact=None,
 ) -> List[Endpoint]:
     """Discover endpoints for a remote repository via a temporary clone."""
     import tempfile
@@ -397,6 +413,7 @@ def discover_endpoints_from_repo(
             repo_path=clone_path,
             type_filter=type_filter,
             verbose=verbose,
+            may_contact=may_contact,
         )
         return endpoints
     finally:

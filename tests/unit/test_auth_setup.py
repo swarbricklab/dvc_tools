@@ -371,3 +371,42 @@ class TestNewSshHostsNeedApproval:
         eps = checked.call_args.kwargs['endpoints']
         urls = [e.url for e in eps] + [c.url for e in eps for c in e.children]
         assert urls == ['ssh://xy1234@known.example.org/d']
+
+
+class TestImportSourcesAskedFirst:
+    def test_new_import_host_not_cloned_without_agreement(self, tmp_path, monkeypatch):
+        from dt.auth import endpoints as ep_mod, setup as setup_mod
+        from dt import remote as remote_mod
+        monkeypatch.setattr('dt.auth._helpers._get_import_urls',
+                            lambda repo_path=None: {'git@new.example.org:o/r.git': ['a.dvc']})
+        for name in ('_discover_dt_config',):
+            monkeypatch.setattr(ep_mod, name, lambda: [])
+        monkeypatch.setattr(ep_mod, '_discover_dvc_remotes', lambda p=None: [])
+        monkeypatch.setattr(ep_mod, '_discover_git_remotes', lambda p=None: [])
+        monkeypatch.setattr(ep_mod.utils, 'get_project_name', lambda: 'p')
+        cloned = []
+        monkeypatch.setattr(remote_mod, 'list_remotes_from_repo',
+                            lambda url, **k: cloned.append(url) or [])
+        monkeypatch.setattr(setup_mod.sys.stdin, 'isatty', lambda: False)
+        ssh_calls = []
+        monkeypatch.setattr(setup_mod, '_do_ssh_setup',
+                            lambda **kw: ssh_calls.append(kw) or [])
+        report = setup_mod.auth_setup(ssh_config_file=tmp_path / 'cfg')
+        assert cloned == []
+        assert ssh_calls and ssh_calls[0]['decisions'] == {'new.example.org': False}
+
+    def test_agreed_import_host_is_cloned(self, tmp_path, monkeypatch):
+        from dt.auth import endpoints as ep_mod, setup as setup_mod
+        from dt import remote as remote_mod
+        monkeypatch.setattr('dt.auth._helpers._get_import_urls',
+                            lambda repo_path=None: {'git@new.example.org:o/r.git': ['a.dvc']})
+        monkeypatch.setattr(ep_mod, '_discover_dt_config', lambda: [])
+        monkeypatch.setattr(ep_mod, '_discover_dvc_remotes', lambda p=None: [])
+        monkeypatch.setattr(ep_mod, '_discover_git_remotes', lambda p=None: [])
+        monkeypatch.setattr(ep_mod.utils, 'get_project_name', lambda: 'p')
+        cloned = []
+        monkeypatch.setattr(remote_mod, 'list_remotes_from_repo',
+                            lambda url, **k: cloned.append(url) or [])
+        monkeypatch.setattr(setup_mod, '_do_ssh_setup', lambda **kw: [])
+        setup_mod.auth_setup(ssh_config_file=tmp_path / 'cfg', add_ssh_hosts=True)
+        assert cloned == ['git@new.example.org:o/r.git']
