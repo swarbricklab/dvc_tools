@@ -225,9 +225,7 @@ def get_transfer_dir(operation: str) -> Path:
     Returns:
         Path to the transfer directory (created if needed)
     """
-    transfer_dir = utils.get_dt_dir() / 'tmp' / operation
-    transfer_dir.mkdir(parents=True, exist_ok=True)
-    return transfer_dir
+    return utils.dt_subdir('tmp', operation)
 
 
 def get_prefixes_for_worker(worker_id: int, num_workers: int) -> Set[str]:

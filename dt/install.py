@@ -1150,9 +1150,9 @@ def hook_list() -> Dict[str, List[Dict]]:
 def _get_hook_results_dir() -> Path:
     """Return the .dt/hook-results directory, creating it if needed."""
     root = utils.find_git_root() or Path.cwd()
-    results_dir = root / '.dt' / HOOK_RESULTS_DIR_NAME
-    results_dir.mkdir(parents=True, exist_ok=True)
-    return results_dir
+    # .dt and .dt/hook-results must be real directories in the repo: a
+    # committed link here would redirect writes and `--clear` deletions.
+    return utils.dt_subdir(HOOK_RESULTS_DIR_NAME, root=Path(root))
 
 
 def _save_hook_result(

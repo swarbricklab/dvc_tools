@@ -203,6 +203,12 @@ def set_values(values: dict, scope: str = 'user') -> None:
     for key, value in values.items():
         _assign(data, key, value)
 
+    # Repository-scope files live under .dt, which repository content could
+    # have committed as (or filled with) links; never write through one.
+    if scope in ('project', 'local'):
+        utils.dt_subdir(root=path.parent.parent)
+        utils.refuse_link(path)
+
     # Ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
 

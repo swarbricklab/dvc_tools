@@ -255,6 +255,9 @@ def save_manifest(manifest: ArchiveManifest, repo_root: Optional[Path] = None) -
     Returns the path written to. Does NOT git-add — let the caller decide.
     """
     target = manifest_path(manifest.archive_name, repo_root=repo_root)
+    if target.parent.parent.name == '.dt':
+        utils.dt_subdir(target.parent.name, root=target.parent.parent.parent)
+    utils.refuse_link(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     with open(target, 'w') as f:
         yaml.safe_dump(

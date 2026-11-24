@@ -1234,9 +1234,42 @@ def get_dt_dir(create: bool = True) -> Path:
     """
     root = find_project_root()
     dt_dir = root / '.dt'
+    _require_real_dir(dt_dir)
     if create:
         dt_dir.mkdir(parents=True, exist_ok=True)
     return dt_dir
+
+
+def _require_real_dir(path: Path) -> None:
+    """Refuse ``path`` if something other than a real directory is there."""
+    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isdir(path)):
+        from .errors import DTError
+        raise DTError(f"Refusing to use {path}: it must be a real directory "
+                      f"in the repository, not a link")
+
+
+def refuse_link(path: Path) -> None:
+    """Refuse to write ``path`` if it is a link or not a regular file."""
+    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isfile(path)):
+        from .errors import DTError
+        raise DTError(f"Refusing to write {path}: it must be a regular file "
+                      f"in the repository, not a link")
+
+
+def dt_subdir(*parts: str, root: Optional[Path] = None, create: bool = True) -> Path:
+    """``<root>/.dt/<parts...>``, every component a real directory.
+
+    Repository content can commit links under ``.dt``; this never follows
+    one. ``root`` defaults to the project root.
+    """
+    cur = Path(root if root is not None else find_project_root()) / '.dt'
+    for part in (None, *parts):
+        if part is not None:
+            cur = cur / part
+        _require_real_dir(cur)
+        if create:
+            cur.mkdir(exist_ok=True)
+    return cur
 
 
 # Entries that must appear in .dt/.gitignore.
@@ -1670,6 +1703,7 @@ def ensure_dvcignore(repo_path: Optional[Path] = None) -> Tuple[Path, bool]:
     if repo_path is None:
         repo_path = find_project_root()
     dvcignore = Path(repo_path) / '.dvcignore'
+    refuse_link(dvcignore)
 
     existing = dvcignore.read_text() if dvcignore.exists() else ''
     if DVCIGNORE_GITIGNORE_PATTERN in {l.strip() for l in existing.splitlines()}:

@@ -1114,3 +1114,62 @@ class TestObjectIdPaths:
 
     def test_non_strict_allows_other_hash_kinds(self, tmp_path):
         assert utils.hash_to_cache_path(tmp_path, 'abc123etag-5') == tmp_path / 'ab' / 'c123etag-5'
+
+
+class TestDtDirLinksAreRefused:
+    def _repo(self, tmp_path):
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        return repo
+
+    def test_hook_results_link_is_not_written_or_cleared(self, tmp_path, monkeypatch):
+        from dt import install
+        from dt.errors import DTError
+        repo = self._repo(tmp_path)
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (outside / 'keep.json').write_text('{}')
+        (repo / '.dt').mkdir()
+        (repo / '.dt' / install.HOOK_RESULTS_DIR_NAME).symlink_to(outside)
+        monkeypatch.chdir(repo)
+        with pytest.raises(DTError, match='real directory'):
+            install._save_hook_result('c', 'pre-commit', True, 'out')
+        assert install.clear_hook_results() == 0
+        assert install.count_unread_results() == 0
+        assert sorted(p.name for p in outside.iterdir()) == ['keep.json']
+
+    def test_dvcignore_link_is_left_unchanged(self, tmp_path):
+        from dt.errors import DTError
+        repo = self._repo(tmp_path)
+        target = tmp_path / 'victim.cfg'
+        target.write_text('strict=1\n')
+        (repo / '.dvcignore').symlink_to(target)
+        with pytest.raises(DTError, match='regular file'):
+            utils.ensure_dvcignore(repo)
+        assert target.read_text() == 'strict=1\n'
+
+    def test_dt_subdir_refuses_links_at_any_level(self, tmp_path):
+        from dt.errors import DTError
+        repo = self._repo(tmp_path)
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (repo / '.dt').mkdir()
+        (repo / '.dt' / 'tmp').symlink_to(outside)
+        with pytest.raises(DTError):
+            utils.dt_subdir('tmp', 'push', root=repo)
+        assert list(outside.iterdir()) == []
+
+    def test_local_config_write_refuses_linked_dt(self, tmp_path, monkeypatch):
+        from dt import config as cfg
+        from dt.errors import DTError
+        repo = self._repo(tmp_path)
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (repo / '.dt').symlink_to(outside)
+        monkeypatch.chdir(repo)
+        with patch('dt.config.get_config_paths',
+                   return_value={'local': repo / '.dt' / 'config.local.yaml'}):
+            with pytest.raises(DTError):
+                cfg.set_values({'owner': 'x'}, scope='local')
+        assert list(outside.iterdir()) == []
