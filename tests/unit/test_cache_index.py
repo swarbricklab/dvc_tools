@@ -154,6 +154,33 @@ class TestSharedCacheIsNeverOpened:
         assert os.listdir(private) == []
 
 
+class TestSymlinksInSharedCacheAreInert:
+    """Symlinks at <cache_root>/.dt or .dt/cache.db never change their targets."""
+
+    def _private_dir(self, tmp_path):
+        d = tmp_path / 'private'
+        d.mkdir()
+        os.chmod(d, 0o700)
+        (d / 'secret').write_text('key')
+        os.chmod(d / 'secret', 0o600)
+        return d
+
+    def _snapshot(self, d):
+        return {p.name: (stat.S_IMODE(p.stat().st_mode), p.read_bytes())
+                for p in d.iterdir()} | {'.': stat.S_IMODE(d.stat().st_mode)}
+
+    @pytest.mark.parametrize('link_at', ['.dt', '.dt/cache.db'])
+    def test_target_unchanged_after_index_use(self, cache_root, tmp_path, link_at):
+        private = self._private_dir(tmp_path)
+        before = self._snapshot(private)
+        link = cache_root / link_at
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(private)
+        with CacheIndex(cache_root) as idx:
+            _exercise(idx)
+        assert self._snapshot(private) == before
+
+
 class TestUnexpectedIndexFile:
     def _plant(self, cache_root, sql):
         db = cache_index.index_path_for(cache_root)
