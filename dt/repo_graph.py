@@ -201,6 +201,7 @@ def _clone_or_refresh(
             return repo_path, STATUS_OK, None
         result = subprocess.run(
             tmp_mod._git(repo_path, 'fetch', '--all', '--prune', '--quiet'),
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             cwd=str(repo_path), capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -220,6 +221,7 @@ def _clone_or_refresh(
 
     result = subprocess.run(
         ['git', 'clone', '--quiet', '--', url, str(repo_path)],
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -237,6 +239,7 @@ def _ensure_rev(repo_path: Path, rev: str) -> bool:
         return True
     subprocess.run(
         ['git', 'fetch', '--quiet', '--end-of-options', 'origin', rev],
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         cwd=str(repo_path), capture_output=True, text=True,
     )
     return dvc_deps.resolve_ref(rev, repo_path) is not None

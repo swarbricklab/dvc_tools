@@ -120,6 +120,24 @@ def format_size(size_bytes: int, human_readable: bool = True) -> str:
 # DVC cache utilities
 # =============================================================================
 
+#: Transports git may use when dt hands it a URL or remote that came from a
+#: repository (import sources, origins of scratch clones, dependency scans).
+GIT_NET_PROTOCOLS = 'https:http:ssh:git:file'
+
+
+def git_net_env() -> dict:
+    """Environment for git commands that reach a repository-supplied URL.
+
+    Limits git to the ordinary transports (no ``ext::``/``fd::`` or other
+    remote helpers, whatever the user's git config allows) and keeps it from
+    waiting on a terminal prompt.
+    """
+    env = dict(os.environ)
+    env['GIT_ALLOW_PROTOCOL'] = GIT_NET_PROTOCOLS
+    env['GIT_TERMINAL_PROMPT'] = '0'
+    return env
+
+
 def get_cache_dir() -> Optional[Path]:
     """Get the primary DVC cache directory.
     

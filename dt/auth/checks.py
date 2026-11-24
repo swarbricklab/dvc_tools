@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from .. import utils
 from .endpoints import Endpoint, classify_url, discover_endpoints
 
 
@@ -619,6 +620,7 @@ def _check_git(ep: Endpoint) -> CheckResult:
     try:
         result = subprocess.run(
             ['git', 'ls-remote', '--exit-code', '--', ep.url],
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0:

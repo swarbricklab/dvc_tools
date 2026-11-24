@@ -1994,6 +1994,7 @@ def _run_repo_import_network_fetch(
             # Ensure the specific commit is available in the (possibly shallow) clone
             subprocess.run(
                 ['git', 'fetch', '--depth', '1', '--end-of-options', 'origin', rev_lock],
+                env=utils.git_net_env(), stdin=subprocess.DEVNULL,
                 cwd=clone_path,
                 capture_output=True,
             )

@@ -499,7 +499,8 @@ def ls_remote_heads(url: str) -> Dict[str, str]:
     API call -- but useful for checking a single repo's freshness precisely.
     """
     result = subprocess.run(
-        ['git', 'ls-remote', '--heads', url],
+        ['git', 'ls-remote', '--heads', '--', url],
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         capture_output=True, text=True,
     )
     if result.returncode != 0:

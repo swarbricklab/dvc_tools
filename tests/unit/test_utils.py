@@ -1324,3 +1324,34 @@ class TestSharedDirModeNeverFollowsForeignLinks:
         with pytest.raises(CacheError):
             cache.init_cache_structure(store)
         assert list(victim.iterdir()) == []
+
+
+class TestGitNetEnv:
+    def test_ext_transport_refused_even_if_config_allows(self, tmp_path, monkeypatch):
+        import subprocess
+        from dt import utils
+        marker = tmp_path / 'ran'
+        monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
+        monkeypatch.setenv('GIT_CONFIG_KEY_0', 'protocol.allow')
+        monkeypatch.setenv('GIT_CONFIG_VALUE_0', 'always')
+        monkeypatch.setenv('GIT_ALLOW_PROTOCOL', 'ext:fd:file')
+        result = subprocess.run(
+            ['git', 'clone', '--', f'ext::sh -c touch% {marker}', str(tmp_path / 'c')],
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=30)
+        assert result.returncode != 0
+        assert not marker.exists()
+
+    def test_local_clone_still_works(self, tmp_path):
+        import subprocess
+        from dt import utils
+        src = tmp_path / 'src'
+        subprocess.run(['git', 'init', '-q', str(src)], check=True)
+        subprocess.run(['git', '-C', str(src), '-c', 'user.name=t', '-c',
+                        'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 'x'],
+                       check=True)
+        result = subprocess.run(
+            ['git', 'clone', '-q', '--', str(src), str(tmp_path / 'c')],
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr

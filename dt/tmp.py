@@ -251,6 +251,7 @@ def clone_repo(
         # Full clone for dvc.yaml etc and to support dvc diff against any revision
         result = subprocess.run(
             ['git', 'clone', '--', url, str(repo_path)],
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
         )
@@ -296,11 +297,13 @@ def _checkout_rev(repo_path: Path, rev: str, verbose: bool = True) -> Path:
     # shallow fetch first, then a full fetch as a fallback.
     fetched = subprocess.run(
         _git(repo_path, 'fetch', '--depth', '1', '--end-of-options', 'origin', rev),
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         cwd=repo_path, capture_output=True, text=True,
     )
     if fetched.returncode != 0:
         fetched = subprocess.run(
             _git(repo_path, 'fetch', '--end-of-options', 'origin', rev),
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             cwd=repo_path, capture_output=True, text=True,
         )
 
@@ -340,6 +343,7 @@ def _refresh_clone(repo_path: Path, verbose: bool = True) -> Path:
     # Fetch latest
     result = subprocess.run(
         _git(repo_path, 'fetch', '--depth', '1', 'origin'),
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -503,6 +507,7 @@ def checkout_path_at_revision(
     
     result = subprocess.run(
         _git(repo_path, 'fetch', '--depth', '1', '--end-of-options', 'origin', revision),
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -514,6 +519,7 @@ def checkout_path_at_revision(
         # Try without depth in case it's already available
         result = subprocess.run(
             _git(repo_path, 'fetch', '--end-of-options', 'origin', revision),
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             cwd=repo_path,
             capture_output=True,
             text=True,
