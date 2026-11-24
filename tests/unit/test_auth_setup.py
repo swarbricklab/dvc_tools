@@ -350,6 +350,8 @@ class TestNewSshHostsNeedApproval:
         known = Endpoint(type='ssh', url='ssh://xy1234@known.example.org/d',
                          source='r1')
         known.children = [Endpoint(type='ssh', url='ssh://xy1234@new.example.org/e',
+                                   source='child'),
+                          Endpoint(type='http', url='https://other.example.org/x',
                                    source='child')]
         new = Endpoint(type='ssh', url='ssh://xy1234@new.example.org/d',
                        source='r2')

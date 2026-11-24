@@ -478,8 +478,8 @@ def _do_ssh_setup(
     # Check connectivity
     # Only hosts that are being set up are contacted.
     def _kept(ep: Endpoint) -> bool:
-        return (ep.type not in ssh_git_types
-                or _extract_ssh_host(ep.url) in all_hosts)
+        return (ep.type in ssh_git_types
+                and _extract_ssh_host(ep.url) in all_hosts)
 
     check_eps = [replace(ep, children=[c for c in ep.children if _kept(c)])
                  for ep in ssh_eps if _kept(ep)]
