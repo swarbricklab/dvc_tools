@@ -31,13 +31,13 @@ from dt.secrets import GCPIdentity, GCPSecretBackend, SecretError
 
 SA_JSON = {
     'type': 'service_account',
-    'client_email': 'ctp-archive@ctp-archive.iam.gserviceaccount.com',
-    'project_id': 'ctp-archive',
+    'client_email': 'example-sa@example-sa.iam.gserviceaccount.com',
+    'project_id': 'example-sa',
 }
 USER_JSON = {
     'type': 'authorized_user',
     'client_id': '764086051850-abc.apps.googleusercontent.com',
-    'quota_project_id': 'bcarc-489101',
+    'quota_project_id': 'example-quota-123',
 }
 
 
@@ -47,7 +47,7 @@ def _write(path: Path, payload) -> Path:
     return path
 
 
-def _backend(project='bcarc-489101'):
+def _backend(project='example-quota-123'):
     """A real backend whose identity is pre-resolved, so nothing shells out."""
     b = GCPSecretBackend(project=project)
     b._identity = GCPIdentity(kind='cli', source='gcloud CLI', account='her@example.org')
@@ -138,7 +138,7 @@ class TestActiveIdentityResolutionOrder:
 
         i = GCPSecretBackend.active_identity()
         assert i.kind == 'user'
-        assert i.quota_project == 'bcarc-489101'
+        assert i.quota_project == 'example-quota-123'
 
     def test_env_var_pointing_at_nothing_is_ignored(self, tmp_path, monkeypatch):
         _write(tmp_path / 'home' / '.config' / 'gcloud'
@@ -204,7 +204,7 @@ class TestBackendCarriesTheAuthCheckResult:
     def test_cli_account_is_passed_to_the_backend(self):
         with patch('dt.config.get_value', side_effect=lambda k, *a: {
                     'secrets.backend': 'gcp',
-                    'secrets.gcp.project': 'bcarc-489101',
+                    'secrets.gcp.project': 'example-quota-123',
                    }.get(k)), \
              patch.object(GCPSecretBackend, '_has_adc_credentials', return_value=False), \
              patch.object(GCPSecretBackend, 'gcloud_auth_status',
@@ -215,7 +215,7 @@ class TestBackendCarriesTheAuthCheckResult:
     def test_adc_path_leaves_cli_account_unset(self):
         with patch('dt.config.get_value', side_effect=lambda k, *a: {
                     'secrets.backend': 'gcp',
-                    'secrets.gcp.project': 'bcarc-489101',
+                    'secrets.gcp.project': 'example-quota-123',
                    }.get(k)), \
              patch.object(GCPSecretBackend, '_has_adc_credentials', return_value=True):
             backend = creds_mod._get_secret_backend()
@@ -231,10 +231,10 @@ class TestDescribeSecretIdentity:
     def test_names_identity_and_project(self):
         text = creds_mod.describe_secret_identity(_backend())
         assert 'her@example.org' in text
-        assert 'bcarc-489101' in text
+        assert 'example-quota-123' in text
 
     def test_includes_the_service_account_caveat(self):
-        b = GCPSecretBackend(project='bcarc-489101')
+        b = GCPSecretBackend(project='example-quota-123')
         b._identity = GCPIdentity(
             kind='service-account', account='sa@x.iam.gserviceaccount.com',
             source='$GOOGLE_APPLICATION_CREDENTIALS=/k.json')
@@ -361,7 +361,7 @@ class TestDenialsAreEchoed:
     def _denied_backend(self, tmp_path, monkeypatch, sa=True):
         gac = _write(tmp_path / 'key.json', SA_JSON if sa else USER_JSON)
         monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS', str(gac))
-        b = GCPSecretBackend(project='bcarc-489101')
+        b = GCPSecretBackend(project='example-quota-123')
         b._cli_account = 'her@example.org'
         return b
 
@@ -381,7 +381,7 @@ class TestDenialsAreEchoed:
         err = capsys.readouterr().err
         assert 'Permission denied' in err
         assert 'dvc-remote-bcarc_wts' in err
-        assert 'bcarc-489101' in err
+        assert 'example-quota-123' in err
 
     def test_echo_names_the_refused_identity(self, tmp_path, monkeypatch, capsys):
         b = self._denied_backend(tmp_path, monkeypatch)
@@ -427,7 +427,7 @@ class TestBothIdentitiesRefused:
     def _run(self, tmp_path, monkeypatch):
         _write(tmp_path / 'key.json', SA_JSON)
         monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS', str(tmp_path / 'key.json'))
-        b = GCPSecretBackend(project='bcarc-489101')
+        b = GCPSecretBackend(project='example-quota-123')
         b._cli_account = 'her@example.org'
         denied = MagicMock(returncode=1, stderr='PERMISSION_DENIED: nope', stdout='')
         with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
@@ -485,7 +485,7 @@ class TestCliIdentityDescription:
 class TestNotFoundIsNotADenial:
 
     def test_missing_secret_does_not_echo_a_denial(self, capsys):
-        b = GCPSecretBackend(project='bcarc-489101')
+        b = GCPSecretBackend(project='example-quota-123')
         missing = MagicMock(returncode=1, stderr='NOT_FOUND: no such secret', stdout='')
         with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
              patch('dt.secrets.gcp.subprocess.run', return_value=missing):
@@ -500,7 +500,7 @@ class TestDiagnosticsGoToStderr:
     def test_denial_echo_is_not_on_stdout(self, tmp_path, monkeypatch, capsys):
         _write(tmp_path / 'key.json', SA_JSON)
         monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS', str(tmp_path / 'key.json'))
-        b = GCPSecretBackend(project='bcarc-489101')
+        b = GCPSecretBackend(project='example-quota-123')
         b._cli_account = 'her@example.org'
         from google.api_core import exceptions as gcp_exceptions
         client = MagicMock()
@@ -536,11 +536,11 @@ class TestListIsSuggestedOnFailure:
         assert 'dt auth credentials list' in str(exc.value)
 
     def test_denied_message_suggests_listing(self):
-        b = GCPSecretBackend(project='bcarc-489101')
+        b = GCPSecretBackend(project='example-quota-123')
         assert 'dt auth credentials list' in b._denied_message('dvc-remote-x', 'detail')
 
     def test_not_found_suggests_listing(self):
-        b = GCPSecretBackend(project='bcarc-489101')
+        b = GCPSecretBackend(project='example-quota-123')
         missing = MagicMock(returncode=1, stderr='NOT_FOUND: nope', stdout='')
         with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
              patch('dt.secrets.gcp.subprocess.run', return_value=missing):
@@ -553,7 +553,7 @@ class TestListSecretsErrorsAreReported:
     """`list` had a bare `gcloud error listing secrets: <stderr>`."""
 
     def _list_failing(self, stderr):
-        b = GCPSecretBackend(project='bcarc-489101')
+        b = GCPSecretBackend(project='example-quota-123')
         b._cli_account = 'her@example.org'
         failed = MagicMock(returncode=1, stderr=stderr, stdout='')
         with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
@@ -563,7 +563,7 @@ class TestListSecretsErrorsAreReported:
         return str(exc.value)
 
     def test_denial_names_the_project(self):
-        assert "bcarc-489101" in self._list_failing('PERMISSION_DENIED: nope')
+        assert "example-quota-123" in self._list_failing('PERMISSION_DENIED: nope')
 
     def test_denial_names_the_identity(self):
         assert 'her@example.org' in self._list_failing('PERMISSION_DENIED: nope')
@@ -578,7 +578,7 @@ class TestListSecretsErrorsAreReported:
 
     def test_other_errors_still_name_the_project(self):
         msg = self._list_failing('some other gcloud failure')
-        assert 'bcarc-489101' in msg
+        assert 'example-quota-123' in msg
         assert 'some other gcloud failure' in msg
 
 
@@ -591,19 +591,19 @@ class TestCredentialsCliCommands:
 
     def test_list_names_the_project(self):
         with patch('dt.auth.list_repo_secrets', return_value=['bcarc_wts']), \
-             patch('dt.config.get_value', return_value='bcarc-489101'):
+             patch('dt.config.get_value', return_value='example-quota-123'):
             result = self._invoke(['auth', 'credentials', 'list'])
-        assert 'bcarc-489101' in result.output
+        assert 'example-quota-123' in result.output
 
     def test_empty_list_names_the_project_too(self):
         with patch('dt.auth.list_repo_secrets', return_value=[]), \
-             patch('dt.config.get_value', return_value='bcarc-489101'):
+             patch('dt.config.get_value', return_value='example-quota-123'):
             result = self._invoke(['auth', 'credentials', 'list'])
-        assert 'bcarc-489101' in result.output
+        assert 'example-quota-123' in result.output
 
     def test_empty_list_admits_it_may_be_visibility(self):
         with patch('dt.auth.list_repo_secrets', return_value=[]), \
-             patch('dt.config.get_value', return_value='bcarc-489101'):
+             patch('dt.config.get_value', return_value='example-quota-123'):
             result = self._invoke(['auth', 'credentials', 'list'])
         assert 'cannot see them' in result.output
 

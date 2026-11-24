@@ -120,25 +120,25 @@ class TestQuotaProject:
     """The configured project must reach the credentials, not just the path."""
 
     def test_quota_project_is_attached(self):
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         creds = MagicMock()
         scoped = MagicMock()
         creds.with_quota_project.return_value = scoped
 
         with patch('google.auth.default', return_value=(creds, 'p')):
             assert backend._credentials() is scoped
-        creds.with_quota_project.assert_called_once_with('bcarc-489101')
+        creds.with_quota_project.assert_called_once_with('example-quota-123')
 
     def test_service_account_credentials_are_left_alone(self):
         """Only user credentials need a quota project; SA creds bill their own."""
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         creds = MagicMock(spec=[])  # no with_quota_project attribute
 
         with patch('google.auth.default', return_value=(creds, 'p')):
             assert backend._credentials() is creds
 
     def test_unresolvable_credentials_fall_back_to_default_lookup(self):
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         with patch('google.auth.default', side_effect=Exception('no ADC')):
             assert backend._credentials() is None
 
@@ -147,7 +147,7 @@ class TestQuotaProject:
         need live credentials, so stand in for the secretmanager module."""
         import google.cloud
 
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         creds = MagicMock()
         fake_client = MagicMock()
         fake_sm = MagicMock()
@@ -384,7 +384,7 @@ class TestQuotaProjectDegradesSafely:
     def test_permission_denied_falls_back_to_the_cli(self):
         from google.api_core import exceptions as gcp_exceptions
 
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         client = MagicMock()
         client.access_secret_version.side_effect = \
             gcp_exceptions.PermissionDenied('USER_PROJECT_DENIED')
@@ -417,7 +417,7 @@ class TestSecretErrorsNameTheProject:
     secret that lives in another project.
     """
 
-    def _denied(self, project='ctp-archive'):
+    def _denied(self, project='example-sa'):
         backend = GCPSecretBackend(project=project)
         result = MagicMock(returncode=1, stdout='',
                            stderr='ERROR: PERMISSION_DENIED: denied on resource')
@@ -428,7 +428,7 @@ class TestSecretErrorsNameTheProject:
         return str(exc.value)
 
     def test_names_the_project(self):
-        assert "project 'ctp-archive'" in self._denied()
+        assert "project 'example-sa'" in self._denied()
 
     def test_says_the_secret_may_not_exist_there(self):
         assert 'does not exist there' in self._denied()
@@ -436,7 +436,7 @@ class TestSecretErrorsNameTheProject:
     def test_shows_how_to_check_which_project_is_configured(self):
         message = self._denied()
         assert 'dt config get secrets.gcp.project' in message
-        assert 'gcloud secrets list --project=ctp-archive' in message
+        assert 'gcloud secrets list --project=example-sa' in message
 
     def test_still_names_the_secret(self):
         assert 'dvc-remote-bcarc_visium' in self._denied()
@@ -455,7 +455,7 @@ class TestFallbackPreservesTheRealCause:
         """
         from google.api_core import exceptions as gcp_exceptions
 
-        backend = GCPSecretBackend(project='ctp-archive')
+        backend = GCPSecretBackend(project='example-sa')
         client = MagicMock()
         client.access_secret_version.side_effect = \
             gcp_exceptions.PermissionDenied('403 denied on resource')
@@ -472,7 +472,7 @@ class TestFallbackPreservesTheRealCause:
 
     def test_plain_missing_gcloud_still_reads_simply(self):
         """With no prior failure, the old install advice is still right."""
-        backend = GCPSecretBackend(project='ctp-archive')
+        backend = GCPSecretBackend(project='example-sa')
         with patch('dt.secrets.gcp.shutil.which', return_value=None):
             with pytest.raises(Exception) as exc:
                 backend._require_gcloud()
