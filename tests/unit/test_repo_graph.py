@@ -7,6 +7,7 @@ file:// URLs, which exercises the actual clone/scan path without network access.
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -467,3 +468,21 @@ class TestRenderedIdsStayLabels:
         from dt.repo_graph_render import _dot_id
         out = _dot_id('a"b\\c')
         assert out == '"a\\"b\\\\c"'
+
+
+class TestCloneDirectoryStaysInside:
+    @pytest.mark.parametrize('repo_id', ['../../outside', 'host/../../x/y', '/abs/x/y',
+                                         'a/b/c/d/e'])
+    def test_clone_path_is_inside_clones_root(self, tmp_path, monkeypatch, repo_id):
+        calls = []
+        clones = tmp_path / '.dt' / 'tmp' / 'clones'
+        clones.mkdir(parents=True)
+        monkeypatch.setattr(repo_graph.tmp_mod, 'get_tmp_dir', lambda: clones)
+        monkeypatch.setattr(repo_graph.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd) or
+                            subprocess.CompletedProcess(cmd, 1, '', 'x'))
+        repo_graph._clone_or_refresh('file:///somewhere', repo_id)
+        for cmd in calls:
+            if 'clone' in cmd:
+                target = Path(cmd[-1]).resolve()
+                assert clones.resolve() in target.parents
