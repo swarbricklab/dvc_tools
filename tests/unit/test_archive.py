@@ -1755,7 +1755,7 @@ class TestRestoreAndPruneStayInTheProjectsRemote:
         (cache / 'files' / 'md5').mkdir(parents=True)
 
         class FakeRepo:
-            def __init__(self, root):
+            def __init__(self, root, **kw):
                 self.cache = types.SimpleNamespace(local=types.SimpleNamespace(
                     path=str(cache / 'files' / 'md5')))
             def __enter__(self):
@@ -1769,10 +1769,60 @@ class TestRestoreAndPruneStayInTheProjectsRemote:
                 ops._refuse_project_cache(target, tmp_path, 'prune')
         ops._refuse_project_cache(tmp_path / 'remote', tmp_path, 'prune')
 
+    def test_manifest_remote_path_is_expanded_once(self, tmp_path, monkeypatch):
+        from dt.errors import ArchiveError
+        monkeypatch.setenv('HOME', str(tmp_path))
+        (tmp_path / 'cache').mkdir()
+        got = ops._manifest_remote_path(MagicMock(source_remote='~/cache'), 'prune')
+        assert got == Path(os.path.realpath(tmp_path / 'cache'))
+        for bad in ('cache', '', 'x/../y'):
+            with pytest.raises(ArchiveError, match='not an absolute path'):
+                ops._manifest_remote_path(MagicMock(source_remote=bad), 'prune')
+
+    def test_tree_removal_does_not_follow_links(self, tmp_path):
+        victim = tmp_path / 'victim' / 'files' / 'md5' / 'ab'
+        victim.mkdir(parents=True)
+        (victim / 'cd').write_text('keep')
+        remote = tmp_path / 'remote'
+        remote.mkdir()
+        (remote / 'files').symlink_to(tmp_path / 'victim' / 'files')
+        with pytest.raises(OSError):
+            ops._remove_tree_under(remote, ('files', 'md5'))
+        assert (victim / 'cd').read_text() == 'keep'
+
+        real = tmp_path / 'real' / 'files' / 'md5' / 'ab'
+        real.mkdir(parents=True)
+        (real / 'obj').write_text('x')
+        (real / 'link').symlink_to(victim)
+        ops._remove_tree_under(tmp_path / 'real', ('files', 'md5'))
+        assert not (tmp_path / 'real' / 'files' / 'md5').exists()
+        assert (victim / 'cd').read_text() == 'keep'
+
+    def test_default_project_cache_is_refused_without_git(self, tmp_path):
+        from dt.errors import ArchiveError
+        (tmp_path / '.dvc').mkdir()
+        (tmp_path / '.dvc' / 'config').write_text('')
+        with pytest.raises(ArchiveError, match="overlaps this project's DVC cache"):
+            ops._refuse_project_cache(tmp_path / '.dvc' / 'cache', tmp_path, 'prune')
+        ops._refuse_project_cache(tmp_path / 'remote', tmp_path, 'prune')
+
+    def test_project_cache_unreadable_is_refused(self, tmp_path, monkeypatch):
+        from dt.errors import ArchiveError
+        import dvc.repo
+
+        def boom(*a, **k):
+            raise RuntimeError('broken')
+        monkeypatch.setattr(dvc.repo, 'Repo', boom)
+        ops._refuse_project_cache(tmp_path / 'r', tmp_path, 'prune')
+        (tmp_path / '.dvc').mkdir()
+        with pytest.raises(ArchiveError, match='could not read'):
+            ops._refuse_project_cache(tmp_path / 'r', tmp_path, 'prune')
+
     def test_prune_yes_without_source_still_asks(self, tmp_path, monkeypatch):
         from dt.errors import ArchiveError
         manifest = MagicMock(source_remote=str(tmp_path / 'remote'),
                              source_layout='dvc-v3')
+        (tmp_path / 'remote').mkdir()
         monkeypatch.setattr(ops, 'load_manifest', lambda *a, **k: manifest)
         monkeypatch.setattr(ops, '_require_project_remote', lambda *a, **k: None)
         monkeypatch.setattr(ops, '_refuse_project_cache', lambda *a, **k: None)

@@ -1860,7 +1860,7 @@ def restore_archive(
                 f"Archive '{name}' has no source_remote recorded — "
                 f"pass --to <path> explicitly."
             )
-        to_path = Path(manifest.source_remote)
+        to_path = _manifest_remote_path(manifest, 'restore into')
         _require_project_remote(to_path, repo_root, 'restore into')
         _refuse_project_cache(to_path, repo_root, 'restore into')
         _confirm_named_target(
@@ -2164,6 +2164,51 @@ def _require_tar_digest(local: Path, inner: InnerTar) -> None:
             f"{local.name} does not match the checksum recorded in the manifest")
 
 
+def _manifest_remote_path(manifest: ArchiveManifest, action: str) -> Path:
+    """The manifest's ``source_remote`` as the one absolute, resolved path
+    that every later check and file operation uses."""
+    raw = os.path.expanduser(str(manifest.source_remote or ''))
+    if not raw or not os.path.isabs(raw):
+        raise ArchiveError(
+            f"Refusing to {action} {manifest.source_remote!r}: the archive "
+            f"manifest's source_remote is not an absolute path.")
+    return Path(os.path.realpath(raw))
+
+
+_OPEN_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
+
+
+def _remove_tree_under(root: Path, parts) -> None:
+    """Delete ``root/<parts...>`` and everything in it, reaching each
+    directory through a handle opened without following links, so a link
+    planted anywhere below *root* cannot redirect the delete."""
+    *parents, last = parts
+    fd = os.open(str(root), _OPEN_DIR)
+    try:
+        for part in parents:
+            nfd = os.open(part, _OPEN_DIR, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        _remove_entry_tree(fd, last)
+    finally:
+        os.close(fd)
+
+
+def _remove_entry_tree(parent_fd: int, name: str) -> None:
+    fd = os.open(name, _OPEN_DIR, dir_fd=parent_fd)
+    try:
+        with os.scandir(fd) as it:
+            entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
+        for entry, is_dir in entries:
+            if is_dir:
+                _remove_entry_tree(fd, entry)
+            else:
+                os.unlink(entry, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
 def _same_path(a, b) -> bool:
     return (os.path.realpath(os.path.expanduser(str(a)))
             == os.path.realpath(os.path.expanduser(str(b))))
@@ -2193,13 +2238,17 @@ def _refuse_project_cache(target: Path, repo_root: Optional[Path],
                           action: str) -> None:
     """*target* must not be (or hold, or sit inside) the project's own
     DVC cache."""
+    root = Path(repo_root or utils.find_project_root())
     try:
         from dvc.repo import Repo
-        root = Path(repo_root or utils.find_project_root())
-        with Repo(str(root)) as repo:
+        with Repo(str(root), uninitialized=True) as repo:
             odb = repo.cache.local.path
-    except Exception:
-        return
+    except Exception as exc:
+        if not (root / '.dvc').exists():
+            return  # not a DVC project: no cache of its own
+        raise ArchiveError(
+            f"Refusing to {action} {target}: could not read this project's "
+            f"DVC cache location ({exc}).")
     if not odb:
         return
     cache = os.path.realpath(utils.cache_root_from_odb_path(Path(odb)))
@@ -2391,7 +2440,7 @@ def prune_archive(
     ``--yes`` does not skip.
     """
     manifest = load_manifest(name, repo_root=repo_root)
-    source_remote = Path(manifest.source_remote)
+    source_remote = _manifest_remote_path(manifest, 'prune')
     layout = manifest.source_layout or LAYOUT_DVC_V3
     _require_project_remote(source_remote, repo_root, 'prune')
     _refuse_project_cache(source_remote, repo_root, 'prune')
@@ -2409,7 +2458,7 @@ def prune_archive(
     prune_targets: List[Path] = []
     if layout in (LAYOUT_DVC_V3, LAYOUT_DVC_MIXED):
         files_md5 = source_remote / 'files' / 'md5'
-        if files_md5.is_dir():
+        if _real_dir(files_md5.parent) and _real_dir(files_md5):
             prune_targets.append(files_md5)
     if layout in (LAYOUT_DVC_V2, LAYOUT_DVC_MIXED):
         for p in source_remote.iterdir() if source_remote.is_dir() else []:
@@ -2503,7 +2552,7 @@ def prune_archive(
     print(f"Wrote signpost {signpost_path}", flush=True)
 
     for target in prune_targets:
-        shutil.rmtree(target)
+        _remove_tree_under(source_remote, target.relative_to(source_remote).parts)
     repo = repo_root or utils.find_project_root()
     _registry.record_pruned(name, repo, now_iso())
     return PruneResult(
