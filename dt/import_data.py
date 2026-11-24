@@ -1151,12 +1151,17 @@ def import_data(
         if primary_cache_root:
             # First, add the .dir file or single file hash to primary cache
             if root_hash:
-                populate_cache_file(
+                placed = populate_cache_file(
                     md5=root_hash,
                     source_cache=cache_path,
                     dest_cache=primary_cache_root,
                     verbose=verbose,
                 )
+                if placed is None and root_hash.endswith('.dir'):
+                    print(f"Warning: directory listing {root_hash} is missing "
+                          f"from the source cache or does not match its hash; "
+                          f"not checking out {dvc_file}.")
+                    return dvc_file, cache_path
             
             # Then, add individual files
             for f in files:
