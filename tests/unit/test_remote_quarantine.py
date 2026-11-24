@@ -391,7 +391,7 @@ class TestQuarantineNeverFollowsLinks:
         (remote / rv.LEDGER_DIRNAME / q.QUARANTINE_DIRNAME).symlink_to(elsewhere)
         entries = [{'path': f'files/md5/{good[:2]}/{good[2:]}', 'status': rv.STATUS_MISMATCH}]
         with pytest.raises(RemoteError, match='real directory'):
-            q.quarantine(remote, entries=entries)
+            q.quarantine(remote, entries=entries, confirm=False)
         assert list(elsewhere.iterdir()) == []
 
     def test_restore_ignores_forged_manifest_paths(self, tmp_path):
@@ -399,7 +399,8 @@ class TestQuarantineNeverFollowsLinks:
         remote = tmp_path / 'remote'
         good = _place_blob(remote, b'data\n')
         res = q.quarantine(remote, entries=[{'path': f'files/md5/{good[:2]}/{good[2:]}',
-                                             'status': rv.STATUS_MISMATCH}])
+                                             'status': rv.STATUS_MISMATCH}],
+                           confirm=False)
         qdir = Path(res['quarantine_dir'])
         outside = tmp_path / 'home' / 'keep.txt'
         outside.parent.mkdir()
@@ -412,3 +413,44 @@ class TestQuarantineNeverFollowsLinks:
         assert outside.read_text() == 'mine'
         assert '../../../home/keep.txt' in out['absent']
         assert f'files/md5/{good[:2]}/{good[2:]}' in out['restored']
+
+
+
+class TestReportEntriesAreConfirmed:
+    def test_forged_entry_for_intact_blob_is_refused(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'healthy\n')
+        rel = f'files/md5/{good[:2]}/{good[2:]}'
+        res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH,
+                                             'expected_md5': good}])
+        assert (remote / rel).exists()
+        assert res['moved'] == []
+        assert res['refused'][0]['path'] == rel
+
+    def test_genuinely_corrupt_blob_is_still_quarantined(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'healthy\n')
+        rel = f'files/md5/{good[:2]}/{good[2:]}'
+        p = remote / rel
+        p.chmod(0o644)
+        p.write_bytes(b'corrupted')
+        res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH,
+                                             'expected_md5': good}])
+        assert not p.exists()
+        assert [m['path'] for m in res['moved']] == [rel]
+
+    @pytest.mark.parametrize('rel', ['../../etc/passwd', '/etc/passwd',
+                                     'files/md5/ab/../../../../home/x'])
+    def test_out_of_tree_report_paths_move_nothing(self, tmp_path, rel):
+        remote = tmp_path / 'remote'
+        _place_blob(remote, b'healthy\n')
+        res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH}])
+        assert res['moved'] == []
+
+    def test_from_list_rejects_dotdot_tokens(self, tmp_path):
+        remote = tmp_path / 'remote'
+        _place_blob(remote, b'healthy\n')
+        entries, rejected = q.entries_from_list(
+            remote, ['files/md5/ab/../../../home/' + 'c' * 30, 'ab/..'])
+        assert entries == []
+        assert len(rejected) == 2

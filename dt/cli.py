@@ -1667,8 +1667,12 @@ def remote_quarantine(remote_name, from_report, from_list, run_verify,
             click.echo("No bad blobs to quarantine.")
             return
 
+        # A saved report lives where other users can write it, so its
+        # entries are re-checked before anything moves; a fresh verify or an
+        # operator-supplied list is taken as given.
         result = remote_quarantine_mod.quarantine(
-            path, entries, verbose=verbose, dry_run=dry_run)
+            path, entries, verbose=verbose, dry_run=dry_run,
+            confirm=not (run_verify or from_list))
 
         if json_output:
             click.echo(_json.dumps(result, indent=2))
@@ -1684,6 +1688,11 @@ def remote_quarantine(remote_name, from_report, from_list, run_verify,
                    f"({n_bad} bad + {n_dir} enclosing .dir) from {name}.")
         if result['quarantine_dir'] and not dry_run:
             click.echo(f"  -> {result['quarantine_dir']}")
+        if result.get('refused'):
+            click.echo(f"  Refused {len(result['refused'])} report entr"
+                       f"{'ies' if len(result['refused']) != 1 else 'y'} that "
+                       f"are not actually bad (e.g. {result['refused'][0]['path']}: "
+                       f"{result['refused'][0]['reason']}).")
         if result['missing']:
             click.echo(f"  {len(result['missing'])} listed blob(s) already "
                        f"absent from the remote.")

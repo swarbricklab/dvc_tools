@@ -153,6 +153,9 @@ def entries_from_list(
         if not rel:
             rejected.append((raw, 'empty path'))
             continue
+        if not remote_verify.safe_blob_rel(rel):
+            rejected.append((raw, 'not a blob path inside the remote'))
+            continue
         name = rel.split('/')[-1]
         hex_prefix = remote_verify._prefix_key_for_rel(rel, layout)[0][-2:]
         expected = remote_verify.expected_md5_for_blob(hex_prefix, name)
@@ -163,6 +166,50 @@ def entries_from_list(
         _emit(rel, expected)
 
     return entries, rejected
+
+
+def confirm_bad(remote_dir: Path, entries: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """Re-check report entries against the remote before acting on them.
+
+    A report can be edited by other users, so it is not proof on its own.
+    An entry is confirmed bad if it is a link, a stray (non-blob-named) file,
+    or a regular blob whose content does not hash to its path's md5; absent
+    entries are kept (reported as missing). An intact blob is refused.
+
+    Returns ``(confirmed, refused)``.
+    """
+    confirmed: List[dict] = []
+    refused: List[dict] = []
+    for e in entries:
+        rel = e.get('path') if isinstance(e, dict) else None
+        if not remote_verify.safe_blob_rel(rel) or not remote_verify._dirs_are_real(
+                remote_dir, rel.rsplit('/', 1)[0]):
+            refused.append({'path': str(rel), 'reason': 'not a blob path inside the remote'})
+            continue
+        f = remote_dir / rel
+        try:
+            st = os.lstat(f)
+        except FileNotFoundError:
+            confirmed.append(e)
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            confirmed.append(e)
+            continue
+        hex_prefix = remote_verify._prefix_key_for_rel(rel, 'dvc-mixed')[0][-2:]
+        expected = remote_verify.expected_md5_for_blob(hex_prefix, rel.rsplit('/', 1)[-1])
+        if not remote_verify._HASH_RE.match(expected or ''):
+            confirmed.append(e)  # stray file in a prefix dir
+            continue
+        try:
+            _size, _mtime, actual = remote_verify._hash_blob(f)
+        except OSError:
+            confirmed.append(e)  # unreadable: as the verifier would report it
+            continue
+        if actual == expected:
+            refused.append({'path': rel, 'reason': 'intact (content matches its name)'})
+        else:
+            confirmed.append(e)
+    return confirmed, refused
 
 
 def _quarantine_root(remote_dir: Path) -> Path:
@@ -336,8 +383,13 @@ def quarantine(
     timestamp: Optional[str] = None,
     verbose: bool = False,
     dry_run: bool = False,
+    confirm: bool = True,
 ) -> dict:
     """Move bad blobs (and their enclosing ``.dir`` objects) into quarantine.
+
+    With ``confirm`` (the default) each entry is re-checked against the
+    remote first (see :func:`confirm_bad`); pass False only for a list the
+    operator produced or a verify run made just now.
 
     Returns a result dict with the quarantine dir, the moved entries, and any
     that were missing. On ``dry_run`` nothing is moved.
@@ -345,9 +397,13 @@ def quarantine(
     from .archive import operations as ops
 
     layout = layout or ops.detect_source_layout(remote_dir)
+    refused: List[dict] = []
+    if confirm:
+        entries, refused = confirm_bad(remote_dir, entries)
     plan = plan_quarantine(remote_dir, entries, layout)
     if not plan:
-        return {'quarantine_dir': None, 'moved': [], 'missing': [], 'plan': []}
+        return {'quarantine_dir': None, 'moved': [], 'missing': [], 'plan': [],
+                'refused': refused}
 
     ts = timestamp or _dt.datetime.now(_dt.timezone.utc).strftime(
         '%Y%m%dT%H%M%SZ')
@@ -361,7 +417,8 @@ def quarantine(
             src = remote_dir / item['path']
             (moved if os.path.lexists(src) else missing).append(item)
         return {'quarantine_dir': str(qdir), 'moved': moved,
-                'missing': missing, 'plan': plan, 'dry_run': True}
+                'missing': missing, 'plan': plan, 'dry_run': True,
+                'refused': refused}
 
     # Ensure a fresh batch dir: two runs in the same UTC second must not share
     # a dir (that would orphan the first run's blobs and overwrite its
@@ -417,7 +474,7 @@ def quarantine(
         raise RemoteError(f"Quarantined blobs but failed to write manifest: {exc}")
 
     return {'quarantine_dir': str(qdir), 'moved': moved,
-            'missing': missing, 'plan': plan}
+            'missing': missing, 'plan': plan, 'refused': refused}
 
 
 def list_quarantines(remote_dir: Path) -> List[dict]:
