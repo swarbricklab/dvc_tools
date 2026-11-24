@@ -319,7 +319,9 @@ dt config set summary.output_dir .
 dt config set summary.output_dir project_docs
 ```
 
-The `--out` flag on `dt summary` overrides this setting.
+The `--out` flag on `dt summary` overrides this setting. A value from the
+repository's own `.dt` config must be a relative path inside the project, and
+summary files are written without following links.
 
 ## secrets Options
 

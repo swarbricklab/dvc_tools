@@ -14,6 +14,7 @@ from dt.summary import (
     generate_all,
 )
 from dt.errors import SummaryError
+from dt import summary
 
 
 # =============================================================================
@@ -28,17 +29,20 @@ class TestGetOutputDir:
         result = get_output_dir(output_dir="/custom/output")
         
         assert result == Path("/custom/output")
+        assert get_output_dir(output_dir="rel") == Path.cwd() / "rel"
 
     def test_uses_config_value(self):
         """Test uses summary.output_dir from config."""
-        with patch("dt.summary.cfg.get_value", return_value="/config/docs"):
+        with patch("dt.summary.cfg.get_trusted_value_with_scope",
+                   return_value=("/config/docs", "user")):
             result = get_output_dir()
             
             assert result == Path("/config/docs")
 
     def test_defaults_to_docs(self):
         """Test defaults to docs/ directory."""
-        with patch("dt.summary.cfg.get_value", return_value=None):
+        with patch("dt.summary.cfg.get_trusted_value_with_scope",
+                   return_value=(None, None)):
             result = get_output_dir()
             
             assert result == Path("docs")
@@ -265,3 +269,47 @@ class TestGenerateAll:
                 dag_kwargs = mock_dag.call_args[1]
                 assert tree_kwargs["verbose"] is True
                 assert dag_kwargs["verbose"] is True
+
+
+
+class TestReportsStayInTheProject:
+    @pytest.mark.parametrize('value', ['/etc', '../outside', 'docs/../../x'])
+    def test_repository_output_dir_must_stay_inside(self, value):
+        from dt.errors import SummaryError
+        with patch("dt.summary.cfg.get_trusted_value_with_scope",
+                   return_value=(value, "project")):
+            with pytest.raises(SummaryError):
+                summary.get_output_dir()
+
+    def test_linked_report_file_is_not_written_through(self, tmp_path, monkeypatch):
+        import os
+        monkeypatch.chdir(tmp_path)
+        victim = tmp_path / 'victim.txt'
+        victim.write_text('keep')
+        (tmp_path / 'docs').mkdir()
+        os.symlink(victim, tmp_path / 'docs' / 'tree.txt')
+        summary._write_report(summary.Path('docs'), 'tree.txt', 'new')
+        assert victim.read_text() == 'keep'
+        assert (tmp_path / 'docs' / 'tree.txt').read_text() == 'new'
+
+    def test_linked_output_dir_is_refused(self, tmp_path, monkeypatch):
+        import os
+        from dt.errors import SummaryError
+        monkeypatch.chdir(tmp_path)
+        elsewhere = tmp_path / 'elsewhere'
+        elsewhere.mkdir()
+        os.symlink(elsewhere, tmp_path / 'docs')
+        with pytest.raises(SummaryError):
+            summary._write_report(summary.Path('docs'), 'tree.txt', 'new')
+        assert list(elsewhere.iterdir()) == []
+
+
+    def test_repository_relative_output_dir_is_accepted(self):
+        with patch("dt.summary.cfg.get_trusted_value_with_scope",
+                   return_value=("site/docs", "local")):
+            assert summary.get_output_dir() == summary.Path("site/docs")
+
+    def test_nested_missing_dirs_are_created(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        summary._write_report(summary.Path('a/b/c'), 'tree.txt', 'x')
+        assert (tmp_path / 'a' / 'b' / 'c' / 'tree.txt').read_text() == 'x'
