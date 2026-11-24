@@ -1321,6 +1321,16 @@ class TestExtractRemoteName:
 class TestCheckDvcRemote:
     """Tests for _check_dvc_remote_impl."""
 
+    def test_other_repos_remote_is_not_probed(self):
+        ep = Endpoint(type='ssh', url='ssh://approved.example.org/data',
+                      source="DVC remote 'storage'")
+        mock_repo = MagicMock()
+        mock_repo.config = {'remote': {'storage': {'url': 'ssh://other.example.org/x'}}}
+        result = _check_dvc_remote_impl(ep, 'storage',
+                                        _repo_factory=lambda: mock_repo)
+        assert result is None
+        mock_repo.cloud.get_remote_odb.assert_not_called()
+
     def test_pass_when_reachable(self):
         ep = Endpoint(type='s3', url='s3://bucket/prefix',
                       source="DVC remote 'cloud'")

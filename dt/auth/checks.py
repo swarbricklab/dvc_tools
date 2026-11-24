@@ -1002,6 +1002,16 @@ def _check_dvc_remote_impl(ep: Endpoint, remote_name: str,
     except Exception:
         return None
 
+    # Only probe through DVC when the repo it opened (the current directory)
+    # gives this remote the URL being checked; otherwise fall back to the
+    # plain check of ep.url.
+    try:
+        dvc_url = repo.config['remote'][remote_name].get('url')
+    except Exception:
+        dvc_url = None
+    if isinstance(dvc_url, str) and dvc_url != ep.url:
+        return None
+
     try:
         odb = repo.cloud.get_remote_odb(remote_name)
     except Exception as exc:
