@@ -1767,8 +1767,7 @@ class TestFetchRemoteOption:
         with patch('dt.remote.list_remotes', return_value=[('myremote', '/data/cache', True)]), \
              patch('dt.remote.extract_local_path', return_value='/data/cache'), \
              patch('pathlib.Path.exists', return_value=True), \
-             patch('dt.fetch.fetch', return_value=[]) as mock_fetch, \
-             patch('dt.index.is_auto_sync_enabled', return_value=False):
+             patch('dt.fetch.fetch', return_value=[]) as mock_fetch:
             result = runner.invoke(cli, ['fetch', '-r', 'myremote'])
             assert result.exit_code == 0, result.output
             mock_fetch.assert_called_once()
@@ -1780,8 +1779,7 @@ class TestFetchRemoteOption:
         from dt.cli import cli
 
         runner = CliRunner()
-        with patch('dt.remote.list_remotes', return_value=[('other', '/x', False)]), \
-             patch('dt.index.is_auto_sync_enabled', return_value=False):
+        with patch('dt.remote.list_remotes', return_value=[('other', '/x', False)]):
             result = runner.invoke(cli, ['fetch', '-r', 'nope'])
             assert result.exit_code != 0
             assert "not found" in result.output
@@ -1795,7 +1793,6 @@ class TestFetchRemoteOption:
         runner = CliRunner()
         with patch('dt.remote.list_remotes', return_value=[('s3remote', 's3://bucket/path', False)]), \
              patch('dt.remote.extract_local_path', return_value=None), \
-             patch('dt.index.is_auto_sync_enabled', return_value=False), \
              patch('dt.fetch.fetch', return_value=[]) as mock_fetch:
             result = runner.invoke(cli, ['fetch', '-r', 's3remote'])
             assert result.exit_code == 0, result.output
@@ -1812,7 +1809,6 @@ class TestFetchRemoteOption:
         with patch('dt.remote.list_remotes', return_value=[('gone', '/no/such/path', False)]), \
              patch('dt.remote.extract_local_path', return_value='/no/such/path'), \
              patch('pathlib.Path.exists', return_value=False), \
-             patch('dt.index.is_auto_sync_enabled', return_value=False), \
              patch('dt.fetch.fetch', return_value=[]) as mock_fetch:
             result = runner.invoke(cli, ['fetch', '-r', 'gone'])
             assert result.exit_code == 0, result.output
@@ -1825,10 +1821,9 @@ class TestFetchRemoteOption:
         from dt.cli import cli
 
         runner = CliRunner()
-        with patch('dt.index.is_auto_sync_enabled', return_value=False):
-            result = runner.invoke(cli, ['fetch', '-r', 'myremote', '--source', '/tmp'])
-            assert result.exit_code != 0
-            assert "Cannot use --remote and --source together" in result.output
+        result = runner.invoke(cli, ['fetch', '-r', 'myremote', '--source', '/tmp'])
+        assert result.exit_code != 0
+        assert "Cannot use --remote and --source together" in result.output
 
 
 # =============================================================================

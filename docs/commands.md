@@ -25,7 +25,7 @@
 | [`dt deps`](#dt-deps) | Inspect dependencies between repositories |
 | [`dt cache`](#dt-cache) | Manage external shared caches |
 | [`dt remote`](#dt-remote) | Manage remote storage |
-| [`dt index`](#dt-index) | Manage the DVC site cache index mirror |
+| [`dt index`](#dt-index) | Manage the DVC site cache index and cache index |
 | [`dt tmp`](#dt-tmp) | Manage temporary repository clones |
 | [`dt offline`](#dt-offline) | Manage offline mode for compute nodes without internet |
 | [`dt worktree`](#dt-worktree) | Manage git worktrees with DVC cache configured |
@@ -305,20 +305,18 @@ Manage remote storage.
 
 ## dt index
 
-Manage the DVC site cache index mirror.
+Manage the DVC site cache index (`core.site_cache_dir`) and dt's cache index.
 
 | Subcommand | Description |
 |------------|-------------|
-| `dt index status` | Show local index and mirror status |
-| `dt index pull` | Pull the index from the shared mirror to local |
-| `dt index push` | Push the local index to the shared mirror |
+| `dt index status` | Show where the site cache index lives and whether it is private |
 | `dt index build` | Build the index from cache filenames (no re-hashing) |
 | `dt index set` | Set `core.site_cache_dir` for the current repo |
 | `dt index migrate` | Move `core.site_cache_dir`, copying its current contents |
 | `dt index cache status` | Show status of the local cache index (SQLite OID index) |
 | `dt index cache rebuild` | Rebuild the cache index by scanning the filesystem |
 
-The mirror location is set with `dt config set index.mirror_root <path>`. [Full documentation →](index.md)
+[Full documentation →](index.md)
 
 ---
 
@@ -485,7 +483,7 @@ Show DVC pipeline and stage status.
 dt status [--imports] [-v] [DVC_OPTIONS...]
 ```
 
-Wraps `dvc status`. Pulls the index archive first only if `index.auto_sync` is on (off by default). Pass `--imports` to also check import freshness via `dt update --status`. Unrecognised options are passed through to `dvc status`.
+Wraps `dvc status`. Pass `--imports` to also check import freshness via `dt update --status`. Unrecognised options are passed through to `dvc status`.
 
 ---
 

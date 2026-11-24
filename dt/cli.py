@@ -517,7 +517,6 @@ _PATH_KEYS = (
     'cache.root',
     'remote.root',
     'site_cache.root',
-    'index.mirror_root',
     'archive.staging_dir',
     'archive.registry_path',
     'deps.cache_dir',
@@ -5449,67 +5448,13 @@ def offline_status():
 
 @cli.group()
 def index():
-    """Manage DVC site cache index mirror.
-    
-    The site cache index allows DVC to quickly look up files across caches.
-    This command syncs the local index with a shared mirror so all users
-    benefit from the same index without rebuilding it.
-    
-    \b
-    Configure with:
-        dt config set index.mirror_root /g/data/a56/dvc/mirror
+    """Manage DVC's site cache index and dt's cache index.
+
+    The site cache index (core.site_cache_dir) lets DVC quickly look up
+    files across caches; the cache index lets dt fetch skip objects that
+    are already cached.
     """
     pass
-
-
-@index.command('pull')
-@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
-@click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
-def index_pull(verbose, quiet, dry):
-    """Pull index from mirror to local.
-    
-    Syncs the shared index mirror to your local site cache index.
-    This brings in index entries created by other users.
-    
-    \b
-    Examples:
-        dt index pull           # Pull latest index
-        dt index pull -v        # Verbose output
-        dt index pull -q        # Quiet (no output)
-        dt index pull --dry     # Preview what would sync
-    """
-    try:
-        success = index_mod.pull(verbose=verbose, quiet=quiet, dry=dry)
-        if not success:
-            raise SystemExit(1)
-    except index_mod.IndexError as e:
-        raise click.ClickException(str(e))
-
-
-@index.command('push')
-@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
-@click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
-def index_push(verbose, quiet, dry):
-    """Push index from local to mirror.
-    
-    Syncs your local site cache index to the shared mirror.
-    This shares your index entries with other users.
-    
-    \b
-    Examples:
-        dt index push           # Push index to mirror
-        dt index push -v        # Verbose output
-        dt index push -q        # Quiet (no output)
-        dt index push --dry     # Preview what would sync
-    """
-    try:
-        success = index_mod.push(verbose=verbose, quiet=quiet, dry=dry)
-        if not success:
-            raise SystemExit(1)
-    except index_mod.IndexError as e:
-        raise click.ClickException(str(e))
 
 
 @index.command('build')
@@ -5549,11 +5494,7 @@ def index_build(verbose, dry, cache_path):
 @index.command('status')
 @click.option('-v', '--verbose', is_flag=True, help='Show additional details')
 def index_status(verbose):
-    """Show index mirror status.
-    
-    Displays information about the local index and mirror,
-    including paths, existence, and lock status.
-    """
+    """Show where DVC's site cache index lives and whether it is private."""
     # Show site_cache_dir up front so users see what DVC is actually using.
     try:
         current_sc = site_cache_mod.get_current()
@@ -5570,36 +5511,6 @@ def index_status(verbose):
     except site_cache_mod.SiteCacheError as e:
         click.echo(f"Site cache check failed: {e}")
         click.echo()
-
-    info = index_mod.status(verbose=verbose)
-
-    if not info['configured']:
-        click.echo("Index mirror not configured")
-        if 'error' in info:
-            click.echo(f"  {info['error']}")
-        click.echo()
-        click.echo("Configure with:")
-        click.echo("  dt config set index.mirror_root /g/data/a56/dvc/mirror")
-        return
-    
-    click.echo("Index configuration:")
-    click.echo(f"  Local:  {info['local_index']}")
-    click.echo(f"  Mirror: {info['mirror_path']}")
-    click.echo()
-    
-    click.echo("Status:")
-    click.echo(f"  Local exists:  {'yes' if info['local_exists'] else 'no'}")
-    click.echo(f"  Mirror exists: {'yes' if info['mirror_exists'] else 'no'}")
-    
-    if info.get('local_locked'):
-        owner = info.get('local_lock_owner', 'unknown')
-        age = info.get('local_lock_age', 0)
-        click.echo(f"  Local locked:  yes (by {owner}, {age:.0f}s ago)")
-    
-    if info.get('mirror_locked'):
-        owner = info.get('mirror_lock_owner', 'unknown')
-        age = info.get('mirror_lock_age', 0)
-        click.echo(f"  Mirror locked: yes (by {owner}, {age:.0f}s ago)")
 
 
 @index.command('set')
@@ -6596,8 +6507,7 @@ def status(ctx, imports, verbose):
     """Show DVC pipeline and stage status.
 
     Wraps ``dvc status``. Reports changed deps, outs, and missing cache
-    entries. Pulls the index archive first only if ``index.auto_sync`` is
-    enabled (off by default).
+    entries.
 
     Use --imports to additionally check if imports are stale.
 

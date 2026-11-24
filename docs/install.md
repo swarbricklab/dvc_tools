@@ -329,7 +329,7 @@ dt config set hooks.verbosity quiet
 | `large-files` | pre-commit | Rejects staged files exceeding `max_size` |
 | `dvc-checkout` | post-checkout, post-merge, post-rewrite | Reconciles the workspace via `dt pull` (skips file checkouts and in-progress rebases; see [safety gates](#dvc-checkout-safety-gates)) |
 | `dvc-push` | pre-push | Reminds about / prompts for / performs `dt push` — see [`dvc-push` modes](#dvc-push-modes) |
-| `index-sync` | any | Pulls then pushes the site cache index. Not enabled by default; a no-op unless `index.auto_sync` is configured |
+| `index-sync` | any | Removed (the index archive mirror no longer exists); kept as a no-op so old configs don't fail |
 
 #### `dvc-push` modes
 

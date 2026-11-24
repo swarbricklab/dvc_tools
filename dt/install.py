@@ -987,26 +987,13 @@ def _dvc_push_needs_internet() -> bool:
 
 
 def _run_index_sync(verbose: bool = False) -> bool:
-    """Pull then push the site cache index."""
-    from . import index as index_mod
+    """No-op: the index archive mirror (dt index push|pull) was removed.
 
-    if not index_mod.is_auto_sync_enabled():
-        if verbose:
-            print("  index-sync: not configured, skipping")
-        return True
-
-    try:
-        index_mod.pull(quiet=not verbose, verbose=verbose)
-    except Exception as e:
-        if verbose:
-            print(f"  index-sync: pull warning: {e}")
-
-    try:
-        index_mod.push(quiet=not verbose, verbose=verbose)
-    except Exception as e:
-        if verbose:
-            print(f"  index-sync: push warning: {e}")
-
+    Kept so hook configs that still enable ``index-sync`` don't fail.
+    """
+    if verbose:
+        print("  index-sync: index archive mirror removed; skipping "
+              "(disable with: dt config unset hooks.pre-commit.checks.index-sync)")
     return True
 
 
