@@ -558,7 +558,7 @@ def list_files(
     cmd = ['dvc', 'list', '--json', '--show-hash']
     if recursive:
         cmd.append('-R')
-    cmd.extend(['.', path])
+    cmd.extend(['--', '.', path])
     
     result = subprocess.run(
         cmd,
@@ -858,11 +858,12 @@ def _delegate_to_dvc_import(
     rev: Optional[str] = None,
 ) -> Path:
     """Fallback to ``dvc import`` for sources without local cache access."""
-    cmd = ['dvc', 'import', repo_url, path, '--out', str(out_path)]
+    cmd = ['dvc', 'import', '--out', str(out_path)]
     if rev:
         cmd.extend(['--rev', rev])
     if not checkout:
         cmd.append('--no-download')
+    cmd.extend(['--', repo_url, path])
 
     if verbose:
         print("No locally-accessible cache found; delegating to dvc import")
@@ -1175,7 +1176,7 @@ def import_data(
                 print(f"Checking out {dvc_file}...")
             
             result = subprocess.run(
-                ['dvc', 'checkout', str(dvc_file)],
+                ['dvc', 'checkout', '--', str(dvc_file)],
                 capture_output=True,
                 text=True,
             )

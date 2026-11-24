@@ -12,6 +12,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import utils
 from .errors import LsError
 
 
@@ -106,20 +107,21 @@ def run_dvc_list(
         (100k+ files) that is the expensive, mmap-heavy path, so only request
         them when the caller actually needs the values.
     """
-    cmd = ['dvc', 'list', url, '--json']
+    cmd = ['dvc', 'list', '--json']
 
     if size:
         cmd.append('--size')
     if show_hash:
         cmd.append('--show-hash')
-    if path:
-        cmd.append(path)
     if rev:
         cmd.extend(['--rev', rev])
     if recursive:
         cmd.append('--recursive')
     if dvc_only:
         cmd.append('--dvc-only')
+    cmd.extend(['--', url])
+    if path:
+        cmd.append(path)
     
     try:
         result = subprocess.run(
@@ -970,6 +972,8 @@ def _git_revision_info(rev: Optional[str]) -> Optional[Dict[str, Any]]:
     Defaults to HEAD. Returns None outside a git repo or if the ref is unknown.
     """
     ref = rev or 'HEAD'
+    if not utils.is_valid_git_rev(ref):
+        return None
     sha = _run_git(['rev-parse', '--short', ref])
     if not sha:
         return None

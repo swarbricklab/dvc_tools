@@ -1145,7 +1145,7 @@ def update(
         for target in updated_targets:
             try:
                 result = subprocess.run(
-                    ['dvc', 'checkout', target],
+                    ['dvc', 'checkout', '--', target],
                     capture_output=True,
                     text=True,
                 )

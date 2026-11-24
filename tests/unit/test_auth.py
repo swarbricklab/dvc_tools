@@ -3934,3 +3934,27 @@ class TestKeyHasPassphrase:
         assert 'ssh-keygen' in call_args
         assert '-P' in call_args
         assert '' in call_args
+
+
+class TestCheckArgumentsStayArguments:
+    """Endpoint values from project files are passed only as arguments."""
+
+    def test_git_url_follows_option_end(self):
+        ep = Endpoint(type='git', url='--upload-pack=x', source='import source (a)')
+        with patch('subprocess.run', return_value=MagicMock(returncode=2, stderr='')) as run:
+            _check_git(ep)
+        cmd = run.call_args[0][0]
+        assert cmd.index('--') < cmd.index('--upload-pack=x')
+
+    def test_ssh_path_is_quoted_for_remote_shell(self):
+        with patch('subprocess.run', return_value=MagicMock(returncode=0)) as run:
+            _check_ssh_remote_dir('host', '/x;touch y')
+        cmd = run.call_args[0][0]
+        assert cmd[cmd.index('--') + 1] == 'host'
+        assert "'/x;touch y'" in cmd
+        assert '/x;touch y' not in cmd
+
+    def test_ssh_host_must_not_look_like_an_option(self):
+        with patch('subprocess.run') as run:
+            assert _check_ssh_remote_dir('-oProxyCommand=x', '/p') is None
+        run.assert_not_called()

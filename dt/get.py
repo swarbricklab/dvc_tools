@@ -171,9 +171,10 @@ def list_source_files(
     Raises:
         GetError: If the listing fails or the path is not tracked.
     """
-    cmd = ['dvc', 'list', '--json', '--show-hash', '--size', '-R', str(source), path]
+    cmd = ['dvc', 'list', '--json', '--show-hash', '--size', '-R']
     if rev:
         cmd += ['--rev', rev]
+    cmd += ['--', str(source), path]
 
     result = _run_dvc_list(cmd)
     if result.returncode != 0:
@@ -470,10 +471,10 @@ def fetch_via_remote(
                 continue
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = ['dvc', 'get', str(clone), source_path,
-               '--out', str(dest), '--jobs', str(jobs)]
+        cmd = ['dvc', 'get', '--out', str(dest), '--jobs', str(jobs)]
         if rev:
             cmd += ['--rev', rev]
+        cmd += ['--', str(clone), source_path]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             problems.append(f'{relpath}: {_dvc_error_detail(result)}')

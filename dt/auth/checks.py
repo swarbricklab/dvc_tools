@@ -3,6 +3,7 @@
 import getpass
 import json
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -204,10 +205,14 @@ def _check_ssh_remote_dir(
     Returns a :class:`CheckResult` on failure/warning, or *None* when the
     directory is fully accessible (caller should report its own PASS).
     """
+    if host.startswith('-'):
+        return None
+    # ssh hands the command line to the remote shell, which parses it again.
+    quoted = shlex.quote(remote_path)
     try:
         result = subprocess.run(
             ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
-             host, 'test', '-d', remote_path, '-a', '-r', remote_path],
+             '--', host, 'test', '-d', quoted, '-a', '-r', quoted],
             capture_output=True,
             text=True,
             timeout=15,
@@ -224,7 +229,7 @@ def _check_ssh_remote_dir(
     try:
         exists_result = subprocess.run(
             ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
-             host, 'test', '-e', remote_path],
+             '--', host, 'test', '-e', quoted],
             capture_output=True,
             text=True,
             timeout=15,
@@ -286,7 +291,7 @@ def _check_ssh(ep: Endpoint, verbose: bool = False) -> CheckResult:
     try:
         result_proc = subprocess.run(
             ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
-             host],
+             '--', host],
             capture_output=True,
             text=True,
             timeout=10,
@@ -615,7 +620,7 @@ def _check_git(ep: Endpoint) -> CheckResult:
     """Check a git endpoint via ``git ls-remote``."""
     try:
         result = subprocess.run(
-            ['git', 'ls-remote', '--exit-code', ep.url],
+            ['git', 'ls-remote', '--exit-code', '--', ep.url],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0:

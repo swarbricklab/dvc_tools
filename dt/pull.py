@@ -265,6 +265,7 @@ def pull(
     if force:
         cmd.append('--force')
     if targets:
+        cmd.append('--')
         cmd.extend(targets)
 
     if verbose:

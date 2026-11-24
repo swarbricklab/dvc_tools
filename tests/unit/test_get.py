@@ -144,7 +144,8 @@ class TestListSourceFiles:
 
         cmd = run.call_args[0][0]
         assert '--show-hash' in cmd and '-R' in cmd and '--json' in cmd
-        assert cmd[-2:] == ['--rev', 'abc123']
+        assert cmd[cmd.index('--rev') + 1] == 'abc123'
+        assert cmd.index('--rev') < cmd.index('--')
         assert 'data/fq/AF013-A' in cmd
 
     def test_skips_the_dir_entry_itself(self, tmp_path):
@@ -809,7 +810,7 @@ class TestRemoteFallback:
 
         cmd = run.call_args[0][0]
         assert cmd[:2] == ['dvc', 'get']
-        assert cmd[2] == str(clone)
+        assert cmd[cmd.index('--') + 1] == str(clone)
         assert 'data/fq/S1/R1.fq' in cmd
         assert '--jobs' in cmd and '4' in cmd
         assert written == 1 and 'downloaded' in note
@@ -828,7 +829,8 @@ class TestRemoteFallback:
              patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
             get_mod.fetch_via_remote(tmp_path / 'c', 'p', dest, rev='v1.0')
 
-        assert ['--rev', 'v1.0'] == run.call_args[0][0][-2:]
+        cmd = run.call_args[0][0]
+        assert cmd[cmd.index('--rev') + 1] == 'v1.0'
 
     def test_download_failure_is_reported(self, tmp_path):
         failed = MagicMock(

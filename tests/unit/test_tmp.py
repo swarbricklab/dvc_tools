@@ -222,7 +222,7 @@ class TestCloneRepo:
         # git clone, then a fetch of the rev, then a checkout of the rev.
         assert calls[0][0:2] == ['git', 'clone']
         assert any('fetch' in c and 'dev' in c for c in calls)
-        assert any('checkout' in c and c[-1] == 'dev' for c in calls)
+        assert any('checkout' in c and c[-2:] == ['dev', '--'] for c in calls)
 
     @pytest.mark.parametrize('rev', ['--upload-pack=x', '-b', 'a b', 'a:b', 'a..b', ''])
     def test_rejects_malformed_rev(self, tmp_path, monkeypatch, rev):
@@ -256,7 +256,9 @@ class TestCloneRepo:
         assert clone.index('--') < clone.index('git@github.com:org/repo.git')
         for c in calls[1:]:
             if 'v1.0' in c:
-                assert c.index('--end-of-options') < c.index('v1.0')
+                # option end before the rev, or a pathspec end after it
+                assert ('--end-of-options' in c and c.index('--end-of-options') < c.index('v1.0')) \
+                    or c[c.index('v1.0') + 1:] == ['--']
 
     @patch('dt.tmp._require_clone_root')  # git clone is mocked
     def test_checkout_rev_falls_back_to_fetch_head(self, _root, tmp_path, monkeypatch):
@@ -267,7 +269,7 @@ class TestCloneRepo:
             r = MagicMock()
             r.stderr = ''
             # Only `git checkout <rev>` (named) fails; everything else succeeds.
-            if 'checkout' in cmd and cmd[-1] == 'abc123':
+            if 'checkout' in cmd and cmd[-2:] == ['abc123', '--']:
                 r.returncode = 1
                 r.stderr = 'pathspec did not match'
             else:
@@ -284,7 +286,7 @@ class TestCloneRepo:
                 tmp.clone_repo('git@github.com:org/repo.git', refresh=False,
                                verbose=False, rev='abc123')
 
-        assert any('checkout' in c and c[-1] == 'FETCH_HEAD' for c in calls)
+        assert any('checkout' in c and c[-2:] == ['FETCH_HEAD', '--'] for c in calls)
 
     @patch('dt.tmp._require_clone_root')  # git clone is mocked
     def test_checkout_rev_raises_when_unresolvable(self, _root, tmp_path, monkeypatch):

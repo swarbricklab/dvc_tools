@@ -164,7 +164,7 @@ def clone_repository(
         git_cmd.extend(['--depth', '1'])
     if not no_submodules:
         git_cmd.append('--recurse-submodules')
-    git_cmd.extend([repository_url, str(target_dir)])
+    git_cmd.extend(['--', repository_url, str(target_dir)])
 
     # Execute git clone
     result = subprocess.run(git_cmd)
@@ -175,7 +175,9 @@ def clone_repository(
     if rev:
         if verbose:
             print(f"Checking out revision: {rev}")
-        result = subprocess.run(['git', 'checkout', rev], cwd=target_dir)
+        if not utils.is_valid_git_rev(rev):
+            raise CloneError(f"Invalid revision: {rev!r}")
+        result = subprocess.run(['git', 'checkout', rev, '--'], cwd=target_dir)
         if result.returncode != 0:
             raise CloneError(f"Failed to checkout revision '{rev}'.")
     

@@ -306,12 +306,12 @@ def _checkout_rev(repo_path: Path, rev: str, verbose: bool = True) -> Path:
     # Prefer checking out the named rev; fall back to FETCH_HEAD (covers the
     # case where the rev was only reachable via the explicit fetch above).
     checkout = subprocess.run(
-        _git(repo_path, 'checkout', '--end-of-options', rev),
+        _git(repo_path, 'checkout', rev, '--'),
         cwd=repo_path, capture_output=True, text=True,
     )
     if checkout.returncode != 0:
         checkout = subprocess.run(
-            _git(repo_path, 'checkout', 'FETCH_HEAD'),
+            _git(repo_path, 'checkout', 'FETCH_HEAD', '--'),
             cwd=repo_path, capture_output=True, text=True,
         )
         if checkout.returncode != 0:
@@ -539,7 +539,7 @@ def checkout_path_at_revision(
         print(f"  Checking out revision {revision[:12]}...")
     
     result = subprocess.run(
-        _git(repo_path, 'checkout', '--end-of-options', revision),
+        _git(repo_path, 'checkout', revision, '--'),
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -550,7 +550,7 @@ def checkout_path_at_revision(
         if verbose:
             print(f"  Trying checkout of FETCH_HEAD...")
         result = subprocess.run(
-            _git(repo_path, 'checkout', 'FETCH_HEAD'),
+            _git(repo_path, 'checkout', 'FETCH_HEAD', '--'),
             cwd=repo_path,
             capture_output=True,
             text=True,

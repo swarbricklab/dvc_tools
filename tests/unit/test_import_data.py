@@ -345,7 +345,8 @@ class TestImportDataFallback:
         assert cache_path is None
         assert mock_run.call_count == 2
         assert mock_run.call_args_list[1].args[0] == [
-            'dvc', 'import', 'git@github.com:org/repo.git', 'data/file.csv', '--out', 'imported.csv'
+            'dvc', 'import', '--out', 'imported.csv', '--',
+            'git@github.com:org/repo.git', 'data/file.csv',
         ]
 
     @patch.object(utils, 'check_dvc')

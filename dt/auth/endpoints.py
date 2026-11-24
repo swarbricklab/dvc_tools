@@ -384,7 +384,7 @@ def discover_endpoints_from_repo(
 
         result = subprocess.run(
             ['git', 'clone', '--depth', '1', '--single-branch',
-             repo_url, str(clone_path)],
+             '--', repo_url, str(clone_path)],
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:

@@ -2060,7 +2060,7 @@ def _run_repo_import_network_fetch(
 
     rev_was_set = _snapshot_repo_rev_keys(dvc_data)
 
-    cmd = ['dvc', 'update', '--rev', rev_lock, str(stage_path)]
+    cmd = ['dvc', 'update', '--rev', rev_lock, '--', str(stage_path)]
     if verbose:
         print(f"  Running: {' '.join(cmd)}")
 
@@ -2168,7 +2168,7 @@ def _fetch_url_import(
         print(f"  URL import from: {source_url}")
         print(f"  Running: dvc update {dvc_path}")
     
-    cmd = ['dvc', 'update', str(dvc_path)]
+    cmd = ['dvc', 'update', '--', str(dvc_path)]
     
     try:
         result = subprocess.run(

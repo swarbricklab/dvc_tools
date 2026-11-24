@@ -2658,7 +2658,7 @@ def _ensure_remote_ref_fresh(rev):
                          default=True, err=True):
             click.echo(f"  Fetching {remote}/{branch}…", err=True)
             result = subprocess.run(
-                ['git', 'fetch', remote, branch],
+                ['git', 'fetch', '--end-of-options', remote, branch],
                 capture_output=True, text=True,
             )
             if result.returncode != 0:

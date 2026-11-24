@@ -139,7 +139,7 @@ def _discover_changed_targets(
     control_specs = ['*.dvc', 'dvc.lock', 'dvc.yaml']
 
     def _git_name_only(args: List[str]) -> List[str]:
-        cmd = ['git', 'diff', '--name-only'] + args + ['--'] + control_specs
+        cmd = ['git', 'diff', '--name-only', '--end-of-options'] + args + ['--'] + control_specs
         result = subprocess.run(
             cmd, capture_output=True, text=True,
             cwd=str(cwd) if cwd else None,

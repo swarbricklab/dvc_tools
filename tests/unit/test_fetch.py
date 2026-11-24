@@ -1777,7 +1777,7 @@ class TestFetchUrlImport:
         assert 's3://bucket/data.csv' in message
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
-        assert cmd == ['dvc', 'update', str(dvc_file)]
+        assert cmd == ['dvc', 'update', '--', str(dvc_file)]
     
     def test_failed_update(self, dvc_project):
         """Failed dvc update returns failure with error."""
