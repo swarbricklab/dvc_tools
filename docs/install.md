@@ -364,7 +364,14 @@ immediately.
 
 Any check with a `command` key runs that shell command as a subprocess.
 Non-zero exit means failure.  Use this for linters, formatters, or any
-project-specific validation:
+project-specific validation.
+
+A `command` is taken only from your user config (`~/.config/dt/config.yaml`)
+or the system config. One set in a repository's `.dt/config.yaml` or
+`.dt/config.local.yaml` is not run; the hook prints a note with the
+`dt config set` line that adds it to your own config, and `dt hook list` shows
+it as "not run". Other settings for the check (`enabled`, `mode`) can still
+live in the repository.
 
 ```yaml
 hooks:

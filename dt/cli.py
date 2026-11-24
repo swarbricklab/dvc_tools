@@ -6382,6 +6382,9 @@ def hook_list():
             # Show extra settings
             if check.get('command'):
                 parts.append(f"  command: {check['command']}")
+            elif check.get('command_ignored'):
+                parts.append(f"  command (repository config, not run): "
+                             f"{check['command_ignored']}")
             if name == 'large-files':
                 parts.append(f"  max_size={check.get('max_size', '1MB')}")
             if not enabled:

@@ -14,6 +14,7 @@ the standard local > project > user > system precedence.
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -361,8 +362,47 @@ def _merge_check_settings(hook_name: str) -> Dict[str, Dict]:
         override = configured.get(name)
         if isinstance(override, dict):
             settings.update(override)
+        if settings.get('command') is not None:
+            own = _own_command(hook_name, name)
+            if own is None:
+                _note_unused_command(hook_name, name, settings['command'])
+                if name not in defaults:
+                    continue
+                settings['command'] = None
+            else:
+                settings['command'] = own
         merged[name] = settings
     return merged
+
+
+_noted_commands: set = set()
+
+
+def _own_command(hook_name: str, check_name: str) -> Optional[str]:
+    """The check's ``command`` from user or system config, if either sets it.
+
+    A command runs in a shell, so it is taken only from config the user
+    (or the site) wrote, never from config that came with a repository.
+    """
+    key = f'hooks.{hook_name}.checks.{check_name}.command'
+    for scope in cfg.TRUSTED_SCOPES:
+        found, value = cfg._scope_lookup(scope, key)
+        if found and isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _note_unused_command(hook_name: str, check_name: str, command) -> None:
+    key = (hook_name, check_name)
+    if key in _noted_commands:
+        return
+    _noted_commands.add(key)
+    print(f"dt: {hook_name}: not running {check_name!r} command "
+          f"{command!r} from repository config; to run it, set it in your "
+          f"own config:\n"
+          f"  dt config set hooks.{hook_name}.checks.{check_name}.command "
+          f"{shlex.quote(str(command))}",
+          file=sys.stderr)
 
 
 def _get_checks(hook_name: str) -> List[Dict]:
@@ -442,6 +482,12 @@ def _get_checks_with_sources(hook_name: str) -> List[Dict]:
             base.pop('source', None)
             base.update(settings)
             _upsert(name, base, scope)
+    for check in checks:
+        if check['command'] is not None:
+            own = _own_command(hook_name, check['name'])
+            if own is None:
+                check['command_ignored'] = check['command']
+            check['command'] = own
     return checks
 
 
