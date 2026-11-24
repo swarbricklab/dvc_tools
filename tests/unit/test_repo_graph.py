@@ -430,3 +430,24 @@ class TestRendering:
     def test_render_text_rejects_unknown_direction(self):
         with pytest.raises(ValueError, match='Unknown direction'):
             repo_graph_render.render_text(self._graph(), direction='sideways')
+
+
+class TestPinnedRevisionsAreNotOptions:
+    @pytest.mark.parametrize('rev', ['--upload-pack=touch /tmp/x', '-c', '@{-1}', ':/x'])
+    def test_option_shaped_rev_never_reaches_git(self, tmp_path, monkeypatch, rev):
+        calls = []
+        monkeypatch.setattr(repo_graph.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(repo_graph.dvc_deps, 'resolve_ref',
+                            lambda r, p: calls.append(['resolve', r]))
+        assert repo_graph._ensure_rev(tmp_path, rev) is False
+        assert calls == []
+
+    def test_fetch_ends_options_before_the_rev(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(repo_graph.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(repo_graph.dvc_deps, 'resolve_ref', lambda r, p: None)
+        repo_graph._ensure_rev(tmp_path, 'abc123')
+        [cmd] = calls
+        assert cmd.index('--end-of-options') < cmd.index('abc123')
