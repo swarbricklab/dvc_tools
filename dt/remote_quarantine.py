@@ -216,21 +216,49 @@ def _quarantine_root(remote_dir: Path) -> Path:
     return remote_dir / remote_verify.LEDGER_DIRNAME / QUARANTINE_DIRNAME
 
 
-def _real_quarantine_root(remote_dir: Path, create: bool) -> Path:
-    """The quarantine root, with every component a real directory in the
-    remote (never a link, which could lead anywhere)."""
-    cur = Path(remote_dir)
-    for part in (remote_verify.LEDGER_DIRNAME, QUARANTINE_DIRNAME):
-        cur = cur / part
-        if os.path.islink(cur) or (os.path.lexists(cur) and not os.path.isdir(cur)):
-            raise RemoteError(f"{cur} must be a real directory, not a link")
-        if create:
-            cur.mkdir(exist_ok=True)
-    return cur
+_RDIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
-def _move_entry(src: Path, dst: Path) -> None:
-    """Move one remote entry into quarantine (or back).
+def _open_remote(remote_dir: Path) -> int:
+    """Open the remote root once (a link at the root itself only if it is
+    this user's or root's, as for ``dt remote perms``)."""
+    from . import perms
+    try:
+        pfd = perms._open_root(remote_dir)
+        try:
+            return os.open('.', _RDIR, dir_fd=pfd)
+        finally:
+            os.close(pfd)
+    except OSError as exc:
+        raise RemoteError(f"Cannot open remote {remote_dir}: {exc}")
+
+
+def _walk(dir_fd: int, rel_dir: str, create: bool = False,
+          mode: int = 0o777) -> int:
+    """Open ``rel_dir`` under ``dir_fd`` one component at a time, never
+    following a link. With ``create``, missing components are made (with
+    ``mode``, less the umask). Returns a new directory fd."""
+    fd = os.dup(dir_fd)
+    try:
+        for part in [p for p in rel_dir.split('/') if p]:
+            if part in ('.', '..'):
+                raise OSError(errno.EINVAL, f"bad path component {part!r}")
+            if create:
+                try:
+                    os.mkdir(part, mode, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            nfd = os.open(part, _RDIR, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _move_entry(sdir: int, name: str, ddir: int) -> None:
+    """Move entry ``name`` from directory fd ``sdir`` to ``ddir`` (same name).
 
     A plain rename moves the entry itself (a link stays a link). Only a
     genuine cross-filesystem rename falls back to copy+unlink: a regular file
@@ -239,19 +267,22 @@ def _move_entry(src: Path, dst: Path) -> None:
     sticky directory) is raised.
     """
     try:
-        os.rename(src, dst)
+        os.rename(name, name, src_dir_fd=sdir, dst_dir_fd=ddir)
         return
     except OSError as e:
         if e.errno != errno.EXDEV:
             raise
-    st = os.lstat(src)
+    st = os.lstat(name, dir_fd=sdir)
     if stat.S_ISLNK(st.st_mode):
-        os.symlink(os.readlink(src), dst)
+        os.symlink(os.readlink(name, dir_fd=sdir), name, dir_fd=ddir)
     elif stat.S_ISREG(st.st_mode):
-        sfd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+        sfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=sdir)
         try:
-            dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                          stat.S_IMODE(st.st_mode))
+            if not stat.S_ISREG(os.fstat(sfd).st_mode):
+                raise OSError(errno.EINVAL, f"{name} is not a regular file")
+            dfd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                          stat.S_IMODE(st.st_mode), dir_fd=ddir)
+            ok = False
             try:
                 while True:
                     chunk = os.read(sfd, 1 << 20)
@@ -260,13 +291,27 @@ def _move_entry(src: Path, dst: Path) -> None:
                     view = memoryview(chunk)
                     while view:
                         view = view[os.write(dfd, view):]
+                ok = True
             finally:
                 os.close(dfd)
+                if not ok:
+                    try:
+                        os.unlink(name, dir_fd=ddir)
+                    except OSError:
+                        pass
         finally:
             os.close(sfd)
     else:
-        raise OSError(errno.EINVAL, f"{src} is not a regular file or link")
-    os.unlink(src)
+        raise OSError(errno.EINVAL, f"{name} is not a regular file or link")
+    os.unlink(name, dir_fd=sdir)
+
+
+def _lexists_in(dir_fd: int, name: str) -> bool:
+    try:
+        os.lstat(name, dir_fd=dir_fd)
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def build_dir_reverse_map(
@@ -420,61 +465,108 @@ def quarantine(
                 'missing': missing, 'plan': plan, 'dry_run': True,
                 'refused': refused}
 
-    # Ensure a fresh batch dir: two runs in the same UTC second must not share
-    # a dir (that would orphan the first run's blobs and overwrite its
-    # manifest). Suffix -1, -2, ... until we find an unused name.
-    try:
-        root = _real_quarantine_root(remote_dir, create=True)
-        qdir = root / ts
-        n = 1
-        while os.path.lexists(qdir):
-            qdir = root / f'{ts}-{n}'
-            n += 1
-        qdir.mkdir()  # fresh, ours
-        utils.set_group_writable(root, setgid=True)
-    except OSError as exc:
-        raise RemoteError(
-            f"Cannot create quarantine dir {qdir}: {exc}")
-
-    for item in plan:
-        rel = item['path']
-        if not remote_verify.safe_blob_rel(rel) or not remote_verify._dirs_are_real(
-                remote_dir, rel.rsplit('/', 1)[0]):
-            missing.append(item)
-            continue
-        src = remote_dir / rel
-        dst = qdir / rel
-        if not os.path.lexists(src):
-            missing.append(item)
-            continue
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            # The parent dir is writable, so a rename works even though the
-            # blob file itself is read-only.
-            _move_entry(src, dst)
-            moved.append({**item, 'quarantined_to': str(Path(ts) / rel)})
-            if verbose:
-                print(f"  quarantined {rel}")
-        except OSError as exc:
-            raise RemoteError(f"Failed to quarantine {rel}: {exc}")
+    if not ts or '/' in ts or ts in ('.', '..'):
+        raise RemoteError(f"Invalid quarantine batch name: {ts!r}")
 
     manifest = {
         'version': 1,
-        'quarantined_at': _dt.datetime.now(_dt.timezone.utc).isoformat(
-            timespec='seconds'),
         'remote_dir': str(remote_dir),
         'layout': layout,
-        'entries': moved,
-        'missing': missing,
     }
+    rfd = _open_remote(remote_dir)
     try:
-        with open(qdir / MANIFEST_FILENAME, 'w') as f:
-            json.dump(manifest, f, indent=2)
-    except OSError as exc:
-        raise RemoteError(f"Quarantined blobs but failed to write manifest: {exc}")
+        # Ensure a fresh batch dir: two runs in the same UTC second must not
+        # share a dir (that would orphan the first run's blobs and overwrite
+        # its manifest). Suffix -1, -2, ... until a new one is made. All of it
+        # is reached from the remote root without following links.
+        name = ts
+        try:
+            qroot = _walk(rfd, f'{remote_verify.LEDGER_DIRNAME}/{QUARANTINE_DIRNAME}',
+                          create=True)
+            try:
+                try:
+                    os.fchmod(qroot, utils.shared_dir_mode())
+                except OSError:
+                    pass  # not ours to chmod
+                n = 1
+                while True:
+                    try:
+                        os.mkdir(name, 0o755, dir_fd=qroot)  # fresh, ours
+                        break
+                    except FileExistsError:
+                        name = f'{ts}-{n}'
+                        n += 1
+                bfd = os.open(name, _RDIR, dir_fd=qroot)
+            finally:
+                os.close(qroot)
+            st = os.fstat(bfd)
+            if st.st_uid != os.getuid() or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                os.close(bfd)
+                raise OSError(errno.EPERM, f"new batch {name} was replaced")
+        except OSError as exc:
+            raise RemoteError(
+                f"Cannot create quarantine dir under {_quarantine_root(remote_dir)} "
+                f"(each part must be a real directory, not a link): {exc}")
+        qdir = _quarantine_root(remote_dir) / name
+        try:
+            for item in plan:
+                rel = item['path']
+                if not remote_verify.safe_blob_rel(rel):
+                    missing.append(item)
+                    continue
+                rel_dir, entry = rel.rsplit('/', 1)
+                try:
+                    sdir = _walk(rfd, rel_dir)
+                except OSError:
+                    missing.append(item)  # absent, or reached through a link
+                    continue
+                try:
+                    if not _lexists_in(sdir, entry):
+                        missing.append(item)
+                        continue
+                    ddir = _walk(bfd, rel_dir, create=True, mode=0o755)
+                    try:
+                        # The parent dir is writable, so a rename works even
+                        # though the blob file itself is read-only.
+                        _move_entry(sdir, entry, ddir)
+                    finally:
+                        os.close(ddir)
+                    moved.append({**item, 'quarantined_to': str(Path(name) / rel)})
+                    if verbose:
+                        print(f"  quarantined {rel}")
+                except OSError as exc:
+                    raise RemoteError(f"Failed to quarantine {rel}: {exc}")
+                finally:
+                    os.close(sdir)
+        finally:
+            # Record whatever was moved, even if a later move failed, so the
+            # batch can still be restored.
+            manifest.update({
+                'quarantined_at': _dt.datetime.now(_dt.timezone.utc).isoformat(
+                    timespec='seconds'),
+                'entries': moved,
+                'missing': missing,
+            })
+            try:
+                _write_manifest(bfd, manifest)
+            finally:
+                os.close(bfd)
+    finally:
+        os.close(rfd)
 
     return {'quarantine_dir': str(qdir), 'moved': moved,
             'missing': missing, 'plan': plan, 'refused': refused}
+
+
+def _write_manifest(bfd: int, manifest: dict) -> None:
+    try:
+        mfd = os.open(MANIFEST_FILENAME,
+                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                      0o644, dir_fd=bfd)
+        with os.fdopen(mfd, 'w') as f:
+            json.dump(manifest, f, indent=2)
+    except OSError as exc:
+        raise RemoteError(f"Quarantined blobs but failed to write manifest: {exc}")
 
 
 def list_quarantines(remote_dir: Path) -> List[dict]:
@@ -490,7 +582,10 @@ def list_quarantines(remote_dir: Path) -> List[dict]:
         info = {'timestamp': d.name, 'path': str(d), 'count': None,
                 'quarantined_at': None}
         try:
-            with open(manifest) as f:
+            fd = os.open(manifest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, 'r') as f:
+                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                    raise ValueError('not a regular file')
                 data = json.load(f)
             info['count'] = len(data.get('entries', []))
             info['quarantined_at'] = data.get('quarantined_at')
@@ -498,6 +593,89 @@ def list_quarantines(remote_dir: Path) -> List[dict]:
             pass
         out.append(info)
     return out
+
+
+def _check_batch_owner(fd: int, path: Path) -> None:
+    """A batch is restored only by the user who made it, and only while
+    nobody else can have changed it."""
+    import pwd
+    st = os.fstat(fd)
+    if st.st_uid != os.getuid():
+        try:
+            owner = pwd.getpwuid(st.st_uid).pw_name
+        except KeyError:
+            owner = str(st.st_uid)
+        raise RemoteError(
+            f"{path} belongs to another user ({owner}); only they can restore it")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RemoteError(
+            f"{path} is writable by others; check its contents, then "
+            f"'chmod -R go-w' the batch and retry")
+
+
+def _restore_batch(rfd: int, qfd: int, qdir: Path, manifest_path: Path,
+                   verbose: bool) -> Tuple[List[str], List[str], List[str]]:
+    _check_batch_owner(qfd, qdir)
+    # Distinguish an absent manifest from a present-but-corrupt one so the
+    # operator isn't told a physically-present batch "doesn't exist".
+    try:
+        mfd = os.open(MANIFEST_FILENAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                      dir_fd=qfd)
+    except FileNotFoundError:
+        raise RemoteError(f"No quarantine manifest at {manifest_path}")
+    except OSError as exc:
+        raise RemoteError(
+            f"Quarantine manifest at {manifest_path} is unreadable/corrupt: {exc}")
+    try:
+        if not stat.S_ISREG(os.fstat(mfd).st_mode):
+            raise RemoteError(f"{manifest_path} is not a regular file")
+        _check_batch_owner(mfd, manifest_path)
+        with os.fdopen(mfd, 'r') as f:
+            mfd = None
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise RemoteError(
+            f"Quarantine manifest at {manifest_path} is unreadable/corrupt: {exc}")
+    finally:
+        if mfd is not None:
+            os.close(mfd)
+    if not isinstance(data, dict):
+        raise RemoteError(f"Quarantine manifest at {manifest_path} is corrupt")
+
+    restored, skipped, absent = [], [], []
+    for item in data.get('entries', []):
+        rel = item.get('path') if isinstance(item, dict) else None
+        # Only plain blob paths, reached through real directories on both
+        # sides (opened without following links).
+        if not remote_verify.safe_blob_rel(rel):
+            absent.append(str(rel))
+            continue
+        rel_dir, name = rel.rsplit('/', 1)
+        try:
+            sdir = _walk(qfd, rel_dir)
+        except OSError:
+            absent.append(rel)
+            continue
+        try:
+            if not _lexists_in(sdir, name):
+                absent.append(rel)  # quarantined blob is gone (already restored?)
+                continue
+            ddir = _walk(rfd, rel_dir, create=True)
+            try:
+                if _lexists_in(ddir, name):
+                    skipped.append(rel)  # already re-pushed; leave quarantine copy
+                    continue
+                _move_entry(sdir, name, ddir)
+                restored.append(rel)
+                if verbose:
+                    print(f"  restored {rel}")
+            finally:
+                os.close(ddir)
+        except OSError as exc:
+            raise RemoteError(f"Failed to restore {rel}: {exc}")
+        finally:
+            os.close(sdir)
+    return restored, skipped, absent
 
 
 def restore_quarantine(
@@ -512,48 +690,22 @@ def restore_quarantine(
     """
     if not timestamp or '/' in timestamp or timestamp in ('.', '..'):
         raise RemoteError(f"Invalid quarantine batch name: {timestamp!r}")
-    qdir = _real_quarantine_root(remote_dir, create=False) / timestamp
-    if os.path.islink(qdir) or not os.path.isdir(qdir):
-        raise RemoteError(f"No quarantine batch at {qdir}")
+    qdir = _quarantine_root(remote_dir) / timestamp
     manifest_path = qdir / MANIFEST_FILENAME
-    # Distinguish an absent manifest from a present-but-corrupt one so the
-    # operator isn't told a physically-present batch "doesn't exist".
-    if not manifest_path.exists():
-        raise RemoteError(f"No quarantine manifest at {manifest_path}")
+    rfd = _open_remote(remote_dir)
     try:
-        with open(manifest_path) as f:
-            data = json.load(f)
-    except (OSError, ValueError) as exc:
-        raise RemoteError(
-            f"Quarantine manifest at {manifest_path} is unreadable/corrupt: "
-            f"{exc}")
-
-    restored, skipped, absent = [], [], []
-    for item in data.get('entries', []):
-        rel = item.get('path') if isinstance(item, dict) else None
-        # The manifest lives in a shared directory: only plain blob paths,
-        # through real directories on both sides.
-        if (not remote_verify.safe_blob_rel(rel)
-                or not remote_verify._dirs_are_real(qdir, rel.rsplit('/', 1)[0])
-                or not remote_verify._dirs_are_real(remote_dir, rel.rsplit('/', 1)[0])):
-            absent.append(str(rel))
-            continue
-        src = qdir / rel
-        dst = remote_dir / rel
-        if not os.path.lexists(src):
-            absent.append(rel)  # quarantined blob is gone (already restored?)
-            continue
-        if os.path.lexists(dst):
-            skipped.append(rel)  # already re-pushed; leave quarantine copy
-            continue
         try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            _move_entry(src, dst)
-            restored.append(rel)
-            if verbose:
-                print(f"  restored {rel}")
-        except OSError as exc:
-            raise RemoteError(f"Failed to restore {rel}: {exc}")
+            qfd = _walk(rfd, '/'.join(
+                (remote_verify.LEDGER_DIRNAME, QUARANTINE_DIRNAME, timestamp)))
+        except OSError:
+            raise RemoteError(f"No quarantine batch at {qdir}")
+        try:
+            restored, skipped, absent = _restore_batch(
+                rfd, qfd, qdir, manifest_path, verbose)
+        finally:
+            os.close(qfd)
+    finally:
+        os.close(rfd)
 
     return {'restored': restored, 'skipped': skipped, 'absent': absent,
             'quarantine_dir': str(qdir)}

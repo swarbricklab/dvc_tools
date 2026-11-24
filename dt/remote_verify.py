@@ -348,10 +348,16 @@ def _setup_ledger_dir(remote_dir: Path) -> Optional[Path]:
     ledger_dir = remote_dir / LEDGER_DIRNAME
     try:
         ledger_dir.mkdir(parents=True, exist_ok=True)
-        utils.set_group_writable(ledger_dir, setgid=True)
-        return ledger_dir
+        fd = os.open(ledger_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return None
+    try:
+        os.fchmod(fd, utils.shared_dir_mode())
+    except OSError:
+        pass  # not ours to chmod
+    finally:
+        os.close(fd)
+    return ledger_dir
 
 
 def verify_remote(

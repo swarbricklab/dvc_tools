@@ -289,7 +289,9 @@ quarantines each enclosing `.dir` alongside its bad members. It handles v2/v3/
 mixed layouts and the case where the bad blob *is* a `.dir`.
 
 Quarantined blobs land in `<remote>/.dt-verify/quarantine/<timestamp>/<rel-path>`
-with a `manifest.json` restore map.
+with a `manifest.json` restore map. A batch can be restored only by the user
+who created it, and only while no one else can write to it (older batches may
+need `chmod -R go-w` first); likewise only the creator can delete it.
 
 ## dt remote perms
 

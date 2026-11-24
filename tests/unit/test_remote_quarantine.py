@@ -416,6 +416,112 @@ class TestQuarantineNeverFollowsLinks:
 
 
 
+class TestRestoreOnlyOwnBatches:
+    def _batch(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        rel = f'files/md5/{good[:2]}/{good[2:]}'
+        res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH}],
+                           confirm=False)
+        return remote, Path(res['quarantine_dir']), rel
+
+    def test_new_batch_is_not_writable_by_others(self, tmp_path):
+        import os, stat
+        _, qdir, _ = self._batch(tmp_path)
+        for p in (qdir, qdir / q.MANIFEST_FILENAME):
+            assert not os.stat(p).st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+
+    def test_other_users_batch_is_refused(self, tmp_path, monkeypatch):
+        import os
+        remote, qdir, rel = self._batch(tmp_path)
+        real = os.getuid()
+        monkeypatch.setattr(os, 'getuid', lambda: real + 1)
+        with pytest.raises(q.RemoteError, match='another user'):
+            q.restore_quarantine(remote, qdir.name)
+        assert not (remote / rel).exists()
+
+    @pytest.mark.parametrize('target', ['dir', 'manifest'])
+    def test_group_writable_batch_is_refused(self, tmp_path, target):
+        import os
+        remote, qdir, rel = self._batch(tmp_path)
+        path = qdir if target == 'dir' else qdir / q.MANIFEST_FILENAME
+        os.chmod(path, 0o775 if target == 'dir' else 0o664)
+        with pytest.raises(q.RemoteError, match='writable by others'):
+            q.restore_quarantine(remote, qdir.name)
+        assert not (remote / rel).exists()
+
+    def test_restore_does_not_follow_linked_remote_dir(self, tmp_path):
+        import os, shutil
+        remote, qdir, rel = self._batch(tmp_path)
+        prefix = remote / rel.rsplit('/', 1)[0]
+        elsewhere = tmp_path / 'elsewhere'
+        elsewhere.mkdir()
+        shutil.rmtree(prefix)
+        os.symlink(elsewhere, prefix)
+        with pytest.raises(q.RemoteError):
+            q.restore_quarantine(remote, qdir.name)
+        assert list(elsewhere.iterdir()) == []
+
+    def test_restore_does_not_follow_linked_batch_subdir(self, tmp_path):
+        """A link inside the batch is never moved through."""
+        import os, shutil
+        remote, qdir, rel = self._batch(tmp_path)
+        sub = qdir / rel.rsplit('/', 1)[0]
+        moved = tmp_path / 'moved'
+        shutil.move(str(sub), str(moved))
+        os.symlink(moved, sub)
+        out = q.restore_quarantine(remote, qdir.name)
+        assert rel in out['absent']
+        assert not (remote / rel).exists()
+
+
+    @pytest.mark.parametrize('part', ['ledger', 'root'])
+    def test_quarantine_never_chmods_or_writes_through_links(self, tmp_path, part):
+        import os, stat
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        rel = f'files/md5/{good[:2]}/{good[2:]}'
+        victim = tmp_path / 'victim'
+        victim.mkdir(mode=0o700)
+        before = stat.S_IMODE(os.stat(victim).st_mode)
+        if part == 'ledger':
+            os.symlink(victim, remote / rv.LEDGER_DIRNAME)
+        else:
+            (remote / rv.LEDGER_DIRNAME).mkdir()
+            os.symlink(victim, remote / rv.LEDGER_DIRNAME / q.QUARANTINE_DIRNAME)
+        with pytest.raises(q.RemoteError):
+            q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH}],
+                         confirm=False)
+        assert stat.S_IMODE(os.stat(victim).st_mode) == before
+        assert list(victim.iterdir()) == []
+        assert (remote / rel).exists()
+
+
+    def test_manifest_written_when_a_move_fails(self, tmp_path, monkeypatch):
+        remote = tmp_path / 'remote'
+        a = _place_blob(remote, b'one\n')
+        b = _place_blob(remote, b'two\n')
+        rels = [f'files/md5/{h[:2]}/{h[2:]}' for h in (a, b)]
+        real_move = q._move_entry
+        calls = []
+
+        def flaky(sdir, name, ddir):
+            calls.append(name)
+            if len(calls) == 2:
+                raise OSError(5, 'boom')
+            real_move(sdir, name, ddir)
+
+        monkeypatch.setattr(q, '_move_entry', flaky)
+        with pytest.raises(q.RemoteError):
+            q.quarantine(remote, entries=[{'path': r, 'status': rv.STATUS_MISMATCH}
+                                          for r in rels], confirm=False)
+        [batch] = q.list_quarantines(remote)
+        assert batch['count'] == 1
+        monkeypatch.setattr(q, '_move_entry', real_move)
+        out = q.restore_quarantine(remote, batch['timestamp'])
+        assert len(out['restored']) == 1
+
+
 class TestReportEntriesAreConfirmed:
     def test_forged_entry_for_intact_blob_is_refused(self, tmp_path):
         remote = tmp_path / 'remote'
