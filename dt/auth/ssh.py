@@ -6,7 +6,7 @@ import platform
 import shlex
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -580,8 +580,12 @@ def ssh_setup(
     username: Optional[str] = None,
     config_file: Optional[Path] = None,
     verbose: bool = False,
+    add_new_hosts: Optional[bool] = None,
 ) -> List[SSHSetupResult]:
     """Set up SSH access for every discovered SSH and git endpoint.
+
+    Hosts not yet in the SSH config are set up only with the user's
+    agreement (see ``add_new_hosts``, as for ``dt auth setup``).
 
     1. Discover endpoints and collect unique SSH hosts.
     2. Resolve the username for each non-forge host (prompt if needed).
@@ -626,6 +630,14 @@ def ssh_setup(
         if verbose:
             print("No SSH hosts found in discovered endpoints.")
         return []
+
+    from .setup import _approve_new_hosts
+    new_hosts = [h for h in all_hosts if not _host_in_ssh_config(h, config_file)]
+    if new_hosts and not _approve_new_hosts(new_hosts, config_file, add_new_hosts):
+        for host in new_hosts:
+            del all_hosts[host]
+        if not all_hosts:
+            return []
 
     # -- 2. Resolve usernames BEFORE any SSH connections -------------------
     host_users: Dict[str, str] = {}
@@ -713,8 +725,14 @@ def ssh_setup(
     # SSH access often doesn't have agent access (e.g. paramiko, sshfs, or
     # PBS batch jobs), so we must also verify that the *specific key file*
     # is accepted — not just that "some" authentication method works.
+    def _kept(ep: Endpoint) -> bool:
+        return (ep.type in ssh_git_types
+                and _extract_ssh_host(ep.url) in all_hosts)
+
+    check_eps = [replace(ep, children=[c for c in ep.children if _kept(c)])
+                 for ep in endpoints if _kept(ep)]
     results_check = check_endpoints(
-        endpoints=endpoints,
+        endpoints=check_eps,
         type_filter=ssh_git_types,
         verbose=False,
     )

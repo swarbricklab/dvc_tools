@@ -3555,10 +3555,25 @@ class TestKeyAcceptedByHost:
 class TestSSHSetup:
     """Tests for ssh_setup orchestration."""
 
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
+    def test_new_hosts_need_agreement(self, mock_discover, mock_check,
+                                      mock_write, mock_ssh_dir, tmp_path):
+        mock_discover.return_value = [
+            Endpoint(type='ssh', url='ssh://u@new.example.org/p', source='t')]
+        with patch('dt.auth.setup.sys.stdin.isatty', return_value=False):
+            results = ssh_setup(config_file=tmp_path / 'cfg', verbose=False)
+        assert results == []
+        mock_write.assert_not_called()
+        mock_check.assert_not_called()
+        mock_ssh_dir.assert_not_called()
+
     @patch('dt.auth.ssh.check_endpoints')
     @patch('dt.auth.ssh.discover_endpoints', return_value=[])
     def test_no_endpoints(self, mock_discover, mock_check):
-        results = ssh_setup(verbose=False)
+        results = ssh_setup(add_new_hosts=True, verbose=False)
         assert results == []
 
     @patch('dt.auth.ssh._key_accepted_by_host', return_value=True)
@@ -3584,7 +3599,7 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(config_file=config_file, verbose=False)
+        results = ssh_setup(add_new_hosts=True, config_file=config_file, verbose=False)
         assert len(results) == 1
         assert results[0].already_ok is True
 
@@ -3614,7 +3629,7 @@ class TestSSHSetup:
         mock_deploy.return_value = True
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username=None, config_file=config_file, verbose=False,
         )
 
@@ -3656,7 +3671,7 @@ class TestSSHSetup:
         mock_copy_id.return_value = True
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username='alice', config_file=config_file, verbose=False,
         )
 
@@ -3693,7 +3708,7 @@ class TestSSHSetup:
         mock_copy_id.return_value = True
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username='user', config_file=config_file, verbose=False,
         )
 
@@ -3726,7 +3741,7 @@ class TestSSHSetup:
         mock_gen_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username='user', config_file=config_file, verbose=False,
         )
 
@@ -3759,7 +3774,7 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username='xy1234', config_file=config_file, verbose=False,
         )
 
@@ -3800,7 +3815,7 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username=None, config_file=config_file, verbose=False,
         )
 
@@ -3837,7 +3852,7 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username='user', config_file=config_file, verbose=False,
         )
 
@@ -3871,7 +3886,7 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username=None, config_file=config_file, verbose=False,
         )
 
@@ -3910,7 +3925,7 @@ class TestSSHSetup:
 
         config_file = tmp_path / 'ssh_config'
         # No username — but should NOT prompt since only forge hosts
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username=None, config_file=config_file, verbose=False,
         )
 
