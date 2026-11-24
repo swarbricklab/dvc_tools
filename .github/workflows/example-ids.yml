@@ -1,0 +1,35 @@
+name: Example identifiers
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Only placeholder logins in tracked files
+        # Docs, help text and tests use placeholder NCI-style logins
+        # (two letters + four digits). Anything else must be added to the
+        # allow-list deliberately.
+        run: |
+          set -euo pipefail
+          ALLOW='^(ab1234|cd1234|cd5678|ef9012|gh3456|xy1234|cb2431)$'
+          found=$(git grep -ohwE '[a-z]{2}[0-9]{4}' -- . ':!.github/workflows/example-ids.yml' \
+                    | sort -u | grep -vE "$ALLOW" || true)
+          if [[ -n "$found" ]]; then
+            echo "::error::Non-placeholder login-like identifiers found:"
+            for id in $found; do
+              git grep -nw "$id" -- . ':!.github/workflows/example-ids.yml'
+            done
+            exit 1
+          fi
+          echo "OK"

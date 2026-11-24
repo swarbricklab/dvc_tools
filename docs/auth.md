@@ -581,7 +581,7 @@ For non-interactive operation, provide a `--config` YAML file:
 ```yaml
 hosts:
   gadi-dm.nci.org.au:
-    username: jr9959
+    username: xy1234
   github.com:
     # forge host — no username needed
 ```
@@ -598,7 +598,7 @@ hosts:
 dt auth setup
 
 # Provide a default SSH username
-dt auth setup -u jr9959
+dt auth setup -u xy1234
 
 # Fully non-interactive with a config file
 dt auth setup --config hosts.yaml

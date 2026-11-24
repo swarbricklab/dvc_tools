@@ -2924,7 +2924,7 @@ def auth_setup(username, config_path, ssh_config_file, repo_url, verbose):
     \b
       hosts:
         gadi-dm.nci.org.au:
-          username: jr9959
+          username: xy1234
         github.com: {}
 
     Use --repo to set up access to a repo you have not cloned — enough to
@@ -2937,7 +2937,7 @@ def auth_setup(username, config_path, ssh_config_file, repo_url, verbose):
     \b
     Examples:
       dt auth setup                        # interactive
-      dt auth setup -u jr9959              # default SSH username
+      dt auth setup -u xy1234              # default SSH username
       dt auth setup --config hosts.yaml    # non-interactive
       dt auth setup --repo data-repo       # a repo you have not cloned
       dt auth setup -v                     # verbose output
@@ -5525,8 +5525,8 @@ def index_set(site_cache_root, site_cache_path, name):
 
     \b
     Examples:
-        dt index set --root /scratch/a56/jr9959/dvc/site
-        dt index set --path /scratch/a56/jr9959/dvc/site/my-repo
+        dt index set --root /scratch/a56/xy1234/dvc/site
+        dt index set --path /scratch/a56/xy1234/dvc/site/my-repo
     """
     try:
         target = site_cache_mod.init_site_cache(
@@ -5554,8 +5554,8 @@ def index_migrate(site_cache_root, site_cache_path, name):
 
     \b
     Examples:
-        dt index migrate --root /scratch/a56/jr9959/dvc/site
-        dt index migrate --path /scratch/a56/jr9959/dvc/site/my-repo
+        dt index migrate --root /scratch/a56/xy1234/dvc/site
+        dt index migrate --path /scratch/a56/xy1234/dvc/site/my-repo
     """
     try:
         target = site_cache_mod.resolve_path(

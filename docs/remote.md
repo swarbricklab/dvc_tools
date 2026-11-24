@@ -393,13 +393,13 @@ Repair is therefore inherently per-owner. The report is grouped that way, and
 its main output is the worklist telling each person what only they can run:
 
 ```
-1603 directories deviate from policy, 344 prefix directories missing
+1500 directories deviate from policy, 300 prefix directories missing
 
 Needs the owner to run it:
-  hz7248         772 directories
-  jr9959         357 directories  (you)
-  sl6147         266 directories
-  hk8797         196 directories
+  cd5678         700 directories
+  xy1234         350 directories  (you)
+  ef9012         250 directories
+  gh3456         200 directories
 
 Each owner: dt remote perms --all --fix
 ```

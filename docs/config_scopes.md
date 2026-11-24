@@ -29,7 +29,7 @@ Personal settings that apply in every repository you work in.
 
 ```bash
 dt config set owner myorg
-dt config set username jr9959
+dt config set username xy1234
 dt config set cache.root /g/data/a56/dvc_cache
 ```
 
@@ -60,8 +60,8 @@ Because project scope outranks user scope, a value committed here overrides
 what a collaborator set for themselves. `dt config set` says so when it happens:
 
 ```
-$ dt config set cache.root /scratch/a56/jr9959/cache
-Set cache.root=/scratch/a56/jr9959/cache in user config (/home/jr9959/.config/dt/config.yaml).
+$ dt config set cache.root /scratch/a56/xy1234/cache
+Set cache.root=/scratch/a56/xy1234/cache in user config (/home/xy1234/.config/dt/config.yaml).
 Note: cache.root is also set in project config (/path/to/repo/.dt/config.yaml), which takes
       precedence over user — the effective value is unchanged ('/g/data/a56/dvc_cache').
       Precedence is local > project > user > system. To change the value that applies,

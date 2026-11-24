@@ -8,7 +8,7 @@ YAML config format::
 
     hosts:
       gadi-dm.nci.org.au:
-        username: jr9959
+        username: xy1234
       github.com:
         # forge — no username needed
 

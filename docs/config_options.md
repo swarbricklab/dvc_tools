@@ -10,7 +10,7 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 |--------|-------------|---------|
 | `owner` | Default GitHub owner (user or org) for [short repository names](clone.md#short-name-feature) | `myorg` |
 | `team` | GitHub team for [`gh repo create --team`](https://cli.github.com/manual/gh_repo_create) | `analysts` |
-| `username` | Default SSH username for remote hosts, used by [`dt clone`](clone.md) and [`dt auth setup`](auth.md) | `jr9959` |
+| `username` | Default SSH username for remote hosts, used by [`dt clone`](clone.md) and [`dt auth setup`](auth.md) | `xy1234` |
 | `cache.root` | Root director**y** for [shared external caches](cache.md). May also be a list, in which case the **first** entry is the primary cache and the rest are reported by `dt auth list`. Manage with `dt config add/remove cache.root <path>` | `/g/data/a56/dvc_cache` |
 | `remote.root` | Root director**ies** for [DVC remote storage](remote.md). A single path, or a list. The **first** entry is where new remotes are created; the rest are also scanned by `--all`. Manage with `dt config add/remove remote.root <path>` | `/g/data/a56/dvc/analysis` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
@@ -40,7 +40,7 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `secrets.gcp.locations` | Region(s) for new GCP secrets; unset means GCP automatic (global) replication | `australia-southeast1` |
 | `secrets.default_endpointurl` | Fallback S3 endpoint for [`dt auth credentials configure-remotes`](auth.md#dt-auth-credentials-configure-remotes) when `--endpoint` is omitted | `https://<account>.r2.cloudflarestorage.com` |
 | `summary.output_dir` | Output directory for [summary files](summary.md) | `docs` |
-| `archive.staging_dir` | Local staging directory for [`dt remote archive`](archive.md#configuration) inner tarballs (no default — required) | `/scratch/a56/jr9959/dt-archive` |
+| `archive.staging_dir` | Local staging directory for [`dt remote archive`](archive.md#configuration) inner tarballs (no default — required) | `/scratch/a56/xy1234/dt-archive` |
 | `archive.backend_root` | Base path on the archive backend (default `dt-archive`) | `dt-archive` |
 | `archive.registry_path` | Central archive register directory; unset disables registration | `/g/data/a56/dt-archives/registry` |
 | `archive.stage_jobs` | Parallel workers for `archive stage` (default `min(PBS_NCPUS or nproc, 8)`) | `8` |
@@ -71,7 +71,7 @@ Used by `dt init` when suggesting the `gh repo create` command. If set, adds `--
 Default SSH username used when setting up access to remote hosts (e.g. your NCI login for `gadi-dm.nci.org.au`). Both `dt clone` and `dt auth setup` use it as the default for `--username`, so setting it once avoids being prompted for your username on every run.
 
 ```bash
-dt config set --user username jr9959
+dt config set --user username xy1234
 ```
 
 Resolution order during auth setup: a per-host `--config` YAML file, then `--username` (which defaults to this config value), then a username embedded in the remote URL, then an interactive prompt. SSH/forge hosts like `github.com` always use `git` and ignore this setting.

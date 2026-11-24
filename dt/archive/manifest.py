@@ -11,11 +11,11 @@ Schema version 2 (folder-per-prefix layout)::
     archive_name: projx-2026-05
     source_remote: /g/data/a56/dvc/projx
     created_at: 2026-05-28T12:34:56+00:00
-    created_by: jr9959
+    created_by: xy1234
     git_ref: <sha>
     dt_version: 0.6.0
     backend: mdss
-    backend_dir: jr9959/archive/projx/projx-2026-05/
+    backend_dir: xy1234/archive/projx/projx-2026-05/
     layout: folder-per-prefix
     contents:
       total_objects: 42137

@@ -3303,13 +3303,13 @@ class TestParseSSHConfig:
             "    User git\n"
             "\n"
             "Host gadi.nci.org.au\n"
-            "    User jr9959\n"
+            "    User xy1234\n"
             "    ForwardAgent yes\n"
         )
         hosts = _parse_ssh_config(config_file)
         assert len(hosts) == 2
         assert hosts['github.com']['User'] == 'git'
-        assert hosts['gadi.nci.org.au']['User'] == 'jr9959'
+        assert hosts['gadi.nci.org.au']['User'] == 'xy1234'
 
     def test_comments_ignored(self, tmp_path):
         config_file = tmp_path / 'config'
@@ -3370,14 +3370,14 @@ class TestWriteSSHConfigStanza:
         key_path = Path('/home/user/.ssh/id_ed25519')
 
         _write_ssh_config_stanza(
-            host='gadi.nci.org.au', user='jr9959',
+            host='gadi.nci.org.au', user='xy1234',
             identity_file=key_path, config_path=config_file,
         )
 
         content = config_file.read_text()
         assert 'Host github.com' in content
         assert 'Host gadi.nci.org.au' in content
-        assert 'User jr9959' in content
+        assert 'User xy1234' in content
 
     def test_no_user(self, tmp_path):
         config_file = tmp_path / 'config'
@@ -3760,7 +3760,7 @@ class TestSSHSetup:
 
         config_file = tmp_path / 'ssh_config'
         results = ssh_setup(
-            username='jr9959', config_file=config_file, verbose=False,
+            username='xy1234', config_file=config_file, verbose=False,
         )
 
         assert len(results) == 1
