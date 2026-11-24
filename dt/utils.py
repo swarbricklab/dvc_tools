@@ -221,6 +221,30 @@ def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
     return cache_dir / prefix / suffix
 
 
+def read_dir_entries(cache_dir: Path, dir_hash: str) -> Optional[list]:
+    """Entries of the ``.dir`` manifest *dir_hash* in *cache_dir*, or None.
+
+    Only a manifest whose content matches its id is read (a shared cache can
+    be written by others), and only entries naming a valid md5 object are
+    returned.
+    """
+    import json
+    from . import cache_ops
+    if not is_md5_oid(dir_hash) or not dir_hash.endswith('.dir'):
+        return None
+    raw = cache_ops.read_dir_manifest(hash_to_cache_path(cache_dir, dir_hash), dir_hash)
+    if raw is None:
+        return None
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    return [e for e in entries
+            if isinstance(e, dict) and is_md5_oid(e.get('md5'))]
+
+
 def oid_to_path(file_hash: str) -> Optional[Path]:
     """Convert a file hash to its cache path using DVC's cache object.
     

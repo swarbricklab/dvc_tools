@@ -1507,7 +1507,7 @@ def _fetch_dir_only_from_remote(
     for stage in all_stages:
         hash_paths, is_v2 = _collect_hashes_from_stage(stage)
         for h, _path in hash_paths:
-            if h.endswith('.dir'):
+            if h.endswith('.dir') and _usable_hash(h, stage.addressing):
                 if is_v2:
                     v2_dir_hashes.append(h)
                 else:
@@ -2147,10 +2147,8 @@ def _fetch_url_import(
             md5 = outs[0].get('md5', '')
             if md5:
                 primary_cache = utils.get_cache_dir()
-                if primary_cache:
-                    hash_clean = md5.replace('.dir', '')
-                    suffix = '.dir' if md5.endswith('.dir') else ''
-                    cache_file = primary_cache / hash_clean[:2] / (hash_clean[2:] + suffix)
+                if primary_cache and utils.is_md5_oid(md5):
+                    cache_file = utils.hash_to_cache_path(primary_cache, md5)
                     if cache_file.exists():
                         return (True, "Already in cache (URL import)")
     

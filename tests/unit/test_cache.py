@@ -199,17 +199,18 @@ class TestExpandDirHashes:
         cache_dir = tmp_path / 'cache' / 'files' / 'md5'
         cache_dir.mkdir(parents=True)
         
-        # Create .dir file
-        dir_hash = 'abcdef1234567890abcdef1234567890'
-        dir_subdir = cache_dir / dir_hash[:2]
-        dir_subdir.mkdir()
-        
-        dir_file = dir_subdir / (dir_hash[2:] + '.dir')
+        # Create .dir file, named by its content as DVC does
+        import hashlib
         dir_contents = [
             {'md5': '1111111111111111111111111111111a', 'relpath': 'file1.txt'},
             {'md5': '2222222222222222222222222222222b', 'relpath': 'subdir/file2.txt'},
+            {'md5': '../../../../etc/passwd', 'relpath': 'evil'},
         ]
-        dir_file.write_text(json.dumps(dir_contents))
+        raw = json.dumps(dir_contents).encode()
+        dir_hash = hashlib.md5(raw).hexdigest()
+        dir_subdir = cache_dir / dir_hash[:2]
+        dir_subdir.mkdir()
+        (dir_subdir / (dir_hash[2:] + '.dir')).write_bytes(raw)
         
         return cache_dir, dir_hash
     
@@ -225,7 +226,20 @@ class TestExpandDirHashes:
         assert full_hash in expanded
         assert '1111111111111111111111111111111a' in expanded
         assert '2222222222222222222222222222222b' in expanded
-        assert len(expanded) == 3
+        assert len(expanded) == 3  # the non-object entry is dropped
+
+    def test_manifest_not_matching_its_id_is_not_expanded(self, cache_with_dir):
+        cache_dir, dir_hash = cache_with_dir
+        p = cache_dir / dir_hash[:2] / (dir_hash[2:] + '.dir')
+        p.write_text(json.dumps([{'md5': '3' * 32, 'relpath': 'x'}]))
+        expanded, _ = cache.expand_dir_hashes(cache_dir, [dir_hash + '.dir'], {})
+        assert expanded == [dir_hash + '.dir']
+
+    def test_invalid_ids_are_reported_missing_not_resolved(self, tmp_path):
+        cache_dir = tmp_path / 'cache' / 'files' / 'md5'
+        cache_dir.mkdir(parents=True)
+        info = cache.get_cache_file_info(cache_dir, ['../../etc/passwd', '/etc/hosts'])
+        assert info == [('../../etc/passwd', None, None), ('/etc/hosts', None, None)]
     
     def test_handles_missing_dir_file(self, tmp_path):
         """Handles missing .dir file gracefully."""
@@ -259,17 +273,17 @@ class TestGetHashForPathInDir:
         cache_dir = tmp_path / 'cache' / 'files' / 'md5'
         cache_dir.mkdir(parents=True)
         
-        dir_hash = 'abcdef1234567890abcdef1234567890.dir'
-        hash_only = dir_hash[:-4]
+        import hashlib
+        dir_contents = [
+            {'md5': 'f1' * 16, 'relpath': 'file1.txt'},
+            {'md5': 'f2' * 16, 'relpath': 'subdir/file2.txt'},
+        ]
+        raw = json.dumps(dir_contents).encode()
+        hash_only = hashlib.md5(raw).hexdigest()
+        dir_hash = hash_only + '.dir'
         dir_subdir = cache_dir / hash_only[:2]
         dir_subdir.mkdir()
-        
-        dir_file = dir_subdir / (hash_only[2:] + '.dir')
-        dir_contents = [
-            {'md5': 'file1hash', 'relpath': 'file1.txt'},
-            {'md5': 'file2hash', 'relpath': 'subdir/file2.txt'},
-        ]
-        dir_file.write_text(json.dumps(dir_contents))
+        (dir_subdir / (hash_only[2:] + '.dir')).write_bytes(raw)
         
         return cache_dir, dir_hash
     
@@ -279,7 +293,7 @@ class TestGetHashForPathInDir:
         
         result = cache.get_hash_for_path_in_dir(cache_dir, dir_hash, 'file1.txt')
         
-        assert result == 'file1hash'
+        assert result == 'f1' * 16
     
     def test_finds_nested_file(self, cache_with_dir_file):
         """Finds hash for nested file."""
@@ -287,7 +301,7 @@ class TestGetHashForPathInDir:
         
         result = cache.get_hash_for_path_in_dir(cache_dir, dir_hash, 'subdir/file2.txt')
         
-        assert result == 'file2hash'
+        assert result == 'f2' * 16
     
     def test_returns_none_when_not_found(self, cache_with_dir_file):
         """Returns None when file not in directory manifest."""
@@ -446,3 +460,41 @@ class TestValidateNeverLeavesCache:
         with _pytest.raises(OSError):
             cache_mod._unlink_object(cache_dir / 'ab' / 'x')
         assert (outside / 'x').exists()
+
+
+def _dir_object(cache_dir, entries):
+    import hashlib
+    raw = json.dumps(entries).encode()
+    h = hashlib.md5(raw).hexdigest()
+    (cache_dir / h[:2]).mkdir(parents=True, exist_ok=True)
+    (cache_dir / h[:2] / (h[2:] + '.dir')).write_bytes(raw)
+    return h + '.dir'
+
+
+class TestOnlyVerifiedDirectoryContentsAreActedOn:
+    def test_children_need_a_verified_manifest(self, tmp_path):
+        cache_dir = tmp_path / 'files' / 'md5'
+        a, b, other = 'a' * 32, 'b' * 32, 'c' * 32
+        d = _dir_object(cache_dir, [{'md5': a, 'relpath': 'x'}, {'md5': b, 'relpath': 'y'}])
+        paths = {d: 'data', a: 'data/x', b: 'data/y', other: 'data/z', 'e' * 32: 'file.txt'}
+        keep, dropped = cache._confirmed_hashes(
+            cache_dir, [d, a, b, other, 'e' * 32, '../../etc/passwd'], paths)
+        assert set(keep) == {d, a, b, 'e' * 32}
+        assert set(dropped) == {other, '../../etc/passwd'}
+
+    def test_unverifiable_manifest_protects_its_children(self, tmp_path):
+        cache_dir = tmp_path / 'files' / 'md5'
+        a = 'a' * 32
+        d = _dir_object(cache_dir, [{'md5': a, 'relpath': 'x'}])
+        (cache_dir / d[:2] / (d[2:-4] + '.dir')).write_text('[]')  # no longer matches
+        keep, dropped = cache._confirmed_hashes(cache_dir, [d, a], {d: 'data', a: 'data/x'})
+        assert keep == [d] and dropped == [a]
+
+    def test_parent_search_skips_bad_manifests(self, tmp_path):
+        cache_dir = tmp_path / 'files' / 'md5'
+        a = 'a' * 32
+        good = _dir_object(cache_dir, [{'md5': a, 'relpath': 'x'}])
+        (cache_dir / 'ff').mkdir()
+        (cache_dir / 'ff' / ('0' * 30 + '.dir')).write_text('{"not": "a list"}')
+        os.mkfifo(cache_dir / 'ff' / ('1' * 30 + '.dir'))
+        assert cache.get_parent_dir_hash(cache_dir, a) == good

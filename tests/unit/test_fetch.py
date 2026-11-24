@@ -2045,7 +2045,7 @@ class TestFetchDirOnlyFromRemote:
         """All .dir hashes already in local cache returns early."""
         from dt.fetch import _fetch_dir_only_from_remote
 
-        stage = self._make_stage('data.dvc', ['abc123.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -2062,7 +2062,7 @@ class TestFetchDirOnlyFromRemote:
         from dt.fetch import _fetch_dir_only_from_remote
         from dvc_data.hashfile.hash_info import HashInfo
 
-        stage = self._make_stage('data.dvc', ['abc123.dir', 'def456.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir', 'dddddddddddddddddddddddddddddddd.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -2070,7 +2070,7 @@ class TestFetchDirOnlyFromRemote:
         mock_repo.cloud.get_remote_odb.return_value = MagicMock()
 
         mock_result = MagicMock()
-        mock_result.transferred = {HashInfo('md5', 'abc123.dir'), HashInfo('md5', 'def456.dir')}
+        mock_result.transferred = {HashInfo('md5', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'), HashInfo('md5', 'dddddddddddddddddddddddddddddddd.dir')}
         mock_result.failed = set()
 
         mock_local_odb = mock_repo.cache.local
@@ -2089,7 +2089,7 @@ class TestFetchDirOnlyFromRemote:
         from dt.fetch import _fetch_dir_only_from_remote
         from dvc_data.hashfile.hash_info import HashInfo
 
-        stage = self._make_stage('data.dvc', ['abc123.dir', 'def456.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir', 'dddddddddddddddddddddddddddddddd.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -2097,12 +2097,12 @@ class TestFetchDirOnlyFromRemote:
         mock_repo.cloud.get_remote_odb.return_value = MagicMock()
 
         mock_result = MagicMock()
-        mock_result.transferred = {HashInfo('md5', 'abc123.dir')}
-        mock_result.failed = {HashInfo('md5', 'def456.dir')}
+        mock_result.transferred = {HashInfo('md5', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir')}
+        mock_result.failed = {HashInfo('md5', 'dddddddddddddddddddddddddddddddd.dir')}
 
         mock_local_odb = mock_repo.cache.local
-        # abc123.dir transferred OK, def456.dir failed
-        mock_local_odb.exists.side_effect = lambda h: h == 'abc123.dir'
+        # aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir transferred OK, dddddddddddddddddddddddddddddddd.dir failed
+        mock_local_odb.exists.side_effect = lambda h: h == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'
 
         with patch('dvc.repo.Repo', return_value=mock_repo), \
              patch('dt.fetch._hash_in_odb', return_value=False), \
@@ -2147,11 +2147,24 @@ class TestFetchDirOnlyFromRemote:
         else:
             assert not os.path.lexists(landed)
 
+    def test_forged_dir_ids_never_reach_the_cache(self):
+        """An id that is not an md5 object never becomes a path."""
+        from dt.fetch import _fetch_dir_only_from_remote
+        stage = self._make_stage('data.dvc', ['ab/home/victim/notes.dir', '../../etc/x.dir'])
+        cat = self._make_categorization([stage])
+        mock_repo = MagicMock()
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dvc_data.hashfile.transfer.transfer') as transfer:
+            results = _fetch_dir_only_from_remote('myremote', cat)
+        transfer.assert_not_called()
+        mock_repo.cache.local.oid_to_path.assert_not_called()
+        assert 'No .dir' in results[0][2]
+
     def test_remote_open_error(self):
         """Error opening remote ODB reported cleanly."""
         from dt.fetch import _fetch_dir_only_from_remote
 
-        stage = self._make_stage('data.dvc', ['abc123.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -2168,7 +2181,7 @@ class TestFetchDirOnlyFromRemote:
         """Hash not on remote is detected via post-transfer verification."""
         from dt.fetch import _fetch_dir_only_from_remote
 
-        stage = self._make_stage('data.dvc', ['abc123.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -2196,7 +2209,7 @@ class TestFetchDirOnlyFromRemote:
         from dt.fetch import _fetch_dir_only_from_remote
         from dvc_data.hashfile.hash_info import HashInfo
 
-        stage = self._make_stage('data.dvc', ['abc123.dir'],
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'],
                                  hash_name='md5-dos2unix')
         cat = self._make_categorization([stage])
 
@@ -2207,7 +2220,7 @@ class TestFetchDirOnlyFromRemote:
         mock_repo.cloud.get_remote_odb.return_value = mock_remote_odb
 
         mock_result = MagicMock()
-        mock_result.transferred = {HashInfo('md5', 'abc123.dir')}
+        mock_result.transferred = {HashInfo('md5', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir')}
         mock_result.failed = set()
 
         # After transfer, hash exists in legacy local cache
@@ -2236,9 +2249,9 @@ class TestFetchDirOnlyFromRemote:
         from dt.fetch import _fetch_dir_only_from_remote
         from dvc_data.hashfile.hash_info import HashInfo
 
-        v2_stage = self._make_stage('old.dvc', ['v2hash.dir'],
+        v2_stage = self._make_stage('old.dvc', ['22222222222222222222222222222222.dir'],
                                     hash_name='md5-dos2unix')
-        v3_stage = self._make_stage('new.dvc', ['v3hash.dir'],
+        v3_stage = self._make_stage('new.dvc', ['33333333333333333333333333333333.dir'],
                                     hash_name='md5')
         cat = self._make_categorization([v2_stage, v3_stage])
 

@@ -6,6 +6,7 @@ Handles external shared cache setup and configuration for HPC environments.
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -234,26 +235,17 @@ def expand_dir_hashes(
         expanded.append(file_hash)
         
         if file_hash.endswith('.dir'):
-            # Read the .dir file to get contained file hashes
-            cache_path = hash_to_cache_path(cache_dir, file_hash)
+            # Read the (verified) .dir manifest to get contained file hashes;
+            # an unreadable or mismatching one is not expanded.
             dir_path = paths.get(file_hash, '')
-            if cache_path.exists():
-                try:
-                    with open(cache_path, 'r') as f:
-                        dir_contents = json.load(f)
-                    # Each entry has 'md5' key with the file hash and 'relpath'
-                    for entry in dir_contents:
-                        if 'md5' in entry:
-                            child_hash = entry['md5']
-                            if child_hash not in expanded:
-                                expanded.append(child_hash)
-                            # Build path for child
-                            if dir_path and 'relpath' in entry:
-                                child_path = f"{dir_path}/{entry['relpath']}"
-                                paths[child_hash] = child_path
-                except (json.JSONDecodeError, OSError, KeyError):
-                    # If we can't read the .dir file, just skip expansion
-                    pass
+            for entry in utils.read_dir_entries(cache_dir, file_hash) or []:
+                child_hash = entry['md5']
+                if child_hash not in expanded:
+                    expanded.append(child_hash)
+                # Build path for child
+                if dir_path and 'relpath' in entry:
+                    child_path = f"{dir_path}/{entry['relpath']}"
+                    paths[child_hash] = child_path
     
     return expanded, paths
 
@@ -273,22 +265,9 @@ def get_hash_for_path_in_dir(
     Returns:
         The file's hash if found, None otherwise
     """
-    import json
-    
-    cache_path = hash_to_cache_path(cache_dir, dir_hash)
-    if not cache_path.exists():
-        return None
-    
-    try:
-        with open(cache_path, 'r') as f:
-            dir_contents = json.load(f)
-        
-        for entry in dir_contents:
-            if entry.get('relpath') == relative_path:
-                return entry.get('md5')
-    except (json.JSONDecodeError, OSError, KeyError):
-        pass
-    
+    for entry in utils.read_dir_entries(cache_dir, dir_hash) or []:
+        if entry.get('relpath') == relative_path:
+            return entry.get('md5')
     return None
 
 
@@ -406,7 +385,12 @@ def get_cache_file_info(
     """
     results = []
     for file_hash in file_hashes:
-        cache_path = hash_to_cache_path(cache_dir, file_hash)
+        try:
+            cache_path = hash_to_cache_path(cache_dir, file_hash)
+        except ValueError:
+            # Not an object id at all: reported as missing, never touched.
+            results.append((file_hash, None, None))
+            continue
         if cache_path.exists():
             try:
                 size = cache_path.stat().st_size
@@ -417,6 +401,30 @@ def get_cache_file_info(
             results.append((file_hash, cache_path, None))
     
     return results
+
+
+def _confirmed_hashes(cache_dir: Path, hashes: List[str],
+                      hash_to_path: Dict[str, str]) -> Tuple[List[str], List[str]]:
+    """Split *hashes* into those that may be acted on and the rest.
+
+    Outputs themselves always qualify. A file inside a tracked directory
+    qualifies only if that directory's manifest, read and verified from the
+    cache, lists it. Anything that is not an object id never qualifies.
+    """
+    dirs = {hash_to_path.get(h, ''): h for h in hashes if h.endswith('.dir')}
+    listed: set = set()
+    for dir_hash in dirs.values():
+        listed.update(e['md5'] for e in utils.read_dir_entries(cache_dir, dir_hash) or [])
+    keep: List[str] = []
+    dropped: List[str] = []
+    for h in hashes:
+        path = hash_to_path.get(h, '')
+        inside = any(d and path.startswith(d + '/') for d in dirs)
+        if not utils.is_md5_oid(h) or (inside and h not in listed):
+            dropped.append(h)
+        else:
+            keep.append(h)
+    return keep, dropped
 
 
 def remove_cache_files(
@@ -471,9 +479,11 @@ def remove_cache_files(
         }
     
     # _collect_indexes already returns both directory manifests (.dir files)
-    # and all contained files, so no expansion is needed
-    all_hashes = manifest['files']
+    # and all contained files. DVC reads those manifests from the cache as
+    # they are, so a file inside a tracked directory is only removed if the
+    # directory's own (verified) manifest lists it.
     hash_to_path = manifest['paths']
+    all_hashes, unlisted = _confirmed_hashes(cache_dir, manifest['files'], hash_to_path)
     
     # Get cache file info (filter to files that exist)
     file_info = get_cache_file_info(cache_dir, all_hashes)
@@ -491,7 +501,11 @@ def remove_cache_files(
         ]
     
     deleted = []
-    missing = []
+    missing = [(hash_to_path.get(h, h), h) for h in unlisted]
+    if unlisted:
+        print(f"Warning: leaving {len(unlisted)} cache entr"
+              f"{'y' if len(unlisted) == 1 else 'ies'} not listed by a verified "
+              f"directory manifest (or not an object id)", file=sys.stderr)
     failed = []
     total_size = 0
     blocked = False
@@ -663,24 +677,25 @@ def get_parent_dir_hash(
     Returns:
         The .dir hash if found, None otherwise
     """
-    import json
-    
-    # Search all .dir files
-    for subdir in cache_dir.iterdir():
-        if not subdir.is_dir():
+    # Search all (verified) .dir manifests in real prefix dirs
+    try:
+        subdirs = list(cache_dir.iterdir())
+    except OSError:
+        return None
+    for subdir in subdirs:
+        if not _is_prefix_dir(subdir):
             continue
-        for cache_file in subdir.iterdir():
-            if not cache_file.name.endswith('.dir'):
+        try:
+            names = [p.name for p in subdir.iterdir()]
+        except OSError:
+            continue
+        for name in names:
+            dir_hash = subdir.name + name
+            if not name.endswith('.dir') or not utils.is_md5_oid(dir_hash):
                 continue
-            try:
-                with open(cache_file, 'r') as f:
-                    entries = json.load(f)
-                for entry in entries:
-                    if entry.get('md5') == file_hash:
-                        # Found it - return the full .dir hash
-                        return subdir.name + cache_file.name
-            except (json.JSONDecodeError, OSError):
-                pass
+            for entry in utils.read_dir_entries(cache_dir, dir_hash) or []:
+                if entry['md5'] == file_hash:
+                    return dir_hash
     return None
 
 
