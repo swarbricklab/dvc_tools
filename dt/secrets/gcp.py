@@ -530,45 +530,36 @@ class GCPSecretBackend(SecretBackend):
 
     def _cli_set_secret(self, repo_name: str, content: str) -> None:
         """Create or update a secret via gcloud CLI."""
-        import tempfile
         gcloud = self._require_gcloud()
         secret_id = self._get_secret_id(repo_name)
 
-        # Write to a temp file so we can pipe into gcloud
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False) as f:
-            f.write(content)
-            tmp_path = f.name
-
-        try:
-            # Create secret if it doesn't exist
-            if not self._cli_secret_exists(repo_name):
-                result = subprocess.run(
-                    [gcloud, 'secrets', 'create', secret_id,
-                     f'--project={self.project}',
-                     *_replication_create_flags(),
-                     f'--data-file={tmp_path}'],
-                    capture_output=True, text=True,
+        # The content goes to gcloud on stdin, never to a file on disk.
+        if not self._cli_secret_exists(repo_name):
+            result = subprocess.run(
+                [gcloud, 'secrets', 'create', secret_id,
+                 f'--project={self.project}',
+                 *_replication_create_flags(),
+                 '--data-file=-'],
+                input=content, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise SecretError(
+                    f"Failed to create secret '{secret_id}': "
+                    f"{result.stderr.strip()}"
                 )
-                if result.returncode != 0:
-                    raise SecretError(
-                        f"Failed to create secret '{secret_id}': "
-                        f"{result.stderr.strip()}"
-                    )
-            else:
-                # Add a new version
-                result = subprocess.run(
-                    [gcloud, 'secrets', 'versions', 'add', secret_id,
-                     f'--project={self.project}',
-                     f'--data-file={tmp_path}'],
-                    capture_output=True, text=True,
+        else:
+            # Add a new version
+            result = subprocess.run(
+                [gcloud, 'secrets', 'versions', 'add', secret_id,
+                 f'--project={self.project}',
+                 '--data-file=-'],
+                input=content, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise SecretError(
+                    f"Failed to update secret '{secret_id}': "
+                    f"{result.stderr.strip()}"
                 )
-                if result.returncode != 0:
-                    raise SecretError(
-                        f"Failed to update secret '{secret_id}': "
-                        f"{result.stderr.strip()}"
-                    )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
 
     def _cli_access_secret(self, repo_name: str, cause: Optional[Exception] = None,
                            prior_identity: Optional[str] = None) -> str:

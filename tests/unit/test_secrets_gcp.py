@@ -74,6 +74,8 @@ class TestCliSetSecretPassesReplication:
         assert 'create' in args
         assert '--replication-policy=user-managed' in args
         assert '--locations=australia-southeast1' in args
+        assert '--data-file=-' in args
+        assert mock_run.call_args.kwargs['input'] == 'creds'
 
     def test_create_command_bare_when_unset(self, tmp_path):
         backend = gcp.GCPSecretBackend(project='proj')
