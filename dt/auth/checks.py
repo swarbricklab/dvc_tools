@@ -1008,7 +1008,7 @@ def _check_dvc_remote_impl(ep: Endpoint, remote_name: str,
     try:
         dvc_url = repo.config['remote'][remote_name].get('url')
     except Exception:
-        dvc_url = None
+        return None
     if isinstance(dvc_url, str) and dvc_url != ep.url:
         return None
 
@@ -1125,7 +1125,8 @@ def _try_check(ep: Endpoint, verbose: bool = False,
     # non-interactive shell it blocks indefinitely on a username/password
     # prompt (issue #190). Fall back to the bounded _check_ssh (BatchMode +
     # ConnectTimeout) whenever stdin is not a tty.
-    use_dvc_native = bool(remote_name) and ' of ' not in ep.source
+    use_dvc_native = (bool(remote_name) and ' of ' not in ep.source
+                      and not ep.other_repo)
     if ep.type == 'ssh' and not sys.stdin.isatty():
         use_dvc_native = False
 

@@ -324,7 +324,7 @@ class TestMigrateDirectoryOutput:
         cache_root = tmp_path / 'cache'
         _make_cache_file(cache_root, dir_hash, forged, v3=True, is_dir=True)
         _make_cache_file(cache_root, a_md5, b'aaa', v3=True)
-        with pytest.raises(migrate.MigrateError, match='does not match'):
+        with pytest.raises(migrate.MigrateError, match='does not match its hash'):
             migrate.migrate_directory_output(
                 {'md5': dir_hash, 'size': 3, 'nfiles': 1, 'path': 'd'}, cache_root)
 

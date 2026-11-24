@@ -1321,6 +1321,21 @@ class TestExtractRemoteName:
 class TestCheckDvcRemote:
     """Tests for _check_dvc_remote_impl."""
 
+    def test_remote_missing_from_current_repo_falls_back(self):
+        ep = Endpoint(type='s3', url='s3://b/p', source="DVC remote 'x'")
+        mock_repo = MagicMock()
+        mock_repo.config = {'remote': {}}
+        assert _check_dvc_remote_impl(ep, 'x', _repo_factory=lambda: mock_repo) is None
+
+    def test_other_repo_endpoint_skips_dvc_probe(self):
+        from dt.auth import checks
+        ep = Endpoint(type='s3', url='s3://b/p', source="DVC remote 'x'",
+                      other_repo=True)
+        with patch.object(checks, '_check_dvc_remote') as probe, \
+             patch.dict(checks._CHECKERS, {'s3': lambda e: 'plain'}):
+            assert checks._try_check(ep) == 'plain'
+        probe.assert_not_called()
+
     def test_other_repos_remote_is_not_probed(self):
         ep = Endpoint(type='ssh', url='ssh://approved.example.org/data',
                       source="DVC remote 'storage'")

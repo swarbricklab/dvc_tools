@@ -59,6 +59,9 @@ class Endpoint:
         local_path: For SSH remotes on a local host, the equivalent
             local filesystem path.
         children: Secondary endpoints discovered *through* this one.
+        other_repo: Found in a repository other than the current
+            directory's (``--repo``), so the current DVC repo's settings
+            do not describe it.
     """
 
     type: str
@@ -66,6 +69,7 @@ class Endpoint:
     source: str
     local_path: Optional[str] = None
     children: List['Endpoint'] = field(default_factory=list)
+    other_repo: bool = False
 
     @property
     def key(self) -> Tuple[str, str]:
@@ -415,6 +419,10 @@ def discover_endpoints_from_repo(
             verbose=verbose,
             may_contact=may_contact,
         )
+        for ep in endpoints:
+            ep.other_repo = True
+            for child in ep.children:
+                child.other_repo = True
         return endpoints
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

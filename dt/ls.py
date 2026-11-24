@@ -335,7 +335,7 @@ def _subtree_file_count(node: Dict[str, Any]) -> int:
     Rendering asks for this count at every directory (fold-up summaries and
     collapse placeholders). Computing it naively re-walks each subtree once
     per ancestor -- super-linear on wide trees. Caching the result under the
-    reserved ``_nf`` key makes the whole render O(number of nodes).
+    reserved ``/nf`` key makes the whole render O(number of nodes).
     """
     cached = node.get('/nf')
     if cached is not None:
@@ -528,6 +528,12 @@ def _format_tree_text(
     return '\n'.join(lines)
 
 
+def _md_text(text) -> str:
+    """*text* as plain markdown text: control characters shown as escapes,
+    markup characters backslash-escaped."""
+    return re.sub(r'([\\`*_{}\[\]<>()#+!|~])', r'\\\1', _printable(text))
+
+
 def _format_tree_md(
     tree: Dict[str, Any], repo: Dict[str, Optional[str]], base: str,
     rev: Optional[str], revinfo: Optional[Dict[str, Any]] = None,
@@ -536,7 +542,7 @@ def _format_tree_md(
     """Format a tree as markdown (a fenced code block plus a summary line)."""
     files, dirs = _count_tree(tree)
     label = _root_label(repo, base, rev)
-    text = re.sub(r'([\\`*_{}\[\]<>()#+!|~])', r'\\\1', _printable(label))
+    text = _md_text(label)
     if repo['web_url']:
         url = urllib.parse.quote(_printable(repo['web_url']), safe=":/?#@!$&'*+,;=%~.-_")
         heading = f"[{text}]({url})"
@@ -546,7 +552,7 @@ def _format_tree_md(
     rline = _revision_line(revinfo)
     if rline:
         lines.append("")
-        lines.append(f"_{rline}_")
+        lines.append(f"_{_md_text(rline)}_")
     lines.extend(["", "```text", label,
                   *_render_tree_text(tree, max_level=max_level), "```"])
     return '\n'.join(lines)

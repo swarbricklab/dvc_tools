@@ -259,7 +259,7 @@ def _dedup_dir_entries(node: Dict[str, Any]) -> None:
     *files* alongside the individual files inside ``results/``.  This
     causes the directory to appear twice in the tree and inflates counts.
 
-    After removing duplicates, recalculates ``_counts`` bottom-up so that
+    After removing duplicates, recalculates ``/counts`` bottom-up so that
     all ancestor counts are correct.
     """
     # Recurse into subdirectories first (bottom-up)

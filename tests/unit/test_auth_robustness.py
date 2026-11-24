@@ -503,3 +503,15 @@ class TestSecretContentErrors:
         backend._use_cli = False
         with pytest.raises(SecretError, match='UTF-8'):
             backend.get_raw_config('r')
+
+
+    def test_non_utf8_payload_via_cli_is_a_secret_error(self, tmp_path):
+        import pytest, stat
+        from dt.secrets import gcp, SecretError
+        fake = tmp_path / 'gcloud'
+        fake.write_text("#!/bin/sh\nprintf '\\377\\376'\n")
+        fake.chmod(0o755)
+        backend = gcp.GCPSecretBackend(project='p')
+        backend._require_gcloud = lambda cause=None: str(fake)
+        with pytest.raises(SecretError, match='UTF-8'):
+            backend._cli_access_secret('r')

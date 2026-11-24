@@ -565,11 +565,14 @@ class GCPSecretBackend(SecretBackend):
                            prior_identity: Optional[str] = None) -> str:
         gcloud = self._require_gcloud(cause)
         secret_id = self._get_secret_id(repo_name)
-        result = subprocess.run(
-            [gcloud, 'secrets', 'versions', 'access', 'latest',
-             f'--secret={secret_id}', f'--project={self.project}'],
-            capture_output=True, text=True,
-        )
+        try:
+            result = subprocess.run(
+                [gcloud, 'secrets', 'versions', 'access', 'latest',
+                 f'--secret={secret_id}', f'--project={self.project}'],
+                capture_output=True, text=True,
+            )
+        except UnicodeDecodeError as e:
+            raise SecretError(f"Secret '{repo_name}' is not UTF-8 text: {e}")
         if result.returncode == 0:
             return result.stdout
         if 'NOT_FOUND' in result.stderr:
