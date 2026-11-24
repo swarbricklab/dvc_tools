@@ -409,10 +409,22 @@ def copy_tree(
         os.close(root_fd)
 
     if group_writable:
+        from . import perms
+        mode = utils.shared_dir_mode()
         utils.set_group_writable(dst)
-        for root, dirs_, _files in os.walk(dst):
+        # Walk by directory handle; a link among the entries is never followed.
+        for _root, dirs_, _files, root_fd in os.fwalk(dst, follow_symlinks=False):
             for d in dirs_:
-                utils.set_group_writable(Path(root) / d)
+                try:
+                    dfd = os.open(d, perms._DIR_FLAGS, dir_fd=root_fd)
+                except OSError:
+                    continue
+                try:
+                    perms._fchmod_path_fd(dfd, mode)
+                except OSError:
+                    pass
+                finally:
+                    os.close(dfd)
 
     totals['links'] = sorted(set(totals['links']))
     totals['layout'] = layout

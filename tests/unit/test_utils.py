@@ -1252,3 +1252,75 @@ class TestTrustedRootDetails:
             utils.is_trusted_root(tmp_path)
             utils._trusted_cache.clear()
         assert capsys.readouterr().err.count('ignoring') == 1
+
+
+class TestSharedDirModeNeverFollowsForeignLinks:
+    def test_link_owned_by_someone_else_is_not_followed(self, tmp_path, monkeypatch):
+        import stat as stat_mod
+        victim = tmp_path / 'private'
+        victim.mkdir(mode=0o700)
+        before = stat_mod.S_IMODE(victim.stat().st_mode)
+        link = tmp_path / 'store' / '.dt-verify'
+        link.parent.mkdir()
+        link.symlink_to(victim)
+        real_lstat = os.lstat
+
+        class _Other:
+            def __init__(self, st):
+                self.st_mode, self.st_uid = st.st_mode, os.geteuid() + 1
+        monkeypatch.setattr(utils.os, 'lstat', lambda p, *a, **k:
+                            _Other(real_lstat(p)) if str(p) == str(link) else real_lstat(p, *a, **k))
+        assert utils.set_group_writable(link) is False
+        assert stat_mod.S_IMODE(victim.stat().st_mode) == before
+
+    def test_real_directory_is_changed(self, tmp_path):
+        import stat as stat_mod
+        d = tmp_path / 'd'
+        d.mkdir(mode=0o700)
+        assert utils.set_group_writable(d, mode=0o2770) is True
+        assert stat_mod.S_IMODE(d.stat().st_mode) == 0o2770
+
+    def test_md5_prefix_link_is_left_alone(self, tmp_path):
+        import stat as stat_mod
+        victim = tmp_path / 'private'
+        victim.mkdir(mode=0o700)
+        before = stat_mod.S_IMODE(victim.stat().st_mode)
+        store = tmp_path / 'store'
+        (store / 'files' / 'md5').mkdir(parents=True)
+        (store / 'files' / 'md5' / 'ab').symlink_to(victim)
+        failed = utils.create_md5_subdirs(store, mode=0o2770)
+        assert failed == 1
+        assert stat_mod.S_IMODE(victim.stat().st_mode) == before
+        assert stat_mod.S_IMODE((store / 'files' / 'md5' / '00').stat().st_mode) == 0o2770
+
+    def test_new_store_files_dir_gets_shared_mode(self, tmp_path):
+        import stat as stat_mod
+        store = tmp_path / 'store'
+        assert utils.create_md5_subdirs(store, mode=0o2770) == 0
+        for d in (store / 'files', store / 'files' / 'md5', store / 'files' / 'md5' / 'ff'):
+            assert stat_mod.S_IMODE(d.stat().st_mode) == 0o2770
+
+    def test_linked_files_dir_is_refused(self, tmp_path):
+        import stat as stat_mod
+        victim = tmp_path / 'private'
+        victim.mkdir(mode=0o700)
+        before = stat_mod.S_IMODE(victim.stat().st_mode)
+        store = tmp_path / 'store'
+        store.mkdir()
+        (store / 'files').symlink_to(victim)
+        with pytest.raises(OSError):
+            utils.create_md5_subdirs(store, mode=0o2770)
+        assert stat_mod.S_IMODE(victim.stat().st_mode) == before
+        assert list(victim.iterdir()) == []
+
+    def test_cache_runs_link_is_refused(self, tmp_path):
+        from dt import cache
+        from dt.errors import CacheError
+        victim = tmp_path / 'private'
+        victim.mkdir(mode=0o700)
+        store = tmp_path / 'cache'
+        store.mkdir()
+        (store / 'runs').symlink_to(victim)
+        with pytest.raises(CacheError):
+            cache.init_cache_structure(store)
+        assert list(victim.iterdir()) == []

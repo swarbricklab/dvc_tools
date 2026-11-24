@@ -1176,11 +1176,21 @@ def set_group_writable(
         mode = shared_dir_mode()
         if not setgid:
             mode &= ~0o2000
+    # Only a real directory at exactly this path (a link there is followed
+    # only if it is this user's own, as for store roots), changed through
+    # the handle that was checked -- never whatever a planted link names.
+    from . import perms
     try:
-        os.chmod(path, mode)
-        return True
-    except (PermissionError, OSError):
+        fd = perms._open_root(Path(path))
+    except OSError:
         return False
+    try:
+        perms._fchmod_path_fd(fd, mode)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
 
 
 def create_md5_subdirs(
@@ -1206,19 +1216,60 @@ def create_md5_subdirs(
     if mode is None:
         mode = shared_dir_mode()
 
-    files_md5 = parent_dir / "files" / "md5"
-    files_md5.mkdir(parents=True, exist_ok=True)
-    failed = 0 if set_group_writable(files_md5, mode=mode) else 1
+    return create_prefix_tree(Path(parent_dir), ('files', 'md5'), mode,
+                              verbose=verbose)
 
-    if verbose:
-        print(f"Creating files/md5 subdirectories under {parent_dir}")
 
-    for i in range(256):
-        subdir = files_md5 / f"{i:02x}"
-        subdir.mkdir(exist_ok=True)
-        if not set_group_writable(subdir, mode=mode):
-            failed += 1
+def create_prefix_tree(parent_dir: Path, parts: Tuple[str, ...], mode: int,
+                       verbose: bool = False) -> int:
+    """Create ``parent_dir/<parts...>/{00..ff}`` with *mode* on each new or
+    existing directory below the root.
 
+    Every component is created and opened relative to its parent without
+    following a link, and its mode is set through that handle, so a link
+    planted anywhere in a shared store is never followed.
+
+    Returns:
+        Number of prefix directories that could not be set up (e.g. a link
+        at that name).
+
+    Raises:
+        OSError: If the root or one of *parts* is not a real directory.
+    """
+    from . import perms
+
+    def _shared_subdir(dir_fd: int, name: str) -> Tuple[int, bool]:
+        try:
+            os.mkdir(name, 0o700, dir_fd=dir_fd)
+        except FileExistsError:
+            pass
+        fd = os.open(name, perms._DIR_FLAGS, dir_fd=dir_fd)
+        try:
+            perms._fchmod_path_fd(fd, mode)
+            return fd, True
+        except OSError:
+            return fd, False
+
+    failed = 0
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    fd = perms._open_root(parent_dir)
+    try:
+        for part in parts:
+            nfd, ok = _shared_subdir(fd, part)
+            failed += 0 if ok else 1
+            os.close(fd)
+            fd = nfd
+        if verbose:
+            print(f"Creating {'/'.join(parts)} subdirectories under {parent_dir}")
+        for i in range(256):
+            try:
+                pfd, ok = _shared_subdir(fd, f"{i:02x}")
+                os.close(pfd)
+                failed += 0 if ok else 1
+            except OSError:
+                failed += 1  # e.g. a link planted at the prefix name
+    finally:
+        os.close(fd)
     return failed
 
 

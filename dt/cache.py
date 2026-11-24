@@ -91,19 +91,13 @@ def init_cache_structure(
     cache_dir.mkdir(parents=True, exist_ok=True)
     failed = 0 if utils.set_group_writable(cache_dir, mode=mode) else 1
 
-    # Create runs directory for DVC run cache with 00-ff subdirectories
-    runs_dir = cache_dir / "runs"
-    runs_dir.mkdir(exist_ok=True)
-    if not utils.set_group_writable(runs_dir, mode=mode):
-        failed += 1
-    for i in range(256):
-        subdir = runs_dir / f"{i:02x}"
-        subdir.mkdir(exist_ok=True)
-        if not utils.set_group_writable(subdir, mode=mode):
-            failed += 1
-
-    # Create files/md5 structure with 00-ff subdirectories
-    failed += utils.create_md5_subdirs(cache_dir, verbose=verbose, mode=mode)
+    try:
+        # runs/ (DVC run cache) and files/md5/, each with 00-ff
+        failed += utils.create_prefix_tree(cache_dir, ('runs',), mode)
+        failed += utils.create_md5_subdirs(cache_dir, verbose=verbose, mode=mode)
+    except OSError as e:
+        raise CacheError(f"Cannot set up {cache_dir}: {e} "
+                         f"(a link or non-directory where a store directory belongs?)")
 
     if failed and verbose:
         print(f"  warning: could not set the mode on {failed} director"

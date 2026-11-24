@@ -128,7 +128,11 @@ def init_remote_structure(
     failed = 0 if utils.set_group_writable(remote_dir, mode=mode) else 1
 
     # Create files/md5 structure with 00-ff subdirectories
-    failed += utils.create_md5_subdirs(remote_dir, verbose=verbose, mode=mode)
+    try:
+        failed += utils.create_md5_subdirs(remote_dir, verbose=verbose, mode=mode)
+    except OSError as e:
+        raise RemoteError(f"Cannot set up {remote_dir}: {e} "
+                          f"(a link or non-directory where a store directory belongs?)")
 
     if failed and verbose:
         # chmod needs ownership, so this is what happens when re-initialising
