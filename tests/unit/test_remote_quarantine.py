@@ -305,3 +305,21 @@ class TestExternalListQuarantineEndToEnd:
         assert dir_rel in restored['restored']
         assert (remote / bad_rel).exists()
         assert (remote / dir_rel).exists()
+
+
+class TestQuarantineStaysInsideRemote:
+    def test_paths_outside_layout_are_not_planned(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        outside = tmp_path / 'home' / 'keep.txt'
+        outside.parent.mkdir()
+        outside.write_text('mine')
+        entries = [
+            {'path': '../home/keep.txt', 'status': rv.STATUS_MISMATCH},
+            {'path': str(outside), 'status': rv.STATUS_MISMATCH},
+            {'path': f'files/md5/{good[:2]}/{good[2:]}', 'expected_md5': good,
+             'status': rv.STATUS_MISMATCH},
+        ]
+        plan = q.plan_quarantine(remote, entries)
+        assert [p['path'] for p in plan] == [f'files/md5/{good[:2]}/{good[2:]}']
+        assert outside.read_text() == 'mine'

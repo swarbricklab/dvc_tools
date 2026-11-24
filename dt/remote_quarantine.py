@@ -221,7 +221,10 @@ def plan_quarantine(
 
     layout = layout or ops.detect_source_layout(remote_dir)
 
-    bad_paths = {e['path'] for e in entries if e.get('path')}
+    # Only plain blob paths inside the remote; report entries are editable
+    # by other users.
+    entries = [e for e in entries if remote_verify.safe_blob_rel(e.get('path'))]
+    bad_paths = {e['path'] for e in entries}
     # Only an md5-bearing bad *member* (not a .dir, not a stray with no md5)
     # needs the reverse map. Skip the whole-remote .dir scan otherwise — e.g.
     # when the only finding is a stray *.tmp with no md5.
