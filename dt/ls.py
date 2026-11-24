@@ -384,15 +384,22 @@ def _render_tree_text(
     for i, (name, is_dir) in enumerate(entries):
         is_last = (i == len(entries) - 1)
         connector = "└── " if is_last else "├── "
+        shown = _printable(name)
         if is_dir:
-            lines.append(f"{prefix}{connector}{name}/")
+            lines.append(f"{prefix}{connector}{shown}/")
             child_prefix = prefix + ("    " if is_last else "│   ")
             lines.extend(_render_tree_text(
                 tree[name], child_prefix, max_level, current_level + 1,
             ))
         else:
-            lines.append(f"{prefix}{connector}{name}")
+            lines.append(f"{prefix}{connector}{shown}")
     return lines
+
+
+def _printable(text: str) -> str:
+    """*text* with control characters shown as escapes, so a name cannot
+    start a new line (or end a fenced block) in text/markdown output."""
+    return ''.join(c if c.isprintable() else repr(c)[1:-1] for c in str(text))
 
 
 def _split_repo_url(src: str) -> Optional[Tuple[str, str]]:
@@ -922,19 +929,35 @@ def _format_tree_html(
     counts = f'{dirs} directories, {files} files'
 
     html_tree = _render_tree_html(tree, max_level=max_level, parent=base)
-    script = (_TREE_HTML_SCRIPT
-              .replace('%%HTTPS_JS%%', json.dumps(repo['https_url']))
-              .replace('%%SSH_JS%%', json.dumps(repo['ssh_url']))
-              .replace('%%REV_JS%%', json.dumps(rev or '')))
+    script = _fill(_TREE_HTML_SCRIPT, {
+        'HTTPS_JS': _script_json(repo['https_url']),
+        'SSH_JS': _script_json(repo['ssh_url']),
+        'REV_JS': _script_json(rev or ''),
+    })
 
-    return (_TREE_HTML_TEMPLATE
-            .replace('%%TITLE%%', html.escape(_root_label(repo, base, rev)))
-            .replace('%%STYLE%%', _TREE_HTML_STYLE)
-            .replace('%%HEADER%%', header)
-            .replace('%%SUBTITLE%%', subtitle)
-            .replace('%%COUNTS%%', counts)
-            .replace('%%TREE%%', html_tree)
-            .replace('%%SCRIPT%%', script))
+    # One pass: text substituted for one placeholder is never re-scanned
+    # for another (a file could be named %%SCRIPT%%).
+    return _fill(_TREE_HTML_TEMPLATE, {
+        'TITLE': html.escape(_root_label(repo, base, rev)),
+        'STYLE': _TREE_HTML_STYLE,
+        'HEADER': header,
+        'SUBTITLE': subtitle,
+        'COUNTS': counts,
+        'TREE': html_tree,
+        'SCRIPT': script,
+    })
+
+
+def _fill(template: str, values: Dict[str, str]) -> str:
+    """Replace ``%%NAME%%`` placeholders in a single pass."""
+    return re.sub(r'%%([A-Z_]+)%%',
+                  lambda m: values.get(m.group(1), m.group(0)), template)
+
+
+def _script_json(value: Any) -> str:
+    """JSON for inside a ``<script>`` element: it cannot end the element."""
+    return (json.dumps(value).replace('<', '\\u003c').replace('>', '\\u003e')
+            .replace('&', '\\u0026'))
 
 
 def _run_git(args: List[str]) -> Optional[str]:

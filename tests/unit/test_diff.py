@@ -1071,7 +1071,7 @@ class TestDiscoverChangedTargets:
 
     @patch('dt.diff.subprocess.run')
     def test_maps_dvc_files_to_outputs_rev_vs_rev(self, mock_run):
-        mock_run.return_value = _git_result('data/a.dvc\nmodels/b.dvc\n')
+        mock_run.return_value = _git_result('data/a.dvc\0models/b.dvc\0')
 
         targets, lock_changed = _discover_changed_targets('v1', 'v2')
 
@@ -1080,7 +1080,7 @@ class TestDiscoverChangedTargets:
         # rev-vs-rev uses the double-dot range form
         cmd = mock_run.call_args[0][0]
         assert 'v1..v2' in cmd
-        assert cmd[:3] == ['git', 'diff', '--name-only']
+        assert 'diff' in cmd and '--name-only' in cmd and '-z' in cmd
 
     @patch('dt.diff.subprocess.run')
     def test_empty_when_no_control_files_changed(self, mock_run):
@@ -1093,7 +1093,7 @@ class TestDiscoverChangedTargets:
 
     @patch('dt.diff.subprocess.run')
     def test_lock_change_flags_fallback(self, mock_run):
-        mock_run.return_value = _git_result('dvc.lock\ndata/a.dvc\n')
+        mock_run.return_value = _git_result('dvc.lock\0data/a.dvc\0')
 
         targets, lock_changed = _discover_changed_targets('v1', 'v2')
 
@@ -1102,7 +1102,7 @@ class TestDiscoverChangedTargets:
 
     @patch('dt.diff.subprocess.run')
     def test_yaml_change_flags_fallback(self, mock_run):
-        mock_run.return_value = _git_result('dvc.yaml\n')
+        mock_run.return_value = _git_result('dvc.yaml\0')
 
         targets, lock_changed = _discover_changed_targets('v1', 'v2')
 
@@ -1111,7 +1111,7 @@ class TestDiscoverChangedTargets:
 
     @patch('dt.diff.subprocess.run')
     def test_dedups_and_sorts_targets(self, mock_run):
-        mock_run.return_value = _git_result('z/c.dvc\na/b.dvc\na/b.dvc\n')
+        mock_run.return_value = _git_result('z/c.dvc\0a/b.dvc\0a/b.dvc\0')
 
         targets, _ = _discover_changed_targets('v1', 'v2')
 
@@ -1121,8 +1121,8 @@ class TestDiscoverChangedTargets:
     def test_workspace_mode_includes_untracked_dvc(self, mock_run):
         # First call: git diff against working tree; second: git ls-files others
         mock_run.side_effect = [
-            _git_result('tracked/a.dvc\n'),
-            _git_result('new/b.dvc\n'),
+            _git_result('tracked/a.dvc\0'),
+            _git_result('new/b.dvc\0'),
         ]
 
         targets, lock_changed = _discover_changed_targets('HEAD', None)
@@ -1134,7 +1134,7 @@ class TestDiscoverChangedTargets:
         assert 'HEAD' in first_cmd
         assert not any('..' in part for part in first_cmd)
         second_cmd = mock_run.call_args_list[1][0][0]
-        assert second_cmd[:2] == ['git', 'ls-files']
+        assert 'ls-files' in second_cmd and '-z' in second_cmd
 
     @patch('dt.diff.subprocess.run')
     def test_raises_on_git_failure(self, mock_run):
@@ -1143,6 +1143,12 @@ class TestDiscoverChangedTargets:
         with pytest.raises(DiffError, match='git diff failed'):
             _discover_changed_targets('v1', 'v2')
 
+
+    @patch('dt.diff.subprocess.run')
+    def test_unusual_names_are_not_dropped(self, mock_run):
+        mock_run.return_value = _git_result('caf\u00e9.dvc\0a\nb.dvc\0')
+        targets, _ = _discover_changed_targets('v1', 'v2')
+        assert targets == ['a\nb', 'caf\u00e9']
 
 class TestTreeDiffScoping:
     """Tests for tree_diff scope behaviour."""
@@ -1222,3 +1228,50 @@ class TestTreeDiffScoping:
         mock_run_md.assert_called_once()
         passed_targets = mock_run_md.call_args[0][2]
         assert passed_targets == ['data/a']
+
+
+class TestRepositoryNamesAreShownAsText:
+    EVIL = '<img src=x onerror=alert(1)>'
+
+    def _data(self):
+        return {'added': [{'path': f'data/{self.EVIL}/f.txt'},
+                          {'path': f'data/{self.EVIL}'},
+                          {'path': 'data/line\nbreak.txt'},
+                          {'path': 'data/a,"b".txt'}],
+                'deleted': [], 'modified': [], 'renamed': []}
+
+    def test_html_escapes_names_and_revs(self):
+        from dt.diff import _format_md
+        data = self._data()
+        out = _format_html(_build_tree(data), data, '<b>old', '<i>new')
+        assert '<img' not in out and '<b>old' not in out and '<i>new' not in out
+        assert '&lt;img src=x onerror=alert(1)&gt;' in out
+
+    def test_markdown_names_cannot_break_lines(self):
+        from dt.diff import _format_md
+        data = self._data()
+        out = _format_md(_build_tree(data), data, 'a', 'b', 10)
+        assert 'line\\nbreak.txt' in out
+        assert not any(line.startswith('break.txt') for line in out.splitlines())
+
+    def test_csv_quotes_per_rfc4180(self):
+        import csv, io
+        rows = list(csv.reader(io.StringIO(_format_csv(self._data()))))
+        paths = [r[1] for r in rows[1:]]
+        assert 'data/a,"b".txt' in paths and 'data/line\nbreak.txt' in paths
+        assert all(len(r) == 4 for r in rows)
+
+
+def test_markdown_rev_cannot_close_its_code_span():
+    from dt.diff import _md_code
+    span = _md_code('a`b|c')
+    assert span.startswith('``') and span.endswith('``') and 'a`b|c' in span
+
+
+def test_verbose_scoping_note_goes_to_stderr(capsys):
+    from dt import diff as d
+    with patch.object(d, '_discover_changed_targets', return_value=(['<img src=x>'], False)), \
+         patch.object(d, '_run_dvc_diff', return_value={'added': [], 'deleted': [],
+                                                             'modified': [], 'renamed': []}):
+        d.tree_diff('a', 'b', output_format='html', verbose=True)
+    assert '<img' not in capsys.readouterr().out

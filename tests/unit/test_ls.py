@@ -994,3 +994,22 @@ class TestHiddenInTree:
         ]
         for p in visible:
             assert not _is_hidden_in_tree(p), p
+
+
+class TestRepositoryValuesStayText:
+    def test_script_json_cannot_close_the_script(self):
+        from dt.ls import _script_json
+        out = _script_json('x</script><img src=x onerror=alert(1)>')
+        assert '</script>' not in out and '<img' not in out
+        import json
+        assert json.loads(out) == 'x</script><img src=x onerror=alert(1)>'
+
+    def test_placeholders_filled_in_one_pass(self):
+        from dt.ls import _fill
+        assert _fill('%%A%%|%%B%%', {'A': '%%B%%', 'B': 'b'}) == '%%B%%|b'
+
+    def test_text_tree_names_cannot_break_lines(self):
+        from dt.ls import _render_tree_text
+        tree = {'_files': [{'name': 'a\n```\n<img>'}]}
+        lines = _render_tree_text(tree)
+        assert len(lines) == 1 and '\\n' in lines[0]

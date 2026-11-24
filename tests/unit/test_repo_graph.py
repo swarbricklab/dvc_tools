@@ -451,3 +451,19 @@ class TestPinnedRevisionsAreNotOptions:
         repo_graph._ensure_rev(tmp_path, 'abc123')
         [cmd] = calls
         assert cmd.index('--end-of-options') < cmd.index('abc123')
+
+
+class TestRenderedIdsStayLabels:
+    EVIL = 'h/o/x"];click n0 href "javascript:alert(1)";%%<img src=x>'
+
+    def test_mermaid_label_escapes(self):
+        from dt.repo_graph_render import _mermaid_text
+        out = _mermaid_text(self.EVIL)
+        assert '"' not in out and ';' not in out.replace('#34;', '').replace('#59;', '') \
+            .replace('#60;', '').replace('#62;', '').replace('#38;', '').replace('#35;', '')
+        assert '<' not in out
+
+    def test_dot_id_escapes_quotes(self):
+        from dt.repo_graph_render import _dot_id
+        out = _dot_id('a"b\\c')
+        assert out == '"a\\"b\\\\c"'

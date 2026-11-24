@@ -8,9 +8,14 @@ Provides a plugin architecture for format-specific content diffing (CSV, etc.)
 with graceful fallback for unsupported formats.
 """
 
+import csv
 import filecmp
+import html
+import io
 import json
+import re
 import subprocess
+import sys
 import tempfile
 import warnings
 from abc import ABC, abstractmethod
@@ -139,7 +144,10 @@ def _discover_changed_targets(
     control_specs = ['*.dvc', 'dvc.lock', 'dvc.yaml']
 
     def _git_name_only(args: List[str]) -> List[str]:
-        cmd = ['git', 'diff', '--name-only', '--end-of-options'] + args + ['--'] + control_specs
+        # -z: names verbatim (git would otherwise C-quote unusual ones, and
+        # a quoted "x.dvc" no longer looks like a .dvc file).
+        cmd = (['git', '-c', 'core.quotePath=false', 'diff', '--name-only', '-z',
+                '--end-of-options'] + args + ['--'] + control_specs)
         result = subprocess.run(
             cmd, capture_output=True, text=True,
             cwd=str(cwd) if cwd else None,
@@ -147,7 +155,7 @@ def _discover_changed_targets(
         if result.returncode != 0:
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
             raise DiffError(f"git diff failed: {error_msg}")
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return [name for name in result.stdout.split('\0') if name]
 
     if new_rev:
         # Rev-vs-rev: compare the two commits directly.
@@ -157,15 +165,13 @@ def _discover_changed_targets(
         # any untracked *.dvc files that git diff won't report.
         changed = _git_name_only([old_rev])
         untracked = subprocess.run(
-            ['git', 'ls-files', '--others', '--exclude-standard', '--'] + ['*.dvc'],
+            ['git', '-c', 'core.quotePath=false', 'ls-files', '-z', '--others',
+             '--exclude-standard', '--'] + ['*.dvc'],
             capture_output=True, text=True,
             cwd=str(cwd) if cwd else None,
         )
         if untracked.returncode == 0:
-            changed += [
-                line.strip() for line in untracked.stdout.splitlines()
-                if line.strip()
-            ]
+            changed += [name for name in untracked.stdout.split('\0') if name]
 
     lock_changed = any(
         Path(p).name in ('dvc.lock', 'dvc.yaml') for p in changed
@@ -208,7 +214,9 @@ def _build_tree(diff_data: Dict[str, Any]) -> Dict[str, Any]:
             if not path:
                 continue
 
-            parts = Path(path).parts
+            # Names come from the repository: no line breaks or other
+            # control characters in any rendered form.
+            parts = tuple(_printable(p) for p in Path(path).parts)
             current = tree
 
             # Navigate/create directories
@@ -218,14 +226,14 @@ def _build_tree(diff_data: Dict[str, Any]) -> Dict[str, Any]:
                 current = current[part]
 
             # Add file to leaf directory
-            filename = parts[-1] if parts else path
+            filename = parts[-1] if parts else _printable(path)
             file_entry: Dict[str, Any] = {
                 'name': filename,
                 'status': status,
                 'path': path,
             }
             if old_path:
-                file_entry['old_path'] = old_path
+                file_entry['old_path'] = _printable(old_path)
             current['_files'].append(file_entry)
             
             # Update counts up the tree
@@ -481,7 +489,9 @@ def _format_json(diff_data: Dict[str, Any]) -> str:
 
 def _format_csv(diff_data: Dict[str, Any]) -> str:
     """Format diff data as CSV with columns: change,path,old_hash,new_hash."""
-    lines = ["change,path,old_hash,new_hash"]
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator='\n')
+    writer.writerow(["change", "path", "old_hash", "new_hash"])
     
     for status in ['added', 'deleted', 'modified', 'renamed']:
         items = diff_data.get(status, [])
@@ -496,13 +506,9 @@ def _format_csv(diff_data: Dict[str, Any]) -> str:
                 new_path = item.get('path', {}).get('new', '') if isinstance(item.get('path'), dict) else path
                 path = f"{old_path} -> {new_path}"
             
-            # Escape commas in paths
-            if ',' in path:
-                path = f'"{path}"'
-            
-            lines.append(f"{status},{path},{old_hash},{new_hash}")
+            writer.writerow([status, path, old_hash, new_hash])
     
-    return '\n'.join(lines)
+    return buf.getvalue().rstrip('\n')
 
 
 def _format_md(
@@ -527,9 +533,9 @@ def _format_md(
     summary = ', '.join(summary_parts)
     
     if new_rev:
-        rev_display = f"`{old_rev}`...`{new_rev}`"
+        rev_display = f"{_md_code(old_rev)}...{_md_code(new_rev)}"
     else:
-        rev_display = f"`{old_rev}` → workspace"
+        rev_display = f"{_md_code(old_rev)} → workspace"
     
     lines = [f"**Changes ({rev_display}):** {summary}", "", "```diff"]
     
@@ -640,9 +646,10 @@ def _format_html(
     summary = ', '.join(summary_parts)
     
     if new_rev:
-        rev_display = f"<code>{old_rev}</code>...<code>{new_rev}</code>"
+        rev_display = (f"<code>{html.escape(old_rev)}</code>..."
+                       f"<code>{html.escape(new_rev)}</code>")
     else:
-        rev_display = f"<code>{old_rev}</code> → workspace"
+        rev_display = f"<code>{html.escape(old_rev)}</code> → workspace"
     
     html_tree = _render_tree_html(tree)
     
@@ -733,6 +740,20 @@ def _format_html(
 </html>'''
 
 
+def _printable(text: str) -> str:
+    """*text* with control characters shown as escapes (``\\n`` etc.)."""
+    return ''.join(c if c.isprintable() else repr(c)[1:-1] for c in str(text))
+
+
+def _md_code(text: str) -> str:
+    """*text* as a markdown code span that it cannot close early."""
+    text = _printable(text)
+    longest = max((len(m) for m in re.findall(r'`+', text)), default=0)
+    fence = '`' * (longest + 1)
+    pad = ' ' if text.startswith('`') or text.endswith('`') else ''
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
 def _render_tree_html(
     tree: Dict[str, Any],
     indent: int = 2,
@@ -768,15 +789,16 @@ def _render_tree_html(
         
         child_html = _render_tree_html(data, indent + 1)
         lines.append(f'{spaces}<details>')
-        lines.append(f'{spaces}    <summary>{name}/{count_str}</summary>')
+        lines.append(f'{spaces}    <summary>{html.escape(name)}/{count_str}</summary>')
         lines.append(child_html)
         lines.append(f'{spaces}</details>')
     
     for f in files:
         status = f.get('status', 'modified')
         symbol = STATUS_SYMBOLS.get(status, '?')
-        css_class = status
-        lines.append(f'{spaces}<div class="file {css_class}">[{symbol}] {f["name"]}</div>')
+        css_class = html.escape(status, quote=True)
+        lines.append(f'{spaces}<div class="file {css_class}">[{symbol}] '
+                     f'{html.escape(f["name"])}</div>')
     
     return '\n'.join(lines)
 
@@ -821,7 +843,7 @@ def tree_diff(
             # A dvc.lock / dvc.yaml change can touch many stages; mapping it to
             # precise output targets is unreliable, so fall back to a full diff.
             if verbose:
-                print("dvc.lock/dvc.yaml changed — running a full (unscoped) diff")
+                print("dvc.lock/dvc.yaml changed — running a full (unscoped) diff", file=sys.stderr)
         elif not changed_targets:
             # Nothing DVC-tracked changed between the revisions: short-circuit
             # without invoking dvc diff at all.
@@ -830,7 +852,7 @@ def tree_diff(
         else:
             if verbose:
                 print(f"Scoped diff to {len(changed_targets)} changed target(s): "
-                      f"{', '.join(changed_targets)}")
+                      f"{', '.join(changed_targets)}", file=sys.stderr)
             targets = changed_targets
 
     # Handle table format separately (uses dvc diff --md)
@@ -865,7 +887,7 @@ def tree_diff(
     if level == "auto":
         max_level = _find_auto_level(tree)
         if verbose:
-            print(f"Auto-selected level: {max_level}")
+            print(f"Auto-selected level: {max_level}", file=sys.stderr)
     else:
         max_level = int(level)
     
@@ -1280,9 +1302,9 @@ def content_diff(
     if handler is None:
         handler = FallbackHandler()
         if verbose:
-            print(f"No specific handler for {Path(path).suffix}, using fallback")
+            print(f"No specific handler for {Path(path).suffix}, using fallback", file=sys.stderr)
     elif verbose:
-        print(f"Using {handler.format_name} handler")
+        print(f"Using {handler.format_name} handler", file=sys.stderr)
 
     # -------------------------------------------------------------------------
     # Direct mode: compare two workspace files, no DVC involved
@@ -1307,8 +1329,8 @@ def content_diff(
 
     if verbose:
         import dvc as _dvc
-        print(f"DVC version : {_dvc.__version__}")
-        print(f"Repo path   : {repo_abs}")
+        print(f"DVC version : {_dvc.__version__}", file=sys.stderr)
+        print(f"Repo path   : {repo_abs}", file=sys.stderr)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -1318,7 +1340,7 @@ def content_diff(
         def _fetch_revision(rev: str, dest: Path) -> None:
             """Fetch a DVC-tracked file at a git revision via subprocess."""
             if verbose:
-                print(f"Fetching    : {path!r} @ {rev!r}")
+                print(f"Fetching    : {path!r} @ {rev!r}", file=sys.stderr)
             result = subprocess.run(
                 ['dvc', 'get', '--rev', rev, '.', path, '--out', str(dest)],
                 capture_output=True, text=True, cwd=repo_abs,
