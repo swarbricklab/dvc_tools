@@ -240,9 +240,9 @@ dt fetch -v imported_data.dvc
 # Fetching import: imported_data.dvc
 # Import from: git@github.com:org/repo.git
 # Cloning source repository...
-# Found local cache: /g/data/a56/dvc/repo (from remote 'nci')
+# Found local cache: /g/data/ab12/dvc/repo (from remote 'nci')
 # Populating primary cache...
-# Fetched 5 files from /g/data/a56/dvc/repo
+# Fetched 5 files from /g/data/ab12/dvc/repo
 
 # Now checkout with standard DVC
 dvc checkout imported_data.dvc

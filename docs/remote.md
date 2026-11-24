@@ -50,11 +50,11 @@ policy.
 dt remote init
 
 # Set up remote with custom root
-# Uses: /g/data/a56/my-dvc-storage/my-project  
-dt remote init --name my-project --remote-root /g/data/a56/my-dvc-storage
+# Uses: /g/data/ab12/my-dvc-storage/my-project  
+dt remote init --name my-project --remote-root /g/data/ab12/my-dvc-storage
 
 # Set up remote with complete custom path (absolute)
-dt remote init --remote-path /g/data/a56/special-project/custom-remote
+dt remote init --remote-path /g/data/ab12/special-project/custom-remote
 
 # Set up remote with relative path
 dt remote init --remote-path ../shared-remote
@@ -125,11 +125,11 @@ dt remote list otherproject --owner myorg
 
 ```
 $ dt remote list
-storage (default): ssh://gadi-dm.nci.org.au/g/data/a56/dvc/projx
+storage (default): ssh://gadi-dm.nci.org.au/g/data/ab12/dvc/projx
 
 $ dt remote list --all
-storage: ssh://gadi-dm.nci.org.au/g/data/a56/dvc/projx
-local (default): /g/data/a56/dvc/projx
+storage: ssh://gadi-dm.nci.org.au/g/data/ab12/dvc/projx
+local (default): /g/data/ab12/dvc/projx
 ```
 
 The `(default)` marker is `core.remote` **as read in the same scopes as the
@@ -370,7 +370,7 @@ never moves where `dt remote init` puts things.
 
 ```bash
 dt remote perms --all                                   # every configured root
-dt remote perms --all --root /g/data/px14/dvc/analysis  # ad-hoc, repeatable
+dt remote perms --all --root /g/data/cd34/dvc/analysis  # ad-hoc, repeatable
 ```
 
 Store names are not unique across roots, so each is labelled with just enough of
@@ -522,7 +522,7 @@ directory that blocked it, since that is what has to change:
 
 ```
   3 could not be removed (12.1G)
-      /g/data/px14/dvc/datasets/foo/files/md5/3a  drwxr-sr-x  dir owner: ab1234
+      /g/data/cd34/dvc/datasets/foo/files/md5/3a  drwxr-sr-x  dir owner: ab1234
         3 file(s), 12.1G -- permission denied
       files owned by: cd5678 2, ef9012 1
 ```

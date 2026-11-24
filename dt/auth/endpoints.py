@@ -93,7 +93,7 @@ class Endpoint:
 def classify_url(url: str) -> str:
     """Return the endpoint type string for a URL.
 
-    >>> classify_url('/g/data/a56/dvc_cache')
+    >>> classify_url('/g/data/ab12/dvc_cache')
     'filesystem'
     >>> classify_url('ssh://gadi.nci.org.au/data')
     'ssh'

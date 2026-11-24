@@ -90,7 +90,7 @@ class TestConfigAddCli:
 # Reading: consumers tolerate a list that is already in someone's config
 # =============================================================================
 
-CACHE_LIST = ['/scratch/a56/dvc/cache', '/g/data/a56/dvc/cache2']
+CACHE_LIST = ['/scratch/ab12/dvc/cache', '/g/data/ab12/dvc/cache2']
 
 
 class TestCacheRootConsumers:

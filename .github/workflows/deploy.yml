@@ -26,6 +26,7 @@ env:
   QXUB_VENV: ${{ secrets.QXUB_VENV }}
   GHCR_TOKEN_SECRET: ${{ secrets.GHCR_TOKEN_SECRET }}
   GHCR_USERNAME_SECRET: ${{ secrets.GHCR_USERNAME_SECRET }}
+  NCI_SCRATCH_ROOT: ${{ secrets.NCI_SCRATCH_ROOT }}
 
 jobs:
   publish:
@@ -56,7 +57,7 @@ jobs:
 
       - name: Check deployment settings
         run: |
-          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV GHCR_TOKEN_SECRET GHCR_USERNAME_SECRET; do
+          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV GHCR_TOKEN_SECRET GHCR_USERNAME_SECRET NCI_SCRATCH_ROOT; do
             if [[ -z "${!v}" ]]; then
               echo "::error::Repository secret $v is not set" >&2
               exit 1
@@ -203,7 +204,7 @@ jobs:
 
       - name: Check deployment settings
         run: |
-          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV GHCR_TOKEN_SECRET GHCR_USERNAME_SECRET; do
+          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV GHCR_TOKEN_SECRET GHCR_USERNAME_SECRET NCI_SCRATCH_ROOT; do
             if [[ -z "${!v}" ]]; then
               echo "::error::Repository secret $v is not set" >&2
               exit 1
@@ -325,15 +326,15 @@ jobs:
           NCI_USER="${{ secrets.USER_NAME }}"
           if [[ -z "$NCI_USER" ]]; then
             echo "::error::USER_NAME secret is empty -- refusing to write the" \
-                 "Singularity cache to /scratch/a56//.singularity/cache" >&2
+                 "Singularity cache to the scratch root itself" >&2
             exit 1
           fi
 
-          CACHE_DIR="/scratch/a56/${NCI_USER}/.singularity/cache"
+          CACHE_DIR="${NCI_SCRATCH_ROOT}/${NCI_USER}/.singularity/cache"
           ssh -o StrictHostKeyChecking=accept-new gadi \
             "mkdir -p '$CACHE_DIR' && test -w '$CACHE_DIR'" \
             || { echo "::error::Cannot create or write $CACHE_DIR on NCI." \
-                      "Check the USER_NAME secret names an account with /scratch/a56 access." >&2; exit 1; }
+                      "Check the USER_NAME secret names an account with access to NCI_SCRATCH_ROOT." >&2; exit 1; }
 
           echo "SINGULARITY_CACHEDIR=$CACHE_DIR" >> "$GITHUB_ENV"
 

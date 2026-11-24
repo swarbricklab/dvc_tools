@@ -33,3 +33,21 @@ jobs:
             exit 1
           fi
           echo "OK"
+
+      - name: Only placeholder project codes in storage paths
+        # Example paths use placeholder project codes (ab12, cd34) or
+        # <project>; anything shaped like a real project code is flagged.
+        run: |
+          set -euo pipefail
+          codes=$(git grep -ohE '(/g/data|/scratch|/massdata)/[A-Za-z0-9]+|(gdata|scratch|massdata)/[a-z0-9]+\+' \
+                    -- . ':!.github/workflows/example-ids.yml' \
+                  | sed -E 's#^/?(g/data|scratch|massdata|gdata)/##; s#\+$##' \
+                  | grep -E '^[a-z]{1,3}[0-9]{1,3}$' | sort -u | grep -vE '^(ab12|cd34)$' || true)
+          if [[ -n "$codes" ]]; then
+            echo "::error::Non-placeholder project codes in storage paths:"
+            for c in $codes; do
+              git grep -nE "(/g/data|/scratch|/massdata|gdata|scratch|massdata)/$c\b" -- . ':!.github/workflows/example-ids.yml'
+            done
+            exit 1
+          fi
+          echo "OK"

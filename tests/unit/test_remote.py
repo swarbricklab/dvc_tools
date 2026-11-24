@@ -339,12 +339,12 @@ class TestConfigureLocalOverride:
 
     def test_returns_local_path_and_runs_dvc(self, tmp_path):
         """Adds a local remote when an existing remote resolves locally."""
-        remotes = [("myremote", "ssh://host/g/data/a56/dvc/remotes/proj", True)]
+        remotes = [("myremote", "ssh://host/g/data/ab12/dvc/remotes/proj", True)]
 
         with patch("dt.remote.list_remotes", return_value=remotes):
             with patch(
                 "dt.remote.find_local_remote",
-                return_value=("myremote", "/g/data/a56/dvc/remotes/proj"),
+                return_value=("myremote", "/g/data/ab12/dvc/remotes/proj"),
             ):
                 with patch("subprocess.run") as mock_run:
                     mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -352,12 +352,12 @@ class TestConfigureLocalOverride:
                         repo_path=tmp_path, verbose=False,
                     )
 
-        assert result == "/g/data/a56/dvc/remotes/proj"
+        assert result == "/g/data/ab12/dvc/remotes/proj"
         # Should have run `dvc remote add --local -d local <path>`
         cmd = mock_run.call_args[0][0]
         assert cmd == [
             "dvc", "remote", "add", "--local", "-d", "local",
-            "/g/data/a56/dvc/remotes/proj",
+            "/g/data/ab12/dvc/remotes/proj",
         ]
         assert mock_run.call_args[1]["cwd"] == tmp_path
 

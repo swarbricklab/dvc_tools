@@ -389,7 +389,7 @@ def label_stores(stores: Sequence[Path]) -> List[Tuple[str, Path]]:
     more than one root, some under three -- so a bare name would quietly merge
     distinct remotes in the reader's mind. Qualifying everything with its root
     is not enough either, since two roots can share a basename
-    (``a56/dvc/analysis`` and ``px14/dvc/analysis``).
+    (``ab12/dvc/analysis`` and ``cd34/dvc/analysis``).
 
     So: use the bare name where it is unique, else add parent directories one
     at a time until it is, falling back to the full path.

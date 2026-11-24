@@ -759,12 +759,12 @@ class TestDvcPushNeedsInternet:
     def test_false_when_local_remote_available(self):
         """Returns False when find_local_remote finds a local remote."""
         remotes = [
-            ('local', '/g/data/a56/dvc/datasets/test', False),
-            ('myremote', 'ssh://gadi-dm.nci.org.au/g/data/a56/dvc/datasets/test', True),
+            ('local', '/g/data/ab12/dvc/datasets/test', False),
+            ('myremote', 'ssh://gadi-dm.nci.org.au/g/data/ab12/dvc/datasets/test', True),
         ]
         with patch('dt.remote.list_remotes', return_value=remotes), \
              patch('dt.remote.find_local_remote',
-                   return_value=('local', '/g/data/a56/dvc/datasets/test')):
+                   return_value=('local', '/g/data/ab12/dvc/datasets/test')):
             assert install._dvc_push_needs_internet() is False
 
     def test_true_when_default_is_s3(self):
@@ -780,12 +780,12 @@ class TestDvcPushNeedsInternet:
     def test_false_when_default_is_local_path(self):
         """Returns False when default remote resolves to local path."""
         remotes = [
-            ('myremote', 'ssh://gadi-dm/g/data/a56/remote', True),
+            ('myremote', 'ssh://gadi-dm/g/data/ab12/remote', True),
         ]
         with patch('dt.remote.list_remotes', return_value=remotes), \
              patch('dt.remote.find_local_remote', return_value=None), \
              patch('dt.remote.extract_local_path',
-                   return_value='/g/data/a56/remote'):
+                   return_value='/g/data/ab12/remote'):
             assert install._dvc_push_needs_internet() is False
 
     def test_no_remotes(self):

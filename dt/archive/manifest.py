@@ -9,7 +9,7 @@ Schema version 2 (folder-per-prefix layout)::
 
     version: 2
     archive_name: projx-2026-05
-    source_remote: /g/data/a56/dvc/projx
+    source_remote: /g/data/ab12/dvc/projx
     created_at: 2026-05-28T12:34:56+00:00
     created_by: xy1234
     git_ref: <sha>

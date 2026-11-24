@@ -488,7 +488,7 @@ class TestCloneHooksAndRemote:
             with patch.object(cfg, 'get_value', return_value='testowner'):
                 with patch('dt.clone.cache_mod.init_cache'):
                     with patch('dt.clone.remote_mod.configure_local_override',
-                               return_value='/g/data/a56/dvc/remotes/testrepo'):
+                               return_value='/g/data/ab12/dvc/remotes/testrepo'):
                         with patch('dt.clone.remote_mod.init_remote') as mock_remote:
                             clone.clone_repository(
                                 'git@github.com:org/testrepo.git',

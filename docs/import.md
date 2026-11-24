@@ -94,7 +94,7 @@ A sparse clone is created in `.dt/tmp/clones/` containing only the `.dvc/` direc
 ### Step 2: Find Local Cache
 
 The source repository's remotes are examined to find one accessible locally:
-- Direct filesystem paths: `/g/data/a56/dvc/project`
+- Direct filesystem paths: `/g/data/ab12/dvc/project`
 - SSH URLs matching `ssh.host`: `ssh://gadi-dm.nci.org.au/g/data/...`
 
 ### Step 3: Create DVC Files

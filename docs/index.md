@@ -166,7 +166,7 @@ Show where DVC's site cache index lives, and warn if it is not private.
 dt index status
 # Output:
 # Site cache (core.site_cache_dir):
-#   Configured: /scratch/a56/xy1234/dvc/site/my-repo
+#   Configured: /scratch/ab12/xy1234/dvc/site/my-repo
 #   Exists:     yes
 ```
 

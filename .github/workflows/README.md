@@ -19,7 +19,7 @@ This directory contains the GitHub Actions workflows for `dvc_tools`.
 
 ## Configuration
 
-Deployment-specific values are repository secrets so they are masked in public run logs: `REMOTE_BUILDER_NAME`, `REMOTE_BUILDER_HOST`, `REMOTE_BUILDER_WORKSPACE`, `GCP_REGION`, `GCP_ZONE`, `QXUB_VENV`, and `GHCR_TOKEN_SECRET` / `GHCR_USERNAME_SECRET` (the Secret Manager secret names holding the GHCR PAT and its username) (plus the org-level `WIF_PROVIDER`, `SERVICE_ACCOUNT`, `PROJECT_ID`, and `USER_NAME`). The runner label is the repository variable `RUNNER_LABEL` (`runs-on` cannot read secrets).
+Deployment-specific values are repository secrets so they are masked in public run logs: `REMOTE_BUILDER_NAME`, `REMOTE_BUILDER_HOST`, `REMOTE_BUILDER_WORKSPACE`, `GCP_REGION`, `GCP_ZONE`, `QXUB_VENV`, and `GHCR_TOKEN_SECRET` / `GHCR_USERNAME_SECRET` (the Secret Manager secret names holding the GHCR PAT and its username), and `NCI_SCRATCH_ROOT` (the project's `/scratch/<project>` directory, used for the Singularity cache) (plus the org-level `WIF_PROVIDER`, `SERVICE_ACCOUNT`, `PROJECT_ID`, and `USER_NAME`). The runner label is the repository variable `RUNNER_LABEL` (`runs-on` cannot read secrets).
 
 ## Operational notes / learnings
 

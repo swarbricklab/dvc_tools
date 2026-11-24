@@ -50,7 +50,7 @@ post-hoc re-read, not a weaker one.
 ## Verified foundations
 
 Everything below was checked in the `dt3` environment
-(`/g/data/a56/conda/envs/dt3`, Python 3.14.4). **No new dependencies are required.**
+(`/g/data/ab12/conda/envs/dt3`, Python 3.14.4). **No new dependencies are required.**
 
 | package | version | role |
 |---|---|---|

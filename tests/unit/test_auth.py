@@ -108,13 +108,13 @@ class TestClassifyUrl:
     """Tests for classify_url."""
 
     def test_absolute_path(self):
-        assert classify_url('/g/data/a56/dvc_cache') == 'filesystem'
+        assert classify_url('/g/data/ab12/dvc_cache') == 'filesystem'
 
     def test_file_url(self):
-        assert classify_url('file:///g/data/a56/dvc_cache') == 'filesystem'
+        assert classify_url('file:///g/data/ab12/dvc_cache') == 'filesystem'
 
     def test_ssh_url(self):
-        assert classify_url('ssh://gadi.nci.org.au/g/data/a56/remote') == 'ssh'
+        assert classify_url('ssh://gadi.nci.org.au/g/data/ab12/remote') == 'ssh'
 
     def test_ssh_url_with_user(self):
         assert classify_url('ssh://user@gadi.nci.org.au/g/data/remote') == 'ssh'
@@ -886,13 +886,13 @@ class TestExtractSshRemotePath:
     """Tests for _extract_ssh_remote_path."""
 
     def test_ssh_url(self):
-        assert _extract_ssh_remote_path('ssh://host/g/data/px14') == '/g/data/px14'
+        assert _extract_ssh_remote_path('ssh://host/g/data/cd34') == '/g/data/cd34'
 
     def test_ssh_url_with_user(self):
-        assert _extract_ssh_remote_path('ssh://user@host/g/data/px14') == '/g/data/px14'
+        assert _extract_ssh_remote_path('ssh://user@host/g/data/cd34') == '/g/data/cd34'
 
     def test_scp_style(self):
-        assert _extract_ssh_remote_path('user@host:/g/data/px14') == '/g/data/px14'
+        assert _extract_ssh_remote_path('user@host:/g/data/cd34') == '/g/data/cd34'
 
     def test_no_path(self):
         assert _extract_ssh_remote_path('ssh://host') is None
@@ -908,7 +908,7 @@ class TestCheckSshRemoteDir:
     @patch('subprocess.run')
     def test_directory_accessible(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
-        result = _check_ssh_remote_dir('host', '/g/data/px14')
+        result = _check_ssh_remote_dir('host', '/g/data/cd34')
         assert result is None  # None means success
 
     @patch('subprocess.run')
@@ -918,7 +918,7 @@ class TestCheckSshRemoteDir:
             MagicMock(returncode=1),  # not readable/not a dir
             MagicMock(returncode=0),  # but path exists
         ]
-        result = _check_ssh_remote_dir('host', '/g/data/px14')
+        result = _check_ssh_remote_dir('host', '/g/data/cd34')
         assert result is not None
         assert result.status == STATUS_FAIL
         assert 'not accessible' in result.summary
@@ -930,14 +930,14 @@ class TestCheckSshRemoteDir:
             MagicMock(returncode=1),  # not readable/not a dir
             MagicMock(returncode=1),  # does not exist
         ]
-        result = _check_ssh_remote_dir('host', '/g/data/px14')
+        result = _check_ssh_remote_dir('host', '/g/data/cd34')
         assert result is not None
         assert result.status == STATUS_WARN
         assert 'does not exist' in result.summary
 
     @patch('subprocess.run', side_effect=subprocess.TimeoutExpired('ssh', 15))
     def test_timeout_returns_none(self, _):
-        result = _check_ssh_remote_dir('host', '/g/data/px14')
+        result = _check_ssh_remote_dir('host', '/g/data/cd34')
         assert result is None  # don't block on timeout
 
 
@@ -960,7 +960,7 @@ class TestCheckSsh:
     def test_remote_ssh_host_and_dir_ok(self, mock_run):
         # Both host check and directory check succeed
         mock_run.return_value = MagicMock(returncode=0)
-        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/px14', source='r')
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/cd34', source='r')
         r = _check_ssh(ep)
         assert r.status == STATUS_PASS
         assert 'remote directory accessible' in r.summary
@@ -973,7 +973,7 @@ class TestCheckSsh:
             MagicMock(returncode=1),   # test -d -a -r fails
             MagicMock(returncode=0),   # test -e succeeds (path exists)
         ]
-        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/px14', source='r')
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/cd34', source='r')
         r = _check_ssh(ep)
         assert r.status == STATUS_FAIL
         assert 'not accessible' in r.summary
@@ -986,7 +986,7 @@ class TestCheckSsh:
             MagicMock(returncode=1),   # test -d -a -r fails
             MagicMock(returncode=1),   # test -e fails (doesn't exist)
         ]
-        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/px14', source='r')
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/cd34', source='r')
         r = _check_ssh(ep)
         assert r.status == STATUS_WARN
         assert 'does not exist' in r.summary

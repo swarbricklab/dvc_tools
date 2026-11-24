@@ -11,10 +11,10 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `owner` | Default GitHub owner (user or org) for [short repository names](clone.md#short-name-feature) | `myorg` |
 | `team` | GitHub team for [`gh repo create --team`](https://cli.github.com/manual/gh_repo_create) | `analysts` |
 | `username` | Default SSH username for remote hosts, used by [`dt clone`](clone.md) and [`dt auth setup`](auth.md) | `xy1234` |
-| `cache.root` | Root director**y** for [shared external caches](cache.md). May also be a list, in which case the **first** entry is the primary cache and the rest are reported by `dt auth list`. Manage with `dt config add/remove cache.root <path>` | `/g/data/a56/dvc_cache` |
-| `remote.root` | Root director**ies** for [DVC remote storage](remote.md). A single path, or a list. The **first** entry is where new remotes are created; the rest are also scanned by `--all`. Manage with `dt config add/remove remote.root <path>` | `/g/data/a56/dvc/analysis` |
+| `cache.root` | Root director**y** for [shared external caches](cache.md). May also be a list, in which case the **first** entry is the primary cache and the rest are reported by `dt auth list`. Manage with `dt config add/remove cache.root <path>` | `/g/data/ab12/dvc_cache` |
+| `remote.root` | Root director**ies** for [DVC remote storage](remote.md). A single path, or a list. The **first** entry is where new remotes are created; the rest are also scanned by `--all`. Manage with `dt config add/remove remote.root <path>` | `/g/data/ab12/dvc/analysis` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
-| `site_cache.root` | Root directory for shared DVC [`site_cache_dir`](index.md) | `/g/data/a56/dvc/site` |
+| `site_cache.root` | Root directory for shared DVC [`site_cache_dir`](index.md) | `/g/data/ab12/dvc/site` |
 | `site_cache.enabled` | Whether `dt init`/`dt clone` configure `core.site_cache_dir` | `true` |
 | `add.max_threads` | Maximum threads for checksum computation | `192` |
 | `add.mem_per_thread` | GB of RAM per thread for `dt add` | `1` |
@@ -22,7 +22,7 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `qxub.queue` | PBS queue for parallel jobs (default depends on the caller — see below) | `copyq` |
 | `qxub.walltime` | Maximum runtime for parallel jobs | `10:00:00` |
 | `qxub.mem` | Memory allocation for parallel jobs | `4GB` |
-| `deps.cache_dir` | Directory for the [org-wide import index](deps.md#dt-deps-index); set to a shared path so a whole lab reuses one scan. Defaults to a per-user cache dir (`~/.cache/dvc-tools/repo-deps` on Linux) | `/g/data/a56/dvc-tools/repo-deps` |
+| `deps.cache_dir` | Directory for the [org-wide import index](deps.md#dt-deps-index); set to a shared path so a whole lab reuses one scan. Defaults to a per-user cache dir (`~/.cache/dvc-tools/repo-deps` on Linux) | `/g/data/ab12/dvc-tools/repo-deps` |
 | `hooks.verbosity` | Output level for [git hooks](install.md#configuration): `quiet`, `normal`, `verbose` (default `normal`) | `quiet` |
 | `hooks.<hook>.checks.<check>.*` | Per-check overrides for git hooks (`enabled`, `mode`, `max_size`, …). See [dt install](install.md#configuration) | `hooks.pre-commit.checks.large-files.max_size` |
 | `perms.sticky` | Whether shared dirs get the sticky bit, restricting deletion to file owners (creation is unaffected). Default `true`. Used by `dt remote/cache init` and `perms` | `false` |
@@ -40,9 +40,9 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `secrets.gcp.locations` | Region(s) for new GCP secrets; unset means GCP automatic (global) replication | `australia-southeast1` |
 | `secrets.default_endpointurl` | Fallback S3 endpoint for [`dt auth credentials configure-remotes`](auth.md#dt-auth-credentials-configure-remotes) when `--endpoint` is omitted | `https://<account>.r2.cloudflarestorage.com` |
 | `summary.output_dir` | Output directory for [summary files](summary.md) | `docs` |
-| `archive.staging_dir` | Local staging directory for [`dt remote archive`](archive.md#configuration) inner tarballs (no default — required) | `/scratch/a56/xy1234/dt-archive` |
+| `archive.staging_dir` | Local staging directory for [`dt remote archive`](archive.md#configuration) inner tarballs (no default — required) | `/scratch/ab12/xy1234/dt-archive` |
 | `archive.backend_root` | Base path on the archive backend (default `dt-archive`) | `dt-archive` |
-| `archive.registry_path` | Central archive register directory; unset disables registration | `/g/data/a56/dt-archives/registry` |
+| `archive.registry_path` | Central archive register directory; unset disables registration | `/g/data/ab12/dt-archives/registry` |
 | `archive.stage_jobs` | Parallel workers for `archive stage` (default `min(PBS_NCPUS or nproc, 8)`) | `8` |
 | `archive.deposit_jobs` | Parallel upload workers for `archive deposit` (default `4`) | `4` |
 | `archive.scan_jobs` | Threads for the preflight remote scan (default `32`) | `32` |
@@ -97,10 +97,10 @@ May be a single path or a **list**. The first entry is the default — it is whe
 ```yaml
 remote:
   root:
-    - /g/data/a56/dvc/analysis      # default: new remotes go here
-    - /g/data/a56/dvc/datasets
-    - /g/data/a56/dvc/registries
-    - /g/data/px14/dvc/analysis
+    - /g/data/ab12/dvc/analysis      # default: new remotes go here
+    - /g/data/ab12/dvc/datasets
+    - /g/data/ab12/dvc/registries
+    - /g/data/cd34/dvc/analysis
 ```
 
 Manage the list with [`dt config add` / `dt config remove`](config.md#list-valued-settings).
@@ -108,8 +108,8 @@ Manage the list with [`dt config add` / `dt config remove`](config.md#list-value
 Scopes override rather than merge: the highest-precedence scope defining
 `remote.root` supplies the whole list.
 
-**Do not list cache roots here.** `/g/data/a56/dvc/cache` and
-`/g/data/px14/dvc/cache` hold caches, not remotes; listing them would have
+**Do not list cache roots here.** `/g/data/ab12/dvc/cache` and
+`/g/data/cd34/dvc/cache` hold caches, not remotes; listing them would have
 `perms` apply remote policy to a cache and `clean` sweep it as one.
 
 Store names are not unique across roots — one site has 18 names appearing under

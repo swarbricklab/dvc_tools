@@ -82,8 +82,8 @@ Each discovered endpoint is classified by type:
 
 | Type | Examples |
 |------|----------|
-| `filesystem` | `/g/data/a56/dvc_cache`, `/scratch/dvc/remote` |
-| `ssh` | `ssh://gadi.nci.org.au/g/data/a56/dvc_remote` |
+| `filesystem` | `/g/data/ab12/dvc_cache`, `/scratch/dvc/remote` |
+| `ssh` | `ssh://gadi.nci.org.au/g/data/ab12/dvc_remote` |
 | `s3` | `s3://my-bucket/dvc-remote` (AWS S3, CloudFlare R2, MinIO, …) |
 | `gs` | `gs://my-bucket/dvc-remote` |
 | `http` | `https://example.com/data` |
@@ -94,19 +94,19 @@ $ dt auth list
 Endpoints for project 'my-project':
 
   filesystem
-    /g/data/a56/dvc_cache                       (cache.root)
-    /g/data/a56/dvc_remote/my-project           (remote.root)
+    /g/data/ab12/dvc_cache                       (cache.root)
+    /g/data/ab12/dvc_remote/my-project           (remote.root)
 
   ssh
-    ssh://gadi.nci.org.au/g/data/a56/dvc_remote (DVC remote 'origin')
-      → local equivalent: /g/data/a56/dvc_remote (host is local)
+    ssh://gadi.nci.org.au/g/data/ab12/dvc_remote (DVC remote 'origin')
+      → local equivalent: /g/data/ab12/dvc_remote (host is local)
 
   s3
     s3://my-r2-bucket/dvc                       (DVC remote 'cloud')
 
   git
     git@github.com:org/data-repo.git            (import source)
-      → remote: ssh://gadi.nci.org.au/g/data/a56/dvc_remote/data-repo
+      → remote: ssh://gadi.nci.org.au/g/data/ab12/dvc_remote/data-repo
 ```
 
 ### JSON output
@@ -221,9 +221,9 @@ dt auth check --repo projx
 When filesystem subdirectories fail the access check, `dt auth check` shows the **owner and group** of each failing directory. This tells you who to ask to run `setfacl` to grant access:
 
 ```
-  ✗ /g/data/a56/dvc_cache
-      files  not writable  (owner: ab1234, group: a56)
-    Fix permissions: setfacl -R -m u:jsmith:rwx /g/data/a56/dvc_cache/files
+  ✗ /g/data/ab12/dvc_cache
+      files  not writable  (owner: ab1234, group: ab12)
+    Fix permissions: setfacl -R -m u:jsmith:rwx /g/data/ab12/dvc_cache/files
     Ask ab1234 to run the setfacl command(s) above
 ```
 
@@ -293,8 +293,8 @@ If no `endpointurl` is configured in DVC, falls back to the default AWS endpoint
 $ dt auth check
 Checking access for project 'my-project'...
 
-  ✓ /g/data/a56/dvc_cache                       read/write (12/12 subdirs OK)
-  ✓ /g/data/a56/dvc_remote/my-project           read/write (12/12 subdirs OK)
+  ✓ /g/data/ab12/dvc_cache                       read/write (12/12 subdirs OK)
+  ✓ /g/data/ab12/dvc_remote/my-project           read/write (12/12 subdirs OK)
   ✓ ssh://gadi.nci.org.au/...                    → checked as local path
   ✓ s3://my-r2-bucket/dvc                        credentials OK, bucket accessible
   ⚠ gs://my-gcs-bucket/dvc                       no gcloud auth configured (warning)
@@ -309,12 +309,12 @@ With `--verbose`:
 $ dt auth check --verbose
 Checking access for project 'my-project'...
 
-  ✓ /g/data/a56/dvc_cache
-      /g/data/a56/dvc_cache/00  ✓ r/w
-      /g/data/a56/dvc_cache/01  ✓ r/w
+  ✓ /g/data/ab12/dvc_cache
+      /g/data/ab12/dvc_cache/00  ✓ r/w
+      /g/data/ab12/dvc_cache/01  ✓ r/w
       ...
-      /g/data/a56/dvc_cache/ff  ✓ r/w
-      /g/data/a56/dvc_cache/files/md5  ✓ r/w
+      /g/data/ab12/dvc_cache/ff  ✓ r/w
+      /g/data/ab12/dvc_cache/files/md5  ✓ r/w
     12 subdirectories, all accessible
 
   ✗ /scratch/dvc/project-x
@@ -363,9 +363,9 @@ Example output:
 $ dt auth check --user ab1234
 Checking access for user: ab1234
 
-  ✓ /g/data/a56/dvc_cache                       read/write for ab1234
-  ✗ /g/data/a56/dvc_remote/my-project           not readable by ab1234
-    Hint: Grant access: setfacl -R -m u:ab1234:rwx /g/data/a56/dvc_remote/my-project
+  ✓ /g/data/ab12/dvc_cache                       read/write for ab1234
+  ✗ /g/data/ab12/dvc_remote/my-project           not readable by ab1234
+    Hint: Grant access: setfacl -R -m u:ab1234:rwx /g/data/ab12/dvc_remote/my-project
   ✓ git@github.com:org/data-repo.git             write access for ab1234
   – s3://my-r2-bucket/dvc                        cannot check s3 access for another user
 ```

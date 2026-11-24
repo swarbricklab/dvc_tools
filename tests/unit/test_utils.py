@@ -711,13 +711,13 @@ class TestCacheRootFromOdbPath:
 
     def test_strips_files_md5_suffix(self):
         assert utils.cache_root_from_odb_path(
-            Path('/g/data/a56/dvc/cache/files/md5')
-        ) == Path('/g/data/a56/dvc/cache')
+            Path('/g/data/ab12/dvc/cache/files/md5')
+        ) == Path('/g/data/ab12/dvc/cache')
 
     def test_leaves_bare_root_alone(self):
         assert utils.cache_root_from_odb_path(
-            Path('/g/data/a56/dvc/cache')
-        ) == Path('/g/data/a56/dvc/cache')
+            Path('/g/data/ab12/dvc/cache')
+        ) == Path('/g/data/ab12/dvc/cache')
 
     def test_does_not_strip_partial_match(self):
         """`md5` without a `files` parent is a real directory name."""

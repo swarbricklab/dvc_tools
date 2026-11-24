@@ -356,17 +356,17 @@ Stage on a normal compute node:
 
 ```bash
 #!/bin/bash
-#PBS -P a56
+#PBS -P ab12
 #PBS -q normal
 #PBS -l ncpus=8
 #PBS -l mem=32GB
 #PBS -l jobfs=400GB
 #PBS -l walltime=24:00:00
-#PBS -l storage=gdata/a56+scratch/a56
+#PBS -l storage=gdata/ab12+scratch/ab12
 
 cd /path/to/repo
 dt remote archive stage projx-2026-05 \
-    --staging-dir /scratch/a56/${USER}/dt-archive \
+    --staging-dir /scratch/ab12/${USER}/dt-archive \
     -v
 ```
 
@@ -374,16 +374,16 @@ Deposit on a data mover:
 
 ```bash
 #!/bin/bash
-#PBS -P a56
+#PBS -P ab12
 #PBS -q copyq
 #PBS -l ncpus=1
 #PBS -l mem=4GB
 #PBS -l walltime=10:00:00
-#PBS -l storage=gdata/a56+scratch/a56+massdata/a56
+#PBS -l storage=gdata/ab12+scratch/ab12+massdata/ab12
 
 cd /path/to/repo
 dt remote archive deposit projx-2026-05 \
-    --staging-dir /scratch/a56/${USER}/dt-archive \
+    --staging-dir /scratch/ab12/${USER}/dt-archive \
     -v
 ```
 
@@ -396,17 +396,17 @@ extra storage flag for the data they touch:
 
 ```bash
 #!/bin/bash
-#PBS -P a56
+#PBS -P ab12
 #PBS -q copyq
 #PBS -l ncpus=1
 #PBS -l mem=4GB
 #PBS -l walltime=01:00:00
-#PBS -l storage=gdata/a56+massdata/a56   # + scratch/a56 for restore --to / verify --deep
+#PBS -l storage=gdata/ab12+massdata/ab12   # + scratch/ab12 for restore --to / verify --deep
                                           # + gdata/<other> for the source remote (prune only)
 
 cd /path/to/repo
 dt remote archive verify  projx-2026-05
-# or restore: dt remote archive restore projx-2026-05 --to /scratch/a56/$USER/restored
+# or restore: dt remote archive restore projx-2026-05 --to /scratch/ab12/$USER/restored
 # or destroy: dt remote archive destroy projx-2026-05 --yes
 # or prune:   dt remote archive prune   projx-2026-05 --yes
 ```
@@ -415,7 +415,7 @@ Or wrap any of them in a one-liner via `qxub`:
 
 ```bash
 qxub exec --env dt --queue copyq --time 01:00:00 --mem 4GB \
-    --storage 'gdata/a56+massdata/a56' \
+    --storage 'gdata/ab12+massdata/ab12' \
     -N dt-verify-projx \
     -- dt remote archive verify projx-2026-05
 ```

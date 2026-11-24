@@ -327,7 +327,7 @@ def config_add(key, value, local, project, user, system):
 
     \b
     Examples:
-        dt config add remote.root /g/data/px14/dvc/analysis
+        dt config add remote.root /g/data/cd34/dvc/analysis
         dt config list | grep remote.root
     """
     if _count_scope_flags(local, project, user, system) > 1:
@@ -361,7 +361,7 @@ def config_remove(key, value, local, project, user, system):
 
     \b
     Examples:
-        dt config remove remote.root /g/data/px14/dvc/analysis
+        dt config remove remote.root /g/data/cd34/dvc/analysis
     """
     if _count_scope_flags(local, project, user, system) > 1:
         raise click.UsageError("Only one scope flag can be specified.")
@@ -5525,8 +5525,8 @@ def index_set(site_cache_root, site_cache_path, name):
 
     \b
     Examples:
-        dt index set --root /scratch/a56/xy1234/dvc/site
-        dt index set --path /scratch/a56/xy1234/dvc/site/my-repo
+        dt index set --root /scratch/ab12/xy1234/dvc/site
+        dt index set --path /scratch/ab12/xy1234/dvc/site/my-repo
     """
     try:
         target = site_cache_mod.init_site_cache(
@@ -5554,8 +5554,8 @@ def index_migrate(site_cache_root, site_cache_path, name):
 
     \b
     Examples:
-        dt index migrate --root /scratch/a56/xy1234/dvc/site
-        dt index migrate --path /scratch/a56/xy1234/dvc/site/my-repo
+        dt index migrate --root /scratch/ab12/xy1234/dvc/site
+        dt index migrate --path /scratch/ab12/xy1234/dvc/site/my-repo
     """
     try:
         target = site_cache_mod.resolve_path(

@@ -473,8 +473,8 @@ class TestListValuedConfig:
     """`remote.root` may hold one path or several; both must work."""
 
     def test_scalar_reads_as_a_one_item_list(self, isolated_config):
-        cfg.set_value('remote.root', '/g/data/a56/dvc/analysis', 'user')
-        assert cfg.get_str_list('remote.root') == ['/g/data/a56/dvc/analysis']
+        cfg.set_value('remote.root', '/g/data/ab12/dvc/analysis', 'user')
+        assert cfg.get_str_list('remote.root') == ['/g/data/ab12/dvc/analysis']
 
     def test_list_reads_as_a_list(self, isolated_config):
         cfg.set_value('remote.root', '[/a, /b, /c]', 'user')

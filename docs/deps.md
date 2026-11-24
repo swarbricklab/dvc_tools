@@ -349,7 +349,7 @@ the small metadata lives in the user cache. Set `deps.cache_dir` to point a whol
 lab at one shared index:
 
 ```bash
-dt config set deps.cache_dir /g/data/a56/dvc-tools/repo-deps
+dt config set deps.cache_dir /g/data/ab12/dvc-tools/repo-deps
 ```
 
 Scan records are written one file per repo so concurrent refreshes cannot

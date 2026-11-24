@@ -51,11 +51,11 @@ DVC Tools version: 0.1.0
 ✓ GitHub CLI installed (2.40.0)
 ✓ SSH key found (~/.ssh/id_ed25519.pub)
 ✓ GitHub SSH connection works
-✓ Cache root accessible (/g/data/a56/dvc_cache)
-✓ Remote root accessible (/g/data/a56/dvc_remote)
+✓ Cache root accessible (/g/data/ab12/dvc_cache)
+✓ Remote root accessible (/g/data/ab12/dvc_remote)
 ✓ No archived remotes detected
-✓ In git repository (/scratch/a56/me/my-project)
-✓ In DVC repository (/scratch/a56/me/my-project)
+✓ In git repository (/scratch/ab12/me/my-project)
+✓ In DVC repository (/scratch/ab12/me/my-project)
 ✓ .dvcignore excludes .gitignore files
 
 All 11 checks passed.
@@ -80,8 +80,8 @@ DVC Tools version: 0.1.0
 ✗ Remote root not configured
   Run: dt config set remote.root /path/to/remote
 ✓ No archived remotes detected
-✓ In git repository (/scratch/a56/me/my-project)
-✓ In DVC repository (/scratch/a56/me/my-project)
+✓ In git repository (/scratch/ab12/me/my-project)
+✓ In DVC repository (/scratch/ab12/me/my-project)
 
 5 passed, 5 failed.
 ```
@@ -102,8 +102,8 @@ All 13 checks passed.
 
 --- Configuration (with sources) ---
 user    owner=myorg
-project cache.root=/g/data/a56/dvc_cache
-project remote.root=/g/data/a56/dvc_remote
+project cache.root=/g/data/ab12/dvc_cache
+project remote.root=/g/data/ab12/dvc_remote
 
 --- DVC Doctor ---
 DVC version: 3.55.2
