@@ -5561,6 +5561,9 @@ def index_status(verbose):
         if current_sc:
             click.echo(f"  Configured: {current_sc}")
             click.echo(f"  Exists:     {'yes' if current_sc.exists() else 'no'}")
+            risk = site_cache_mod.describe_risk(current_sc)
+            if risk:
+                click.echo(f"  Warning:    {risk}; re-run 'dt index set' to move to a private dir")
         else:
             click.echo("  Configured: (DVC default — usually /var/tmp/dvc)")
         click.echo()
@@ -5649,7 +5652,7 @@ def index_migrate(site_cache_root, site_cache_path, name):
             site_cache_root=site_cache_root,
             site_cache_path=site_cache_path,
         )
-        site_cache_mod.migrate(target=target, verbose=True)
+        site_cache_mod.migrate(target=target, verbose=True, site_cache_root=site_cache_root)
     except site_cache_mod.SiteCacheError as e:
         raise click.ClickException(str(e))
 

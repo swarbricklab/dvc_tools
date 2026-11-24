@@ -14,7 +14,7 @@ the workspace.
 `dt` provides two complementary mechanisms:
 
 1. **Shared `site_cache_dir`** — point DVC's per-repo index at shared
-   storage (e.g. `/scratch/<project>/dvc/site/<repo>`) so every node
+   storage (e.g. `/scratch/<project>/dvc/site/<user>/<repo>`) so every node
    mounting the same workspace sees the same index live. This is the
    recommended setup, and [`dt init`](init.md) / [`dt clone`](clone.md)
    configure it for you **once `site_cache.root` is set** (without it
@@ -104,30 +104,54 @@ correctly.
 
 ### Shared filesystem permissions
 
-A shared `site_cache_dir` is read **and written** by every user that
-touches the workspace, so the root directory needs to be group-writable
-with the setgid bit (so per-project subdirs inherit the group) and
-ideally a default ACL (so files DVC creates inside are also
-group-writable regardless of each user's umask).
+DVC trusts what it reads from `site_cache_dir`, so each user's state is
+kept private even when the root is shared. Under a shared root, `dt`
+uses `{root}/{user}/{project}`:
 
-Set it up once, as the directory owner:
+- `{root}/{user}` and `{root}/{user}/{project}` are created owned by
+  you, mode `0700`.
+- An existing directory is only used if you own it and everything in it
+  is yours and not writable by others; its permissions are then
+  tightened. A directory owned by anyone else, one containing files
+  others could have written, or a symlink planted by another user, is
+  refused (remove it — DVC rebuilds the index).
+- The path is refused if another user could rename or replace it or any
+  parent, up to the first system-owned directory. If that system
+  directory (e.g. an HPC project directory) itself lets group members
+  rename entries, `dt` warns: it cannot protect paths below it, so ask
+  the system administrators to set its sticky bit. **Until they do, a
+  member of that group can still swap the whole tree** (the same is true
+  of everything else under that directory, including workspaces).
+- `dt index migrate` only copies the old index if it was private to you;
+  otherwise it starts empty and DVC rebuilds it.
+- `dt index status` warns if the configured directory is not private.
+
+`site_cache.root` and `site_cache.group_shared` are only read from user
+or system dt config (or the command line), never from a repo's tracked
+`.dt/config.yaml` or the workspace's `.dt/config.local.yaml`.
+
+The root's owner is trusted by every user (they can always rename
+entries in it), so prefer an admin or service account as owner. A root
+that `dt` has to create itself is made private (`0700`).
+
+Set the root up once, as its owner — group-writable so users can create
+their own subdirectory, with the **sticky bit** so they cannot rename or
+replace each other's, and **no** default ACL granting group write:
 
 ```bash
 SC_ROOT=/scratch/<project>/dvc/site
 mkdir -p $SC_ROOT
 chgrp <project-group> $SC_ROOT
-chmod 2775 $SC_ROOT
-setfacl    -m u::rwx,g::rwx,o::rx $SC_ROOT
-setfacl -d -m u::rwx,g::rwx,o::rx $SC_ROOT
+chmod 3775 $SC_ROOT     # setgid + sticky
+setfacl -k $SC_ROOT     # remove any default ACL
 ```
 
-Every user that runs `dt`/`dvc` against the shared cache should also
-have `umask 0002` in effect so newly created SQLite files come out
-group-writable.
+A workspace deliberately used by several users can opt in to a
+group-writable index (`2770`, never other-writable):
 
-`dt` creates per-repo subdirectories with mode `2775` and warns at
-`dt init` / `dt clone` / `dt index set` / `dt index migrate` time if
-the root is missing the setgid bit, group-write, or a default ACL.
+```bash
+dt config set site_cache.group_shared true
+```
 
 ## Commands
 
