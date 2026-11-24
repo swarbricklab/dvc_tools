@@ -112,6 +112,21 @@ def sidecar_name(archive_name: str) -> str:
     return f'{archive_name}{SIDECAR_SUFFIX}'
 
 
+
+def is_plain_name(name: Any) -> bool:
+    """True for a single, ordinary file-name component (an archive name or
+    an inner tar file name): no separators, no dot segments."""
+    import re
+    return (isinstance(name, str)
+            and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]{0,200}', name) is not None
+            and '..' not in name)
+
+
+def require_plain_name(name: Any, what: str = 'archive name') -> str:
+    if not is_plain_name(name):
+        raise ArchiveError(f"Invalid {what}: {name!r}")
+    return name
+
 @dataclass
 class InnerTar:
     """One per-prefix inner tarball uploaded to the backend folder."""
@@ -215,7 +230,7 @@ class ArchiveManifest:
             )
 
         return cls(
-            archive_name=data['archive_name'],
+            archive_name=require_plain_name(data['archive_name']),
             source_remote=data['source_remote'],
             backend=data['backend'],
             backend_dir=backend_dir,
@@ -226,7 +241,7 @@ class ArchiveManifest:
             compression=contents.get('compression', 'none'),
             inner_tars={
                 prefix: InnerTar(
-                    filename=row['filename'],
+                    filename=require_plain_name(row['filename'], 'inner tar file name'),
                     size_bytes=int(row['size_bytes']),
                     sha256=row['sha256'],
                     n_objects=int(row['n_objects']),

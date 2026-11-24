@@ -143,6 +143,11 @@ def project_slug(repo_root: Path) -> str:
 
 
 def entry_filename(slug: str, archive_name: str) -> str:
+    """``<slug>__<archive>.yaml``: both must be plain names, so the entry
+    can only ever be a file directly in the register directory."""
+    from .manifest import require_plain_name
+    require_plain_name(slug, 'project slug')
+    require_plain_name(archive_name)
     return f"{slug}__{archive_name}.yaml"
 
 
@@ -207,14 +212,11 @@ def write_entry(entry: RegistryEntry) -> Optional[Path]:
     if base is None:
         return None
     target = base / entry_filename(entry.project_slug, entry.archive_name)
-    tmp = target.with_suffix(target.suffix + '.tmp')
     try:
-        with open(tmp, 'w') as f:
-            yaml.safe_dump(
-                entry.to_dict(), f, default_flow_style=False, sort_keys=False,
-            )
-        tmp.rename(target)
-    except OSError as e:
+        utils.write_text_atomic(target, yaml.safe_dump(
+            entry.to_dict(), default_flow_style=False, sort_keys=False,
+        ))
+    except (OSError, ArchiveError) as e:
         print(
             f"warning: failed to update archive registry {target}: {e}",
             file=sys.stderr,
@@ -225,14 +227,28 @@ def write_entry(entry: RegistryEntry) -> Optional[Path]:
 
 def read_entry(slug: str, archive_name: str) -> Optional[RegistryEntry]:
     path = _entry_path(slug, archive_name)
-    if path is None or not path.is_file():
+    if path is None:
         return None
     try:
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
+        data = yaml.safe_load(_read_shared_file(path)) or {}
         return RegistryEntry.from_dict(data)
-    except (yaml.YAMLError, KeyError, ValueError):
+    except (yaml.YAMLError, KeyError, ValueError, OSError, ArchiveError):
         return None
+
+
+def _read_shared_file(path: Path, limit: int = 1 << 20) -> str:
+    """Text of the regular file at *path* itself (not through a link, not a
+    FIFO or device), at most *limit* bytes."""
+    import os
+    import stat as stat_mod
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat_mod.S_ISREG(st.st_mode) or st.st_size > limit:
+            raise OSError(f"{path} is not a regular file of usable size")
+        return os.read(fd, limit + 1).decode('utf-8')
+    finally:
+        os.close(fd)
 
 
 def list_entries() -> List[RegistryEntry]:
@@ -243,10 +259,9 @@ def list_entries() -> List[RegistryEntry]:
     entries: List[RegistryEntry] = []
     for p in sorted(base.glob('*.yaml')):
         try:
-            with open(p) as f:
-                data = yaml.safe_load(f) or {}
+            data = yaml.safe_load(_read_shared_file(p)) or {}
             entries.append(RegistryEntry.from_dict(data))
-        except (yaml.YAMLError, KeyError, ValueError, OSError):
+        except (yaml.YAMLError, KeyError, ValueError, OSError, ArchiveError):
             continue
     entries.sort(key=lambda e: (e.project_slug, e.archive_name))
     return entries

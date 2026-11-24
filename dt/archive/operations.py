@@ -76,11 +76,13 @@ from .manifest import (
     LAYOUT_FOLDER_PER_PREFIX,
     SUPPORTED_SOURCE_LAYOUTS,
     archives_dir,
+    is_plain_name,
     list_manifests,
     load_manifest,
     manifest_path,
     now_iso,
     save_manifest,
+    require_plain_name,
     sidecar_name,
 )
 from . import registry as _registry
@@ -655,12 +657,27 @@ def _load_sentinel(sentinel: Path) -> Optional[Dict]:
     return data
 
 
+def _require_private_staging(staging: Path) -> None:
+    """A per-archive staging directory must be this user's own and not
+    writable by others (it may sit under a shared staging root)."""
+    import stat as stat_mod
+    try:
+        fd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as e:
+        raise ArchiveError(f"Staging directory {staging} is not usable: {e}")
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid():
+            raise ArchiveError(f"Staging directory {staging} belongs to another user")
+        if st.st_mode & (stat_mod.S_IWGRP | stat_mod.S_IWOTH):
+            os.fchmod(fd, stat_mod.S_IMODE(st.st_mode) & ~0o022)
+    finally:
+        os.close(fd)
+
+
 def _write_sentinel(sentinel: Path, data: Dict) -> None:
-    """Atomic sentinel write: tmp then rename."""
-    tmp = sentinel.with_suffix(sentinel.suffix + '.tmp')
-    with open(tmp, 'w') as f:
-        json.dump(data, f)
-    tmp.rename(sentinel)
+    """Atomic sentinel write: private tmp then rename."""
+    utils.write_text_atomic(sentinel, json.dumps(data), mode=0o600)
 
 
 # --------------------------------------------------------------------------- #
@@ -682,12 +699,12 @@ def _save_qxub_job_config(
     command lines and re-derives nothing in the worker.
     """
     config_path = staging / QXUB_JOB_CONFIG_FILENAME
-    config_path.write_text(json.dumps({
+    utils.write_text_atomic(config_path, json.dumps({
         'source_remote': str(source_remote),
         'compress': compress,
         'layout': layout,
         'n_objects_by_prefix': {p: n for p, (n, _) in stats.items()},
-    }))
+    }), mode=0o600)
     return config_path
 
 
@@ -877,6 +894,7 @@ def build_prefix_tarball(
     remote = Path(remote_dir)
     staging = Path(staging_dir)
     staging.mkdir(parents=True, exist_ok=True)
+    _require_private_staging(staging)
 
     member_path, base = _key_to_paths(prefix_key, layout)
     ext = _COMPRESSION_EXT[compress]
@@ -889,7 +907,7 @@ def build_prefix_tarball(
     # the .done.json sentinel is the source of truth, not the presence of
     # a .tar file on disk.
     for p in (target, target_tmp, sentinel):
-        if p.exists():
+        if os.path.lexists(p):  # a dangling link too
             p.unlink()
 
     # --dereference: follow symlinks and archive the *content* they point at,
@@ -1053,7 +1071,7 @@ def stage_archive(
 
     staging_root = resolve_staging_dir(staging_dir)
     staging_root.mkdir(parents=True, exist_ok=True)
-    staging = staging_root / name
+    staging = staging_root / require_plain_name(name)
     _check_jobfs_headroom(staging_root, total_bytes, force=force, verbose=verbose)
 
     bdir = backend_dir or _default_backend_dir(name, source_remote)
@@ -1097,9 +1115,11 @@ def stage_archive(
     # Prepare staging dir.
     if staging.exists():
         if force:
+            _require_private_staging(staging)
             shutil.rmtree(staging)
-            staging.mkdir(parents=True)
+            staging.mkdir(parents=True, mode=0o700)
         elif resume:
+            _require_private_staging(staging)
             print(
                 f"Resume: reusing existing staging dir {staging}",
                 flush=True,
@@ -1111,7 +1131,7 @@ def stage_archive(
                 f"or --force to start over."
             )
     else:
-        staging.mkdir(parents=True)
+        staging.mkdir(parents=True, mode=0o700)
         if resume:
             print(
                 f"Resume: no prior staging dir at {staging}, starting fresh",
@@ -1123,7 +1143,7 @@ def stage_archive(
     if resume:
         for sentinel in staging.glob(f'*{STAGED_SENTINEL_SUFFIX}'):
             data = _load_sentinel(sentinel)
-            if not data:
+            if not data or not is_plain_name(data.get('filename')):
                 continue
             tar_file = staging / data['filename']
             try:
@@ -1189,7 +1209,7 @@ def stage_archive(
                 _member, base = _key_to_paths(key, source_layout)
                 expected = staging / f"{base}.tar{ext}{STAGED_SENTINEL_SUFFIX}"
                 data = _load_sentinel(expected) if expected.exists() else None
-                if not data:
+                if not data or data.get('filename') != f"{base}.tar{ext}":
                     missing.append(key)
                     continue
                 inner_tars[key] = InnerTar(
@@ -1356,7 +1376,10 @@ def deposit_archive(
 
     be = backend_override if backend_override is not None else get_backend(manifest.backend)
     staging_root = resolve_staging_dir(staging_dir)
+    require_plain_name(name)
     staging = staging_root / name
+    if staging.is_dir():
+        _require_private_staging(staging)
     if not staging.is_dir():
         raise ArchiveError(
             f"Staging directory {staging} not found. Has stage been run?"

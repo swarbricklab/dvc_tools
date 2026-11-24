@@ -108,13 +108,9 @@ def write_signpost(
     }
 
     target = source_remote / SIGNPOST_FILENAME
-    tmp = target.with_suffix(target.suffix + '.tmp')
     target.parent.mkdir(parents=True, exist_ok=True)
-    with open(tmp, 'w') as f:
-        f.write(_comment_block())
-        f.write('\n')
-        yaml.safe_dump(body, f, default_flow_style=False, sort_keys=False)
-    tmp.rename(target)
+    utils.write_text_atomic(target, _comment_block() + '\n' + yaml.safe_dump(
+        body, default_flow_style=False, sort_keys=False))
     return target
 
 

@@ -245,6 +245,38 @@ def read_dir_entries(cache_dir: Path, dir_hash: str) -> Optional[list]:
             if isinstance(e, dict) and is_md5_oid(e.get('md5'))]
 
 
+def write_text_atomic(path: Path, text: str, mode: int = 0o644) -> None:
+    """Replace *path* with *text* via a private temporary file beside it.
+
+    The temporary name is random and created exclusively without following
+    links (safe in a directory other users can write), given *mode*, then
+    renamed over *path* relative to the same directory.
+    """
+    import secrets
+    path = Path(path)
+    dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    tmp = f'.{path.name}.{secrets.token_hex(8)}.tmp'
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=dfd)
+        try:
+            view = memoryview(text.encode())
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        os.rename(tmp, path.name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(dfd)
+
+
 def strip_url_credentials(url: Any) -> str:
     """*url* without any ``user:password@`` part (scp-style ``user@host:``
     git addresses carry no secret and are kept)."""

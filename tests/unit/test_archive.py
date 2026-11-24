@@ -1621,3 +1621,77 @@ def test_access_request_output_carries_no_credentials():
                         items=[CheckResult(endpoint=ep, status='fail', summary='x')])
     assert 'ghp_X' not in format_request_text(req)
     assert 'ghp_X' not in format_request_json(req)
+
+
+class TestSharedDirectoryWritesDoNotFollowLinks:
+    def test_write_text_atomic_ignores_planted_tmp_links(self, tmp_path):
+        from dt import utils
+        victim = tmp_path / 'victim.txt'
+        victim.write_text('keep')
+        target = tmp_path / 'shared' / 'entry.yaml'
+        target.parent.mkdir()
+        os.symlink(victim, target.with_suffix('.yaml.tmp'))
+        utils.write_text_atomic(target, 'new')
+        assert victim.read_text() == 'keep' and target.read_text() == 'new'
+        assert not target.is_symlink()
+
+    def test_signpost_ignores_planted_tmp_link(self, tmp_path):
+        from dt.archive import signpost
+        from dt.archive.manifest import ArchiveManifest
+        victim = tmp_path / 'victim.txt'
+        victim.write_text('keep')
+        remote = tmp_path / 'remote'
+        remote.mkdir()
+        os.symlink(victim, remote / 'ARCHIVED.yaml.tmp')
+        m = ArchiveManifest.from_dict({'archive_name': 'n', 'source_remote': 'r',
+                                       'backend': 'b', 'backend_dir': 'd'})
+        signpost.write_signpost(remote, m, pruned_by='u')
+        assert victim.read_text() == 'keep'
+
+    def test_staging_of_another_user_is_refused(self, tmp_path, monkeypatch):
+        from dt.archive import operations as ops
+        from dt.errors import ArchiveError
+        staging = tmp_path / 'staging'
+        staging.mkdir()
+        real = os.geteuid()
+        monkeypatch.setattr(ops.os, 'geteuid', lambda: real + 1)
+        with pytest.raises(ArchiveError, match='another user'):
+            ops._require_private_staging(staging)
+
+    def test_group_writable_own_staging_is_tightened(self, tmp_path):
+        import stat as stat_mod
+        from dt.archive import operations as ops
+        staging = tmp_path / 'staging'
+        staging.mkdir()
+        staging.chmod(0o775)
+        ops._require_private_staging(staging)
+        assert stat_mod.S_IMODE(staging.stat().st_mode) & 0o022 == 0
+
+
+class TestArchiveNamesStayInTheirDirectory:
+    @pytest.mark.parametrize('name', ['x/../../etc/config', '..', 'a/b', '', '.hidden/x'])
+    def test_manifest_with_path_like_name_is_refused(self, name):
+        from dt.archive.manifest import ArchiveManifest
+        from dt.errors import ArchiveError
+        with pytest.raises(ArchiveError):
+            ArchiveManifest.from_dict({'archive_name': name, 'source_remote': 'r',
+                                       'backend': 'b', 'backend_dir': 'd'})
+
+    def test_register_entry_name_must_be_plain(self):
+        from dt.archive import registry
+        from dt.errors import ArchiveError
+        with pytest.raises(ArchiveError):
+            registry.entry_filename('slug', 'x/../../victim')
+
+    def test_register_read_does_not_follow_links_or_block(self, tmp_path):
+        from dt.archive import registry
+        target = tmp_path / 'secret'
+        target.write_text('archive_name: x\n')
+        link = tmp_path / 'e.yaml'
+        link.symlink_to(target)
+        with pytest.raises(OSError):
+            registry._read_shared_file(link)
+        fifo = tmp_path / 'f.yaml'
+        os.mkfifo(fifo)
+        with pytest.raises(OSError):
+            registry._read_shared_file(fifo)
