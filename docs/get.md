@@ -180,10 +180,10 @@ always a stream).
 
 ```bash
 # 82 samples out to a collaborator's bucket, over 8 nodes
-dt get bcarc_wts --csv samples.csv -o s3://their-bucket/fastqs/ -w 8 --dest-profile their-aws
+dt get example_wts --csv samples.csv -o s3://their-bucket/fastqs/ -w 8 --dest-profile their-aws
 
 # Submit and go; collect the result later with qxub monitor
-dt get bcarc_wts --csv samples.csv -o s3://their-bucket/fastqs/ -w 8 --no-wait
+dt get example_wts --csv samples.csv -o s3://their-bucket/fastqs/ -w 8 --no-wait
 ```
 
 ### Why only `s3://`
@@ -252,11 +252,11 @@ dt get my-registry data/reference -o ./
 dt get my-registry data/fq/AF013-A --rev v1.2.0 -o fastqs/
 
 # Batch, reading paths from a column of the source manifest
-dt get bcarc-wts --csv paths.csv --path-col fq_dir -o fastqs/
+dt get example-wts --csv paths.csv --path-col fq_dir -o fastqs/
 
 # Batch, over a subset selected beforehand
 csvgrep -c wts_lib -r '^$' paths.csv > setup.csv
-dt get bcarc-wts --csv setup.csv --path-col fq_dir -o fastqs/
+dt get example-wts --csv setup.csv --path-col fq_dir -o fastqs/
 
 # Force a real copy regardless of cache.type
 dt get my-registry data/fq/AF013-A --link copy -o fastqs/

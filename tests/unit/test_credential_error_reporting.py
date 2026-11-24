@@ -1,6 +1,6 @@
 """Failure reasons and the GCP identity must survive without ``-v``.
 
-A collaborator hit `dt auth credentials install bcarc_wts` and got exactly
+A collaborator hit `dt auth credentials install example_wts` and got exactly
 one line back:
 
     Error: No credentials were installed (no usable secrets found).
@@ -258,58 +258,58 @@ def _patched_backend(**kwargs):
 
 class TestFailureReasonsAreNotVerboseOnly:
 
-    DENIED = SecretError("Cannot read secret 'dvc-remote-bcarc_wts' in project 'x'.")
+    DENIED = SecretError("Cannot read secret 'dvc-remote-example_wts' in project 'x'.")
 
     def test_denial_is_reported_without_verbose(self, capsys):
         """On stderr, so it survives the output being piped elsewhere."""
         with _patched_backend(side_effect=self.DENIED):
             with pytest.raises(AuthError):
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert 'Cannot read secret' in capsys.readouterr().err
 
     def test_denial_is_in_the_exception_too(self):
         """stdout gets piped away and pasted selectively; the error must stand alone."""
         with _patched_backend(side_effect=self.DENIED):
             with pytest.raises(AuthError) as exc:
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert 'Cannot read secret' in str(exc.value)
 
     def test_exception_names_the_repo(self):
         with _patched_backend(side_effect=self.DENIED):
             with pytest.raises(AuthError) as exc:
-                install_credentials(verbose=False, repo_name='bcarc_wts')
-        assert 'bcarc_wts' in str(exc.value)
+                install_credentials(verbose=False, repo_name='example_wts')
+        assert 'example_wts' in str(exc.value)
 
     def test_old_uninformative_wording_is_gone(self):
         with _patched_backend(side_effect=self.DENIED):
             with pytest.raises(AuthError) as exc:
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert 'no usable secrets found' not in str(exc.value)
 
     def test_empty_secret_says_empty(self):
         with _patched_backend(return_value='   '):
             with pytest.raises(AuthError) as exc:
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert 'empty' in str(exc.value)
 
     def test_unrecognised_format_says_so(self):
         with _patched_backend(return_value='just some prose, not an ini file'):
             with pytest.raises(AuthError) as exc:
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert 'recognised' in str(exc.value)
 
     def test_legacy_format_keeps_its_own_migrate_hint(self):
         legacy = "['remote \"storage\"']\n    access_key_id = AK\n    secret_access_key = SK\n"
         with _patched_backend(return_value=legacy):
             with pytest.raises(AuthError) as exc:
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert 'migrate' in str(exc.value)
 
     def test_multiline_reasons_are_indented(self):
         multi = SecretError("Cannot read secret 'x'.\nEither you lack access, or it is absent.")
         with _patched_backend(side_effect=multi):
             with pytest.raises(AuthError) as exc:
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert '    Either you lack access' in str(exc.value)
 
 
@@ -320,20 +320,20 @@ class TestIdentityIsReportedOnEveryFetch:
              patch.object(creds_mod, 'describe_secret_identity',
                           return_value='Authenticating to GCP as: sa@x'):
             with pytest.raises(AuthError):
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         captured = capsys.readouterr()
         assert 'Authenticating to GCP as: sa@x' in captured.out
         assert 'denied' in captured.err
 
     def test_identity_printed_on_success_too(self, capsys):
-        valid = '[bcarc_wts]\naws_access_key_id = AK\naws_secret_access_key = SK\n'
+        valid = '[example_wts]\naws_access_key_id = AK\naws_secret_access_key = SK\n'
         with _patched_backend(return_value=valid), \
              patch.object(creds_mod, 'describe_secret_identity',
                           return_value='Authenticating to GCP as: her@example.org'), \
              patch.object(creds_mod, '_install_aws_profile',
                           return_value=(Path('/c'), Path('/g'))), \
              patch.object(creds_mod, '_get_project_s3_remotes', return_value={}):
-            install_credentials(verbose=False, repo_name='bcarc_wts')
+            install_credentials(verbose=False, repo_name='example_wts')
         assert 'her@example.org' in capsys.readouterr().out
 
     def test_identity_is_repeated_in_the_exception(self):
@@ -341,7 +341,7 @@ class TestIdentityIsReportedOnEveryFetch:
              patch.object(creds_mod, 'describe_secret_identity',
                           return_value='Authenticating to GCP as: sa@x'):
             with pytest.raises(AuthError) as exc:
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert 'sa@x' in str(exc.value)
 
 
@@ -376,11 +376,11 @@ class TestDenialsAreEchoed:
         client.access_secret_version.side_effect = self._permission_denied()
         with patch.object(type(b), 'client', property(lambda _self: client)), \
              patch.object(b, '_cli_access_secret', return_value='[r]\nk = v\n'):
-            b.get_raw_config('bcarc_wts')
+            b.get_raw_config('example_wts')
 
         err = capsys.readouterr().err
         assert 'Permission denied' in err
-        assert 'dvc-remote-bcarc_wts' in err
+        assert 'dvc-remote-example_wts' in err
         assert 'example-quota-123' in err
 
     def test_echo_names_the_refused_identity(self, tmp_path, monkeypatch, capsys):
@@ -389,7 +389,7 @@ class TestDenialsAreEchoed:
         client.access_secret_version.side_effect = self._permission_denied()
         with patch.object(type(b), 'client', property(lambda _self: client)), \
              patch.object(b, '_cli_access_secret', return_value='x'):
-            b.get_raw_config('bcarc_wts')
+            b.get_raw_config('example_wts')
         assert SA_JSON['client_email'] in capsys.readouterr().err
 
     def test_echo_carries_the_service_account_caveat(self, tmp_path, monkeypatch, capsys):
@@ -398,7 +398,7 @@ class TestDenialsAreEchoed:
         client.access_secret_version.side_effect = self._permission_denied()
         with patch.object(type(b), 'client', property(lambda _self: client)), \
              patch.object(b, '_cli_access_secret', return_value='x'):
-            b.get_raw_config('bcarc_wts')
+            b.get_raw_config('example_wts')
         assert 'do not apply' in capsys.readouterr().err
 
     def test_echo_says_it_is_retrying_elsewhere(self, tmp_path, monkeypatch, capsys):
@@ -407,7 +407,7 @@ class TestDenialsAreEchoed:
         client.access_secret_version.side_effect = self._permission_denied()
         with patch.object(type(b), 'client', property(lambda _self: client)), \
              patch.object(b, '_cli_access_secret', return_value='x'):
-            b.get_raw_config('bcarc_wts')
+            b.get_raw_config('example_wts')
         assert 'retrying via the gcloud CLI' in capsys.readouterr().err
 
     def test_prior_identity_reaches_the_cli_call(self, tmp_path, monkeypatch):
@@ -417,7 +417,7 @@ class TestDenialsAreEchoed:
         client.access_secret_version.side_effect = self._permission_denied()
         with patch.object(type(b), 'client', property(lambda _self: client)), \
              patch.object(b, '_cli_access_secret', return_value='x') as cli:
-            b.get_raw_config('bcarc_wts')
+            b.get_raw_config('example_wts')
         assert SA_JSON['client_email'] in cli.call_args.kwargs['prior_identity']
 
 
@@ -433,7 +433,7 @@ class TestBothIdentitiesRefused:
         with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
              patch('dt.secrets.gcp.subprocess.run', return_value=denied):
             with pytest.raises(SecretError) as exc:
-                b._cli_access_secret('bcarc_wts',
+                b._cli_access_secret('example_wts',
                                      prior_identity='service account sa@x (from env)')
         return str(exc.value)
 
@@ -490,7 +490,7 @@ class TestNotFoundIsNotADenial:
         with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
              patch('dt.secrets.gcp.subprocess.run', return_value=missing):
             with pytest.raises(SecretError, match='not found'):
-                b._cli_access_secret('bcarc_wts')
+                b._cli_access_secret('example_wts')
         assert 'Permission denied' not in capsys.readouterr().err
 
 
@@ -507,13 +507,13 @@ class TestDiagnosticsGoToStderr:
         client.access_secret_version.side_effect = gcp_exceptions.PermissionDenied('no')
         with patch.object(type(b), 'client', property(lambda _s: client)), \
              patch.object(b, '_cli_access_secret', return_value='x'):
-            b.get_raw_config('bcarc_wts')
+            b.get_raw_config('example_wts')
         assert 'Permission denied' not in capsys.readouterr().out
 
     def test_failure_reason_is_not_on_stdout(self, capsys):
         with _patched_backend(side_effect=SecretError('denied for reasons')):
             with pytest.raises(AuthError):
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert 'denied for reasons' not in capsys.readouterr().out
 
 
@@ -532,7 +532,7 @@ class TestListIsSuggestedOnFailure:
     def test_summary_error_suggests_listing(self):
         with _patched_backend(side_effect=SecretError('denied')):
             with pytest.raises(AuthError) as exc:
-                install_credentials(verbose=False, repo_name='bcarc_wts')
+                install_credentials(verbose=False, repo_name='example_wts')
         assert 'dt auth credentials list' in str(exc.value)
 
     def test_denied_message_suggests_listing(self):
@@ -545,7 +545,7 @@ class TestListIsSuggestedOnFailure:
         with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
              patch('dt.secrets.gcp.subprocess.run', return_value=missing):
             with pytest.raises(SecretError) as exc:
-                b._cli_access_secret('bcarc_wts')
+                b._cli_access_secret('example_wts')
         assert 'dt auth credentials list' in str(exc.value)
 
 
@@ -590,7 +590,7 @@ class TestCredentialsCliCommands:
         return CliRunner().invoke(cli, args)
 
     def test_list_names_the_project(self):
-        with patch('dt.auth.list_repo_secrets', return_value=['bcarc_wts']), \
+        with patch('dt.auth.list_repo_secrets', return_value=['example_wts']), \
              patch('dt.config.get_value', return_value='example-quota-123'):
             result = self._invoke(['auth', 'credentials', 'list'])
         assert 'example-quota-123' in result.output
@@ -616,18 +616,18 @@ class TestCredentialsCliCommands:
 
     def test_check_does_not_call_a_denial_not_found(self):
         from dt.auth.credentials import SecretInfo
-        info = SecretInfo(repo_name='bcarc_wts', exists=False, accessible=False,
+        info = SecretInfo(repo_name='example_wts', exists=False, accessible=False,
                           error='Cannot read secret ... PERMISSION_DENIED')
         with patch('dt.auth.check_secret', return_value=info):
-            result = self._invoke(['auth', 'credentials', 'check', 'bcarc_wts'])
+            result = self._invoke(['auth', 'credentials', 'check', 'example_wts'])
         assert 'could not confirm' in result.output
         assert 'secret not found' not in result.output
 
     def test_check_genuine_absence_still_says_not_found(self):
         from dt.auth.credentials import SecretInfo
-        info = SecretInfo(repo_name='bcarc_wts', exists=False, accessible=False, error=None)
+        info = SecretInfo(repo_name='example_wts', exists=False, accessible=False, error=None)
         with patch('dt.auth.check_secret', return_value=info):
-            result = self._invoke(['auth', 'credentials', 'check', 'bcarc_wts'])
+            result = self._invoke(['auth', 'credentials', 'check', 'example_wts'])
         assert 'secret not found' in result.output
         assert 'dt auth credentials list' in result.output
 

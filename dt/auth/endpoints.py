@@ -21,7 +21,7 @@ from ..errors import AuthError
 def resolve_repo_url(repo: str) -> str:
     """Resolve a repository short name or URL to a full git URL.
 
-    Supports short names (e.g. ``neochemo``) when the ``owner`` config
+    Supports short names (e.g. ``projx``) when the ``owner`` config
     key is set, as well as full SSH/HTTPS URLs.
 
     Raises:

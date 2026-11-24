@@ -35,15 +35,15 @@ class TestS3SecretNames:
     """Mapping S3 endpoints back to the repo whose secret unlocks them."""
 
     def test_top_level_s3_belongs_to_the_named_repo(self):
-        names = _s3_secret_names('bcarc_wts', [_s3()])
-        assert names == ['bcarc_wts']
+        names = _s3_secret_names('example_wts', [_s3()])
+        assert names == ['example_wts']
 
     def test_repo_url_is_reduced_to_a_short_name(self):
         """The secret is named after the repo, not its URL."""
         names = _s3_secret_names(
-            'git@github.com:swarbricklab/bcarc_wts.git', [_s3()],
+            'git@github.com:swarbricklab/example_wts.git', [_s3()],
         )
-        assert names == ['bcarc_wts']
+        assert names == ['example_wts']
 
     def test_no_s3_endpoints_needs_no_secrets(self):
         endpoints = [
@@ -60,16 +60,16 @@ class TestS3SecretNames:
                 [_s3(url='s3://other-bucket')],
             ),
         ]
-        assert _s3_secret_names('bcarc_wts', endpoints) == ['other_repo']
+        assert _s3_secret_names('example_wts', endpoints) == ['other_repo']
 
     def test_import_source_without_s3_children_is_ignored(self):
         endpoints = [
             _import_source(
-                'git@github.com:swarbricklab/projects.git',
+                'git@github.com:swarbricklab/project-index.git',
                 [Endpoint(type='ssh', url='ssh://host/p', source='remote')],
             ),
         ]
-        assert _s3_secret_names('bcarc_wts', endpoints) == []
+        assert _s3_secret_names('example_wts', endpoints) == []
 
     def test_own_remote_and_import_source_both_collected(self):
         endpoints = [
@@ -79,8 +79,8 @@ class TestS3SecretNames:
                 [_s3(url='s3://other-bucket')],
             ),
         ]
-        assert _s3_secret_names('bcarc_wts', endpoints) == [
-            'bcarc_wts', 'other_repo',
+        assert _s3_secret_names('example_wts', endpoints) == [
+            'example_wts', 'other_repo',
         ]
 
     def test_names_are_deduplicated(self):
@@ -89,14 +89,14 @@ class TestS3SecretNames:
             _s3(url='s3://bucket-a'),
             _s3(url='s3://bucket-b'),
             _import_source(
-                'git@github.com:swarbricklab/projects.git', [_s3()],
+                'git@github.com:swarbricklab/project-index.git', [_s3()],
             ),
             _import_source(
-                'git@github.com:Swarbricklab/projects.git', [_s3()],
+                'git@github.com:Swarbricklab/project-index.git', [_s3()],
             ),
         ]
-        assert _s3_secret_names('bcarc_wts', endpoints) == [
-            'bcarc_wts', 'projects',
+        assert _s3_secret_names('example_wts', endpoints) == [
+            'example_wts', 'project-index',
         ]
 
 
@@ -165,10 +165,10 @@ class TestAuthSetupRepo:
         with patch('dt.auth.setup.discover_endpoints_from_repo',
                    return_value=[]) as from_repo, \
              patch('dt.auth.setup.discover_endpoints') as local:
-            auth_setup(repo_url='bcarc_wts', ssh_config_file=Path('/tmp/nope'))
+            auth_setup(repo_url='example_wts', ssh_config_file=Path('/tmp/nope'))
 
         from_repo.assert_called_once()
-        assert from_repo.call_args.args[0] == 'bcarc_wts'
+        assert from_repo.call_args.args[0] == 'example_wts'
         local.assert_not_called()
 
     def test_without_repo_discovers_locally(self, no_ssh_or_gcp):
@@ -194,12 +194,12 @@ class TestAuthSetupRepo:
              patch('dt.auth.setup.install_credentials',
                    side_effect=fake) as m:
             report = auth_setup(
-                repo_url='bcarc_wts', ssh_config_file=Path('/tmp/nope'),
+                repo_url='example_wts', ssh_config_file=Path('/tmp/nope'),
             )
 
         m.assert_called_once()
-        assert m.call_args.kwargs.get('repo_name') == 'bcarc_wts'
-        assert report.credentials_installed == {'bcarc_wts': True}
+        assert m.call_args.kwargs.get('repo_name') == 'example_wts'
+        assert report.credentials_installed == {'example_wts': True}
         assert not report.skipped_credentials
 
     def test_without_repo_credentials_are_discovered(self, no_ssh_or_gcp):
@@ -217,7 +217,7 @@ class TestAuthSetupRepo:
                                           source='remote')]), \
              patch('dt.auth.setup.install_credentials') as m:
             report = auth_setup(
-                repo_url='bcarc_wts', ssh_config_file=Path('/tmp/nope'),
+                repo_url='example_wts', ssh_config_file=Path('/tmp/nope'),
             )
 
         m.assert_not_called()

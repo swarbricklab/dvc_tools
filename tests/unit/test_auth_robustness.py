@@ -424,7 +424,7 @@ class TestSecretErrorsNameTheProject:
         with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
              patch('dt.secrets.gcp.subprocess.run', return_value=result):
             with pytest.raises(Exception) as exc:
-                backend._cli_access_secret('bcarc_visium')
+                backend._cli_access_secret('example_visium')
         return str(exc.value)
 
     def test_names_the_project(self):
@@ -439,7 +439,7 @@ class TestSecretErrorsNameTheProject:
         assert 'gcloud secrets list --project=example-sa' in message
 
     def test_still_names_the_secret(self):
-        assert 'dvc-remote-bcarc_visium' in self._denied()
+        assert 'dvc-remote-example_visium' in self._denied()
 
 
 class TestFallbackPreservesTheRealCause:
@@ -463,7 +463,7 @@ class TestFallbackPreservesTheRealCause:
         with patch.object(type(backend), 'client', property(lambda s: client)), \
              patch('dt.secrets.gcp.shutil.which', return_value=None):
             with pytest.raises(Exception) as exc:
-                backend.get_raw_config('bcarc_visium')
+                backend.get_raw_config('example_visium')
 
         message = str(exc.value)
         assert '403 denied on resource' in message, "real cause was discarded"

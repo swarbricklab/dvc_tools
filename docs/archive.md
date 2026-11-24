@@ -19,17 +19,17 @@ restore can work without contacting the backend.
 dt config set archive.staging_dir /scratch/${PROJECT}/${USER}/dt-archive
 
 # Single-node archive (small archives that finish in one walltime).
-dt remote archive create neochemo-2026-05
+dt remote archive create projx-2026-05
 
 # Split workflow (recommended for multi-TB archives).
-dt remote archive stage   neochemo-2026-05   # compute node (parallel CPUs)
-dt remote archive deposit neochemo-2026-05   # data mover (mdss access)
+dt remote archive stage   projx-2026-05   # compute node (parallel CPUs)
+dt remote archive deposit projx-2026-05   # data mover (mdss access)
 
 # Verify it.
-dt remote archive verify neochemo-2026-05
+dt remote archive verify projx-2026-05
 
 # Once you're confident, delete the local copy.
-dt remote archive prune  neochemo-2026-05
+dt remote archive prune  projx-2026-05
 ```
 
 ## Where to run each subcommand
@@ -168,7 +168,7 @@ For sources too large to tar within a single node's walltime,
 running inline:
 
 ```bash
-dt remote archive stage neochemo-2026-05 --via-qxub
+dt remote archive stage projx-2026-05 --via-qxub
 ```
 
 Each worker is a single-CPU job invoking the internal
@@ -365,7 +365,7 @@ Stage on a normal compute node:
 #PBS -l storage=gdata/a56+scratch/a56
 
 cd /path/to/repo
-dt remote archive stage neochemo-2026-05 \
+dt remote archive stage projx-2026-05 \
     --staging-dir /scratch/a56/${USER}/dt-archive \
     -v
 ```
@@ -382,7 +382,7 @@ Deposit on a data mover:
 #PBS -l storage=gdata/a56+scratch/a56+massdata/a56
 
 cd /path/to/repo
-dt remote archive deposit neochemo-2026-05 \
+dt remote archive deposit projx-2026-05 \
     --staging-dir /scratch/a56/${USER}/dt-archive \
     -v
 ```
@@ -405,10 +405,10 @@ extra storage flag for the data they touch:
                                           # + gdata/<other> for the source remote (prune only)
 
 cd /path/to/repo
-dt remote archive verify  neochemo-2026-05
-# or restore: dt remote archive restore neochemo-2026-05 --to /scratch/a56/$USER/restored
-# or destroy: dt remote archive destroy neochemo-2026-05 --yes
-# or prune:   dt remote archive prune   neochemo-2026-05 --yes
+dt remote archive verify  projx-2026-05
+# or restore: dt remote archive restore projx-2026-05 --to /scratch/a56/$USER/restored
+# or destroy: dt remote archive destroy projx-2026-05 --yes
+# or prune:   dt remote archive prune   projx-2026-05 --yes
 ```
 
 Or wrap any of them in a one-liner via `qxub`:
@@ -416,8 +416,8 @@ Or wrap any of them in a one-liner via `qxub`:
 ```bash
 qxub exec --env dt --queue copyq --time 01:00:00 --mem 4GB \
     --storage 'gdata/a56+massdata/a56' \
-    -N dt-verify-neochemo \
-    -- dt remote archive verify neochemo-2026-05
+    -N dt-verify-projx \
+    -- dt remote archive verify projx-2026-05
 ```
 
 ## Backends
@@ -475,14 +475,14 @@ is the "signpost" — a small subset of the manifest that:
 # This DVC remote was archived to cold storage by `dt remote archive prune`.
 # ... full comment block ...
 dt_archive_signpost: 1
-archive_name: neochemo-2026-05
+archive_name: projx-2026-05
 backend: mdss
-backend_dir: dt-archive/neochemo/neochemo-2026-05/
+backend_dir: dt-archive/projx/projx-2026-05/
 source_layout: dvc-v3
-source_remote: /g/data/<proj>/dvc/neochemo
+source_remote: /g/data/<proj>/dvc/projx
 git_url: git@github.com:<org>/<repo>.git
 git_ref: <sha>
-manifest_in_repo: .dt/archives/neochemo-2026-05.yaml
+manifest_in_repo: .dt/archives/projx-2026-05.yaml
 pruned_at: 2026-05-30T12:34:56+00:00
 pruned_by: <user>
 ```

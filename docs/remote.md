@@ -125,11 +125,11 @@ dt remote list otherproject --owner myorg
 
 ```
 $ dt remote list
-storage (default): ssh://gadi-dm.nci.org.au/g/data/a56/dvc/neochemo
+storage (default): ssh://gadi-dm.nci.org.au/g/data/a56/dvc/projx
 
 $ dt remote list --all
-storage: ssh://gadi-dm.nci.org.au/g/data/a56/dvc/neochemo
-local (default): /g/data/a56/dvc/neochemo
+storage: ssh://gadi-dm.nci.org.au/g/data/a56/dvc/projx
+local (default): /g/data/a56/dvc/projx
 ```
 
 The `(default)` marker is `core.remote` **as read in the same scopes as the
@@ -212,7 +212,7 @@ bad at the last scan (from `bad.json`), the total blob count, and how many are
 incremental run).
 
 ```
-Remote: bcarc_xenium  (dvc-v3)
+Remote: example_xenium  (dvc-v3)
   Verified OK: 12,500 (last scan 2026-07-01T09:14:00+00:00)
   Bad:         2 (as of 2026-07-01T09:14:00+00:00)
   Total blobs: 12,840 (1.2 TB)
@@ -250,7 +250,7 @@ fresh scan first), `--dry-run`, `--restore <timestamp>`, `--list`, `--json`.
 
 **Acting on an externally-known bad set (`--from-list`).** Sometimes the bad
 blobs are already known from a source of truth other than `dt remote verify` —
-e.g. on `bcarc_wgs` 310 bad R2 blobs were identified by comparing remote blob
+e.g. a few hundred bad R2 blobs were identified by comparing remote blob
 sizes against the intact upstream S3 objects. Running a full `dt remote verify`
 just to regenerate that list could egress terabytes. `--from-list` feeds the
 known set straight into the same quarantine machinery:

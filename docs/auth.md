@@ -55,7 +55,7 @@ dt auth list --type s3 --type gs
 dt auth list --repo git@github.com:org/data-repo.git
 
 # Use a short name (requires: dt config set owner <github-org>)
-dt auth list --repo neochemo
+dt auth list --repo projx
 ```
 
 ### Sources scanned
@@ -213,7 +213,7 @@ dt auth check --type filesystem --type ssh --type s3 --type gs
 dt auth check --repo git@github.com:org/data-repo.git
 
 # Use a short name
-dt auth check --repo neochemo
+dt auth check --repo projx
 ```
 
 ### Ownership info for failed subdirectories
@@ -477,13 +477,13 @@ Repository arguments accept a **full URL** or a **short name** (resolved via the
 dt auth teams repo git@github.com:org/data-repo.git
 
 # Same, using a short name
-dt auth teams repo neochemo
+dt auth teams repo projx
 
 # List teams that alice belongs to in the org
 dt auth teams user alice --org myorg
 
 # Grant a team push access to a repo (short name or full URL)
-dt auth teams add-to-repo data-team neochemo
+dt auth teams add-to-repo data-team projx
 
 # Grant read-only access
 dt auth teams add-to-repo data-readers git@github.com:org/repo.git --permission pull
@@ -708,7 +708,7 @@ also clears any legacy `access_key_id` / `secret_access_key` entries from
 
 ```bash
 dt auth credentials uninstall                  # all
-dt auth credentials uninstall --repo bcarc_wgs # only this repo's profile
+dt auth credentials uninstall --repo example_wgs # only this repo's profile
 dt auth credentials uninstall --remote cloud   # only legacy global keys for this remote
 ```
 

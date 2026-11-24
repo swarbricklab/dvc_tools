@@ -1143,13 +1143,13 @@ class TestResolveS3RemoteSettings:
         to secrets.default_endpointurl — otherwise boto3 hits real AWS S3 and
         every R2 bucket false-fails as unreachable (issue #190)."""
         ep = Endpoint(type='s3', url='s3://chromium',
-                      source="DVC remote 'gadi' of bcarc_chromium (default)")
+                      source="DVC remote 'gadi' of example_chromium (default)")
         with patch('dt.auth.credentials._get_project_s3_remotes', return_value={}), \
              patch('dt.config.get_value',
                    return_value='https://acct.r2.cloudflarestorage.com'):
             endpoint_url, profile = _resolve_s3_remote_settings(ep)
         assert endpoint_url == 'https://acct.r2.cloudflarestorage.com'
-        assert profile == 'bcarc_chromium'
+        assert profile == 'example_chromium'
 
     def test_local_endpoint_not_overridden_by_default(self):
         """A remote whose own config supplies an endpoint keeps it — the
@@ -1361,7 +1361,7 @@ class TestCheckDvcRemote:
         """An empty-but-valid S3/R2 bucket warns rather than falsely failing
         with a 'Check remote URL' hint (issue #150)."""
         ep = Endpoint(type='s3', url='s3://xenium',
-                      source="DVC remote 'bcarc_xenium'")
+                      source="DVC remote 'example_xenium'")
         mock_odb = MagicMock()
         # exists() is False for an empty bucket (key-listing probe finds nothing)
         mock_odb.fs.exists.return_value = False
@@ -1372,7 +1372,7 @@ class TestCheckDvcRemote:
         mock_repo = MagicMock()
         mock_repo.cloud.get_remote_odb.return_value = mock_odb
 
-        result = _check_dvc_remote_impl(ep, 'bcarc_xenium',
+        result = _check_dvc_remote_impl(ep, 'example_xenium',
                                         _repo_factory=lambda: mock_repo)
         assert result.status == STATUS_WARN
         assert 'empty' in result.summary
@@ -1383,7 +1383,7 @@ class TestCheckDvcRemote:
         """Empty sub-prefix in an existing bucket: prefix ls fails, bucket root
         ls succeeds -> still WARN, not FAIL (issue #150)."""
         ep = Endpoint(type='s3', url='s3://xenium/data',
-                      source="DVC remote 'bcarc_xenium'")
+                      source="DVC remote 'example_xenium'")
         mock_odb = MagicMock()
         mock_odb.fs.exists.return_value = False
 
@@ -1397,7 +1397,7 @@ class TestCheckDvcRemote:
         mock_repo = MagicMock()
         mock_repo.cloud.get_remote_odb.return_value = mock_odb
 
-        result = _check_dvc_remote_impl(ep, 'bcarc_xenium',
+        result = _check_dvc_remote_impl(ep, 'example_xenium',
                                         _repo_factory=lambda: mock_repo)
         assert result.status == STATUS_WARN
 
@@ -2961,17 +2961,17 @@ class TestResolveRepoUrl:
         assert url == 'https://github.com/org/repo'
 
     @patch('dt.auth.tmp_mod.resolve_repository_url',
-           return_value='git@github.com:swarbricklab/neochemo.git')
+           return_value='git@github.com:swarbricklab/projx.git')
     def test_short_name_resolved(self, mock_resolve):
-        url = resolve_repo_url('neochemo')
-        assert url == 'git@github.com:swarbricklab/neochemo.git'
-        mock_resolve.assert_called_once_with('neochemo')
+        url = resolve_repo_url('projx')
+        assert url == 'git@github.com:swarbricklab/projx.git'
+        mock_resolve.assert_called_once_with('projx')
 
     @patch('dt.auth.tmp_mod.resolve_repository_url',
            side_effect=Exception("no owner configured"))
     def test_short_name_no_owner_raises(self, mock_resolve):
         with pytest.raises(Exception, match='no owner'):
-            resolve_repo_url('neochemo')
+            resolve_repo_url('projx')
 
 
 class TestTeamsWithShortNames:

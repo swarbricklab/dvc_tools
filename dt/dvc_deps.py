@@ -28,8 +28,8 @@ from . import utils
 from .errors import DepsError
 
 
-# Hosts that treat owner/repo case-insensitively, so ``Swarbricklab/metadata``
-# and ``swarbricklab/metadata`` are the same node. Both spellings occur in real
+# Hosts that treat owner/repo case-insensitively, so ``Swarbricklab/data-repo``
+# and ``swarbricklab/data-repo`` are the same node. Both spellings occur in real
 # .dvc files, so this is load-bearing rather than cosmetic.
 CASE_INSENSITIVE_HOSTS = frozenset({'github.com', 'gitlab.com', 'bitbucket.org'})
 
@@ -49,7 +49,7 @@ class ImportRef:
     """A single ``.dvc`` file's dependency on a path in another repo."""
     dvc_file: str          # repo-relative path to the .dvc file
     repo_url: str          # url exactly as written in the .dvc file
-    repo_id: str           # normalised, e.g. github.com/swarbricklab/metadata
+    repo_id: str           # normalised, e.g. github.com/swarbricklab/data-repo
     path: str              # deps[].path -- path inside the source repo
     rev: Optional[str]     # deps[].repo.rev (branch/tag, if pinned loosely)
     rev_lock: Optional[str]  # deps[].repo.rev_lock (commit sha)
@@ -142,8 +142,8 @@ def normalize_repo_id(url: str, owner: Optional[str] = None) -> str:
     """Normalise a repository URL to a stable ``host/owner/repo`` identifier.
 
     All node identity comparisons go through here. This is the single point at
-    which ``git@github.com:Swarbricklab/metadata.git`` and
-    ``https://github.com/swarbricklab/metadata`` collapse to one node.
+    which ``git@github.com:Swarbricklab/data-repo.git`` and
+    ``https://github.com/swarbricklab/data-repo`` collapse to one node.
 
     Accepts URLs from .dvc files as well as the bare ``owner/repo`` and
     ``host/owner/repo`` forms people type on the command line.
@@ -153,7 +153,7 @@ def normalize_repo_id(url: str, owner: Optional[str] = None) -> str:
         owner: Optional owner used to expand short names.
 
     Returns:
-        Normalised identifier, e.g. ``github.com/swarbricklab/metadata``.
+        Normalised identifier, e.g. ``github.com/swarbricklab/data-repo``.
     """
     if not url:
         return ''

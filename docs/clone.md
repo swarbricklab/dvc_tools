@@ -212,8 +212,8 @@ If you need additional setup after cloning:
 
 ```bash
 # Clone the repository
-dt clone neochemo
-cd neochemo
+dt clone projx
+cd projx
 
 # Set up local remote override for faster transfers
 dt remote init

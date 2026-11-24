@@ -3217,7 +3217,7 @@ def auth_teams_repo(repo_url, as_json):
 
     \b
       dt auth teams repo git@github.com:org/data-repo.git
-      dt auth teams repo neochemo
+      dt auth teams repo projx
     """
     try:
         teams = auth_mod.list_repo_teams(repo_url)
@@ -3268,9 +3268,9 @@ def auth_teams_add_to_repo(team_slug, repo_url, permission, dry):
 
     \b
       dt auth teams add-to-repo data-team git@github.com:org/repo.git
-      dt auth teams add-to-repo data-team neochemo
-      dt auth teams add-to-repo data-team neochemo --permission pull
-      dt auth teams add-to-repo data-team neochemo --dry
+      dt auth teams add-to-repo data-team projx
+      dt auth teams add-to-repo data-team projx --permission pull
+      dt auth teams add-to-repo data-team projx --dry
     """
     try:
         repo_url = auth_mod.resolve_repo_url(repo_url)
@@ -3335,7 +3335,7 @@ def auth_credentials():
     \b
     Listing and checking secrets:
       dt auth credentials list              # list all secrets in backend
-      dt auth credentials check neochemo   # check a specific secret
+      dt auth credentials check projx   # check a specific secret
       dt auth credentials status           # show installed vs expected
 
     \b
@@ -3353,8 +3353,8 @@ def auth_credentials():
 
     \b
     Writing a secret (admin / setup):
-      dt auth credentials set neochemo --file creds.ini
-      cat creds.ini | dt auth credentials set neochemo
+      dt auth credentials set projx --file creds.ini
+      cat creds.ini | dt auth credentials set projx
     """
 
 
@@ -3391,8 +3391,8 @@ def auth_credentials_check(repo_name):
     Verifies the secret exists and its content is readable DVC INI.
 
     \b
-      dt auth credentials check neochemo
-      dt auth credentials check bcarc_wgs
+      dt auth credentials check projx
+      dt auth credentials check example_wgs
     """
     info = auth_mod.check_secret(repo_name)
 
@@ -3443,7 +3443,7 @@ def auth_credentials_install(repo_name, verbose):
 
     \b
       dt auth credentials install               # all repos
-      dt auth credentials install bcarc_wgs     # one repo only
+      dt auth credentials install example_wgs     # one repo only
     """
     try:
         results = auth_mod.install_credentials(verbose=verbose, repo_name=repo_name)
@@ -3551,8 +3551,8 @@ def auth_credentials_set(repo_name, input_file):
       aws_secret_access_key = xxxxx
 
     \b
-      dt auth credentials set neochemo --file creds.ini
-      cat creds.ini | dt auth credentials set neochemo
+      dt auth credentials set projx --file creds.ini
+      cat creds.ini | dt auth credentials set projx
     """
     if input_file:
         content = click.open_file(input_file).read()
@@ -4712,7 +4712,7 @@ def tmp_clean(repository, owner, clean_all):
     
     \b
     Examples:
-        dt tmp clean neochemo     # Remove specific repo
+        dt tmp clean projx     # Remove specific repo
         dt tmp clean --all        # Remove all cached repos
     """
     if not repository and not clean_all:
@@ -4772,16 +4772,16 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 
     \b
     Examples:
-        dt import neochemo data/processed
-        dt import neochemo data/samples.h5ad -o my_samples.h5ad
+        dt import projx data/processed
+        dt import projx data/samples.h5ad -o my_samples.h5ad
         dt import git@github.com:lab/project.git results/model
-        dt import neochemo data/large --no-checkout
-        dt import neochemo data/file --no-refresh
-        dt import neochemo data/file --rev dev
-        dt import neochemo data/file --no-download
-        dt import neochemo data/file --no-download --rev abc123
-        dt import neochemo --csv paths.csv
-        dt import neochemo --csv paths.csv --no-download
+        dt import projx data/large --no-checkout
+        dt import projx data/file --no-refresh
+        dt import projx data/file --rev dev
+        dt import projx data/file --no-download
+        dt import projx data/file --no-download --rev abc123
+        dt import projx --csv paths.csv
+        dt import projx --csv paths.csv --no-download
     """
     # --csv mode: path argument is not required
     if force and resume:
@@ -6090,7 +6090,7 @@ def deps_downstream(repository, org, depth, fmt, output, refresh):
     \b
     Examples:
         dt deps downstream                       # Consumers of this repo
-        dt deps downstream metadata              # Consumers of another repo
+        dt deps downstream data-repo             # Consumers of another repo
         dt deps downstream --depth 1             # Direct consumers only
         dt deps downstream --format mermaid
     """

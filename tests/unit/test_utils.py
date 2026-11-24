@@ -840,7 +840,7 @@ class TestDescribeMixedTree:
     def test_names_the_files_and_the_dvcignore_remedy(self):
         msg = utils.describe_mixed_tree(
             ['.gitignore'], 'data/annotations',
-            'git@github.com:swarbricklab/images.git', action='rebuild',
+            'git@github.com:swarbricklab/image-repo.git', action='rebuild',
         )
         assert 'data/annotations' in msg
         assert '.gitignore' in msg

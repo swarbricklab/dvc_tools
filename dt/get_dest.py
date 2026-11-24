@@ -280,7 +280,7 @@ class S3Dest:
         A mistyped profile is the common case and botocore's ``ProfileNotFound``
         traceback is not a useful thing to show for it. Worth noting the trap
         this cannot catch: a typo that lands on a *different real profile* --
-        ``~/.aws/credentials`` here contains both ``umccr`` and ``ummcr`` --
+        ``~/.aws/credentials`` here contains both ``partner`` and ``partnr`` --
         raises nothing at all. That is what the printed identity is for.
         """
         boto3 = _require('boto3', 's3')

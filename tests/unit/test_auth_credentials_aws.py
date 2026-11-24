@@ -78,7 +78,7 @@ class TestDetectSecretFormat:
 
     def test_aws_format(self):
         content = (
-            "[bcarc_wts]\n"
+            "[example_wts]\n"
             "aws_access_key_id = AKIA\n"
             "aws_secret_access_key = SECRET\n"
         )
@@ -86,7 +86,7 @@ class TestDetectSecretFormat:
 
     def test_legacy_dvc_format(self):
         content = (
-            "['remote \"bcarc-wts\"']\n"
+            "['remote \"example-wts\"']\n"
             "    url = s3://wts\n"
             "    access_key_id = AKIA\n"
             "    secret_access_key = SECRET\n"
@@ -101,8 +101,8 @@ class TestDetectSecretFormat:
 class TestParseAwsSecret:
 
     def test_single_section(self):
-        content = "[bcarc_wts]\naws_access_key_id = A\naws_secret_access_key = B\n"
-        assert _parse_aws_secret(content, 'bcarc_wts') == ('A', 'B')
+        content = "[example_wts]\naws_access_key_id = A\naws_secret_access_key = B\n"
+        assert _parse_aws_secret(content, 'example_wts') == ('A', 'B')
 
     def test_multiple_sections_same_keys_ok(self):
         content = (
@@ -128,12 +128,12 @@ class TestExtractCredsFromDvcSecret:
 
     def test_single_remote(self):
         content = (
-            "['remote \"bcarc-wts\"']\n"
+            "['remote \"example-wts\"']\n"
             "    url = s3://wts\n"
             "    access_key_id = A\n"
             "    secret_access_key = B\n"
         )
-        assert _extract_creds_from_dvc_secret(content, 'bcarc_wts') == ('A', 'B')
+        assert _extract_creds_from_dvc_secret(content, 'example_wts') == ('A', 'B')
 
     def test_multiple_remotes_same_keys_ok(self):
         content = (
@@ -288,7 +288,7 @@ def _patch_project_remotes(monkeypatch, remotes: dict) -> None:
 class TestInstallCredentialsAws:
 
     def test_installs_aws_secret(self, aws_dir, fake_dvc_global, monkeypatch):
-        secret = "[bcarc_wts]\naws_access_key_id = AKIA\naws_secret_access_key = SS\n"
+        secret = "[example_wts]\naws_access_key_id = AKIA\naws_secret_access_key = SS\n"
         backend = MagicMock()
         backend.get_raw_config.return_value = secret
         monkeypatch.setattr(
@@ -296,18 +296,18 @@ class TestInstallCredentialsAws:
         )
         _patch_project_remotes(monkeypatch, {})
 
-        results = install_credentials(repo_name='bcarc_wts')
+        results = install_credentials(repo_name='example_wts')
 
-        assert results == {'bcarc_wts': True}
+        assert results == {'example_wts': True}
         creds = _make_aws_parser()
         creds.read(aws_dir / 'credentials')
-        assert creds.get('bcarc_wts', 'aws_access_key_id') == 'AKIA'
+        assert creds.get('example_wts', 'aws_access_key_id') == 'AKIA'
 
     def test_legacy_secret_raises_with_helpful_message(
         self, aws_dir, fake_dvc_global, monkeypatch,
     ):
         secret = (
-            "['remote \"bcarc-wts\"']\n"
+            "['remote \"example-wts\"']\n"
             "    access_key_id = A\n"
             "    secret_access_key = B\n"
         )
@@ -319,14 +319,14 @@ class TestInstallCredentialsAws:
         _patch_project_remotes(monkeypatch, {})
 
         with pytest.raises(AuthError, match="legacy DVC-INI"):
-            install_credentials(repo_name='bcarc_wts')
+            install_credentials(repo_name='example_wts')
 
     def test_strips_legacy_global_for_project_remotes(
         self, aws_dir, fake_dvc_global, monkeypatch,
     ):
         # Pre-existing legacy creds in DVC global
         _write_global_dvc(fake_dvc_global, {
-            'bcarc-wts': {
+            'example-wts': {
                 'url': 's3://wts',
                 'access_key_id': 'OLD',
                 'secret_access_key': 'OLD2',
@@ -334,24 +334,24 @@ class TestInstallCredentialsAws:
         })
         # Project has the matching remote
         _patch_project_remotes(monkeypatch, {
-            'bcarc-wts': {
+            'example-wts': {
                 'url': 's3://wts',
-                'profile': 'bcarc_wts',
+                'profile': 'example_wts',
             },
         })
 
-        secret = "[bcarc_wts]\naws_access_key_id = NEW\naws_secret_access_key = NEW2\n"
+        secret = "[example_wts]\naws_access_key_id = NEW\naws_secret_access_key = NEW2\n"
         backend = MagicMock()
         backend.get_raw_config.return_value = secret
         monkeypatch.setattr(
             'dt.auth.credentials._get_secret_backend', lambda: backend,
         )
 
-        install_credentials(repo_name='bcarc_wts', verbose=False)
+        install_credentials(repo_name='example_wts', verbose=False)
 
         from dt.auth.credentials import _parse_dvc_ini
         sections = _parse_dvc_ini(fake_dvc_global.read_text())
-        r = sections["'remote \"bcarc-wts\"'"]
+        r = sections["'remote \"example-wts\"'"]
         assert 'access_key_id' not in r
         assert 'secret_access_key' not in r
 
@@ -365,24 +365,24 @@ class TestUninstallCredentials:
     def test_removes_profile_and_legacy_global(
         self, aws_dir, fake_dvc_global, monkeypatch,
     ):
-        _install_aws_profile('bcarc_wts', 'A', 'B')
+        _install_aws_profile('example_wts', 'A', 'B')
         _write_global_dvc(fake_dvc_global, {
-            'bcarc-wts': {
+            'example-wts': {
                 'url': 's3://wts',
                 'access_key_id': 'OLD',
                 'secret_access_key': 'OLD2',
             },
         })
         _patch_project_remotes(monkeypatch, {
-            'bcarc-wts': {'url': 's3://wts', 'profile': 'bcarc_wts'},
+            'example-wts': {'url': 's3://wts', 'profile': 'example_wts'},
         })
 
-        touched = uninstall_credentials(repo_name='bcarc_wts')
+        touched = uninstall_credentials(repo_name='example_wts')
 
-        assert 'bcarc_wts' in touched  # AWS profile
-        assert 'bcarc-wts' in touched  # legacy global remote
+        assert 'example_wts' in touched  # AWS profile
+        assert 'example-wts' in touched  # legacy global remote
         assert not (aws_dir / 'credentials').read_text().strip() or \
-            'bcarc_wts' not in (aws_dir / 'credentials').read_text()
+            'example_wts' not in (aws_dir / 'credentials').read_text()
 
     def test_remote_only_targets_global(
         self, aws_dir, fake_dvc_global, monkeypatch,
@@ -407,19 +407,19 @@ class TestUninstallCredentials:
 class TestGetCredentialsStatus:
 
     def test_status_ready(self, aws_dir, fake_dvc_global, monkeypatch):
-        _install_aws_profile('bcarc_wts', 'A', 'B')
+        _install_aws_profile('example_wts', 'A', 'B')
         _patch_project_remotes(monkeypatch, {
-            'bcarc-wts': {
+            'example-wts': {
                 'url': 's3://wts',
-                'profile': 'bcarc_wts',
+                'profile': 'example_wts',
                 'endpointurl': 'https://e',
             },
         })
         statuses = get_credentials_status()
         assert len(statuses) == 1
         st = statuses[0]
-        assert st.remote_name == 'bcarc-wts'
-        assert st.profile == 'bcarc_wts'
+        assert st.remote_name == 'example-wts'
+        assert st.profile == 'example_wts'
         assert st.profile_installed is True
         assert st.endpointurl == 'https://e'
         assert st.legacy_creds_in_global is False
@@ -427,14 +427,14 @@ class TestGetCredentialsStatus:
     def test_status_missing_profile(self, aws_dir, fake_dvc_global, monkeypatch):
         # Profile referenced in .dvc/config but not in ~/.aws/credentials
         _patch_project_remotes(monkeypatch, {
-            'bcarc-wts': {'url': 's3://wts', 'profile': 'bcarc_wts'},
+            'example-wts': {'url': 's3://wts', 'profile': 'example_wts'},
         })
         statuses = get_credentials_status()
         assert statuses[0].profile_installed is False
 
     def test_status_no_profile_configured(self, aws_dir, fake_dvc_global, monkeypatch):
         _patch_project_remotes(monkeypatch, {
-            'bcarc-wts': {'url': 's3://wts'},
+            'example-wts': {'url': 's3://wts'},
         })
         statuses = get_credentials_status()
         assert statuses[0].profile is None
@@ -442,14 +442,14 @@ class TestGetCredentialsStatus:
 
     def test_status_legacy_creds_flag(self, aws_dir, fake_dvc_global, monkeypatch):
         _write_global_dvc(fake_dvc_global, {
-            'bcarc-wts': {
+            'example-wts': {
                 'url': 's3://wts',
                 'access_key_id': 'A',
                 'secret_access_key': 'B',
             },
         })
         _patch_project_remotes(monkeypatch, {
-            'bcarc-wts': {'url': 's3://wts', 'profile': 'bcarc_wts'},
+            'example-wts': {'url': 's3://wts', 'profile': 'example_wts'},
         })
         statuses = get_credentials_status()
         assert statuses[0].legacy_creds_in_global is True
@@ -490,39 +490,39 @@ class TestConfigureRemotes:
     def test_adds_endpoint_and_profile(self, tmp_path, monkeypatch):
         cfg = (
             "[core]\n"
-            "    remote = bcarc-wts\n"
-            "['remote \"bcarc-wts\"']\n"
+            "    remote = example-wts\n"
+            "['remote \"example-wts\"']\n"
             "    url = s3://wts\n"
         )
         repo = self._make_repo(tmp_path, cfg)
         monkeypatch.chdir(repo)
         monkeypatch.setattr('dt.auth.credentials.utils.get_project_name',
-                            lambda: 'bcarc_wts')
+                            lambda: 'example_wts')
 
         result = configure_remotes(endpoint='https://r2.example.com')
 
-        assert result.updated_remotes == ['bcarc-wts']
+        assert result.updated_remotes == ['example-wts']
         text = (repo / '.dvc' / 'config').read_text()
-        assert 'profile = bcarc_wts' in text
+        assert 'profile = example_wts' in text
         assert 'endpointurl = https://r2.example.com' in text
 
     def test_skips_already_configured(self, tmp_path, monkeypatch):
         cfg = (
             "[core]\n"
-            "    remote = bcarc-wts\n"
-            "['remote \"bcarc-wts\"']\n"
+            "    remote = example-wts\n"
+            "['remote \"example-wts\"']\n"
             "    url = s3://wts\n"
             "    endpointurl = https://e\n"
-            "    profile = bcarc_wts\n"
+            "    profile = example_wts\n"
         )
         repo = self._make_repo(tmp_path, cfg)
         monkeypatch.chdir(repo)
         monkeypatch.setattr('dt.auth.credentials.utils.get_project_name',
-                            lambda: 'bcarc_wts')
+                            lambda: 'example_wts')
 
         result = configure_remotes(endpoint='https://e')
         assert result.updated_remotes == []
-        assert result.skipped_remotes == ['bcarc-wts']
+        assert result.skipped_remotes == ['example-wts']
 
     def test_no_endpoint_no_default_fails(self, tmp_path, monkeypatch):
         repo = self._make_repo(tmp_path)
@@ -567,7 +567,7 @@ class TestMigrateCredentials:
         self, aws_dir, fake_dvc_global, monkeypatch,
     ):
         legacy = (
-            "['remote \"bcarc-wts\"']\n"
+            "['remote \"example-wts\"']\n"
             "    url = s3://wts\n"
             "    access_key_id = A\n"
             "    secret_access_key = B\n"
@@ -579,10 +579,10 @@ class TestMigrateCredentials:
         )
         _patch_project_remotes(monkeypatch, {})
 
-        result = migrate_credentials(repo_name='bcarc_wts')
+        result = migrate_credentials(repo_name='example_wts')
 
-        assert result.reuploaded == ['bcarc_wts']
-        assert result.installed == ['bcarc_wts']
+        assert result.reuploaded == ['example_wts']
+        assert result.installed == ['example_wts']
         # Backend was asked to write new AWS-INI content
         backend.set_secret.assert_called_once()
         new_content = backend.set_secret.call_args.args[1]
@@ -590,7 +590,7 @@ class TestMigrateCredentials:
         # Credentials installed
         creds = _make_aws_parser()
         creds.read(aws_dir / 'credentials')
-        assert creds.get('bcarc_wts', 'aws_access_key_id') == 'A'
+        assert creds.get('example_wts', 'aws_access_key_id') == 'A'
 
     def test_already_aws_secret_just_installs(
         self, aws_dir, fake_dvc_global, monkeypatch,
@@ -633,20 +633,20 @@ class TestMigrateCredentials:
         self, aws_dir, fake_dvc_global, monkeypatch,
     ):
         _write_global_dvc(fake_dvc_global, {
-            'bcarc-wts': {
+            'example-wts': {
                 'url': 's3://wts',
                 'access_key_id': 'A', 'secret_access_key': 'B',
             },
         })
         _patch_project_remotes(monkeypatch, {
-            'bcarc-wts': {'url': 's3://wts', 'profile': 'bcarc_wts'},
+            'example-wts': {'url': 's3://wts', 'profile': 'example_wts'},
         })
-        secret = "[bcarc_wts]\naws_access_key_id = A\naws_secret_access_key = B\n"
+        secret = "[example_wts]\naws_access_key_id = A\naws_secret_access_key = B\n"
         backend = MagicMock()
         backend.get_raw_config.return_value = secret
         monkeypatch.setattr(
             'dt.auth.credentials._get_secret_backend', lambda: backend,
         )
 
-        result = migrate_credentials(repo_name='bcarc_wts')
-        assert result.stripped_remotes == ['bcarc-wts']
+        result = migrate_credentials(repo_name='example_wts')
+        assert result.stripped_remotes == ['example-wts']
