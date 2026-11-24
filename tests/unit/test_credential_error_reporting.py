@@ -251,6 +251,7 @@ class TestDescribeSecretIdentity:
 def _patched_backend(**kwargs):
     """Patch _get_secret_backend to return a mock with the given behaviour."""
     backend = MagicMock()
+    backend.project, backend.prefix = 'p', 'dvc-remote-'
     for key, value in kwargs.items():
         setattr(backend.get_raw_config, key, value)
     return patch.object(creds_mod, '_get_secret_backend', return_value=backend)

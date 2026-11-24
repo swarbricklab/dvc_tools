@@ -315,14 +315,20 @@ _PLAIN_PROFILE_SETTINGS = frozenset({'region', 'output'})
 
 
 def _check_profile_name(profile: str) -> None:
-    if (not isinstance(profile, str) or not _PROFILE_NAME_RE.match(profile)
+    if (not isinstance(profile, str) or not _PROFILE_NAME_RE.fullmatch(profile)
             or profile.lower() in _RESERVED_PROFILES):
         raise AuthError(f"'{profile}' cannot be used as an AWS profile name")
 
 
+_SOURCE_RE = re.compile(r'gcp:[A-Za-z0-9._:-]{0,128}/[A-Za-z0-9._-]{1,255}')
+
+
 def _secret_source(project: Optional[str], prefix: Optional[str], name: str) -> str:
     """Identifier of the secret a profile is installed from."""
-    return f"gcp:{project}/{prefix or 'dvc-remote-'}{name}"
+    source = f"gcp:{project}/{prefix or 'dvc-remote-'}{name}"
+    if not _SOURCE_RE.fullmatch(source):
+        raise AuthError(f"Unusable secret store name {source!r}")
+    return source
 
 
 def _configured_source(name: str) -> str:
@@ -352,6 +358,9 @@ def _install_aws_profile(
             install from *source*.
     """
     _check_profile_name(profile)
+    _check_key_pair(access_key_id, secret_access_key, profile)
+    if not _PROFILE_NAME_RE.fullmatch(region or ''):
+        raise AuthError(f"Unusable region {region!r} for profile '{profile}'")
     creds_path = _get_aws_credentials_path()
     config_path = _get_aws_config_path()
     retry = (f"if it should come from {source}, run "
@@ -484,6 +493,21 @@ def _detect_secret_format(content: str) -> str:
     return 'unknown'
 
 
+# Key values written to ~/.aws/credentials: one token, no whitespace or
+# control characters (a line break would start new sections or options).
+_KEY_ID_RE = re.compile(r'[A-Za-z0-9_-]{1,256}')
+_SECRET_KEY_RE = re.compile(r'[A-Za-z0-9/+=_.-]{1,512}')
+
+
+def _check_key_pair(access_key_id: str, secret_access_key: str, name: str) -> None:
+    if not (isinstance(access_key_id, str) and _KEY_ID_RE.fullmatch(access_key_id)
+            and isinstance(secret_access_key, str)
+            and _SECRET_KEY_RE.fullmatch(secret_access_key)):
+        raise AuthError(f"Secret for '{name}' does not hold a usable key pair "
+                        f"(key values must be single tokens of letters, digits "
+                        f"and _ - / + = .)")
+
+
 def _parse_aws_secret(content: str, repo_name: str) -> Tuple[str, str]:
     """Parse an AWS-INI secret and return ``(access_key_id, secret_access_key)``.
 
@@ -522,11 +546,15 @@ def _parse_aws_secret(content: str, repo_name: str) -> Tuple[str, str]:
             f"credential pair(s). One profile per repo is required; "
             f"split the repo or unify the keys."
         )
-    return next(iter(pairs))
+    access_key_id, secret_access_key = next(iter(pairs))
+    _check_key_pair(access_key_id, secret_access_key, repo_name)
+    return access_key_id, secret_access_key
 
 
 def _build_aws_secret(repo_name: str, access_key_id: str, secret_access_key: str) -> str:
     """Build the canonical AWS-INI secret content for *repo_name*."""
+    _check_key_pair(access_key_id, secret_access_key, repo_name)
+    _check_profile_name(repo_name)
     parser = _make_aws_parser()
     parser.add_section(repo_name)
     parser.set(repo_name, 'aws_access_key_id', access_key_id)
@@ -953,8 +981,8 @@ def install_credentials(
             _failed(repo_info.name, "secret is not in a recognised AWS-INI format")
             continue
 
-        access_key, secret_key = _parse_aws_secret(raw, repo_info.name)
         try:
+            access_key, secret_key = _parse_aws_secret(raw, repo_info.name)
             creds_path, config_path = _install_aws_profile(
                 repo_info.name, access_key, secret_key,
                 source=_secret_source(backend.project, backend.prefix, repo_info.name),
@@ -1308,13 +1336,21 @@ def migrate_credentials(
         fmt = _detect_secret_format(raw)
 
         if fmt == 'aws':
-            access_key, secret_key = _parse_aws_secret(raw, name)
+            try:
+                access_key, secret_key = _parse_aws_secret(raw, name)
+            except AuthError as exc:
+                result.skipped.append((name, str(exc)))
+                continue
             if verbose:
                 print(f"  \u00b7 {name}: already AWS-INI; installing")
         elif fmt == 'dvc':
             # Legacy: extract from the secret directly
-            access_key, secret_key = _extract_creds_from_dvc_secret(raw, name)
-            new_content = _build_aws_secret(name, access_key, secret_key)
+            try:
+                access_key, secret_key = _extract_creds_from_dvc_secret(raw, name)
+                new_content = _build_aws_secret(name, access_key, secret_key)
+            except AuthError as exc:
+                result.skipped.append((name, str(exc)))
+                continue
             print(f"  {name}: secret {backend._get_secret_id(name)} in GCP "
                   f"project '{backend.project}'")
             if dry_run:
@@ -1389,7 +1425,9 @@ def _extract_creds_from_dvc_secret(content: str, repo_name: str) -> Tuple[str, s
             f"Legacy secret for '{repo_name}' contains {len(pairs)} distinct "
             "credential pair(s); cannot migrate to a single AWS profile."
         )
-    return next(iter(pairs))
+    access_key_id, secret_access_key = next(iter(pairs))
+    _check_key_pair(access_key_id, secret_access_key, repo_name)
+    return access_key_id, secret_access_key
 
 
 def format_migrate_result(result: MigrateResult) -> str:
@@ -1537,6 +1575,11 @@ def set_secret(repo_name: str, content: str, allow_repo_store: bool = False) -> 
             "Expected an `aws_access_key_id` (AWS) or `access_key_id` "
             "(legacy DVC) entry."
         )
+    # Upload only what install would accept back.
+    if fmt == 'aws':
+        _parse_aws_secret(content, repo_name)
+    else:
+        _extract_creds_from_dvc_secret(content, repo_name)
 
     try:
         backend = _get_secret_backend()

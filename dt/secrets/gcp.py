@@ -692,8 +692,10 @@ class GCPSecretBackend(SecretBackend):
         except Exception as e:
             raise SecretError(f"Error fetching secret: {e}")
         
-        # Return raw payload as text
-        return response.payload.data.decode('utf-8')
+        # Return the payload as text, with line endings normalised the way
+        # the gcloud CLI path (text mode) does, so both read the same.
+        text = response.payload.data.decode('utf-8')
+        return text.replace('\r\n', '\n').replace('\r', '\n')
 
     def list_secrets(self) -> list:
         """List secret IDs matching the prefix."""

@@ -320,6 +320,7 @@ class TestInstallCredentialsAws:
     def test_installs_aws_secret(self, aws_dir, fake_dvc_global, monkeypatch):
         secret = "[example_wts]\naws_access_key_id = AKIA\naws_secret_access_key = SS\n"
         backend = MagicMock()
+        backend.project, backend.prefix = 'p', 'dvc-remote-'
         backend.get_raw_config.return_value = secret
         monkeypatch.setattr(
             'dt.auth.credentials._get_secret_backend', lambda: backend,
@@ -342,6 +343,7 @@ class TestInstallCredentialsAws:
             "    secret_access_key = B\n"
         )
         backend = MagicMock()
+        backend.project, backend.prefix = 'p', 'dvc-remote-'
         backend.get_raw_config.return_value = secret
         monkeypatch.setattr(
             'dt.auth.credentials._get_secret_backend', lambda: backend,
@@ -372,6 +374,7 @@ class TestInstallCredentialsAws:
 
         secret = "[example_wts]\naws_access_key_id = NEW\naws_secret_access_key = NEW2\n"
         backend = MagicMock()
+        backend.project, backend.prefix = 'p', 'dvc-remote-'
         backend.get_raw_config.return_value = secret
         monkeypatch.setattr(
             'dt.auth.credentials._get_secret_backend', lambda: backend,
@@ -603,6 +606,7 @@ class TestMigrateCredentials:
             "    secret_access_key = B\n"
         )
         backend = MagicMock()
+        backend.project, backend.prefix = 'p', 'dvc-remote-'
         backend.get_raw_config.return_value = legacy
         monkeypatch.setattr(
             'dt.auth.credentials._get_secret_backend', lambda: backend,
@@ -627,6 +631,7 @@ class TestMigrateCredentials:
     ):
         secret = "[x]\naws_access_key_id = A\naws_secret_access_key = B\n"
         backend = MagicMock()
+        backend.project, backend.prefix = 'p', 'dvc-remote-'
         backend.get_raw_config.return_value = secret
         monkeypatch.setattr(
             'dt.auth.credentials._get_secret_backend', lambda: backend,
@@ -647,6 +652,7 @@ class TestMigrateCredentials:
             "    secret_access_key = B\n"
         )
         backend = MagicMock()
+        backend.project, backend.prefix = 'p', 'dvc-remote-'
         backend.get_raw_config.return_value = legacy
         monkeypatch.setattr(
             'dt.auth.credentials._get_secret_backend', lambda: backend,
@@ -673,6 +679,7 @@ class TestMigrateCredentials:
         })
         secret = "[example_wts]\naws_access_key_id = A\naws_secret_access_key = B\n"
         backend = MagicMock()
+        backend.project, backend.prefix = 'p', 'dvc-remote-'
         backend.get_raw_config.return_value = secret
         monkeypatch.setattr(
             'dt.auth.credentials._get_secret_backend', lambda: backend,
@@ -844,3 +851,88 @@ class TestCredentialsFileIsPrivateThroughout:
         fake_dvc_global.chmod(0o644)
         assert c._strip_dvc_global_creds({'r'}) == ['r']
         assert stat_mod.S_IMODE(fake_dvc_global.stat().st_mode) == 0o600
+
+
+class TestKeyValuesStaySingleTokens:
+    PAYLOAD = (b'[r]\naws_access_key_id = AKIA\r[evil]\rcredential_process = sh -c x\n'
+               b'aws_secret_access_key = S\n')
+
+    def test_library_path_normalises_line_endings(self):
+        from dt.secrets.gcp import GCPSecretBackend
+        backend = GCPSecretBackend(project='p')
+        client = MagicMock()
+        client.access_secret_version.return_value.payload.data = self.PAYLOAD
+        with patch.object(type(backend), 'client', property(lambda s: client)):
+            text = backend.get_raw_config('r')
+        assert '\r' not in text
+        assert text == self.PAYLOAD.decode().replace('\r', '\n')
+
+    @pytest.mark.parametrize('key_id,secret', [
+        ('AKIA\r[evil]', 'S'), ('AKIA', 'S\ncredential_process = x'),
+        ('AK IA', 'S'), ('AKIA', ''), ('AKIA', 'S\x00'),
+    ])
+    def test_unusable_key_values_never_reach_the_files(self, aws_dir, key_id, secret):
+        (aws_dir / 'credentials').write_text('[other]\naws_access_key_id = K\n')
+        before = (aws_dir / 'credentials').read_bytes()
+        with pytest.raises(AuthError):
+            _install_aws_profile('myrepo', key_id, secret, source='gcp:p/x')
+        with pytest.raises(AuthError):
+            _build_aws_secret('myrepo', key_id, secret)
+        assert (aws_dir / 'credentials').read_bytes() == before
+        assert not (aws_dir / 'config').exists()
+
+    def test_secret_with_carriage_return_is_refused_when_parsed(self):
+        content = '[r]\naws_access_key_id = AKIA\r[evil]\naws_secret_access_key = S\n'
+        with pytest.raises(AuthError):
+            _parse_aws_secret(content, 'r')
+
+    @pytest.mark.parametrize('name', ['myrepo\n', 'my\rrepo', 'x\n[evil]'])
+    def test_profile_name_with_line_break_refused(self, aws_dir, name):
+        with pytest.raises(AuthError):
+            _install_aws_profile(name, 'AKIA', 'S', source='gcp:p/x')
+
+    @pytest.mark.parametrize('key_id,secret', [
+        ('AKIAIOSFODNN7EXAMPLE', 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY+a=='),
+        ('0123456789abcdef0123456789abcdef', 'ab' * 32),
+        ('GOOG1EXAMPLEKEYID', 'bGlrZS1hLWtleQ=='),
+    ])
+    def test_real_key_formats_accepted(self, aws_dir, key_id, secret):
+        _install_aws_profile('myrepo', key_id, secret, source='gcp:p/dvc-remote-myrepo')
+        assert _parse_aws_secret(_build_aws_secret('myrepo', key_id, secret),
+                                 'myrepo') == (key_id, secret)
+
+    def test_bad_legacy_secret_is_skipped_not_reuploaded(self, aws_dir):
+        from dt.auth import credentials as c
+        backend = MagicMock(project='p', prefix='dvc-remote-', _repo_scoped=False)
+        backend.get_raw_config.return_value = (
+            "['remote \"r\"']\n    access_key_id = AK\rIA\n    secret_access_key = S\n")
+        with patch.object(c, '_get_secret_backend', return_value=backend), \
+             patch.object(c, '_strippable_remotes', return_value=set()):
+            result = c.migrate_credentials(repo_name='r')
+        backend.set_secret.assert_not_called()
+        assert [n for n, _ in result.skipped] == ['r']
+        assert not (aws_dir / 'credentials').exists()
+
+    def test_one_bad_secret_fails_only_its_repo(self, aws_dir):
+        from dt.auth import credentials as c
+        backend = MagicMock(project='p', prefix='dvc-remote-', _repo_scoped=False)
+        good = '[good]\naws_access_key_id = AKIA\naws_secret_access_key = S\n'
+        bad = '[bad]\naws_access_key_id = AKIA\r[evil]\naws_secret_access_key = S\n'
+        backend.get_raw_config.side_effect = lambda n: bad if n == 'bad' else good
+        repos = [c.RepoCredentialInfo(name=n, url=None, has_s3_remote=True,
+                                      remote_types=['s3']) for n in ('bad', 'good')]
+        with patch.object(c, '_get_secret_backend', return_value=backend), \
+             patch.object(c, '_get_repos_needing_credentials', return_value=repos), \
+             patch.object(c, 'describe_secret_identity', return_value=None), \
+             patch.object(c, '_strippable_remotes', return_value=set()):
+            results = c.install_credentials()
+        assert results == {'bad': False, 'good': True}
+        text = (aws_dir / 'credentials').read_text()
+        assert '[good]' in text and 'evil' not in text and '[bad]' not in text
+
+    def test_set_refuses_unusable_content_before_upload(self):
+        from dt.auth import credentials as c
+        with patch.object(c, '_get_secret_backend') as gb:
+            with pytest.raises(AuthError):
+                c.set_secret('r', '[r]\naws_access_key_id = A\rB\naws_secret_access_key = S\n')
+        gb.assert_not_called()
