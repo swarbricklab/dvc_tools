@@ -59,7 +59,7 @@ def parse_s3_url(url: str) -> Tuple[str, str]:
     Raises:
         GetError: If *url* names no bucket.
     """
-    match = _S3_URL_RE.match(url)
+    match = _S3_URL_RE.fullmatch(url)
     if not match or not match.group(1):
         raise GetError(f"Malformed S3 URL: {url}")
     return match.group(1), (match.group(2) or '').strip('/')

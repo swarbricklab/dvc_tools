@@ -132,7 +132,7 @@ def entries_from_list(
         tok = raw.strip()
         if not tok:
             continue
-        m = _MD5_TOKEN_RE.match(tok.lower())
+        m = _MD5_TOKEN_RE.fullmatch(tok.lower())
         if m:
             md5 = m.group(1)
             is_dir = bool(m.group(2))
@@ -159,7 +159,7 @@ def entries_from_list(
         name = rel.split('/')[-1]
         hex_prefix = remote_verify._prefix_key_for_rel(rel, layout)[0][-2:]
         expected = remote_verify.expected_md5_for_blob(hex_prefix, name)
-        if not remote_verify._HASH_RE.match(expected):
+        if not remote_verify._HASH_RE.fullmatch(expected):
             rejected.append(
                 (raw, 'not an md5 and not a blob path reconstructing an md5'))
             continue
@@ -197,7 +197,7 @@ def confirm_bad(remote_dir: Path, entries: List[dict]) -> Tuple[List[dict], List
             continue
         hex_prefix = remote_verify._prefix_key_for_rel(rel, 'dvc-mixed')[0][-2:]
         expected = remote_verify.expected_md5_for_blob(hex_prefix, rel.rsplit('/', 1)[-1])
-        if not remote_verify._HASH_RE.match(expected or ''):
+        if not remote_verify._HASH_RE.fullmatch(expected or ''):
             confirmed.append(e)  # stray file in a prefix dir
             continue
         try:

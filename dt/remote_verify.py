@@ -315,7 +315,7 @@ def _verify_one_prefix(
 
         # A name that doesn't reconstruct to a valid md5 (e.g. a *.tmp left
         # behind by a killed transfer) is an incomplete artefact, not a blob.
-        if not _HASH_RE.match(expected):
+        if not _HASH_RE.fullmatch(expected):
             counts['incomplete'] += 1
             incomplete_entries.append({
                 'path': rel,
@@ -567,7 +567,7 @@ def _md5_from_cloud_key(rel: str) -> Tuple[str, str, bool, bool]:
     parts = rel.strip('/').split('/')
     name = parts[-1]
     prefix = parts[-2] if len(parts) >= 2 else ''
-    if not _PREFIX_RE.match(prefix):
+    if not _PREFIX_RE.fullmatch(prefix):
         return '', prefix, False, False
     is_dir = name.endswith('.dir')
     md5 = expected_md5_for_blob(prefix, name)
@@ -607,7 +607,7 @@ def compare_remote_sizes(
 
         # A name under a hex prefix that doesn't reconstruct a valid md5 (e.g. a
         # ``*.tmp`` left by a killed multipart upload) is a stray artefact.
-        if not _HASH_RE.match(md5):
+        if not _HASH_RE.fullmatch(md5):
             totals['incomplete'] += 1
             incomplete_entries.append({'path': rel,
                                        'status': STATUS_INCOMPLETE})
@@ -889,7 +889,7 @@ def recheck_entries(
         if expected is None:
             hex_prefix = _prefix_key_for_rel(rel, layout)[0][-2:]
             expected = expected_md5_for_blob(hex_prefix, name)
-        if not _HASH_RE.match(expected or ''):
+        if not _HASH_RE.fullmatch(expected or ''):
             # Stray file: gone means the fix (deletion) worked; else still stray.
             if not f.exists():
                 totals['ok'] += 1

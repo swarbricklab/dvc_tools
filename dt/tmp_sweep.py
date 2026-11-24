@@ -177,7 +177,7 @@ def _username(uid: int) -> str:
 
 def is_tmp_name(name: str) -> bool:
     """True if ``name`` is exactly a DVC temporary-transfer filename."""
-    return bool(TMP_RE.match(name))
+    return bool(TMP_RE.fullmatch(name))
 
 
 def _scan_prefix(
