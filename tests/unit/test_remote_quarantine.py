@@ -323,3 +323,92 @@ class TestQuarantineStaysInsideRemote:
         plan = q.plan_quarantine(remote, entries)
         assert [p['path'] for p in plan] == [f'files/md5/{good[:2]}/{good[2:]}']
         assert outside.read_text() == 'mine'
+
+
+class TestQuarantineNeverFollowsLinks:
+    def _victim(self, tmp_path):
+        v = tmp_path / 'home' / 'private.cfg'
+        v.parent.mkdir()
+        v.write_text('secret=1\n')
+        import os
+        os.chmod(v, 0o600)
+        return v
+
+    def _state(self, p):
+        import os
+        return (p.read_text(), os.stat(p).st_mode & 0o7777)
+
+    def test_failed_rename_does_not_touch_link_target(self, tmp_path):
+        import errno, os
+        from unittest.mock import patch
+        from dt.errors import RemoteError
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        victim = self._victim(tmp_path)
+        rel = f'files/md5/{good[:2]}/{"f" * 30}'
+        (remote / rel).symlink_to(victim)
+        before = self._state(victim)
+        entries = [{'path': rel, 'status': rv.STATUS_SYMLINK}]
+        real_rename = os.rename
+
+        def eperm(src, dst, *a, **k):
+            if str(src).endswith('f' * 30):
+                raise PermissionError(errno.EPERM, 'sticky')
+            return real_rename(src, dst, *a, **k)
+
+        with patch('dt.remote_quarantine.os.rename', side_effect=eperm):
+            with pytest.raises(RemoteError):
+                q.quarantine(remote, entries=entries)
+        assert self._state(victim) == before
+
+    def test_cross_device_moves_link_as_link(self, tmp_path):
+        import errno, os
+        from unittest.mock import patch
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        victim = self._victim(tmp_path)
+        rel = f'files/md5/{good[:2]}/{"f" * 30}'
+        (remote / rel).symlink_to(victim)
+        before = self._state(victim)
+
+        def exdev(src, dst, *a, **k):
+            raise OSError(errno.EXDEV, 'cross-device')
+
+        with patch('dt.remote_quarantine.os.rename', side_effect=exdev):
+            res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_SYMLINK}])
+        moved_to = Path(res['quarantine_dir']) / rel
+        assert os.path.islink(moved_to) and not os.path.lexists(remote / rel)
+        assert self._state(victim) == before
+
+    def test_linked_quarantine_root_is_refused(self, tmp_path):
+        import os
+        from dt.errors import RemoteError
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        elsewhere = tmp_path / 'elsewhere'
+        elsewhere.mkdir()
+        (remote / rv.LEDGER_DIRNAME).mkdir(exist_ok=True)
+        (remote / rv.LEDGER_DIRNAME / q.QUARANTINE_DIRNAME).symlink_to(elsewhere)
+        entries = [{'path': f'files/md5/{good[:2]}/{good[2:]}', 'status': rv.STATUS_MISMATCH}]
+        with pytest.raises(RemoteError, match='real directory'):
+            q.quarantine(remote, entries=entries)
+        assert list(elsewhere.iterdir()) == []
+
+    def test_restore_ignores_forged_manifest_paths(self, tmp_path):
+        import json, os
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        res = q.quarantine(remote, entries=[{'path': f'files/md5/{good[:2]}/{good[2:]}',
+                                             'status': rv.STATUS_MISMATCH}])
+        qdir = Path(res['quarantine_dir'])
+        outside = tmp_path / 'home' / 'keep.txt'
+        outside.parent.mkdir()
+        outside.write_text('mine')
+        man = qdir / q.MANIFEST_FILENAME
+        data = json.loads(man.read_text())
+        data['entries'].append({'path': '../../../home/keep.txt'})
+        man.write_text(json.dumps(data))
+        out = q.restore_quarantine(remote, qdir.name)
+        assert outside.read_text() == 'mine'
+        assert '../../../home/keep.txt' in out['absent']
+        assert f'files/md5/{good[:2]}/{good[2:]}' in out['restored']

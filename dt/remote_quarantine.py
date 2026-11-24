@@ -19,8 +19,10 @@ with a ``manifest.json`` recording each original path, md5, status and reason.
 """
 
 import datetime as _dt
+import errno
 import json
 import os
+import stat
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -167,6 +169,59 @@ def _quarantine_root(remote_dir: Path) -> Path:
     return remote_dir / remote_verify.LEDGER_DIRNAME / QUARANTINE_DIRNAME
 
 
+def _real_quarantine_root(remote_dir: Path, create: bool) -> Path:
+    """The quarantine root, with every component a real directory in the
+    remote (never a link, which could lead anywhere)."""
+    cur = Path(remote_dir)
+    for part in (remote_verify.LEDGER_DIRNAME, QUARANTINE_DIRNAME):
+        cur = cur / part
+        if os.path.islink(cur) or (os.path.lexists(cur) and not os.path.isdir(cur)):
+            raise RemoteError(f"{cur} must be a real directory, not a link")
+        if create:
+            cur.mkdir(exist_ok=True)
+    return cur
+
+
+def _move_entry(src: Path, dst: Path) -> None:
+    """Move one remote entry into quarantine (or back).
+
+    A plain rename moves the entry itself (a link stays a link). Only a
+    genuine cross-filesystem rename falls back to copy+unlink: a regular file
+    is copied through a descriptor opened without following links, a link is
+    recreated as a link; nothing's mode is changed. Any other error (e.g. a
+    sticky directory) is raised.
+    """
+    try:
+        os.rename(src, dst)
+        return
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+    st = os.lstat(src)
+    if stat.S_ISLNK(st.st_mode):
+        os.symlink(os.readlink(src), dst)
+    elif stat.S_ISREG(st.st_mode):
+        sfd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                          stat.S_IMODE(st.st_mode))
+            try:
+                while True:
+                    chunk = os.read(sfd, 1 << 20)
+                    if not chunk:
+                        break
+                    view = memoryview(chunk)
+                    while view:
+                        view = view[os.write(dfd, view):]
+            finally:
+                os.close(dfd)
+        finally:
+            os.close(sfd)
+    else:
+        raise OSError(errno.EINVAL, f"{src} is not a regular file or link")
+    os.unlink(src)
+
+
 def build_dir_reverse_map(
     remote_dir: Path, layout: Optional[str] = None,
 ) -> Dict[str, List[str]]:
@@ -304,50 +359,42 @@ def quarantine(
         qdir = _quarantine_root(remote_dir) / ts
         for item in plan:
             src = remote_dir / item['path']
-            (moved if src.exists() else missing).append(item)
+            (moved if os.path.lexists(src) else missing).append(item)
         return {'quarantine_dir': str(qdir), 'moved': moved,
                 'missing': missing, 'plan': plan, 'dry_run': True}
 
     # Ensure a fresh batch dir: two runs in the same UTC second must not share
     # a dir (that would orphan the first run's blobs and overwrite its
     # manifest). Suffix -1, -2, ... until we find an unused name.
-    root = _quarantine_root(remote_dir)
-    qdir = root / ts
-    n = 1
-    while qdir.exists():
-        qdir = root / f'{ts}-{n}'
-        n += 1
-
     try:
-        qdir.mkdir(parents=True, exist_ok=True)
-        utils.set_group_writable(_quarantine_root(remote_dir), setgid=True)
+        root = _real_quarantine_root(remote_dir, create=True)
+        qdir = root / ts
+        n = 1
+        while os.path.lexists(qdir):
+            qdir = root / f'{ts}-{n}'
+            n += 1
+        qdir.mkdir()  # fresh, ours
+        utils.set_group_writable(root, setgid=True)
     except OSError as exc:
         raise RemoteError(
             f"Cannot create quarantine dir {qdir}: {exc}")
 
     for item in plan:
         rel = item['path']
+        if not remote_verify.safe_blob_rel(rel) or not remote_verify._dirs_are_real(
+                remote_dir, rel.rsplit('/', 1)[0]):
+            missing.append(item)
+            continue
         src = remote_dir / rel
         dst = qdir / rel
-        if not src.exists():
+        if not os.path.lexists(src):
             missing.append(item)
             continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            # The parent dir is writable, so os.rename works even though the
-            # blob file itself is read-only. Falls back to a copy+unlink across
-            # filesystems (quarantine lives under the same remote, so rename
-            # normally succeeds).
-            try:
-                os.rename(src, dst)
-            except OSError:
-                import shutil
-                shutil.copy2(src, dst)
-                try:
-                    os.chmod(src, 0o644)
-                except OSError:
-                    pass
-                src.unlink()
+            # The parent dir is writable, so a rename works even though the
+            # blob file itself is read-only.
+            _move_entry(src, dst)
             moved.append({**item, 'quarantined_to': str(Path(ts) / rel)})
             if verbose:
                 print(f"  quarantined {rel}")
@@ -406,7 +453,11 @@ def restore_quarantine(
     Skips any blob whose original path is now occupied (e.g. it was already
     re-pushed) — that copy wins; the quarantined one stays put for forensics.
     """
-    qdir = _quarantine_root(remote_dir) / timestamp
+    if not timestamp or '/' in timestamp or timestamp in ('.', '..'):
+        raise RemoteError(f"Invalid quarantine batch name: {timestamp!r}")
+    qdir = _real_quarantine_root(remote_dir, create=False) / timestamp
+    if os.path.islink(qdir) or not os.path.isdir(qdir):
+        raise RemoteError(f"No quarantine batch at {qdir}")
     manifest_path = qdir / MANIFEST_FILENAME
     # Distinguish an absent manifest from a present-but-corrupt one so the
     # operator isn't told a physically-present batch "doesn't exist".
@@ -422,18 +473,25 @@ def restore_quarantine(
 
     restored, skipped, absent = [], [], []
     for item in data.get('entries', []):
-        rel = item['path']
+        rel = item.get('path') if isinstance(item, dict) else None
+        # The manifest lives in a shared directory: only plain blob paths,
+        # through real directories on both sides.
+        if (not remote_verify.safe_blob_rel(rel)
+                or not remote_verify._dirs_are_real(qdir, rel.rsplit('/', 1)[0])
+                or not remote_verify._dirs_are_real(remote_dir, rel.rsplit('/', 1)[0])):
+            absent.append(str(rel))
+            continue
         src = qdir / rel
         dst = remote_dir / rel
-        if not src.exists():
+        if not os.path.lexists(src):
             absent.append(rel)  # quarantined blob is gone (already restored?)
             continue
-        if dst.exists():
+        if os.path.lexists(dst):
             skipped.append(rel)  # already re-pushed; leave quarantine copy
             continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            os.rename(src, dst)
+            _move_entry(src, dst)
             restored.append(rel)
             if verbose:
                 print(f"  restored {rel}")
