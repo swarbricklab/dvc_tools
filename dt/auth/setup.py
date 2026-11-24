@@ -53,6 +53,7 @@ from .ssh import (
     _key_accepted_by_host,
     _key_has_passphrase,
     _write_ssh_config_stanza,
+    is_valid_ssh_user,
 )
 
 
@@ -384,6 +385,15 @@ def _do_ssh_setup(
             else:
                 host_users[host] = _prompt_username(host)
 
+    # Only a plain login name is ever passed to ssh or written to the config.
+    for host in list(host_users):
+        if not is_valid_ssh_user(host_users[host]):
+            print(f"  \u26a0 Skipping {host}: unusable SSH username {host_users[host]!r}")
+            del host_users[host]
+            del all_hosts[host]
+    if not all_hosts:
+        return []
+
     # Ensure ~/.ssh and keypair
     _ensure_ssh_dir(verbose=verbose)
 
@@ -404,13 +414,18 @@ def _do_ssh_setup(
     stanzas_written: Dict[str, bool] = {}
     for host in all_hosts:
         if not _host_in_ssh_config(host, ssh_config_file):
-            _write_ssh_config_stanza(
-                host=host,
-                user=host_users[host],
-                identity_file=key_path,
-                config_path=ssh_config_file,
-                verbose=verbose,
-            )
+            try:
+                _write_ssh_config_stanza(
+                    host=host,
+                    user=host_users[host],
+                    identity_file=key_path,
+                    config_path=ssh_config_file,
+                    verbose=verbose,
+                )
+            except ValueError as exc:
+                print(f"  \u26a0 {exc}; SSH config left unchanged for it")
+                stanzas_written[host] = False
+                continue
             stanzas_written[host] = True
         else:
             stanzas_written[host] = False

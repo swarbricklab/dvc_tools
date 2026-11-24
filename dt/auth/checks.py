@@ -279,13 +279,11 @@ def _check_ssh(ep: Endpoint, verbose: bool = False) -> CheckResult:
         return result
 
     url = ep.url.strip()
-    if url.startswith('ssh://'):
-        netloc = url[6:].split('/')[0]
-        host = netloc.split('@')[-1]
-    elif '@' in url and ':' in url:
-        host = url.split('@')[1].split(':')[0]
-    else:
-        host = url
+    from .ssh import _extract_ssh_host, is_valid_ssh_host
+    host = _extract_ssh_host(url) if ('://' in url or ':' in url) else url
+    if not is_valid_ssh_host(host):
+        return CheckResult(endpoint=ep, status=STATUS_FAIL,
+                           summary=f'not a usable SSH host: {url!r}')
 
     # -- Part 1: SSH host connectivity ------------------------------------
     try:

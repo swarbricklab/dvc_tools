@@ -4031,3 +4031,57 @@ class TestRequestDestinationIsTheUsers:
             send_request_email(req, 'admin@example.org')
         cmd = run.call_args.args[0]
         assert cmd[-2:] == ['--', 'admin@example.org']
+
+
+class TestSshConfigOnlyGetsPlainNames:
+    @pytest.mark.parametrize('url', [
+        'ssh://evil\nHost *\n  ProxyCommand touch /tmp/x@host/p',
+        'ssh://user@ho st/p', 'ssh://user@*/p', 'ssh://user@-oProxy/p',
+        'u@h\n  ProxyCommand x:p',
+    ])
+    def test_extraction_rejects_injection(self, url):
+        from dt.auth.ssh import _extract_ssh_host, _extract_ssh_user
+        host, user = _extract_ssh_host(url), _extract_ssh_user(url)
+        assert host is None or '\n' not in host and ' ' not in host and '*' not in host
+        assert user is None or '\n' not in user
+
+    @pytest.mark.parametrize('host,user', [
+        ('h\nHost *', None), ('*', None), ('-oX', None), ('h', 'u\n  ProxyCommand x'),
+        ('h', 'u ser'), ('h', '#c'),
+    ])
+    def test_stanza_writer_refuses_and_leaves_file(self, tmp_path, host, user):
+        from dt.auth.ssh import _write_ssh_config_stanza
+        cfg_file = tmp_path / 'config'
+        cfg_file.write_text('Host keep\n')
+        with pytest.raises(ValueError):
+            _write_ssh_config_stanza(host, user, tmp_path / 'id', cfg_file)
+        assert cfg_file.read_text() == 'Host keep\n'
+
+    def test_plain_names_are_written(self, tmp_path):
+        from dt.auth.ssh import _write_ssh_config_stanza
+        cfg_file = tmp_path / 'config'
+        _write_ssh_config_stanza('gadi.nci.org.au', 'ab1234', tmp_path / 'id', cfg_file)
+        assert 'Host gadi.nci.org.au' in cfg_file.read_text()
+
+    def test_bad_username_never_reaches_ssh(self, tmp_path):
+        from dt.auth import setup as setup_mod
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/x', source='remote')
+        with patch('subprocess.run') as run, \
+             patch.object(setup_mod, '_ensure_ssh_dir'), \
+             patch.object(setup_mod, '_find_existing_key', return_value=tmp_path / 'id'):
+            out = setup_mod._do_ssh_setup(
+                endpoints=[ep], host_configs={},
+                default_username='-oProxyCommand=touch${IFS}/tmp/pwn',
+                ssh_config_file=tmp_path / 'config', verbose=False)
+        assert out == []
+        run.assert_not_called()
+        assert not (tmp_path / 'config').exists()
+
+    @pytest.mark.parametrize('url', ['ssh://u@h:\nHost *\n ProxyCommand x/p', 'ssh://-oX/p'])
+    def test_check_ssh_refuses_unparseable_hosts(self, url):
+        from dt.auth.checks import _check_ssh
+        ep = Endpoint(type='ssh', url=url, source='remote')
+        with patch('subprocess.run') as run:
+            result = _check_ssh(ep)
+        run.assert_not_called()
+        assert result.status == 'fail'

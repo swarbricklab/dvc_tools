@@ -50,6 +50,12 @@ from .archive import backends as archive_backends
 from .archive import registry as archive_registry
 
 
+
+def _own_username():
+    """The ``username`` setting from user or system config (not a repo's)."""
+    value, scope = cfg.get_trusted_value_with_scope('username')
+    return value if scope in cfg.TRUSTED_SCOPES else None
+
 @click.group()
 @click.version_option(package_name='dvc-tools')
 def cli():
@@ -104,7 +110,7 @@ def init(name, owner, team, cache_root, remote_root, site_cache_root, site_cache
 @click.argument('repository', metavar='REPOSITORY')
 @click.argument('path', required=False)
 @click.option('--owner', help='Override the GitHub owner for short names')
-@click.option('--username', '-u', default=lambda: cfg.get_value('username'), help='Default SSH username for auth setup (default: username from config)')
+@click.option('--username', '-u', default=lambda: _own_username(), help='Default SSH username for auth setup (default: username from config)')
 @click.option('--no-init', is_flag=True,
               help='Skip cache, site-cache and remote setup after cloning')
 @click.option('--no-submodules', is_flag=True, help='Skip cloning git submodules')
@@ -2908,7 +2914,7 @@ def auth():
 
 
 @auth.command('setup')
-@click.option('-u', '--username', default=lambda: cfg.get_value('username'),
+@click.option('-u', '--username', default=lambda: _own_username(),
               help='Default SSH username for remote hosts (default: username from config).')
 @click.option('--config', 'config_path',
               type=click.Path(exists=True, dir_okay=False),

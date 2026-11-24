@@ -197,8 +197,8 @@ class TestSshCopyIdFallback:
 
         argv = run.call_args.args[0]
         assert argv[0] == 'ssh'
-        assert argv[1] == 'u@h'
-        assert 'authorized_keys' in argv[2]
+        assert argv[1:3] == ['--', 'u@h']
+        assert 'authorized_keys' in argv[3]
 
     def test_key_is_passed_as_an_argument_not_interpolated(self, pub_key):
         """Key content must never be parsed as shell."""
@@ -214,7 +214,7 @@ class TestSshCopyIdFallback:
                    return_value=MagicMock(returncode=0)) as run:
             _deploy_key_ssh_copy_id('h', 'u', pub_key)
 
-        remote = run.call_args.args[0][2]
+        remote = run.call_args.args[0][3]
         # The script body is quoted as one unit and the key as another, so
         # the substitution can never reach a shell unquoted.
         assert "'ssh-ed25519 AAAA$(rm -rf /) dt@node'" in remote
