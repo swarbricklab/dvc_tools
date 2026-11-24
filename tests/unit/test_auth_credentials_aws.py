@@ -774,3 +774,73 @@ class TestAdoptionAndPlainProfiles:
         (aws_dir / 'config').write_text('[profile myrepo]\nregion = auto\n')
         _install_aws_profile('myrepo', 'AKIA', 'S', source='gcp:p/x')
         assert 'AKIA' in (aws_dir / 'credentials').read_text()
+
+
+class TestCredentialsFileIsPrivateThroughout:
+    def test_new_file_created_owner_only_under_lax_umask(self, tmp_path, monkeypatch):
+        import stat as stat_mod
+        target = tmp_path / 'newdir' / 'credentials'
+        monkeypatch.setenv('AWS_SHARED_CREDENTIALS_FILE', str(target))
+        monkeypatch.setenv('AWS_CONFIG_FILE', str(tmp_path / 'newdir' / 'config'))
+        seen = []
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, *a, **kw):
+            if flags & os.O_CREAT:
+                seen.append(mode)
+            return real_open(path, flags, mode, *a, **kw)
+
+        old = os.umask(0o002)
+        try:
+            monkeypatch.setattr(os, 'open', spy)
+            _install_aws_profile('myrepo', 'AKIA', 'SECRET', source='gcp:p/x')
+        finally:
+            os.umask(old)
+        assert seen and all(m == 0o600 for m in seen)
+        assert stat_mod.S_IMODE(target.stat().st_mode) == 0o600
+        assert stat_mod.S_IMODE(target.parent.stat().st_mode) & 0o077 == 0
+        assert [p.name for p in target.parent.iterdir() if p.name.endswith('.tmp')] == []
+
+    def test_stricter_existing_mode_is_kept(self, aws_dir):
+        import stat as stat_mod
+        creds = aws_dir / 'credentials'
+        creds.write_text('')
+        creds.chmod(0o400)
+        _install_aws_profile('myrepo', 'AKIA', 'SECRET', source='gcp:p/x')
+        assert stat_mod.S_IMODE(creds.stat().st_mode) == 0o400
+
+    def test_group_readable_file_ends_owner_only(self, aws_dir):
+        import stat as stat_mod
+        creds = aws_dir / 'credentials'
+        creds.write_text('')
+        creds.chmod(0o644)
+        _install_aws_profile('myrepo', 'AKIA', 'SECRET', source='gcp:p/x')
+        assert stat_mod.S_IMODE(creds.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root reads anything')
+    def test_unreadable_file_is_not_replaced(self, aws_dir):
+        creds = aws_dir / 'credentials'
+        creds.write_text('[other]\naws_access_key_id = KEEP\naws_secret_access_key = S\n')
+        creds.chmod(0o000)
+        try:
+            with pytest.raises(OSError):
+                _install_aws_profile('myrepo', 'AKIA', 'SECRET', source='gcp:p/x')
+        finally:
+            creds.chmod(0o600)
+        assert 'KEEP' in creds.read_text()
+
+    def test_symlinked_credentials_stay_a_link(self, aws_dir, tmp_path, monkeypatch):
+        real = tmp_path / 'real_credentials'
+        link = aws_dir / 'linked'
+        link.symlink_to(real)
+        monkeypatch.setenv('AWS_SHARED_CREDENTIALS_FILE', str(link))
+        _install_aws_profile('myrepo', 'AKIA', 'SECRET', source='gcp:p/x')
+        assert link.is_symlink() and 'AKIA' in real.read_text()
+
+    def test_dvc_global_config_rewrite_is_owner_only(self, fake_dvc_global):
+        import stat as stat_mod
+        from dt.auth import credentials as c
+        fake_dvc_global.write_text("['remote \"r\"']\n    access_key_id = K\n")
+        fake_dvc_global.chmod(0o644)
+        assert c._strip_dvc_global_creds({'r'}) == ['r']
+        assert stat_mod.S_IMODE(fake_dvc_global.stat().st_mode) == 0o600

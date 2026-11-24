@@ -235,20 +235,61 @@ def _make_aws_parser() -> configparser.RawConfigParser:
 
 
 def _load_aws_ini(path: Path) -> configparser.RawConfigParser:
-    """Load an AWS INI file (returns empty parser if file missing)."""
+    """Load an AWS INI file (returns empty parser if file missing).
+
+    A file that exists but cannot be read raises, rather than being treated
+    as empty -- it would otherwise be rewritten without its other profiles.
+    """
     parser = _make_aws_parser()
     if path.exists():
-        parser.read(path)
+        with open(path) as f:
+            parser.read_file(f)
     return parser
 
 
+def _write_private_file(path: Path, text: str) -> None:
+    """Replace *path* with *text*, readable by the owner only at every moment.
+
+    The content goes to a new file created 0600 beside the target, which
+    then replaces it in one step; a stricter existing mode is kept. A new
+    parent directory is created 0700. A link at *path* is written through
+    to its target, as before.
+    """
+    import secrets
+    target = Path(os.path.realpath(path))
+    if not target.parent.exists():
+        os.makedirs(target.parent, mode=0o700, exist_ok=True)
+    mode = 0o600
+    try:
+        # Owner bits only, and always owner-readable (tools must read it).
+        mode = (os.stat(target).st_mode & 0o600) | 0o400
+    except FileNotFoundError:
+        pass
+    tmp = target.parent / f'.{target.name}.{secrets.token_hex(8)}.tmp'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            view = memoryview(text.encode())
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _write_aws_ini(parser: configparser.RawConfigParser, path: Path) -> None:
-    """Write an AWS INI file with 600 permissions, creating parent dir."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Write an AWS INI file owner-only (see :func:`_write_private_file`)."""
     buf = io.StringIO()
     parser.write(buf)
-    path.write_text(buf.getvalue())
-    path.chmod(0o600)
+    _write_private_file(path, buf.getvalue())
 
 
 def _aws_profile_section_name(profile: str, *, in_config_file: bool) -> str:
@@ -578,8 +619,7 @@ def _strip_dvc_global_creds(remote_names: Set[str], verbose: bool = False) -> Li
                   f"[remote \"{rname}\"]")
 
     if changed:
-        config_path.write_text(_format_dvc_ini(sections))
-        _ensure_config_local_permissions(config_path)
+        _write_private_file(config_path, _format_dvc_ini(sections))
 
     return touched
 
