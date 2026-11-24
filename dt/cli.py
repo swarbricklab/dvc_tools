@@ -2458,7 +2458,8 @@ def remote_archive_restore(name, to_path, object_hash, prefix, verbose):
 
     Without --object or --prefix, performs a full restore. Without
     --to, restores to the manifest's source_remote path (i.e. puts the
-    data back where it came from before pruning).
+    data back where it came from before pruning), after you type that
+    path to confirm it.
     """
     try:
         written = archive_ops.restore_archive(
@@ -2592,10 +2593,16 @@ def remote_archive_build_prefix(name, prefix, staging_dir):
 @click.option('--force', is_flag=True,
               help='Allow pruning when extras outside files/md5/ exist '
                    '(NEVER bypasses verify).')
-def remote_archive_prune(name, yes, force):
+@click.option('--source', 'source', type=click.Path(), default=None,
+              help='The remote directory to prune; must be the one the '
+                   'archive was made from. Without it, you are asked to '
+                   'type the path (even with --yes).')
+def remote_archive_prune(name, yes, force, source):
     """Delete the on-disk DVC remote after verifying its archive."""
     try:
-        result = archive_ops.prune_archive(name, yes=yes, force=force)
+        result = archive_ops.prune_archive(
+            name, yes=yes, force=force,
+            source=Path(source) if source else None)
     except errors.ArchiveError as e:
         raise click.ClickException(str(e))
     click.echo(click.style(

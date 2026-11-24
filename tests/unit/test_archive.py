@@ -9,7 +9,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -1029,7 +1029,7 @@ class TestPrune:
         (remote / 'README.txt').unlink()
         (remote / 'config').unlink()
 
-        result = ops.prune_archive('pr2', yes=True,
+        result = ops.prune_archive('pr2', yes=True, source=remote,
                                    backend_override=local_backend,
                                    repo_root=project_root)
         assert result.deleted_path == remote / 'files' / 'md5'
@@ -1044,7 +1044,7 @@ class TestPrune:
             backend_dir='cold/pr3/', jobs=1,
             backend_override=local_backend, repo_root=project_root,
         )
-        result = ops.prune_archive('pr3', yes=True, force=True,
+        result = ops.prune_archive('pr3', yes=True, force=True, source=remote,
                                    backend_override=local_backend,
                                    repo_root=project_root)
         assert not (remote / 'files' / 'md5').exists()
@@ -1063,7 +1063,7 @@ class TestPrune:
 
         with pytest.raises(ArchiveError, match='did not verify'):
             ops.prune_archive(
-                'pr4', yes=True, force=True,
+                'pr4', yes=True, force=True, source=remote,
                 backend_override=local_backend, repo_root=project_root,
             )
         # files/md5 must still be there.
@@ -1426,7 +1426,7 @@ class TestSignpost:
             backend_override=local_backend, repo_root=project_root,
         )
         ops.prune_archive(
-            name, yes=True,
+            name, yes=True, source=remote,
             backend_override=local_backend, repo_root=project_root,
         )
         return remote
@@ -1487,7 +1487,7 @@ class TestSignpost:
 
         # Restore with no --to: defaults to manifest.source_remote.
         written = ops.restore_archive(
-            'sp2',
+            'sp2', confirm_callback=lambda _p: str(remote),
             backend_override=local_backend, repo_root=project_root,
         )
         # Data lands back in the source remote, signpost gets cleared.
@@ -1507,7 +1507,7 @@ class TestSignpost:
         any_prefix = next(iter(manifest.inner_tars))
 
         ops.restore_archive(
-            'sp3', prefix=any_prefix,
+            'sp3', prefix=any_prefix, confirm_callback=lambda _p: str(remote),
             backend_override=local_backend, repo_root=project_root,
         )
         # Partial restore: signpost is still accurate ("most data still
@@ -1727,6 +1727,61 @@ class TestRestoreAndPruneStayInTheProjectsRemote:
         with pytest.raises(ArchiveError, match="not one of this project's DVC remotes"):
             ops._require_project_remote(tmp_path / 'home', tmp_path, 'restore into')
         ops._require_project_remote(tmp_path / 'real', tmp_path, 'restore into')
+
+    def test_named_target_must_be_typed_back(self, tmp_path):
+        from dt.errors import ArchiveError
+        target = tmp_path / 'remote'
+        target.mkdir()
+        ops._confirm_named_target('a', target, 'prune',
+                                  lambda _p: f' {target}/ ', hint='h')
+        with pytest.raises(ArchiveError, match='Aborted'):
+            ops._confirm_named_target('a', target, 'prune',
+                                      lambda _p: 'yes', hint='h')
+        with pytest.raises(ArchiveError, match='Aborted'):
+            ops._confirm_named_target('a', target, 'prune',
+                                      lambda _p: str(tmp_path), hint='h')
+
+    def test_named_target_without_terminal_is_refused(self, tmp_path, monkeypatch):
+        from dt.errors import ArchiveError
+        monkeypatch.setattr(ops.sys.stdin, 'isatty', lambda: False, raising=False)
+        with pytest.raises(ArchiveError, match='--source'):
+            ops._confirm_named_target('a', tmp_path, 'prune', None,
+                                      hint='pass --source <path>')
+
+    def test_project_cache_is_refused(self, tmp_path, monkeypatch):
+        import types
+        from dt.errors import ArchiveError
+        cache = tmp_path / 'cache'
+        (cache / 'files' / 'md5').mkdir(parents=True)
+
+        class FakeRepo:
+            def __init__(self, root):
+                self.cache = types.SimpleNamespace(local=types.SimpleNamespace(
+                    path=str(cache / 'files' / 'md5')))
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+        import dvc.repo
+        monkeypatch.setattr(dvc.repo, 'Repo', FakeRepo)
+        for target in (cache, cache / 'files', tmp_path):
+            with pytest.raises(ArchiveError, match="overlaps this project's DVC cache"):
+                ops._refuse_project_cache(target, tmp_path, 'prune')
+        ops._refuse_project_cache(tmp_path / 'remote', tmp_path, 'prune')
+
+    def test_prune_yes_without_source_still_asks(self, tmp_path, monkeypatch):
+        from dt.errors import ArchiveError
+        manifest = MagicMock(source_remote=str(tmp_path / 'remote'),
+                             source_layout='dvc-v3')
+        monkeypatch.setattr(ops, 'load_manifest', lambda *a, **k: manifest)
+        monkeypatch.setattr(ops, '_require_project_remote', lambda *a, **k: None)
+        monkeypatch.setattr(ops, '_refuse_project_cache', lambda *a, **k: None)
+        with pytest.raises(ArchiveError, match='Aborted'):
+            ops.prune_archive('a', yes=True, repo_root=tmp_path,
+                              confirm_callback=lambda _p: 'yes')
+        with pytest.raises(ArchiveError, match='is not the remote'):
+            ops.prune_archive('a', yes=True, repo_root=tmp_path,
+                              source=tmp_path / 'other')
 
     def _tar(self, tmp_path, entries):
         import tarfile, io

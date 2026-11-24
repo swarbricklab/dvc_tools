@@ -1826,6 +1826,7 @@ def restore_archive(
     backend_override: Optional[ArchiveBackend] = None,
     repo_root: Optional[Path] = None,
     verbose: bool = False,
+    confirm_callback=None,
 ) -> List[Path]:
     """Restore from an archive.
 
@@ -1837,7 +1838,8 @@ def restore_archive(
     If ``to_path`` is not given, defaults to the manifest's recorded
     ``source_remote`` — i.e. restores the data back to the directory it
     came from. Useful after :func:`prune_archive` left an
-    ``ARCHIVED.yaml`` signpost there.
+    ``ARCHIVED.yaml`` signpost there. That path comes from the manifest,
+    so the user has to type it back before anything is written there.
 
     Returns a list of paths written under ``to_path``.
     """
@@ -1860,6 +1862,10 @@ def restore_archive(
             )
         to_path = Path(manifest.source_remote)
         _require_project_remote(to_path, repo_root, 'restore into')
+        _refuse_project_cache(to_path, repo_root, 'restore into')
+        _confirm_named_target(
+            name, to_path, 'restore into', confirm_callback,
+            hint="pass --to <path> to choose where to restore")
         if verbose:
             print(
                 f"  no --to given; restoring to manifest.source_remote: "
@@ -2158,6 +2164,53 @@ def _require_tar_digest(local: Path, inner: InnerTar) -> None:
             f"{local.name} does not match the checksum recorded in the manifest")
 
 
+def _same_path(a, b) -> bool:
+    return (os.path.realpath(os.path.expanduser(str(a)))
+            == os.path.realpath(os.path.expanduser(str(b))))
+
+
+def _confirm_named_target(name: str, target: Path, action: str,
+                          confirm_callback, hint: str) -> None:
+    """Have the user type *target* (taken from the manifest) back."""
+    prompt = (f"Archive '{name}' names {target} as its source remote.\n"
+              f"Type that path to {action} it: ")
+    if confirm_callback is not None:
+        response = confirm_callback(prompt)
+    else:
+        if not sys.stdin.isatty():
+            raise ArchiveError(
+                f"Refusing to {action} {target} without confirmation: {hint}.")
+        try:
+            response = input(prompt)
+        except EOFError:
+            response = ''
+    response = (response or '').strip()
+    if not response or not _same_path(response, target):
+        raise ArchiveError(f"Aborted: the path typed is not {target}.")
+
+
+def _refuse_project_cache(target: Path, repo_root: Optional[Path],
+                          action: str) -> None:
+    """*target* must not be (or hold, or sit inside) the project's own
+    DVC cache."""
+    try:
+        from dvc.repo import Repo
+        root = Path(repo_root or utils.find_project_root())
+        with Repo(str(root)) as repo:
+            odb = repo.cache.local.path
+    except Exception:
+        return
+    if not odb:
+        return
+    cache = os.path.realpath(utils.cache_root_from_odb_path(Path(odb)))
+    path = os.path.realpath(os.path.expanduser(str(target)))
+    if (path == cache or path.startswith(cache + os.sep)
+            or cache.startswith(path + os.sep)):
+        raise ArchiveError(
+            f"Refusing to {action} {target}: it overlaps this project's DVC "
+            f"cache ({cache}).")
+
+
 def _require_project_remote(source_remote: Path, repo_root: Optional[Path],
                             action: str) -> None:
     """*source_remote* (from a committed manifest) must be one of this
@@ -2323,6 +2376,7 @@ def prune_archive(
     backend_override: Optional[ArchiveBackend] = None,
     repo_root: Optional[Path] = None,
     confirm_callback=None,
+    source: Optional[Path] = None,
 ) -> PruneResult:
     """Delete ``<source_remote>/files/md5/`` after verifying the archive.
 
@@ -2331,12 +2385,25 @@ def prune_archive(
     - The source remote has files outside ``files/md5/`` (extras).
 
     ``--force`` bypasses the extras check (NOT the verify check).
-    ``--yes`` suppresses the interactive confirm.
+    ``--yes`` suppresses the interactive confirm. The remote's path comes
+    from the manifest, so the user names it too: ``source`` (``--source``)
+    must be that path, or, without it, the path is typed at a prompt that
+    ``--yes`` does not skip.
     """
     manifest = load_manifest(name, repo_root=repo_root)
     source_remote = Path(manifest.source_remote)
     layout = manifest.source_layout or LAYOUT_DVC_V3
     _require_project_remote(source_remote, repo_root, 'prune')
+    _refuse_project_cache(source_remote, repo_root, 'prune')
+    if source is not None:
+        if not _same_path(source, source_remote):
+            raise ArchiveError(
+                f"Refusing to prune: --source {source} is not the remote "
+                f"archive '{name}' was made from ({source_remote}).")
+    else:
+        _confirm_named_target(
+            name, source_remote, 'prune', confirm_callback,
+            hint="pass --source <path> naming the remote to prune")
 
     # Identify what to delete based on the source layout.
     prune_targets: List[Path] = []

@@ -29,7 +29,7 @@ dt remote archive deposit projx-2026-05   # data mover (mdss access)
 dt remote archive verify projx-2026-05
 
 # Once you're confident, delete the local copy.
-dt remote archive prune  projx-2026-05
+dt remote archive prune  projx-2026-05 --source /g/data/ab12/dvc/projx
 ```
 
 ## Where to run each subcommand
@@ -237,7 +237,11 @@ typical post-prune workflow is just:
 dt remote archive restore <name>
 ```
 
-…and the source remote pops back into existence. A full restore also
+…and the source remote pops back into existence. Because that path comes
+from the manifest, restore shows it and asks you to type it back before
+writing there; with no terminal to ask (e.g. under `qx`), pass it as `--to`.
+It also refuses when the path is not one of the project's DVC remotes, or
+overlaps the project's own DVC cache. A full restore also
 clears the `ARCHIVED.yaml` signpost since the data is no longer
 archived. Partial restores (`--prefix` / `--object`) leave the
 signpost in place because most of the data is still on the backend.
@@ -319,11 +323,16 @@ Refuses to run unless:
    recorded in the manifest — `files/md5/` for `dvc-v3`, the top-level
    `00` … `ff` prefix dirs for `dvc-v2`, both for `dvc-mixed`
    (extras). `--force` skips this check.
+3. You name the remote: `--source <path>` must be the directory the archive
+   was made from, or, without it, prune shows that path and asks you to
+   type it back (`--yes` does not skip this). The path must also be one of
+   the project's DVC remotes and must not overlap the project's own DVC
+   cache.
 
-When both conditions are met, deletes those same blob directories
+When all conditions are met, deletes those same blob directories
 (`<source-remote>/files/md5/` for a v3 remote, the top-level hex prefix
 dirs for a v2 remote, both for a mixed one) and reports the bytes
-freed. `--yes` skips the interactive confirmation.
+freed. `--yes` skips the final yes/no confirmation.
 
 ## Parallelism
 
@@ -408,7 +417,7 @@ cd /path/to/repo
 dt remote archive verify  projx-2026-05
 # or restore: dt remote archive restore projx-2026-05 --to /scratch/ab12/$USER/restored
 # or destroy: dt remote archive destroy projx-2026-05 --yes
-# or prune:   dt remote archive prune   projx-2026-05 --yes
+# or prune:   dt remote archive prune   projx-2026-05 --yes --source /g/data/ab12/dvc/projx
 ```
 
 Or wrap any of them in a one-liner via `qxub`:
