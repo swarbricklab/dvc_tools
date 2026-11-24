@@ -22,7 +22,7 @@ from .checks import (
     check_endpoints,
 )
 from .endpoints import Endpoint
-from .identity import Identity, get_identities
+from .identity import Identity, get_identities, own_config_value
 
 
 @dataclass
@@ -259,12 +259,40 @@ def _format_slack_blocks(req: AccessRequest) -> dict:
     return {'blocks': blocks}
 
 
+def _webhook_host(url: str) -> str:
+    import urllib.parse
+    return urllib.parse.urlsplit(url).hostname or '?'
+
+
+def _check_webhook(url: str) -> None:
+    import urllib.parse
+    parts = urllib.parse.urlsplit(str(url))
+    if parts.scheme != 'https' or not parts.hostname:
+        raise AuthError(f"auth.slack_webhook must be an https URL, not {url!r}")
+
+
+_EMAIL_RE = None
+
+
+def _check_email(address: str) -> None:
+    """A single plain address: no spaces, control characters or option."""
+    import re
+    global _EMAIL_RE
+    if _EMAIL_RE is None:
+        _EMAIL_RE = re.compile(r'^[A-Za-z0-9._%+=-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
+    if (not isinstance(address, str) or address.startswith('-')
+            or not _EMAIL_RE.fullmatch(address)):
+        raise AuthError(f"auth.admin_email must be a single e-mail address, "
+                        f"not {address!r}")
+
+
 def send_request_slack(req: AccessRequest, webhook_url: str) -> None:
     """Send an access request to a Slack incoming-webhook URL.
 
     Raises:
-        AuthError: If the webhook POST fails.
+        AuthError: If the URL is not https, or the webhook POST fails.
     """
+    _check_webhook(webhook_url)
     payload = json.dumps(_format_slack_blocks(req)).encode()
     http_req = urllib.request.Request(
         webhook_url,
@@ -296,7 +324,12 @@ def send_request_email(
     """
     import getpass
 
-    subject = f'dt access request — {req.project} ({req.user})'
+    _check_email(admin_email)
+    # Project and user names end up in a header: no line breaks or other
+    # control characters.
+    subject = ''.join(
+        ch if ch.isprintable() else ' '
+        for ch in f'dt access request — {req.project} ({req.user})')
     body = format_request_text(req)
     sender = getpass.getuser()
 
@@ -332,7 +365,7 @@ def send_request_email(
         )
 
     result = subprocess.run(
-        ['mail', '-s', subject, admin_email],
+        ['mail', '-s', subject, '--', admin_email],
         input=body,
         capture_output=True,
         text=True,
@@ -364,12 +397,12 @@ def send_request(
     admin_email = None
 
     try:
-        slack_url = cfg.get_value('auth.slack_webhook')
+        slack_url = own_config_value('auth.slack_webhook')
     except Exception:
         pass
 
     try:
-        admin_email = cfg.get_value('auth.admin_email')
+        admin_email = own_config_value('auth.admin_email')
     except Exception:
         pass
 
@@ -381,7 +414,7 @@ def send_request(
                 "'https://hooks.slack.com/services/...'"
             )
         send_request_slack(req, slack_url)
-        return 'Access request sent to Slack.'
+        return f'Access request sent to Slack ({_webhook_host(slack_url)}).'
 
     if method == 'email':
         if not admin_email:
@@ -396,7 +429,7 @@ def send_request(
     # Auto-detect: prefer Slack, fall back to email
     if slack_url:
         send_request_slack(req, slack_url)
-        return 'Access request sent to Slack.'
+        return f'Access request sent to Slack ({_webhook_host(slack_url)}).'
 
     if admin_email:
         send_request_email(req, admin_email)

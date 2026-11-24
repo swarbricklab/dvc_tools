@@ -2026,7 +2026,7 @@ class TestSendRequest:
         )
 
     @patch('dt.auth.request.send_request_slack')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_explicit_slack(self, mock_cfg, mock_send_slack):
         mock_cfg.side_effect = lambda k: {
             'auth.slack_webhook': 'https://hooks.slack.com/xxx',
@@ -2036,7 +2036,7 @@ class TestSendRequest:
         assert 'Slack' in msg
 
     @patch('dt.auth.request.send_request_email')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_explicit_email(self, mock_cfg, mock_send_email):
         mock_cfg.side_effect = lambda k: {
             'auth.admin_email': 'admin@test.com',
@@ -2045,14 +2045,14 @@ class TestSendRequest:
         mock_send_email.assert_called_once()
         assert 'admin@test.com' in msg
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_explicit_slack_no_config_raises(self, mock_cfg):
         from dt.errors import AuthError
         mock_cfg.side_effect = KeyError('not found')
         with pytest.raises(AuthError, match='Slack webhook not configured'):
             send_request(self._make_req(), method='slack')
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_explicit_email_no_config_raises(self, mock_cfg):
         from dt.errors import AuthError
         mock_cfg.side_effect = KeyError('not found')
@@ -2060,7 +2060,7 @@ class TestSendRequest:
             send_request(self._make_req(), method='email')
 
     @patch('dt.auth.request.send_request_slack')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_auto_prefers_slack(self, mock_cfg, mock_send_slack):
         mock_cfg.side_effect = lambda k: {
             'auth.slack_webhook': 'https://hooks.slack.com/xxx',
@@ -2071,7 +2071,7 @@ class TestSendRequest:
         assert 'Slack' in msg
 
     @patch('dt.auth.request.send_request_email')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_auto_falls_back_to_email(self, mock_cfg, mock_send_email):
         def cfg_side(k):
             if k == 'auth.slack_webhook':
@@ -2084,7 +2084,7 @@ class TestSendRequest:
         mock_send_email.assert_called_once()
         assert 'admin@test.com' in msg
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_auto_no_config_raises(self, mock_cfg):
         from dt.errors import AuthError
         mock_cfg.side_effect = KeyError('not found')
@@ -2116,7 +2116,7 @@ class TestIdentity:
 class TestGetIdentities:
     """Tests for get_identities (config-based)."""
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.identity.own_config_value')
     @patch('dt.auth.getpass.getuser', return_value='alice')
     def test_always_includes_nci_username(self, mock_user, mock_cfg):
         mock_cfg.side_effect = KeyError('not set')
@@ -2126,7 +2126,7 @@ class TestGetIdentities:
         assert ids[0].value == 'alice'
         assert ids[0].source == 'detected'
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.identity.own_config_value')
     @patch('dt.auth.getpass.getuser', return_value='alice')
     def test_reads_config_values(self, mock_user, mock_cfg):
         def cfg_side(k):
@@ -2148,7 +2148,7 @@ class TestGetIdentities:
         assert systems['GitHub user'] == 'alice-gh'
         assert systems['GitHub teams'] == 'data-team, ops'
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.identity.own_config_value')
     @patch('dt.auth.getpass.getuser', return_value='bob')
     def test_skips_empty_values(self, mock_user, mock_cfg):
         def cfg_effect(k):
@@ -2357,7 +2357,7 @@ class TestSaveDetectedIdentities:
     """Tests for save_detected_identities."""
 
     @patch('dt.auth.cfg.set_value')
-    @patch('dt.auth.cfg.get_value', side_effect=KeyError)
+    @patch('dt.auth.cfg.load_scope_config', side_effect=KeyError)
     def test_saves_new_values(self, mock_get, mock_set):
         detected = [
             Identity('NCI username', 'alice', 'detected'),  # should skip
@@ -2373,9 +2373,9 @@ class TestSaveDetectedIdentities:
         assert calls[1] == (('auth.gcp_email', 'a@gcp.com'), {'scope': 'user'})
 
     @patch('dt.auth.cfg.set_value')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.cfg.load_scope_config')
     def test_skips_matching_values(self, mock_get, mock_set):
-        mock_get.return_value = 'alice-gh'
+        mock_get.return_value = {'auth': {'github_user': 'alice-gh'}}
         detected = [
             Identity('GitHub user', 'alice-gh', 'detected via gh api'),
         ]
@@ -2384,9 +2384,9 @@ class TestSaveDetectedIdentities:
         mock_set.assert_not_called()
 
     @patch('dt.auth.cfg.set_value')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.cfg.load_scope_config')
     def test_updates_changed_values(self, mock_get, mock_set):
-        mock_get.return_value = 'old-name'
+        mock_get.return_value = {'auth': {'github_user': 'old-name'}}
         detected = [
             Identity('GitHub user', 'new-name', 'detected via gh api'),
         ]
@@ -3958,3 +3958,76 @@ class TestCheckArgumentsStayArguments:
         with patch('subprocess.run') as run:
             assert _check_ssh_remote_dir('-oProxyCommand=x', '/p') is None
         run.assert_not_called()
+
+
+
+class TestRequestDestinationIsTheUsers:
+    """Where an access request goes is not a repository's to decide."""
+
+    def test_repo_scope_destination_is_ignored(self, capsys):
+        from dt.auth.identity import own_config_value
+        with patch('dt.config.get_trusted_value_with_scope',
+                   return_value=('https://evil.example/hook', 'project')):
+            assert own_config_value('auth.slack_webhook') is None
+        assert 'ignoring auth.slack_webhook' in capsys.readouterr().err
+
+    def test_user_scope_destination_is_used(self):
+        from dt.auth.identity import own_config_value
+        with patch('dt.config.get_trusted_value_with_scope',
+                   return_value=('https://hooks.slack.com/x', 'system')):
+            assert own_config_value('auth.slack_webhook') == 'https://hooks.slack.com/x'
+
+    @pytest.mark.parametrize('url', ['http://hooks.slack.com/x', 'file:///etc/passwd',
+                                     'https:///nohost', 'ftp://x/y'])
+    def test_webhook_must_be_https(self, url):
+        from dt.auth.request import send_request_slack
+        from dt.errors import AuthError
+        req = AccessRequest(user='a', project='p', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('urllib.request.urlopen') as op:
+            with pytest.raises(AuthError, match='https'):
+                send_request_slack(req, url)
+            op.assert_not_called()
+
+    @pytest.mark.parametrize('addr', ['-oX@y.z', 'a@b.c\nBcc: x@y.z', 'a@b.c, d@e.f',
+                                      'a b@c.d', 'nobody', 'a@b.cc\n'])
+    def test_email_must_be_one_address(self, addr):
+        from dt.auth.request import send_request_email
+        from dt.errors import AuthError
+        req = AccessRequest(user='a', project='p', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('subprocess.run') as run:
+            with pytest.raises(AuthError, match='single e-mail'):
+                send_request_email(req, addr)
+            run.assert_not_called()
+
+    def test_slack_message_names_host(self):
+        from dt.auth.request import send_request
+        req = AccessRequest(user='a', project='p', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('dt.auth.request.own_config_value',
+                   side_effect=lambda k: 'https://hooks.slack.com/x' if k == 'auth.slack_webhook' else None), \
+             patch('dt.auth.request.send_request_slack'):
+            assert 'hooks.slack.com' in send_request(req, method='slack')
+
+    def test_names_cannot_add_mail_headers(self):
+        from dt.auth.request import send_request_email
+        req = AccessRequest(user='a', project='x\nBcc: evil@e.org', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('shutil.which', return_value='/usr/sbin/sendmail'), \
+             patch('subprocess.run', return_value=MagicMock(returncode=0)) as run:
+            send_request_email(req, 'admin@example.org')
+        message = run.call_args.kwargs['input']
+        headers = message.split('\n\n', 1)[0].splitlines()
+        assert not any(h.startswith('Bcc:') for h in headers)
+        assert headers[0] == 'To: admin@example.org'
+
+    def test_mail_fallback_ends_options(self):
+        from dt.auth.request import send_request_email
+        req = AccessRequest(user='a', project='p', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('shutil.which', side_effect=lambda n: None if n == 'sendmail' else '/bin/mail'), \
+             patch('subprocess.run', return_value=MagicMock(returncode=0)) as run:
+            send_request_email(req, 'admin@example.org')
+        cmd = run.call_args.args[0]
+        assert cmd[-2:] == ['--', 'admin@example.org']

@@ -401,10 +401,16 @@ With `--send`, the request is delivered directly:
 
 Auto-detect (`--send` with no argument) tries Slack first, then email.
 
+Both destinations, and the stored identities (`auth.github_user`,
+`auth.gcp_email`, ...), are read from user or system config only; a value in a
+repository's `.dt` config is ignored with a warning. The webhook must be an
+`https` URL and the address a single e-mail address. The confirmation names
+the webhook host or the address the request went to.
+
 ### Configuration for --send
 
 ```bash
-# Slack webhook (system scope recommended)
+# Slack webhook (system or user scope)
 dt config set --system auth.slack_webhook 'https://hooks.slack.com/services/T.../B.../xxx'
 
 # Admin email (system or user scope)
