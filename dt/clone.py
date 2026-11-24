@@ -89,6 +89,7 @@ def clone_repository(
     no_hooks: bool = False,
     rev: Optional[str] = None,
     overwrite: bool = False,
+    add_ssh_hosts: Optional[bool] = None,
 ) -> Path:
     """Clone a DVC repository with proper cache setup.
 
@@ -97,6 +98,8 @@ def clone_repository(
         path: Target directory (defaults to repo name)
         owner: GitHub owner for short names
         username: Default SSH username passed to auth setup
+        add_ssh_hosts: Passed to auth setup; ``None`` asks before adding
+            hosts named by the project's remotes to the SSH config.
         no_init: Skip the project configuration steps -- cache, site cache
             and remote. Hooks and auth are governed by no_hooks/no_auth.
         no_submodules: Skip cloning submodules
@@ -282,7 +285,9 @@ def clone_repository(
         original_dir = os.getcwd()
         try:
             os.chdir(target_dir)
-            report = auth_setup_mod.auth_setup(username=username, verbose=verbose)
+            report = auth_setup_mod.auth_setup(
+                username=username, verbose=verbose,
+                add_ssh_hosts=add_ssh_hosts)
         except Exception as exc:
             report = None
             if verbose:

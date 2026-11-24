@@ -4072,7 +4072,8 @@ class TestSshConfigOnlyGetsPlainNames:
             out = setup_mod._do_ssh_setup(
                 endpoints=[ep], host_configs={},
                 default_username='-oProxyCommand=touch${IFS}/tmp/pwn',
-                ssh_config_file=tmp_path / 'config', verbose=False)
+                ssh_config_file=tmp_path / 'config', verbose=False,
+                add_new_hosts=True)
         assert out == []
         run.assert_not_called()
         assert not (tmp_path / 'config').exists()

@@ -523,13 +523,18 @@ dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [--repo URL] [-v
 | `--config FILE` | YAML config file with per-host usernames (must exist) |
 | `--ssh-config FILE` | SSH config file path (default: `~/.ssh/config`) |
 | `--repo URL` | Set up access to a remote repository instead of the current directory's project (cloned to a temp dir). Accepts a full URL or a short name. |
+| `--add-ssh-hosts` | Add hosts named by the project's remotes to the SSH config without asking |
 | `-v, --verbose` | Show detailed progress |
 
 ### What it does
 
 `dt auth setup` discovers all endpoints the project uses (same as `dt auth list`), then:
 
-1. **SSH / git endpoints** — reuses an existing key (`~/.ssh/id_ed25519`, `id_rsa`, or `id_ecdsa`) or generates a passphrase-less `~/.ssh/id_ed25519` pair, appends a `Host` stanza to `~/.ssh/config` for any host that doesn't already have one, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts, `gh ssh-key add` for `github.com`, `glab ssh-key add` for `gitlab.com`). Where `ssh-copy-id` is not installed — as in the containerised `module load dt` image, which ships `ssh` without it — the key is appended to the remote `authorized_keys` over plain `ssh` instead
+1. **SSH / git endpoints** — reuses an existing key (`~/.ssh/id_ed25519`, `id_rsa`, or `id_ecdsa`) or generates a passphrase-less `~/.ssh/id_ed25519` pair, appends a `Host` stanza to `~/.ssh/config` for any host that doesn't already have one, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts, `gh ssh-key add` for `github.com`, `glab ssh-key add` for `gitlab.com`). Where `ssh-copy-id` is not installed — as in the containerised `module load dt` image, which ships `ssh` without it — the key is appended to the remote `authorized_keys` over plain `ssh` instead.
+   A host that is in neither the SSH config nor the `--config` file is listed
+   first, and is set up only if you agree. When there is no terminal to ask
+   (or you answer no) those hosts are left out and named in the report; pass
+   `--add-ssh-hosts` to add them without asking
 2. **S3 endpoints** — fetches credentials from the configured secret manager and installs them as a profile in `~/.aws/credentials` / `~/.aws/config` (one profile per repo, named after the repo)
 
 If S3 endpoints exist but GCP authentication is unavailable, the credential

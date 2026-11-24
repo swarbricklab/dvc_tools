@@ -329,7 +329,7 @@ class TestCloneAuthSetup:
                                     verbose=False,
                                 )
 
-        mock_auth.assert_called_once_with(username=None, verbose=False)
+        mock_auth.assert_called_once_with(username=None, verbose=False, add_ssh_hosts=None)
 
     def test_username_forwarded_to_auth_setup(self, tmp_path, monkeypatch):
         """The --username given to clone reaches auth_setup."""
@@ -357,7 +357,7 @@ class TestCloneAuthSetup:
                                     verbose=False,
                                 )
 
-        mock_auth.assert_called_once_with(username='ab1234', verbose=False)
+        mock_auth.assert_called_once_with(username='ab1234', verbose=False, add_ssh_hosts=None)
 
     def test_no_auth_skips_setup(self, tmp_path, monkeypatch):
         """auth_setup is not called when no_auth is True."""

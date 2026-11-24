@@ -121,6 +121,9 @@ class SetupReport:
     #: failure told users their repo had no S3 remote when it plainly did,
     #: and invited them to dismiss the real error printed underneath.
     credentials_skip_reason: Optional[str] = None
+    #: Hosts from the project's remotes that were not added to the SSH
+    #: config because the user did not agree to it.
+    ssh_hosts_skipped: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
 
@@ -130,6 +133,7 @@ def auth_setup(
     ssh_config_file: Optional[Path] = None,
     repo_url: Optional[str] = None,
     verbose: bool = False,
+    add_ssh_hosts: Optional[bool] = None,
 ) -> SetupReport:
     """Combined SSH + credentials setup driven by endpoint discovery.
 
@@ -150,6 +154,10 @@ def auth_setup(
             shallow-cloned to a temp dir purely to read its config, so
             this works from anywhere and without cloning it for real.
         verbose: Print progress.
+        add_ssh_hosts: Whether hosts named by the project's remotes that
+            are not yet in the SSH config (nor in ``config_path``) may be
+            added to it and given the key. ``None`` lists them and asks
+            when stdin is a terminal, and leaves them out otherwise.
 
     Returns:
         :class:`SetupReport` summarising what was done.
@@ -208,6 +216,8 @@ def auth_setup(
                 default_username=username,
                 ssh_config_file=ssh_config_file,
                 verbose=verbose,
+                add_new_hosts=add_ssh_hosts,
+                skipped_hosts=report.ssh_hosts_skipped,
             )
             report.ssh_results = ssh_results
         except Exception as exc:
@@ -338,12 +348,31 @@ def _prompt_username(host: str) -> str:
     return click.prompt(f"SSH username for {host}", type=str)
 
 
+def _approve_new_hosts(hosts: List[str], ssh_config_file: Path,
+                       add_new_hosts: Optional[bool]) -> bool:
+    """Ask before adding *hosts* to the SSH config and deploying the key."""
+    if add_new_hosts is not None:
+        return add_new_hosts
+    listing = '\n'.join(f"  {h}" for h in hosts)
+    if not sys.stdin.isatty():
+        print(f"Not adding these hosts from the project's remotes to "
+              f"{ssh_config_file}:\n{listing}\n"
+              f"Rerun with --add-ssh-hosts to add them.")
+        return False
+    print(f"The project's remotes name these hosts, which are not in "
+          f"{ssh_config_file}:\n{listing}")
+    return click.confirm("Add them to your SSH config and set up your key "
+                         "for them?", default=False)
+
+
 def _do_ssh_setup(
     endpoints: List[Endpoint],
     host_configs: Dict[str, HostConfig],
     default_username: Optional[str],
     ssh_config_file: Path,
     verbose: bool,
+    add_new_hosts: Optional[bool] = None,
+    skipped_hosts: Optional[List[str]] = None,
 ) -> List[SSHSetupResult]:
     """SSH setup that honours the YAML host configs."""
 
@@ -366,6 +395,20 @@ def _do_ssh_setup(
         if host and host not in all_hosts:
             all_hosts[host] = ep
 
+    if not all_hosts:
+        return []
+
+    # Hosts the user has not set up yet are added only with their say-so;
+    # the list comes from the project's remotes, not from the user.
+    new_hosts = [h for h in all_hosts
+                 if h not in host_configs
+                 and not _host_in_ssh_config(h, ssh_config_file)]
+    if new_hosts and not _approve_new_hosts(
+            new_hosts, ssh_config_file, add_new_hosts):
+        for host in new_hosts:
+            del all_hosts[host]
+        if skipped_hosts is not None:
+            skipped_hosts.extend(new_hosts)
     if not all_hosts:
         return []
 
@@ -502,6 +545,9 @@ def format_setup_report(report: SetupReport) -> str:
             lines.append(f"  {icon} {r.host}: {r.message}")
     elif report.skipped_ssh:
         lines.append("\nNo SSH/git endpoints — SSH setup skipped.")
+    if report.ssh_hosts_skipped:
+        lines.append("\nNot added to SSH config (rerun with --add-ssh-hosts): "
+                     + ', '.join(report.ssh_hosts_skipped))
 
     if report.credentials_installed:
         lines.append(click.style("\nCredentials:", bold=True))

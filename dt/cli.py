@@ -125,9 +125,12 @@ def init(name, owner, team, cache_root, remote_root, site_cache_root, site_cache
 @click.option('--no-hooks', is_flag=True, help='Skip installing git hooks and merge driver')
 @click.option('--rev', default=None, help='Check out a specific revision after cloning')
 @click.option('--overwrite', is_flag=True, help='Remove the target directory if it already exists')
+@click.option('--add-ssh-hosts', is_flag=True, default=None,
+              help='Add hosts named by the project\'s remotes to ~/.ssh/config '
+                   'without asking')
 def clone(repository, path, owner, username, no_init, no_submodules, cache_name, remote_name,
           site_cache_root, site_cache_path, no_site_cache,
-          shallow, do_pull, no_auth, no_hooks, rev, overwrite):
+          shallow, do_pull, no_auth, no_hooks, rev, overwrite, add_ssh_hosts):
     """Clone an existing DVC project from GitHub.
 
     REPOSITORY can be either:
@@ -168,6 +171,7 @@ def clone(repository, path, owner, username, no_init, no_submodules, cache_name,
             no_hooks=no_hooks,
             rev=rev,
             overwrite=overwrite,
+            add_ssh_hosts=add_ssh_hosts,
         )
     except clone_mod.CloneError as e:
         raise click.ClickException(str(e))
@@ -2926,9 +2930,13 @@ def auth():
               help='SSH config file path (default: ~/.ssh/config).')
 @click.option('--repo', 'repo_url', default=None,
               help='Set up access to a remote repo (URL or short name).')
+@click.option('--add-ssh-hosts', is_flag=True, default=None,
+              help='Add hosts named by the project\'s remotes to the SSH '
+                   'config without asking.')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show detailed progress.')
-def auth_setup(username, config_path, ssh_config_file, repo_url, verbose):
+def auth_setup(username, config_path, ssh_config_file, repo_url, add_ssh_hosts,
+               verbose):
     """Set up SSH keys, config, and credentials in one step.
 
     Discovers all endpoints, then:
@@ -2972,6 +2980,7 @@ def auth_setup(username, config_path, ssh_config_file, repo_url, verbose):
             ssh_config_file=ssh_cfg,
             repo_url=repo_url,
             verbose=verbose,
+            add_ssh_hosts=add_ssh_hosts,
         )
         click.echo(format_setup_report(report))
 

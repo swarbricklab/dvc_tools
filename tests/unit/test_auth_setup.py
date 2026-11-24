@@ -266,3 +266,75 @@ class TestPromptUsername:
              patch('dt.auth.setup.click.prompt', return_value='alice') as p:
             assert _prompt_username('host') == 'alice'
         p.assert_called_once()
+
+
+class TestNewSshHostsNeedApproval:
+    """Hosts from the project's remotes reach ~/.ssh/config only when agreed."""
+
+    @pytest.fixture
+    def run_setup(self, tmp_path):
+        from dt.auth import setup as setup_mod
+
+        def run(add_new_hosts=None, tty=False, answer=False, host_configs=None,
+                existing=''):
+            config = tmp_path / 'config'
+            if existing:
+                config.write_text(existing)
+            ep = Endpoint(type='ssh', url='ssh://xy1234@hpc.example.org/data',
+                          source="DVC remote 'storage'")
+            skipped = []
+            with patch.object(setup_mod, '_ensure_ssh_dir'), \
+                 patch.object(setup_mod, '_find_existing_key',
+                              return_value=tmp_path / 'id'), \
+                 patch.object(setup_mod, '_key_has_passphrase', return_value=False), \
+                 patch.object(setup_mod, 'check_endpoints', return_value=[]), \
+                 patch.object(setup_mod, '_key_accepted_by_host', return_value=True), \
+                 patch.object(setup_mod, '_deploy_keys_and_report',
+                              side_effect=lambda hosts, **kw: list(hosts)), \
+                 patch.object(setup_mod.sys.stdin, 'isatty', return_value=tty), \
+                 patch.object(setup_mod.click, 'confirm',
+                              return_value=answer) as confirm:
+                out = setup_mod._do_ssh_setup(
+                    endpoints=[ep], host_configs=host_configs or {},
+                    default_username=None, ssh_config_file=config,
+                    verbose=False, add_new_hosts=add_new_hosts,
+                    skipped_hosts=skipped)
+            text = config.read_text() if config.exists() else ''
+            return out, skipped, text, confirm
+        return run
+
+    def test_not_interactive_leaves_new_host_out(self, run_setup, capsys):
+        out, skipped, text, confirm = run_setup()
+        assert out == [] and skipped == ['hpc.example.org']
+        assert 'hpc.example.org' not in text
+        confirm.assert_not_called()
+        assert '--add-ssh-hosts' in capsys.readouterr().out
+
+    def test_interactive_asks_and_respects_no(self, run_setup, capsys):
+        out, skipped, text, confirm = run_setup(tty=True, answer=False)
+        confirm.assert_called_once()
+        assert 'hpc.example.org' in capsys.readouterr().out
+        assert out == [] and 'hpc.example.org' not in text
+
+    def test_interactive_yes_adds_host(self, run_setup):
+        out, skipped, text, _ = run_setup(tty=True, answer=True)
+        assert out == ['hpc.example.org'] and skipped == []
+        assert 'Host hpc.example.org' in text
+
+    def test_flag_adds_without_asking(self, run_setup):
+        out, skipped, text, confirm = run_setup(add_new_hosts=True)
+        confirm.assert_not_called()
+        assert 'Host hpc.example.org' in text
+
+    def test_host_in_user_config_file_counts_as_agreed(self, run_setup):
+        from dt.auth.setup import HostConfig
+        out, skipped, text, confirm = run_setup(
+            host_configs={'hpc.example.org': HostConfig(username='xy1234')})
+        confirm.assert_not_called()
+        assert out == ['hpc.example.org']
+
+    def test_host_already_in_ssh_config_needs_no_answer(self, run_setup):
+        out, skipped, text, confirm = run_setup(
+            existing='Host hpc.example.org\n    User xy1234\n')
+        confirm.assert_not_called()
+        assert out == ['hpc.example.org'] and skipped == []
