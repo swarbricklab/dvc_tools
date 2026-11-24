@@ -1443,6 +1443,7 @@ def _dvc_fetch_from_remote(
     """
     cmd = ['dvc', 'fetch', '-r', remote_name]
     if targets:
+        cmd.append('--')
         cmd.extend(targets)
 
     if verbose:
@@ -2094,7 +2095,7 @@ def _run_dvc_fetch(dvc_path: Path, verbose: bool = False) -> Tuple[bool, str]:
     Returns:
         Tuple of (success, message).
     """
-    cmd = ['dvc', 'fetch', str(dvc_path)]
+    cmd = ['dvc', 'fetch', '--', str(dvc_path)]
     if verbose:
         print(f"  Running: {' '.join(cmd)}")
 

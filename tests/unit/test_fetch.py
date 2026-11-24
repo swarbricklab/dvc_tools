@@ -1482,7 +1482,7 @@ class TestRunDvcFetch:
         assert 'network' in message
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
-        assert cmd == ['dvc', 'fetch', str(dvc_file)]
+        assert cmd == ['dvc', 'fetch', '--', str(dvc_file)]
     
     def test_failed_fetch(self, tmp_path):
         """Failed dvc fetch returns failure with error."""
@@ -1972,7 +1972,7 @@ class TestDvcFetchFromRemote:
         with patch('subprocess.run', return_value=completed) as mock_run:
             _dvc_fetch_from_remote('myremote', targets=['data.dvc', 'model.dvc'])
             cmd = mock_run.call_args[0][0]
-            assert cmd == ['dvc', 'fetch', '-r', 'myremote', 'data.dvc', 'model.dvc']
+            assert cmd == ['dvc', 'fetch', '-r', 'myremote', '--', 'data.dvc', 'model.dvc']
 
     def test_failure(self):
         """Non-zero exit code returns failure."""
