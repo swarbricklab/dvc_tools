@@ -359,8 +359,13 @@ jobs:
         run: |
           IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
 
+          # absconda runs inside a Singularity container, and Singularity does
+          # not pass host SINGULARITY_* variables in. The SINGULARITYENV_ copy
+          # is what reaches the `singularity pull` inside; without it the
+          # blob cache lands in the 10 GB $HOME and the pull runs out of quota.
           qxub exec --mod absconda --mem 4GB --resources jobfs=4GB --internet \
             --var "SINGULARITY_CACHEDIR=$SINGULARITY_CACHEDIR" \
+            --var "SINGULARITYENV_SINGULARITY_CACHEDIR=$SINGULARITY_CACHEDIR" \
             -- \
             absconda deploy "$IMAGE_REF" \
               --commands dt,dvc,gh,aws,daff,qxub,qxi,qxtat,qxet,qx \
