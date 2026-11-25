@@ -37,6 +37,11 @@ jobs:
     # Federation and the build happens on the remote builder, so this job runs
     # on a fresh GitHub-hosted runner.
     runs-on: ubuntu-latest
+    # One publish at a time: runs share the builder VM, and --remote-off stops
+    # it at the end, which would cut short another run's build or push.
+    concurrency:
+      group: absconda-builder
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
