@@ -1824,6 +1824,203 @@ def remote_move(args, quick, jobs, verbose):
         click.echo("  No configured remotes referenced the old path.")
 
 
+@remote.command('diff')
+@click.argument('remote_a')
+@click.argument('remote_b')
+@click.option('--jobs', '-j', type=int, default=None,
+              help='Number of parallel indexing threads.')
+@click.option('--list', 'list_blobs', is_flag=True,
+              help='List the differing blob paths, not just counts.')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON.')
+@click.option('--verbose', '-v', is_flag=True, help='Print indexing progress.')
+def remote_diff(remote_a, remote_b, jobs, list_blobs, json_output, verbose):
+    """Compare the blob sets of two locally-accessible remotes.
+
+    Reports how many objects each remote holds that the other lacks, and how
+    many they share — the diagnosis for a half-finished migration, where blobs
+    are split across an old and a new location with neither a superset of the
+    other. Each argument is either a configured remote name or a filesystem
+    path (the old location is usually not a configured remote).
+
+    Blobs are compared by their path in the remote: legacy (v2-style) objects
+    at the root and md5 objects under files/md5 are separate namespaces that
+    DVC reads separately, so a copy in one does not stand in for the other.
+
+    \b
+    Examples:
+        dt remote diff /g/data/ab12/dvc/analysis/projx nci
+        dt remote diff old_remote new_remote --list
+        dt remote diff A B --json
+    """
+    try:
+        a_label, a_path = remote_ops_mod.resolve_remote_arg(remote_a)
+        b_label, b_path = remote_ops_mod.resolve_remote_arg(remote_b)
+        d = remote_ops_mod.diff_remotes(a_path, b_path, jobs=jobs,
+                                        progress=verbose,
+                                        b_may_be_empty=False)
+    except remote_mod.RemoteError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:  # ArchiveError etc. (no DVC layout, unreadable)
+        raise click.ClickException(str(e))
+
+    if json_output:
+        import json as _json
+        payload = {k: v for k, v in d.items()
+                   if not k.startswith('_')}
+        payload['a_label'] = a_label
+        payload['b_label'] = b_label
+        if not list_blobs:
+            payload.pop('only_in_a', None)
+            payload.pop('only_in_b', None)
+        click.echo(_json.dumps(payload, indent=2))
+        if d['a_unreadable'] or d['b_unreadable'] or d['size_differs']:
+            raise SystemExit(1)
+        return
+
+    click.echo(f"A: {a_label}  ({d['a_layout']})")
+    click.echo(f"   {d['a_objects']:,} object(s), "
+               f"{utils.format_size(d['a_bytes'])}")
+    click.echo(f"B: {b_label}  ({d['b_layout']})")
+    click.echo(f"   {d['b_objects']:,} object(s), "
+               f"{utils.format_size(d['b_bytes'])}")
+    click.echo(f"  Common:    {d['common_count']:,} "
+               f"({utils.format_size(d['common_bytes'])})")
+    click.echo(f"  Only in A: {d['only_in_a_count']:,} "
+               f"({utils.format_size(d['only_in_a_bytes'])})")
+    click.echo(f"  Only in B: {d['only_in_b_count']:,} "
+               f"({utils.format_size(d['only_in_b_bytes'])})")
+    unsure = d['a_unreadable'] or d['b_unreadable'] or d['size_differs']
+    if unsure:
+        pass  # no verdict on a partial or inconsistent picture
+    elif not d['only_in_a_count'] and not d['only_in_b_count']:
+        click.echo("  The two remotes hold the same objects.")
+    elif not d['only_in_a_count']:
+        click.echo("  A is a subset of B (top-up A with: dt remote merge B A).")
+    elif not d['only_in_b_count']:
+        click.echo("  B is a subset of A (top-up B with: dt remote merge A B).")
+    if d['size_differs']:
+        click.echo(f"  WARNING: {len(d['size_differs']):,} common object(s) "
+                   f"differ in size between A and B.", err=True)
+    unreadable = [('A', u) for u in d['a_unreadable']] + \
+                 [('B', u) for u in d['b_unreadable']]
+    if unreadable:
+        click.echo(f"  WARNING: {len(unreadable):,} path(s) could not be read; "
+                   f"the counts above leave them out:", err=True)
+        for side, u in unreadable[:10]:
+            click.echo(f"    {side}: {u}", err=True)
+    if list_blobs:
+        for k in d['only_in_a']:
+            click.echo(f"    only-in-A  {k}")
+        for k in d['only_in_b']:
+            click.echo(f"    only-in-B  {k}")
+        for k in d['size_differs']:
+            click.echo(f"    size-diff  {k}")
+    if unsure:
+        raise SystemExit(1)
+
+
+@remote.command('merge')
+@click.argument('src')
+@click.argument('dst')
+@click.option('--dry-run', 'dry_run', is_flag=True,
+              help='Show how many objects / bytes would transfer, copy nothing.')
+@click.option('--verify', 'verify', is_flag=True,
+              help='Re-hash each copied blob against its content-addressed '
+                   'name before publishing it; report mismatches instead of '
+                   'propagating corruption.')
+@click.option('--group-writable', is_flag=True,
+              help='Give newly-created destination prefix directories the '
+                   'shared mode even when the destination root is not '
+                   'already group-writable or setgid.')
+@click.option('--jobs', '-j', type=int, default=None,
+              help='Number of parallel transfer threads.')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON.')
+@click.option('--verbose', '-v', is_flag=True, help='Print detailed progress.')
+def remote_merge(src, dst, dry_run, verify, group_writable, jobs,
+                 json_output, verbose):
+    """Top-up remote DST with the blobs it is missing from remote SRC.
+
+    Copies every blob present in SRC but absent from DST, so DST becomes a
+    superset — the fix for a half-finished migration where some outputs only
+    ever reached the old location. SRC and DST are each a configured remote
+    name or a filesystem path (the old location is usually not configured).
+
+    The copy is additive (never deletes or overwrites a blob already in DST),
+    atomic (written to a .tmp sibling, then linked into place only while the
+    name is free, so readers never see a partial blob), and idempotent/
+    resumable (re-running only copies what is still missing). Each blob keeps
+    its path, so legacy (root) and md5 (files/md5) objects stay in their own
+    namespaces. New directories in a shared (group-writable or setgid)
+    destination get the shared mode. It does not touch .dvc/config — unlike `dt remote move`,
+    nothing is relocated or repointed, so other repos still pointing at SRC
+    are unaffected.
+
+    \b
+    Examples:
+        dt remote merge OLD_PATH nci --dry-run   # preview the top-up
+        dt remote merge OLD_PATH nci --verify    # copy + re-hash each blob
+        dt remote merge A B -j 16                # 16 transfer threads
+    """
+    try:
+        src_label, src_path = remote_ops_mod.resolve_remote_arg(src)
+        # DST may be created by the merge, so it need not exist yet.
+        dst_label, dst_path = remote_ops_mod.resolve_remote_arg(
+            dst, must_exist=False)
+        result = remote_ops_mod.merge_remotes(
+            src_path, dst_path, dry_run=dry_run, verify=verify,
+            group_writable=group_writable, jobs=jobs, progress=verbose)
+    except remote_mod.RemoteError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(str(e))
+
+    if json_output:
+        import json as _json
+        click.echo(_json.dumps(result, indent=2))
+    elif dry_run:
+        click.echo(f"[dry-run] {src_label} -> {dst_label}")
+        click.echo(f"  Would copy {result['missing_in_dest']:,} object(s), "
+                   f"{utils.format_size(result['missing_in_dest_bytes'])}")
+        if not (result['missing_in_dest'] or result['src_unreadable']
+                or result['dst_unreadable'] or result['size_differs']):
+            click.echo("  Destination already holds every source object.")
+    else:
+        click.echo(f"Topped up {dst_label} from {src_label}")
+        click.echo(f"  Copied {result['copied']:,} object(s), "
+                   f"{utils.format_size(result['copied_bytes'])}"
+                   + (f", {result['skipped']:,} already present"
+                      if result['skipped'] else ""))
+        if result['mismatch']:
+            click.echo(f"  WARNING: {result['mismatch']:,} blob(s) failed "
+                       f"checksum verification and were NOT copied:", err=True)
+            for m in result['mismatches'][:10]:
+                click.echo(f"    {m['path']}  expected={m['expected_md5']} "
+                           f"actual={m['actual_md5']}", err=True)
+        if result['errors']:
+            click.echo(f"  WARNING: {result['errors']:,} blob(s) could not be "
+                       f"copied:", err=True)
+            for e in result['error_entries'][:10]:
+                click.echo(f"    {e['path']}: {e['error']}", err=True)
+    if not json_output:
+        for side, key in (('source', 'src_unreadable'),
+                          ('destination', 'dst_unreadable')):
+            if result[key]:
+                click.echo(f"  WARNING: {len(result[key]):,} {side} path(s) could "
+                           f"not be read and were left out:", err=True)
+                for u in result[key][:10]:
+                    click.echo(f"    {u}", err=True)
+        if result['size_differs']:
+            click.echo(f"  WARNING: {len(result['size_differs']):,} object(s) in "
+                       f"the destination differ in size from the source and were "
+                       f"left alone (check with: dt remote verify):", err=True)
+            for u in result['size_differs'][:10]:
+                click.echo(f"    {u}", err=True)
+
+    if (result.get('mismatch') or result.get('errors') or result['src_unreadable']
+            or result['dst_unreadable'] or result['size_differs']):
+        raise SystemExit(1)
+
+
 @remote.command('perms')
 @click.argument('remote_name', required=False)
 @click.option('--path', 'remote_path', type=click.Path(),

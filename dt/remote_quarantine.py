@@ -260,10 +260,12 @@ def _walk(dir_fd: int, rel_dir: str, create: bool = False,
 _RENAME_NOREPLACE = 1
 
 
-def _rename_noreplace(sdir: int, name: str, ddir: int) -> bool:
-    """``renameat2(..., RENAME_NOREPLACE)``. True when done; False when the
-    system or filesystem does not offer it. Raises ``FileExistsError`` if
-    the destination exists, and other errors as ``OSError``."""
+def _rename_noreplace(sdir: int, name: str, ddir: int,
+                      dst_name: Optional[str] = None) -> bool:
+    """``renameat2(..., RENAME_NOREPLACE)`` of ``name`` to ``dst_name``
+    (default: the same name). True when done; False when the system or
+    filesystem does not offer it. Raises ``FileExistsError`` if the
+    destination exists, and other errors as ``OSError``."""
     import ctypes
     try:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -271,7 +273,8 @@ def _rename_noreplace(sdir: int, name: str, ddir: int) -> bool:
     except (OSError, AttributeError):
         return False
     raw = os.fsencode(name)
-    if fn(sdir, raw, ddir, raw, _RENAME_NOREPLACE) == 0:
+    draw = os.fsencode(dst_name) if dst_name is not None else raw
+    if fn(sdir, raw, ddir, draw, _RENAME_NOREPLACE) == 0:
         return True
     err = ctypes.get_errno()
     if err in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
