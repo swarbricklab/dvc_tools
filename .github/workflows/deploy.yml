@@ -33,7 +33,10 @@ jobs:
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.skip_publish != true) ||
       github.event.pull_request.merged == true
-    runs-on: [self-hosted, "${{ vars.RUNNER_LABEL }}"]
+    # Needs nothing from NCI: GCP access comes from Workload Identity
+    # Federation and the build happens on the remote builder, so this job runs
+    # on a fresh GitHub-hosted runner.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
@@ -54,6 +57,11 @@ jobs:
           service_account: ${{ secrets.SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
+
+      # The runner's system Python refuses `pip install --user` (PEP 668).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Check deployment settings
         run: |
@@ -115,6 +123,10 @@ jobs:
         # guest may not be listening yet, so absconda's first remote command
         # (mkdir on the workspace) fails with ssh exit 255. Start the instance
         # and poll SSH until it answers.
+        #
+        # Each fresh runner makes a new SSH key and registers it on the
+        # service account's OS Login profile; the expiry keeps those keys
+        # from piling up (absconda reuses the same key later in the job).
         run: |
           gcloud compute instances start "$REMOTE_BUILDER_HOST" \
             --zone="$GCP_ZONE" --project="$GCP_PROJECT" >/dev/null 2>&1 \
@@ -123,6 +135,7 @@ jobs:
             if gcloud compute ssh "$REMOTE_BUILDER_HOST" \
                  --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
                  --tunnel-through-iap --quiet \
+                 --ssh-key-expire-after=3h \
                  --ssh-flag="-o ConnectTimeout=10" \
                  --command="true" >/dev/null 2>&1; then
               echo "Builder SSH ready after $attempt attempt(s)."
