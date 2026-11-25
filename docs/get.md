@@ -36,7 +36,7 @@ Use `dt import` when you want to keep the link to the source. Use `dt get` when 
 A path may name a subdirectory *inside* a single large directory output. If `data/fq` is one tracked directory of 898 files, you can take one sample from it:
 
 ```bash
-dt get my-registry data/fq/AF013-A -o fastqs/
+dt get my-registry data/fq/SMP01-A -o fastqs/
 ```
 
 This is what makes it possible to hand over 82 of 412 samples without transferring the other 330.
@@ -122,7 +122,7 @@ S3 destinations only (see [To an S3 bucket](#to-an-s3-bucket)):
 object storage without ever writing to local disk:
 
 ```bash
-dt get my-registry data/fq/AF013-A -o s3://their-bucket/fastqs/ --dest-profile their-aws
+dt get my-registry data/fq/SMP01-A -o s3://their-bucket/fastqs/ --dest-profile their-aws
 dt get my-registry --csv samples.csv -o s3://their-bucket/fastqs/ --dest-profile their-aws
 ```
 
@@ -148,7 +148,7 @@ writes then deletes a zero-byte probe object to confirm write permission. It pri
 will write as — always, not only under `--verbose`:
 
 ```
-Destination: s3://their-bucket/fastqs/AF013-A
+Destination: s3://their-bucket/fastqs/SMP01-A
 Writing as:  account 123456789012 as arn:aws:iam::123456789012:user/handoff
 ```
 
@@ -222,8 +222,8 @@ The unit is a *file*, not a row, so one sample directory may be spread over seve
 Destination: s3://their-bucket/fastqs
 Writing as:  account 123456789012 as arn:aws:iam::123456789012:user/handoff
 Partition byte balance across 8 active worker(s): min=41.2G, max=46.8G, total=358G
-✓ data/fq/AF013-A: 2 files -> s3://their-bucket/fastqs/AF013-A
-✓ data/fq/AF013-B: 2 files -> s3://their-bucket/fastqs/AF013-B
+✓ data/fq/SMP01-A: 2 files -> s3://their-bucket/fastqs/SMP01-A
+✓ data/fq/SMP01-B: 2 files -> s3://their-bucket/fastqs/SMP01-B
 ```
 
 Read the balance line: `min` far below `max` means one file dominates a partition and more nodes will not help.
@@ -243,13 +243,13 @@ A worker killed mid-partition — walltime, usually — reports its rows as fail
 
 ```bash
 # One subpath of a tracked directory
-dt get my-registry data/fq/AF013-A -o fastqs/
+dt get my-registry data/fq/SMP01-A -o fastqs/
 
 # A whole tracked output
 dt get my-registry data/reference -o ./
 
 # From a specific revision
-dt get my-registry data/fq/AF013-A --rev v1.2.0 -o fastqs/
+dt get my-registry data/fq/SMP01-A --rev v1.2.0 -o fastqs/
 
 # Batch, reading paths from a column of the source manifest
 dt get example-wts --csv paths.csv --path-col fq_dir -o fastqs/
@@ -259,7 +259,7 @@ csvgrep -c wts_lib -r '^$' paths.csv > setup.csv
 dt get example-wts --csv setup.csv --path-col fq_dir -o fastqs/
 
 # Force a real copy regardless of cache.type
-dt get my-registry data/fq/AF013-A --link copy -o fastqs/
+dt get my-registry data/fq/SMP01-A --link copy -o fastqs/
 ```
 
 ## Two paths: local cache, or the network

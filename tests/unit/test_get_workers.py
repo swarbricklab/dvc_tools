@@ -58,19 +58,19 @@ def fs():
 def source(fs):
     """A source remote holding two files per sample, of differing sizes."""
     blobs = {
-        'AF013-A/R1.fq': b'a' * 400,
-        'AF013-A/R2.fq': b'b' * 100,
-        'AF013-B/R1.fq': b'c' * 50,
+        'SMP01-A/R1.fq': b'a' * 400,
+        'SMP01-A/R2.fq': b'b' * 100,
+        'SMP01-B/R1.fq': b'c' * 50,
     }
     objects = {md5_of(data): data for data in blobs.values()}
     odb = FakeODB(fs, objects)
     entries = {
-        'data/fq/AF013-A': [
-            {'relpath': 'R1.fq', 'md5': md5_of(blobs['AF013-A/R1.fq']), 'size': 400},
-            {'relpath': 'R2.fq', 'md5': md5_of(blobs['AF013-A/R2.fq']), 'size': 100},
+        'data/fq/SMP01-A': [
+            {'relpath': 'R1.fq', 'md5': md5_of(blobs['SMP01-A/R1.fq']), 'size': 400},
+            {'relpath': 'R2.fq', 'md5': md5_of(blobs['SMP01-A/R2.fq']), 'size': 100},
         ],
-        'data/fq/AF013-B': [
-            {'relpath': 'R1.fq', 'md5': md5_of(blobs['AF013-B/R1.fq']), 'size': 50},
+        'data/fq/SMP01-B': [
+            {'relpath': 'R1.fq', 'md5': md5_of(blobs['SMP01-B/R1.fq']), 'size': 50},
         ],
     }
     return odb, entries, blobs
@@ -341,10 +341,10 @@ class TestWorkerUploadToS3:
         monkeypatch.chdir(tmp_path)
         odb, entries, blobs = source
         tasks = [
-            {'row': 0, 'name': 'AF013-A', 'relpath': 'R1.fq',
-             'md5': md5_of(blobs['AF013-A/R1.fq']), 'size': 400},
-            {'row': 1, 'name': 'AF013-B', 'relpath': 'R1.fq',
-             'md5': md5_of(blobs['AF013-B/R1.fq']), 'size': 50},
+            {'row': 0, 'name': 'SMP01-A', 'relpath': 'R1.fq',
+             'md5': md5_of(blobs['SMP01-A/R1.fq']), 'size': 400},
+            {'row': 1, 'name': 'SMP01-B', 'relpath': 'R1.fq',
+             'md5': md5_of(blobs['SMP01-B/R1.fq']), 'size': 50},
         ]
         manifest_dir = self._manifest(tmp_path, source, tasks)
         repo = FakeRepo()
@@ -356,10 +356,10 @@ class TestWorkerUploadToS3:
 
         assert (written, failed) == (2, 0)
         # The objects landed under the right per-row prefix...
-        assert fs.objects['s3://bucket/fastqs/AF013-A/R1.fq'] == \
-            blobs['AF013-A/R1.fq']
-        assert fs.objects['s3://bucket/fastqs/AF013-B/R1.fq'] == \
-            blobs['AF013-B/R1.fq']
+        assert fs.objects['s3://bucket/fastqs/SMP01-A/R1.fq'] == \
+            blobs['SMP01-A/R1.fq']
+        assert fs.objects['s3://bucket/fastqs/SMP01-B/R1.fq'] == \
+            blobs['SMP01-B/R1.fq']
         # ...and the row tags survived into the result file.
         recorded = json.loads(
             (manifest_dir / 'result_0.json').read_text())['results']
@@ -377,8 +377,8 @@ class TestWorkerUploadToS3:
         """
         monkeypatch.chdir(tmp_path)
         odb, _, blobs = source
-        tasks = [{'row': 0, 'name': 'AF013-A', 'relpath': 'R1.fq',
-                  'md5': md5_of(blobs['AF013-A/R1.fq']), 'size': 400}]
+        tasks = [{'row': 0, 'name': 'SMP01-A', 'relpath': 'R1.fq',
+                  'md5': md5_of(blobs['SMP01-A/R1.fq']), 'size': 400}]
         manifest_dir = self._manifest(tmp_path, source, tasks)
 
         p1, p2 = s3_patches(fs)
@@ -409,8 +409,8 @@ class TestWorkerUploadToS3:
         """--dest-account-id must be enforced on the node doing the writing."""
         monkeypatch.chdir(tmp_path)
         odb, _, blobs = source
-        tasks = [{'row': 0, 'name': 'AF013-A', 'relpath': 'R1.fq',
-                  'md5': md5_of(blobs['AF013-A/R1.fq']), 'size': 400}]
+        tasks = [{'row': 0, 'name': 'SMP01-A', 'relpath': 'R1.fq',
+                  'md5': md5_of(blobs['SMP01-A/R1.fq']), 'size': 400}]
         manifest_dir = self._manifest(
             tmp_path, source,
             tasks,
@@ -433,7 +433,7 @@ class TestWorkerUploadToS3:
         monkeypatch.chdir(tmp_path)
         odb, _, blobs = source
         tasks = [{'row': 0, 'name': 'A', 'relpath': 'R1.fq',
-                  'md5': md5_of(blobs['AF013-A/R1.fq']), 'size': 400}]
+                  'md5': md5_of(blobs['SMP01-A/R1.fq']), 'size': 400}]
         manifest_dir = self._manifest(tmp_path, source, tasks, jobs=5)
 
         p1, p2 = s3_patches(fs)
@@ -494,17 +494,17 @@ class TestDistributedUploadToS3:
 
         job_ids, manifest_dir, results = self._run(
             tmp_path, fs, source,
-            [('data/fq/AF013-A', 'AF013-A'), ('data/fq/AF013-B', 'AF013-B')],
+            [('data/fq/SMP01-A', 'SMP01-A'), ('data/fq/SMP01-B', 'SMP01-B')],
         )
 
         assert len(job_ids) >= 1
         assert [r[0] for r in results] == \
-            ['data/fq/AF013-A', 'data/fq/AF013-B']
+            ['data/fq/SMP01-A', 'data/fq/SMP01-B']
         assert all(ok for _, ok, _ in results), results
         assert set(fs.objects) >= {
-            's3://bucket/fastqs/AF013-A/R1.fq',
-            's3://bucket/fastqs/AF013-A/R2.fq',
-            's3://bucket/fastqs/AF013-B/R1.fq',
+            's3://bucket/fastqs/SMP01-A/R1.fq',
+            's3://bucket/fastqs/SMP01-A/R2.fq',
+            's3://bucket/fastqs/SMP01-B/R1.fq',
         }
         for name, data in blobs.items():
             assert fs.objects[f's3://bucket/fastqs/{name}'] == data
@@ -522,7 +522,7 @@ class TestDistributedUploadToS3:
 
         _, manifest_dir, _ = self._run(
             tmp_path, fs, source,
-            [('data/fq/AF013-A', 'AF013-A'), ('data/fq/AF013-B', 'AF013-B')],
+            [('data/fq/SMP01-A', 'SMP01-A'), ('data/fq/SMP01-B', 'SMP01-B')],
         )
 
         loads = []
@@ -544,12 +544,12 @@ class TestDistributedUploadToS3:
         _, _, blobs = source
 
         _, _, results = self._run(
-            tmp_path, fs, source, [('data/fq/AF013-B', None)],
+            tmp_path, fs, source, [('data/fq/SMP01-B', None)],
         )
 
-        assert results == [('data/fq/AF013-B', True,
+        assert results == [('data/fq/SMP01-B', True,
                             '1 file -> s3://bucket/fastqs')]
-        assert fs.objects['s3://bucket/fastqs/R1.fq'] == blobs['AF013-B/R1.fq']
+        assert fs.objects['s3://bucket/fastqs/R1.fq'] == blobs['SMP01-B/R1.fq']
 
     def test_a_row_that_does_not_resolve_is_reported_not_fatal(
         self, tmp_path, monkeypatch, fs, source
@@ -558,7 +558,7 @@ class TestDistributedUploadToS3:
 
         _, _, results = self._run(
             tmp_path, fs, source,
-            [('data/fq/AF013-A', 'AF013-A'), ('data/fq/nope', 'nope')],
+            [('data/fq/SMP01-A', 'SMP01-A'), ('data/fq/nope', 'nope')],
         )
 
         assert results[0][1] is True
@@ -590,7 +590,7 @@ class TestDistributedUploadToS3:
                 patch.object(hpc, 'monitor_jobs') as monitor:
             job_ids, manifest_dir, results = get_mod.distributed_upload_to_s3(
                 repository='myrepo',
-                targets=[('data/fq/AF013-A', 'AF013-A')],
+                targets=[('data/fq/SMP01-A', 'SMP01-A')],
                 root=self._root(fs),
                 num_workers=2,
                 wait=False,
@@ -608,7 +608,7 @@ class TestDistributedUploadToS3:
 
         with pytest.raises(GetError, match='No worker jobs were submitted'):
             self._run(tmp_path, fs, source,
-                      [('data/fq/AF013-A', 'AF013-A')],
+                      [('data/fq/SMP01-A', 'SMP01-A')],
                       submit=lambda *a, **k: [])
 
     def test_missing_qxub_is_a_get_error(self, tmp_path, monkeypatch, fs, source):
@@ -619,7 +619,7 @@ class TestDistributedUploadToS3:
             with pytest.raises(GetError, match='qxub not found'):
                 get_mod.distributed_upload_to_s3(
                     repository='myrepo',
-                    targets=[('data/fq/AF013-A', 'AF013-A')],
+                    targets=[('data/fq/SMP01-A', 'SMP01-A')],
                     root=self._root(fs),
                     num_workers=2,
                 )
@@ -632,7 +632,7 @@ class TestDistributedUploadToS3:
 
         _, _, results = self._run(
             tmp_path, fs, source,
-            [('data/fq/AF013-A', 'AF013-A')],
+            [('data/fq/SMP01-A', 'SMP01-A')],
             monitor=False,
         )
 
@@ -661,7 +661,7 @@ class TestDistributedUploadToS3:
                 patch.object(hpc, 'monitor_jobs', return_value=True):
             _, manifest_dir, _ = get_mod.distributed_upload_to_s3(
                 repository='myrepo',
-                targets=[('data/fq/AF013-A', 'AF013-A')],
+                targets=[('data/fq/SMP01-A', 'SMP01-A')],
                 root=root,
                 num_workers=1,
                 wait=False,

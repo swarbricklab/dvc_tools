@@ -5175,11 +5175,11 @@ def get_cmd(repository, path, out, owner, rev, csv_path, path_col,
 
     \b
     Examples:
-        dt get my-registry data/fq/AF013-A -o fastqs/
+        dt get my-registry data/fq/SMP01-A -o fastqs/
         dt get my-registry --csv samples.csv -o fastqs/
         dt get my-registry --csv samples.csv --path-col fq_dir -o fastqs/
         dt get my-registry data/ref.fa --link copy -o ./
-        dt get my-registry data/fq/AF013-A -o s3://bucket/fastqs/ --dest-profile aws
+        dt get my-registry data/fq/SMP01-A -o s3://bucket/fastqs/ --dest-profile aws
         dt get my-registry --csv samples.csv -o s3://bucket/fastqs/ -w 8
         dt get my-registry --csv samples.csv -o s3://bucket/fastqs/ -w 8 --no-wait
     """

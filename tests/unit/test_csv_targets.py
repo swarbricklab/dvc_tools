@@ -33,10 +33,10 @@ class TestReadCsvTargetList:
 
     def test_custom_path_column(self, tmp_path):
         csv_file = _write_csv(
-            tmp_path / 'a.csv', 'sample,fq_dir\nAF013,data/fq/AF013\n'
+            tmp_path / 'a.csv', 'sample,fq_dir\nSMP01,data/fq/SMP01\n'
         )
         assert utils.read_csv_target_list(csv_file, path_col='fq_dir') == [
-            'data/fq/AF013'
+            'data/fq/SMP01'
         ]
 
     def test_output_column_gets_no_special_treatment(self, tmp_path):
@@ -48,11 +48,11 @@ class TestReadCsvTargetList:
         """
         csv_file = _write_csv(
             tmp_path / 'a.csv',
-            'path,output,kind\nfq/AF013,data/fq/AF013,wts\n',
+            'path,output,kind\nfq/SMP01,data/fq/SMP01,wts\n',
         )
-        assert utils.read_csv_target_list(csv_file) == ['fq/AF013']
+        assert utils.read_csv_target_list(csv_file) == ['fq/SMP01']
         assert utils.read_csv_target_list(csv_file, path_col='output') == [
-            'data/fq/AF013'
+            'data/fq/SMP01'
         ]
 
     def test_whitespace_is_stripped(self, tmp_path):
@@ -128,7 +128,7 @@ class TestBadInput:
             utils.read_csv_target_list(csv_file)
 
     def test_missing_path_column_lists_what_is_there(self, tmp_path):
-        csv_file = _write_csv(tmp_path / 'a.csv', 'sample,fq_dir\nAF013,d/a\n')
+        csv_file = _write_csv(tmp_path / 'a.csv', 'sample,fq_dir\nSMP01,d/a\n')
         with pytest.raises(ValueError, match='fq_dir'):
             utils.read_csv_target_list(csv_file)
 
@@ -173,11 +173,11 @@ class TestFetchCsvRouting:
 
     def test_path_col_reaches_the_other_column(self, tmp_path):
         csv_file = _write_csv(
-            tmp_path / 'a.csv', 'sample,fq_dir\nAF013,d/fq/AF013\n'
+            tmp_path / 'a.csv', 'sample,fq_dir\nSMP01,d/fq/SMP01\n'
         )
         with patch('dt.fetch.fetch', return_value=[]) as m:
             _invoke(['fetch', '--csv', csv_file, '--path-col', 'fq_dir'])
-        assert m.call_args.kwargs['targets'] == ['d/fq/AF013']
+        assert m.call_args.kwargs['targets'] == ['d/fq/SMP01']
 
     def test_bare_invocation_still_means_everything(self):
         """The one case where targets=None is correct."""

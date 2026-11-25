@@ -130,7 +130,7 @@ class TestListSourceFiles:
             {'path': 'R2.fq.gz', 'md5': 'b' * 32, 'size': 20, 'isout': False, 'isdir': False},
         ]
         with patch.object(get_mod.subprocess, 'run', return_value=_dvc_list_json(listing)):
-            files = get_mod.list_source_files(tmp_path, 'data/fq/AF013-A')
+            files = get_mod.list_source_files(tmp_path, 'data/fq/SMP01-A')
 
         assert [f['relpath'] for f in files] == ['R1.fq.gz', 'R2.fq.gz']
         assert files[0]['md5'] == 'a' * 32
@@ -140,13 +140,13 @@ class TestListSourceFiles:
         """These flags are what make subpath resolution work."""
         listing = [{'path': 'f', 'md5': 'c' * 32, 'size': 1, 'isout': False, 'isdir': False}]
         with patch.object(get_mod.subprocess, 'run', return_value=_dvc_list_json(listing)) as run:
-            get_mod.list_source_files(tmp_path, 'data/fq/AF013-A', rev='abc123')
+            get_mod.list_source_files(tmp_path, 'data/fq/SMP01-A', rev='abc123')
 
         cmd = run.call_args[0][0]
         assert '--show-hash' in cmd and '-R' in cmd and '--json' in cmd
         assert cmd[cmd.index('--rev') + 1] == 'abc123'
         assert cmd.index('--rev') < cmd.index('--')
-        assert 'data/fq/AF013-A' in cmd
+        assert 'data/fq/SMP01-A' in cmd
 
     @pytest.mark.parametrize('relpath,md5', [
         ('../../.bashrc', 'a' * 32),
@@ -164,11 +164,11 @@ class TestListSourceFiles:
     def test_skips_the_dir_entry_itself(self, tmp_path):
         """The .dir output is metadata, not a file to place."""
         listing = [
-            {'path': 'AF013-A', 'md5': 'd' * 32 + '.dir', 'isout': True, 'isdir': True},
+            {'path': 'SMP01-A', 'md5': 'd' * 32 + '.dir', 'isout': True, 'isdir': True},
             {'path': 'R1.fq.gz', 'md5': 'e' * 32, 'size': 5, 'isout': False, 'isdir': False},
         ]
         with patch.object(get_mod.subprocess, 'run', return_value=_dvc_list_json(listing)):
-            files = get_mod.list_source_files(tmp_path, 'data/fq/AF013-A')
+            files = get_mod.list_source_files(tmp_path, 'data/fq/SMP01-A')
 
         assert [f['relpath'] for f in files] == ['R1.fq.gz']
 
@@ -425,19 +425,19 @@ class TestDestFor:
     """Where a source path lands on disk."""
 
     def test_defaults_to_basename(self):
-        assert get_mod._dest_for(None, 'data/fq/AF013-A') == Path('AF013-A')
+        assert get_mod._dest_for(None, 'data/fq/SMP01-A') == Path('SMP01-A')
 
     def test_trailing_slash_collects_under_directory(self):
         """This is what makes a CSV of 82 samples land as 82 siblings."""
-        assert get_mod._dest_for('fastqs/', 'data/fq/AF013-A') == Path('fastqs/AF013-A')
+        assert get_mod._dest_for('fastqs/', 'data/fq/SMP01-A') == Path('fastqs/SMP01-A')
 
     def test_existing_directory_collects_under_it(self, tmp_path):
         target = tmp_path / 'fastqs'
         target.mkdir()
-        assert get_mod._dest_for(str(target), 'data/fq/AF013-A') == target / 'AF013-A'
+        assert get_mod._dest_for(str(target), 'data/fq/SMP01-A') == target / 'SMP01-A'
 
     def test_plain_name_is_used_verbatim(self):
-        assert get_mod._dest_for('renamed', 'data/fq/AF013-A') == Path('renamed')
+        assert get_mod._dest_for('renamed', 'data/fq/SMP01-A') == Path('renamed')
 
     @pytest.mark.parametrize('url', [
         's3://bucket/prefix/',
@@ -450,11 +450,11 @@ class TestDestFor:
         """``Path('s3://b/p')`` is a valid relative path, so without this guard
         the fetch silently created a local directory named ``s3:``."""
         with pytest.raises(GetError, match='must be a local path'):
-            get_mod._dest_for(url, 'data/fq/AF013-A')
+            get_mod._dest_for(url, 'data/fq/SMP01-A')
 
     def test_url_error_names_the_scheme(self):
         with pytest.raises(GetError, match=r's3:// URL'):
-            get_mod._dest_for('s3://bucket/prefix/', 'data/fq/AF013-A')
+            get_mod._dest_for('s3://bucket/prefix/', 'data/fq/SMP01-A')
 
     @pytest.mark.parametrize('out', [
         'fastqs:backup/',      # colon, but no scheme separator
@@ -464,7 +464,7 @@ class TestDestFor:
     ])
     def test_colon_in_a_relative_path_is_not_a_url(self, out):
         """The guard is anchored on ``://`` so ordinary paths still work."""
-        assert isinstance(get_mod._dest_for(out, 'data/fq/AF013-A'), Path)
+        assert isinstance(get_mod._dest_for(out, 'data/fq/SMP01-A'), Path)
 
 
 # =============================================================================
@@ -493,9 +493,9 @@ class TestReadCsvTargets:
 
     def test_custom_path_column(self, tmp_path):
         """The motivating CSV keys fastqs as fq_dir, not path."""
-        csv_file = _write_csv(tmp_path / 'a.csv', 'sample,fq_dir\nAF013,data/fq/AF013\n')
+        csv_file = _write_csv(tmp_path / 'a.csv', 'sample,fq_dir\nSMP01,data/fq/SMP01\n')
         assert utils.read_csv_targets(csv_file, path_col='fq_dir') == [
-            ('data/fq/AF013', None)
+            ('data/fq/SMP01', None)
         ]
 
     def test_extra_columns_are_ignored(self, tmp_path):

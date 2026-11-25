@@ -8,7 +8,7 @@ Let a collaborator pull DVC-tracked data **directly from our remote (R2 or SSH) 
 AWS S3 bucket**, without the bytes ever landing on a local disk.
 
 ```bash
-dt get my-registry data/fq/AF013-A -o s3://their-bucket/fastqs/ --dest-profile their-aws
+dt get my-registry data/fq/SMP01-A -o s3://their-bucket/fastqs/ --dest-profile their-aws
 dt get my-registry --csv samples.csv -o s3://their-bucket/fastqs/ --dest-profile their-aws
 ```
 

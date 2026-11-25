@@ -154,13 +154,13 @@ class TestUrls:
 
     def test_under_descends(self, fs):
         d = dest_with(fs, 's3://bucket/fastqs')
-        assert d.under('AF013-A').child('r1.fq.gz').url == \
-            's3://bucket/fastqs/AF013-A/r1.fq.gz'
+        assert d.under('SMP01-A').child('r1.fq.gz').url == \
+            's3://bucket/fastqs/SMP01-A/r1.fq.gz'
 
     def test_under_shares_the_filesystem(self, fs):
         """Rebuilding it per row would re-resolve credentials for nothing."""
         d = dest_with(fs, 's3://bucket/fastqs')
-        assert d.under('AF013-A').fs is fs
+        assert d.under('SMP01-A').fs is fs
 
     def test_nested_relpath_is_preserved(self, fs):
         d = dest_with(fs, 's3://bucket/out')
