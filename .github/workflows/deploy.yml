@@ -1,8 +1,10 @@
 name: Deploy to NCI
 
 on:
-  pull_request:
-    types: [closed]
+  # A push to main (i.e. a merged PR) rather than the PR's own `closed` event,
+  # so the run's ref is refs/heads/main and the runner group can be limited
+  # to this workflow on main.
+  push:
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -31,8 +33,8 @@ env:
 jobs:
   publish:
     if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.skip_publish != true) ||
-      github.event.pull_request.merged == true
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_publish != true)
     # Needs nothing from NCI: GCP access comes from Workload Identity
     # Federation and the build happens on the remote builder, so this job runs
     # on a fresh GitHub-hosted runner.
@@ -195,12 +197,9 @@ jobs:
     needs: publish
     # Run after publish succeeds, or directly when publish is skipped via
     # workflow_dispatch (skip_publish=true) to redeploy an existing image.
-    # On pull_request events we still gate on merged==true so closed-but-not-
-    # merged PRs don't deploy.
     if: >-
       always() &&
-      (needs.publish.result == 'success' || needs.publish.result == 'skipped') &&
-      (github.event_name != 'pull_request' || github.event.pull_request.merged == true)
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: [self-hosted, "${{ vars.RUNNER_LABEL }}"]
     permissions:
       contents: read
