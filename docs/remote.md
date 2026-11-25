@@ -293,6 +293,132 @@ with a `manifest.json` restore map. A batch can be restored only by the user
 who created it, and only while no one else can write to it (older batches may
 need `chmod -R go-w` first); likewise only the creator can delete it.
 
+## dt remote diff
+
+Compare the blob sets of two locally-accessible remotes.
+
+```
+dt remote diff REMOTE_A REMOTE_B [--list] [--json] [-j N]
+```
+
+Each argument is either a configured remote **name** or a filesystem **path**.
+A bare token that matches a configured remote resolves to that remote; anything
+containing a `/` (or starting with `.` or `~`) is treated as a path — so the
+*old* location, which is usually not a configured remote, can be compared
+directly. A bare word that is neither a remote nor an existing path is an error.
+
+The report gives, for each side, the object count and total size, plus how many
+objects are **only in A**, **only in B**, and **common**:
+
+```
+A: /g/data/ab12/dvc/analysis/projx  (dvc-mixed)
+   79,783 object(s), 2.1T
+B: nci  (dvc-mixed)
+   240,612 object(s), 5.4T
+  Common:    79,779 (2.1T)
+  Only in A: 4 (199G)
+  Only in B: 160,833 (3.3T)
+```
+
+Blobs are compared **by their path in the remote, namespace by namespace**. A
+remote holds legacy objects (`md5-dos2unix`, from DVC 2 or `.dvc` files that
+still name that hash) at the root as `ab/cdef…`, and `md5` objects under
+`files/md5/ab/cdef…`. DVC 3 looks only in the namespace a `.dvc` file's hash
+names, and a root name folds CRLF to LF for text, so the same name in the
+other namespace does not stand in for it: it counts as *only in* one side.
+
+This diagnoses a half-finished migration — blobs split across an old and a new
+location with neither a superset of the other, so `dvc pull` against the
+configured remote fails for the handful that only ever reached the old location
+and they look simply "missing". `--list` prints the differing blob paths (and
+common ones whose sizes differ); `--json` emits the full machine-readable
+structure. Prefix directories or entries that cannot be read, and links where
+a prefix directory (or `files`, `files/md5`) belongs, are listed as a warning
+and are never counted as absent; so are common objects whose sizes differ. Any
+of these makes the command exit non-zero (with `--json` too) and suppresses the
+"subset" verdict. Both arguments must have object directories.
+
+## dt remote merge
+
+Top-up one remote from another: copy the blobs present in `SRC` but missing from
+`DST`, so `DST` becomes a superset.
+
+```
+dt remote merge SRC DST [--dry-run] [--verify] [--group-writable] [-j N]
+```
+
+This is the fix for the half-migrated remote diagnosed by `dt remote diff`.
+Unlike `dt remote move` — which relocates a remote and **deletes the source**,
+repointing `.dvc/config` — `merge` touches neither the config nor the source, so
+other repos still pointing at `SRC` are unaffected. Unlike `dt remote copy`,
+which refuses a non-empty destination, `merge` is designed to add into a
+destination that already holds most of the data.
+
+Properties:
+
+- **Additive** — never deletes or overwrites a blob already in `DST`.
+- **Atomic** — each blob is written to a `.tmp` sibling (the same name shape
+  DVC uses, so `dt remote clean` sweeps any left by an interrupted run) and then
+  linked into place under its final name only if nothing has that name yet, so
+  a concurrent reader never sees a partial blob and nothing is replaced.
+- **Same path, same namespace** — each blob is copied to the path it has in
+  `SRC`, so legacy (root) and `files/md5` objects stay where DVC looks for them.
+- **Real files only** — only regular files that live in `SRC`'s prefix
+  directories are read. A link where a prefix directory belongs, on either
+  side, is reported and not followed; a link or anything other than a file
+  where a `DST` blob belongs is reported as an error, never counted as present.
+- **Durable before visible** — each copy is flushed to disk before it gets its
+  final name. If the destination cannot take hard links, the command stops
+  before copying anything.
+- **Size check** — an object already in `DST` under the same name but with a
+  different size is reported (and left alone); check it with
+  `dt remote verify`.
+- **Verifying** (`--verify`) — re-hash each copied blob against its
+  content-addressed filename *before* publishing it (a root object also
+  matches its `md5-dos2unix` hash); a mismatch is reported and the blob is
+  **not** copied, so corruption is never propagated. Without `--verify` a blob
+  that comes out shorter than the source file is still refused.
+- **Idempotent / resumable** — a second run, or a run after an interruption,
+  only copies what is still missing.
+- Works on a `SRC`/`DST` **path** that is not a configured remote.
+
+`--dry-run` reports how many objects and bytes *would* transfer and writes
+nothing — the recommended first step on shared, multi-TB storage:
+
+```
+dt remote diff /g/data/ab12/dvc/analysis/projx nci   # see the gap
+dt remote merge /g/data/ab12/dvc/analysis/projx nci --dry-run
+dt remote merge /g/data/ab12/dvc/analysis/projx nci --verify
+dt remote verify nci --recheck     # optional: confirm the newly-landed blobs
+```
+
+If `DST` does not exist yet it is created once `SRC` has been checked —
+give it as a path whose parent already exists (a bare word must be a
+configured remote, and a configured remote's directory must exist) — and every
+`SRC` blob is treated as missing (a plain full copy); `--dry-run` just reports
+that. Newly created directories get the shared-directory mode when `DST`'s root
+is group-writable, or always with `--group-writable` (which also applies to a
+`DST` root the command creates); otherwise they follow your umask. Unreadable
+or linked paths on either side, size differences and failed copies all make the
+command exit non-zero. On the same filesystem
+the copy is a real byte copy (content-addressed stores are not reflinked here to
+keep the destination independent of the soon-to-be-retired source).
+
+### Deferred (issue #166 follow-ups)
+
+Two asks from the originating issue are intentionally **not** in this command and
+are tracked as follow-ups:
+
+- **Pull-safety / availability diagnosis.** `dt pull --dry` classifies a remote
+  by reachability, not object presence, so a target whose blobs are entirely
+  absent can still read as "✓ local". And a `dt pull` on a partially-missing
+  target can remove the workspace copy before a failed fetch. Making pull check
+  object presence (and fetch-then-checkout only what verified) is a separate
+  change to the pull path.
+- **Cloud (non-local) remotes.** `diff`/`merge` require both endpoints on a
+  locally-accessible filesystem; an S3/GCS source or destination would need the
+  object-store transfer path.
+
 ## dt remote perms
 
 Check and repair directory permissions on a shared remote.
