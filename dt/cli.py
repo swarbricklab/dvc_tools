@@ -1847,7 +1847,7 @@ def remote_diff(remote_a, remote_b, jobs, list_blobs, json_output, verbose):
 
     \b
     Examples:
-        dt remote diff /g/data/a56/dvc/analysis/proj nci
+        dt remote diff /g/data/ab12/dvc/analysis/projx nci
         dt remote diff old_remote new_remote --list
         dt remote diff A B --json
     """

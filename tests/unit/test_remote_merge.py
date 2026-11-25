@@ -317,3 +317,75 @@ class TestResolveRemoteArg:
         label, path = ops.resolve_remote_arg('nci')
         assert label == 'nci'
         assert path == r
+
+
+# --------------------------------------------------------------------------- #
+# Only real blobs, only into real directories
+# --------------------------------------------------------------------------- #
+
+class TestMergeEntries:
+    def test_linked_source_entry_is_not_indexed(self, tmp_path):
+        src = tmp_path / "src"
+        h = _place_v3(src, b"real\n")
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"elsewhere\n")
+        oh = _md5(b"elsewhere\n")
+        d = src / "files" / "md5" / oh[:2]
+        d.mkdir(parents=True, exist_ok=True)
+        (d / oh[2:]).symlink_to(outside)
+        index, _ = ops.index_remote(src)
+        assert set(index) == {_logical(h)}
+
+    def test_linked_source_prefix_is_not_entered(self, tmp_path):
+        src = tmp_path / "src"
+        _place_v3(src, b"seed\n")
+        other = tmp_path / "other"
+        oh = _place_v2(other, b"other\n")
+        (src / "files" / "md5" / oh[:2]).symlink_to(other / oh[:2])
+        index, _ = ops.index_remote(src)
+        assert _logical(oh) not in index
+
+    def test_linked_destination_prefix_is_an_error(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        h = _place_v3(src, b"payload\n")
+        _place_v3(dst, b"seed\n")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (dst / "files" / "md5" / h[:2]).symlink_to(elsewhere)
+        res = ops.merge_remotes(src, dst)
+        assert res['copied'] == 0 and res['errors'] == 1
+        assert list(elsewhere.iterdir()) == []
+
+    def test_existing_name_is_kept(self, tmp_path):
+        d = tmp_path / "d"
+        d.mkdir()
+        (d / "name").write_bytes(b"keep\n")
+        (d / "tmp").write_bytes(b"new\n")
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            assert ops._publish_noreplace(fd, "tmp", "name") is False
+        finally:
+            os.close(fd)
+        assert (d / "name").read_bytes() == b"keep\n"
+
+    def test_unexpected_plan_path_is_refused(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        h = _place_v3(src, b"payload\n")
+        plan = {
+            'a_layout': 'dvc-v3', 'b_layout': 'empty',
+            'only_in_a': [_logical(h)], 'only_in_a_bytes': 8,
+            '_a_index': {_logical(h): (f"../{h[:2]}/{h[2:]}", 8)},
+        }
+        res = ops.merge_remotes(src, dst, diff=plan)
+        assert res['copied'] == 0 and res['errors'] == 1
+
+    def test_no_temporary_files_left(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        _place_v3(src, b"a\n")
+        _place_v2(src, b"b\n")
+        res = ops.merge_remotes(src, dst, verify=True)
+        assert res['copied'] == 2
+        assert [p for p in dst.rglob("*") if p.name.endswith(".tmp")] == []

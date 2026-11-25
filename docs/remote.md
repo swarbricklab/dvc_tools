@@ -310,7 +310,7 @@ The report gives, for each side, the object count and total size, plus how many
 objects are **only in A**, **only in B**, and **common**:
 
 ```
-A: /g/data/a56/dvc/analysis/brca_mega_atlas  (dvc-v2)
+A: /g/data/ab12/dvc/analysis/projx  (dvc-v2)
    79,783 object(s), 2.1T
 B: nci  (dvc-v3)
    240,612 object(s), 5.4T
@@ -348,8 +348,13 @@ destination that already holds most of the data.
 Properties:
 
 - **Additive** — never deletes or overwrites a blob already in `DST`.
-- **Atomic** — each blob is written to a `.tmp` sibling and `os.replace()`d onto
-  its final name, so a concurrent reader never sees a partial blob.
+- **Atomic** — each blob is written to a `.tmp` sibling (the same name shape
+  DVC uses, so `dt remote clean` sweeps any left by an interrupted run) and then
+  linked into place under its final name only if nothing has that name yet, so
+  a concurrent reader never sees a partial blob and nothing is replaced.
+- **Real files only** — only regular files that live in `SRC`'s prefix
+  directories are read; links there are skipped, and a link where a `DST`
+  prefix directory belongs is reported as an error rather than followed.
 - **Verifying** (`--verify`) — re-hash each copied blob against its
   content-addressed filename *before* publishing it; a mismatch is reported and
   the blob is **not** copied, so corruption is never propagated.
@@ -361,9 +366,9 @@ Properties:
 nothing — the recommended first step on shared, multi-TB storage:
 
 ```
-dt remote diff /g/data/a56/dvc/analysis/brca_mega_atlas nci   # see the gap
-dt remote merge /g/data/a56/dvc/analysis/brca_mega_atlas nci --dry-run
-dt remote merge /g/data/a56/dvc/analysis/brca_mega_atlas nci --verify
+dt remote diff /g/data/ab12/dvc/analysis/projx nci   # see the gap
+dt remote merge /g/data/ab12/dvc/analysis/projx nci --dry-run
+dt remote merge /g/data/ab12/dvc/analysis/projx nci --verify
 dt remote verify nci --recheck     # optional: confirm the newly-landed blobs
 ```
 
