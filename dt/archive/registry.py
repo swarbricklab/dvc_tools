@@ -31,7 +31,7 @@ import yaml
 
 from .. import config as cfg
 from .. import utils
-from ..errors import ArchiveError
+from ..errors import ArchiveError, DTError
 from .manifest import ArchiveManifest, list_manifests
 
 
@@ -85,7 +85,7 @@ class RegistryEntry:
             'created_at': self.created_at,
             'created_by': self.created_by,
             'git_ref': self.git_ref,
-            'git_url': self.git_url,
+            'git_url': utils.strip_url_credentials(self.git_url),
             'dt_version': self.dt_version,
             'status': asdict(self.status),
         }
@@ -108,7 +108,7 @@ class RegistryEntry:
             created_at=data.get('created_at', ''),
             created_by=data.get('created_by', ''),
             git_ref=data.get('git_ref', ''),
-            git_url=data.get('git_url', ''),
+            git_url=utils.strip_url_credentials(data.get('git_url', '')),
             dt_version=data.get('dt_version', ''),
             status=RegistryStatus(
                 verified_at=status_raw.get('verified_at'),
@@ -125,7 +125,8 @@ class RegistryEntry:
 
 def registry_path() -> Optional[Path]:
     """Where the central register lives, or None if unconfigured."""
-    raw = cfg.get_value('archive.registry_path')
+    from .operations import _own_setting
+    raw = _own_setting('archive.registry_path')
     if not raw:
         return None
     return Path(str(raw)).expanduser()
@@ -143,6 +144,11 @@ def project_slug(repo_root: Path) -> str:
 
 
 def entry_filename(slug: str, archive_name: str) -> str:
+    """``<slug>__<archive>.yaml``: both must be plain names, so the entry
+    can only ever be a file directly in the register directory."""
+    from .manifest import require_plain_name
+    require_plain_name(slug, 'project slug')
+    require_plain_name(archive_name)
     return f"{slug}__{archive_name}.yaml"
 
 
@@ -192,7 +198,7 @@ def entry_from_manifest(
         created_at=manifest.created_at,
         created_by=manifest.created_by,
         git_ref=manifest.git_ref,
-        git_url=manifest.git_url,
+        git_url=utils.strip_url_credentials(manifest.git_url),
         dt_version=manifest.dt_version,
     )
 
@@ -207,14 +213,11 @@ def write_entry(entry: RegistryEntry) -> Optional[Path]:
     if base is None:
         return None
     target = base / entry_filename(entry.project_slug, entry.archive_name)
-    tmp = target.with_suffix(target.suffix + '.tmp')
     try:
-        with open(tmp, 'w') as f:
-            yaml.safe_dump(
-                entry.to_dict(), f, default_flow_style=False, sort_keys=False,
-            )
-        tmp.rename(target)
-    except OSError as e:
+        utils.write_text_atomic(target, yaml.safe_dump(
+            entry.to_dict(), default_flow_style=False, sort_keys=False,
+        ))
+    except (OSError, ArchiveError) as e:
         print(
             f"warning: failed to update archive registry {target}: {e}",
             file=sys.stderr,
@@ -225,14 +228,28 @@ def write_entry(entry: RegistryEntry) -> Optional[Path]:
 
 def read_entry(slug: str, archive_name: str) -> Optional[RegistryEntry]:
     path = _entry_path(slug, archive_name)
-    if path is None or not path.is_file():
+    if path is None:
         return None
     try:
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
+        data = yaml.safe_load(_read_shared_file(path)) or {}
         return RegistryEntry.from_dict(data)
-    except (yaml.YAMLError, KeyError, ValueError):
+    except (yaml.YAMLError, KeyError, ValueError, OSError, ArchiveError):
         return None
+
+
+def _read_shared_file(path: Path, limit: int = 1 << 20) -> str:
+    """Text of the regular file at *path* itself (not through a link, not a
+    FIFO or device), at most *limit* bytes."""
+    import os
+    import stat as stat_mod
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat_mod.S_ISREG(st.st_mode) or st.st_size > limit:
+            raise OSError(f"{path} is not a regular file of usable size")
+        return os.read(fd, limit + 1).decode('utf-8')
+    finally:
+        os.close(fd)
 
 
 def list_entries() -> List[RegistryEntry]:
@@ -243,10 +260,9 @@ def list_entries() -> List[RegistryEntry]:
     entries: List[RegistryEntry] = []
     for p in sorted(base.glob('*.yaml')):
         try:
-            with open(p) as f:
-                data = yaml.safe_load(f) or {}
+            data = yaml.safe_load(_read_shared_file(p)) or {}
             entries.append(RegistryEntry.from_dict(data))
-        except (yaml.YAMLError, KeyError, ValueError, OSError):
+        except (yaml.YAMLError, KeyError, ValueError, OSError, ArchiveError):
             continue
     entries.sort(key=lambda e: (e.project_slug, e.archive_name))
     return entries
@@ -333,7 +349,7 @@ def sync_from_roots(roots: List[Path]) -> Dict[str, int]:
             continue
         try:
             manifests = list_manifests(repo_root=root)
-        except ArchiveError:
+        except DTError:  # incl. ArchiveError, and a root of another user's
             skipped += 1
             continue
         for m in manifests:

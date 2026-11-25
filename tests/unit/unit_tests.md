@@ -535,7 +535,6 @@ This document tracks the unit tests needed for the `dt` package. Tests are group
   - [ ] Test returns configured value or default
 - [ ] `get_retry_interval` - get retry interval from config
   - [ ] Test returns configured value or default
-- [ ] `is_auto_sync_enabled` - check if auto sync enabled
   - [ ] Test returns config value
 - [ ] `get_lock_owner` - get owner of lock file
   - [ ] Test returns username

@@ -8,14 +8,14 @@ DVC remote.
 Schema version 2 (folder-per-prefix layout)::
 
     version: 2
-    archive_name: neochemo-2026-05
-    source_remote: /g/data/a56/dvc/neochemo
+    archive_name: projx-2026-05
+    source_remote: /g/data/ab12/dvc/projx
     created_at: 2026-05-28T12:34:56+00:00
-    created_by: jr9959
+    created_by: xy1234
     git_ref: <sha>
     dt_version: 0.6.0
     backend: mdss
-    backend_dir: jr9959/archive/neochemo/neochemo-2026-05/
+    backend_dir: xy1234/archive/projx/projx-2026-05/
     layout: folder-per-prefix
     contents:
       total_objects: 42137
@@ -75,6 +75,7 @@ def archives_dir(repo_root: Optional[Path] = None) -> Path:
     namespace.
     """
     root = repo_root or utils.find_project_root()
+    utils._require_trusted_root(Path(root))
     return root / '.dt' / ARCHIVE_DIR_NAME
 
 
@@ -86,6 +87,7 @@ def archives_dir_legacy(repo_root: Optional[Path] = None) -> Path:
     :func:`archives_dir`.
     """
     root = repo_root or utils.find_project_root()
+    utils._require_trusted_root(Path(root))
     return root / '.dvc' / ARCHIVE_DIR_NAME
 
 
@@ -109,6 +111,52 @@ def sidecar_name(archive_name: str) -> str:
     """Filename of the manifest sidecar uploaded to the backend."""
     return f'{archive_name}{SIDECAR_SUFFIX}'
 
+
+
+def is_plain_name(name: Any) -> bool:
+    """True for a single, ordinary file-name component (an archive name or
+    an inner tar file name): no separators, no dot segments."""
+    import re
+    return (isinstance(name, str)
+            and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]{0,200}', name) is not None
+            and '..' not in name)
+
+
+_TAR_EXT = {'none': '', 'gzip': '.gz', 'zstd': '.zst'}
+
+
+def _expected_tar_name(key: Any, filename: Any, compression: str) -> str:
+    """An inner tar is named ``<key>.tar[.gz|.zst]`` for a prefix key ``xx``
+    (or ``v2-xx`` / ``v3-xx``); anything else is not a manifest dt wrote."""
+    import re
+    if not (isinstance(key, str)
+            and re.fullmatch(r'(?:v[23]-)?[0-9a-f]{2}', key)):
+        raise ArchiveError(f"Invalid inner tar key: {key!r}")
+    expected = f"{key}.tar{_TAR_EXT.get(compression, '')}"
+    if filename != expected:
+        raise ArchiveError(
+            f"Invalid inner tar file name {filename!r} for {key} "
+            f"(expected {expected!r})")
+    return filename
+
+
+def _check_backend_dir(value: Any) -> Any:
+    """A backend folder path: no control characters, no dot-dot segments and
+    no segment that could read as an option."""
+    if value in (None, ''):
+        return value
+    if not isinstance(value, str) or any(not c.isprintable() for c in value):
+        raise ArchiveError(f"Invalid backend_dir: {value!r}")
+    for part in value.split('/'):
+        if part in ('.', '..') or part.startswith('-'):
+            raise ArchiveError(f"Invalid backend_dir: {value!r}")
+    return value
+
+
+def require_plain_name(name: Any, what: str = 'archive name') -> str:
+    if not is_plain_name(name):
+        raise ArchiveError(f"Invalid {what}: {name!r}")
+    return name
 
 @dataclass
 class InnerTar:
@@ -168,7 +216,7 @@ class ArchiveManifest:
             'created_at': self.created_at,
             'created_by': self.created_by,
             'git_ref': self.git_ref,
-            'git_url': self.git_url,
+            'git_url': utils.strip_url_credentials(self.git_url),
             'dt_version': self.dt_version,
             'backend': self.backend,
             'backend_dir': self.backend_dir,
@@ -212,19 +260,28 @@ class ArchiveManifest:
                 f"understands (max {MANIFEST_VERSION})."
             )
 
+        compression = contents.get('compression')
+        if compression is None:
+            # Older manifests: the inner tar names say how they were written.
+            names = [str((row or {}).get('filename', '')) for row in inner_raw.values()]
+            compression = ('gzip' if names and all(n.endswith('.tar.gz') for n in names)
+                           else 'zstd' if names and all(n.endswith('.tar.zst') for n in names)
+                           else 'none')
+        if compression not in _TAR_EXT:
+            raise ArchiveError(f"Unknown compression {compression!r}")
         return cls(
-            archive_name=data['archive_name'],
+            archive_name=require_plain_name(data['archive_name']),
             source_remote=data['source_remote'],
             backend=data['backend'],
-            backend_dir=backend_dir,
+            backend_dir=_check_backend_dir(backend_dir),
             layout=layout_str,
             source_layout=data.get('source_layout', LAYOUT_DVC_V3),
             total_objects=int(contents.get('total_objects', 0)),
             total_bytes=int(contents.get('total_bytes', 0)),
-            compression=contents.get('compression', 'none'),
+            compression=compression,
             inner_tars={
                 prefix: InnerTar(
-                    filename=row['filename'],
+                    filename=_expected_tar_name(prefix, row['filename'], compression),
                     size_bytes=int(row['size_bytes']),
                     sha256=row['sha256'],
                     n_objects=int(row['n_objects']),
@@ -238,7 +295,7 @@ class ArchiveManifest:
             created_at=data.get('created_at', ''),
             created_by=data.get('created_by', ''),
             git_ref=data.get('git_ref', ''),
-            git_url=data.get('git_url', ''),
+            git_url=utils.strip_url_credentials(data.get('git_url', '')),
             dt_version=data.get('dt_version', ''),
             version=version,
         )
@@ -255,6 +312,9 @@ def save_manifest(manifest: ArchiveManifest, repo_root: Optional[Path] = None) -
     Returns the path written to. Does NOT git-add — let the caller decide.
     """
     target = manifest_path(manifest.archive_name, repo_root=repo_root)
+    if target.parent.parent.name == '.dt':
+        utils.dt_subdir(target.parent.name, root=target.parent.parent.parent)
+    utils.refuse_link(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     with open(target, 'w') as f:
         yaml.safe_dump(

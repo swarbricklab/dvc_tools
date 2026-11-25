@@ -177,7 +177,7 @@ def _username(uid: int) -> str:
 
 def is_tmp_name(name: str) -> bool:
     """True if ``name`` is exactly a DVC temporary-transfer filename."""
-    return bool(TMP_RE.match(name))
+    return bool(TMP_RE.fullmatch(name))
 
 
 def _scan_prefix(
@@ -389,7 +389,7 @@ def label_stores(stores: Sequence[Path]) -> List[Tuple[str, Path]]:
     more than one root, some under three -- so a bare name would quietly merge
     distinct remotes in the reader's mind. Qualifying everything with its root
     is not enough either, since two roots can share a basename
-    (``a56/dvc/analysis`` and ``px14/dvc/analysis``).
+    (``ab12/dvc/analysis`` and ``cd34/dvc/analysis``).
 
     So: use the bare name where it is unique, else add parent directories one
     at a time until it is, falling back to the full path.
@@ -435,7 +435,9 @@ def enumerate_stores(roots: Sequence[Path]) -> List[Tuple[str, Path]]:
         except OSError:
             continue
         for child in children:
-            if not child.is_dir():
+            # Only real store directories under the root: a link could point
+            # at someone's private store.
+            if child.is_symlink() or not child.is_dir():
                 continue
             resolved = child.resolve()
             if resolved in seen:

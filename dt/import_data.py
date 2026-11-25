@@ -22,7 +22,7 @@ from . import cache_ops
 from . import remote as remote_mod
 from . import tmp as tmp_mod
 from . import utils
-from .errors import ImportError_ as ImportError
+from .errors import DTError, ImportError_ as ImportError
 
 
 def populate_primary_cache(
@@ -74,7 +74,11 @@ def populate_primary_cache(
             continue
         
         # Cache file location (hash-based)
-        cache_file = cache_base / md5[:2] / md5[2:]
+        try:
+            prefix, fname = utils.oid_path_parts(md5)
+        except ValueError:
+            continue
+        cache_file = cache_base / prefix / fname
         
         # Resolve symlink to actual file and use shared link function
         actual_file = workspace_file.resolve()
@@ -146,15 +150,21 @@ def construct_dir_from_dvc_list(
         print(f"    Path: {path}")
         print(f"    Revision: {revision[:12]}...")
     
+    if not utils.is_valid_repo_path(path):
+        if verbose:
+            print(f"  ERROR: invalid import path: {path!r}")
+        return None
+
     # Run dvc list to get file listing with hashes
     cmd = [
         'dvc', 'list',
         '--json',
         '--show-hash',
         '--recursive',
+        '--rev', revision,
+        '--',
         repo_url,
         path,
-        '--rev', revision,
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -226,14 +236,24 @@ def construct_dir_from_dvc_list(
     file_hash = new_hash if new_hash else expected_hash
     
     # Write .dir file to cache
+    try:
+        prefix, fname = utils.oid_path_parts(f"{file_hash}.dir")
+    except ValueError:
+        if verbose:
+            print(f"  ERROR: invalid directory hash {file_hash!r}")
+        return None
     if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / file_hash[:2] / f"{file_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / 'files' / 'md5' / prefix / fname
     else:
-        dest_file = Path(dest_cache) / file_hash[:2] / f"{file_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / prefix / fname
     
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
+    try:
+        created = cache_ops.write_object(dest_file, manifest_content)
+    except OSError as e:
+        if verbose:
+            print(f"  ERROR: {e}")
+        return None
+    if created:
         if verbose:
             print(f"  Created .dir file: {dest_file}")
     
@@ -357,14 +377,24 @@ def construct_dir_file(
         return None
     
     # Write .dir file to cache
+    try:
+        prefix, fname = utils.oid_path_parts(f"{expected_hash}.dir")
+    except ValueError:
+        if verbose:
+            print(f"  ERROR: invalid directory hash {expected_hash!r}")
+        return None
     if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / 'files' / 'md5' / prefix / fname
     else:
-        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / prefix / fname
     
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
+    try:
+        created = cache_ops.write_object(dest_file, manifest_content)
+    except OSError as e:
+        if verbose:
+            print(f"  ERROR: {e}")
+        return None
+    if created:
         if verbose:
             print(f"  Constructed .dir file: {expected_hash[:12]}...")
     
@@ -421,14 +451,24 @@ def _construct_dir_file_fallback(
         return None
     
     # Write .dir file to cache
+    try:
+        prefix, fname = utils.oid_path_parts(f"{expected_hash}.dir")
+    except ValueError:
+        if verbose:
+            print(f"  ERROR: invalid directory hash {expected_hash!r}")
+        return None
     if use_v3_layout:
-        dest_file = Path(dest_cache) / 'files' / 'md5' / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / 'files' / 'md5' / prefix / fname
     else:
-        dest_file = Path(dest_cache) / expected_hash[:2] / f"{expected_hash[2:]}.dir"
+        dest_file = Path(dest_cache) / prefix / fname
     
-    if not dest_file.exists():
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(manifest_content)
+    try:
+        created = cache_ops.write_object(dest_file, manifest_content)
+    except OSError as e:
+        if verbose:
+            print(f"  ERROR: {e}")
+        return None
+    if created:
         if verbose:
             print(f"  Constructed .dir file (fallback): {expected_hash[:12]}...")
     
@@ -474,6 +514,14 @@ def configure_clone_cache(clone_path: Path, cache_path: str) -> None:
         clone_path: Path to the cloned repository.
         cache_path: Path to the cache directory.
     """
+    tmp_mod.require_dvc_root(clone_path)
+    problem = utils.dvc_local_config_problem(clone_path)
+    if problem:
+        raise ImportError(f"Refusing to configure source clone {clone_path}: {problem}")
+    try:
+        utils.pin_clone_site_cache(clone_path)
+    except DTError as e:
+        raise ImportError(str(e))
     subprocess.run(
         ['dvc', 'cache', 'dir', '--local', cache_path],
         cwd=clone_path,
@@ -500,10 +548,17 @@ def list_files(
     Raises:
         ImportError: If listing fails.
     """
+    try:
+        tmp_mod.require_dvc_root(clone_path)
+    except tmp_mod.TmpError as e:
+        raise ImportError(str(e))
+    problem = utils.dvc_local_config_problem(clone_path)
+    if problem:
+        raise ImportError(f"Refusing to use source clone {clone_path}: {problem}")
     cmd = ['dvc', 'list', '--json', '--show-hash']
     if recursive:
         cmd.append('-R')
-    cmd.extend(['.', path])
+    cmd.extend(['--', '.', path])
     
     result = subprocess.run(
         cmd,
@@ -640,21 +695,15 @@ def create_dir_file(
     # overwrite an object another member wrote first, and the import failed
     # with EACCES on exactly the sections a colleague had imported before
     # (#175). The other .dir writers in this file already guard this way.
-    if dir_file.exists():
+    if dir_file.is_file() and not dir_file.is_symlink():
         _warn_if_dir_size_differs(dir_file, content)
         return f"{dir_hash}.dir", len(content)
 
-    dir_path.mkdir(parents=True, exist_ok=True)
-
+    # Created exclusively; a concurrent writer of the same (identical) object
+    # counts as success, anything else at the name is refused.
     try:
-        dir_file.write_bytes(content)
+        cache_ops.write_object(dir_file, content)
     except OSError as e:
-        # Another writer may have created it between the check above and here,
-        # which is normal when several imports populate one registry at once.
-        # The content is identical either way, so an object that now exists is
-        # success rather than a collision.
-        if dir_file.exists():
-            return f"{dir_hash}.dir", len(content)
         raise ImportError(f"Failed to write .dir file: {e}")
 
     return f"{dir_hash}.dir", len(content)
@@ -809,11 +858,12 @@ def _delegate_to_dvc_import(
     rev: Optional[str] = None,
 ) -> Path:
     """Fallback to ``dvc import`` for sources without local cache access."""
-    cmd = ['dvc', 'import', repo_url, path, '--out', str(out_path)]
+    cmd = ['dvc', 'import', '--out', str(out_path)]
     if rev:
         cmd.extend(['--rev', rev])
     if not checkout:
         cmd.append('--no-download')
+    cmd.extend(['--', repo_url, path])
 
     if verbose:
         print("No locally-accessible cache found; delegating to dvc import")
@@ -1101,12 +1151,17 @@ def import_data(
         if primary_cache_root:
             # First, add the .dir file or single file hash to primary cache
             if root_hash:
-                populate_cache_file(
+                placed = populate_cache_file(
                     md5=root_hash,
                     source_cache=cache_path,
                     dest_cache=primary_cache_root,
                     verbose=verbose,
                 )
+                if placed is None and root_hash.endswith('.dir'):
+                    print(f"Warning: directory listing {root_hash} is missing "
+                          f"from the source cache or does not match its hash; "
+                          f"not checking out {dvc_file}.")
+                    return dvc_file, cache_path
             
             # Then, add individual files
             for f in files:
@@ -1126,7 +1181,7 @@ def import_data(
                 print(f"Checking out {dvc_file}...")
             
             result = subprocess.run(
-                ['dvc', 'checkout', str(dvc_file)],
+                ['dvc', 'checkout', '--', str(dvc_file)],
                 capture_output=True,
                 text=True,
             )

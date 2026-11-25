@@ -120,25 +120,25 @@ class TestQuotaProject:
     """The configured project must reach the credentials, not just the path."""
 
     def test_quota_project_is_attached(self):
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         creds = MagicMock()
         scoped = MagicMock()
         creds.with_quota_project.return_value = scoped
 
         with patch('google.auth.default', return_value=(creds, 'p')):
             assert backend._credentials() is scoped
-        creds.with_quota_project.assert_called_once_with('bcarc-489101')
+        creds.with_quota_project.assert_called_once_with('example-quota-123')
 
     def test_service_account_credentials_are_left_alone(self):
         """Only user credentials need a quota project; SA creds bill their own."""
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         creds = MagicMock(spec=[])  # no with_quota_project attribute
 
         with patch('google.auth.default', return_value=(creds, 'p')):
             assert backend._credentials() is creds
 
     def test_unresolvable_credentials_fall_back_to_default_lookup(self):
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         with patch('google.auth.default', side_effect=Exception('no ADC')):
             assert backend._credentials() is None
 
@@ -147,7 +147,7 @@ class TestQuotaProject:
         need live credentials, so stand in for the secretmanager module."""
         import google.cloud
 
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         creds = MagicMock()
         fake_client = MagicMock()
         fake_sm = MagicMock()
@@ -197,8 +197,8 @@ class TestSshCopyIdFallback:
 
         argv = run.call_args.args[0]
         assert argv[0] == 'ssh'
-        assert argv[1] == 'u@h'
-        assert 'authorized_keys' in argv[2]
+        assert argv[1:3] == ['--', 'u@h']
+        assert 'authorized_keys' in argv[3]
 
     def test_key_is_passed_as_an_argument_not_interpolated(self, pub_key):
         """Key content must never be parsed as shell."""
@@ -214,7 +214,7 @@ class TestSshCopyIdFallback:
                    return_value=MagicMock(returncode=0)) as run:
             _deploy_key_ssh_copy_id('h', 'u', pub_key)
 
-        remote = run.call_args.args[0][2]
+        remote = run.call_args.args[0][3]
         # The script body is quoted as one unit and the key as another, so
         # the substitution can never reach a shell unquoted.
         assert "'ssh-ed25519 AAAA$(rm -rf /) dt@node'" in remote
@@ -384,7 +384,7 @@ class TestQuotaProjectDegradesSafely:
     def test_permission_denied_falls_back_to_the_cli(self):
         from google.api_core import exceptions as gcp_exceptions
 
-        backend = GCPSecretBackend(project='bcarc-489101')
+        backend = GCPSecretBackend(project='example-quota-123')
         client = MagicMock()
         client.access_secret_version.side_effect = \
             gcp_exceptions.PermissionDenied('USER_PROJECT_DENIED')
@@ -417,18 +417,18 @@ class TestSecretErrorsNameTheProject:
     secret that lives in another project.
     """
 
-    def _denied(self, project='ctp-archive'):
+    def _denied(self, project='example-sa'):
         backend = GCPSecretBackend(project=project)
         result = MagicMock(returncode=1, stdout='',
                            stderr='ERROR: PERMISSION_DENIED: denied on resource')
         with patch('dt.secrets.gcp.shutil.which', return_value='/usr/bin/gcloud'), \
              patch('dt.secrets.gcp.subprocess.run', return_value=result):
             with pytest.raises(Exception) as exc:
-                backend._cli_access_secret('bcarc_visium')
+                backend._cli_access_secret('example_visium')
         return str(exc.value)
 
     def test_names_the_project(self):
-        assert "project 'ctp-archive'" in self._denied()
+        assert "project 'example-sa'" in self._denied()
 
     def test_says_the_secret_may_not_exist_there(self):
         assert 'does not exist there' in self._denied()
@@ -436,10 +436,10 @@ class TestSecretErrorsNameTheProject:
     def test_shows_how_to_check_which_project_is_configured(self):
         message = self._denied()
         assert 'dt config get secrets.gcp.project' in message
-        assert 'gcloud secrets list --project=ctp-archive' in message
+        assert 'gcloud secrets list --project=example-sa' in message
 
     def test_still_names_the_secret(self):
-        assert 'dvc-remote-bcarc_visium' in self._denied()
+        assert 'dvc-remote-example_visium' in self._denied()
 
 
 class TestFallbackPreservesTheRealCause:
@@ -455,7 +455,7 @@ class TestFallbackPreservesTheRealCause:
         """
         from google.api_core import exceptions as gcp_exceptions
 
-        backend = GCPSecretBackend(project='ctp-archive')
+        backend = GCPSecretBackend(project='example-sa')
         client = MagicMock()
         client.access_secret_version.side_effect = \
             gcp_exceptions.PermissionDenied('403 denied on resource')
@@ -463,7 +463,7 @@ class TestFallbackPreservesTheRealCause:
         with patch.object(type(backend), 'client', property(lambda s: client)), \
              patch('dt.secrets.gcp.shutil.which', return_value=None):
             with pytest.raises(Exception) as exc:
-                backend.get_raw_config('bcarc_visium')
+                backend.get_raw_config('example_visium')
 
         message = str(exc.value)
         assert '403 denied on resource' in message, "real cause was discarded"
@@ -472,10 +472,46 @@ class TestFallbackPreservesTheRealCause:
 
     def test_plain_missing_gcloud_still_reads_simply(self):
         """With no prior failure, the old install advice is still right."""
-        backend = GCPSecretBackend(project='ctp-archive')
+        backend = GCPSecretBackend(project='example-sa')
         with patch('dt.secrets.gcp.shutil.which', return_value=None):
             with pytest.raises(Exception) as exc:
                 backend._require_gcloud()
         message = str(exc.value)
         assert 'Neither the google-cloud-secret-manager' in message
         assert 'Original error' not in message
+
+
+class TestSecretContentErrors:
+    def test_unparseable_aws_secret_is_reported(self):
+        from unittest.mock import MagicMock, patch
+        from dt.auth import credentials
+        backend = MagicMock()
+        backend.get_raw_config.return_value = '[default]\naws_access_key_id = a\n[default]\nx = y\n'
+        with patch.object(credentials, '_get_secret_backend', return_value=backend), \
+             patch.object(credentials, '_detect_secret_format', return_value='aws'):
+            info = credentials.check_secret('r')
+        assert info.error and 'could not be parsed' in info.error
+
+    def test_non_utf8_payload_is_a_secret_error(self):
+        from unittest.mock import MagicMock
+        import pytest
+        from dt.secrets import gcp, SecretError
+        backend = gcp.GCPSecretBackend(project='p')
+        client = MagicMock()
+        client.access_secret_version.return_value.payload.data = b'\xff\xfe'
+        backend._client = client
+        backend._use_cli = False
+        with pytest.raises(SecretError, match='UTF-8'):
+            backend.get_raw_config('r')
+
+
+    def test_non_utf8_payload_via_cli_is_a_secret_error(self, tmp_path):
+        import pytest, stat
+        from dt.secrets import gcp, SecretError
+        fake = tmp_path / 'gcloud'
+        fake.write_text("#!/bin/sh\nprintf '\\377\\376'\n")
+        fake.chmod(0o755)
+        backend = gcp.GCPSecretBackend(project='p')
+        backend._require_gcloud = lambda cause=None: str(fake)
+        with pytest.raises(SecretError, match='UTF-8'):
+            backend._cli_access_secret('r')

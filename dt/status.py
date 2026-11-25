@@ -35,15 +35,6 @@ def status(
     """
     utils.check_dvc()
 
-    # Index sync before status
-    try:
-        from . import index as index_mod
-        if index_mod.is_auto_sync_enabled():
-            index_mod.pull(quiet=not verbose, verbose=verbose)
-    except Exception as e:
-        if verbose:
-            print(f"Warning: index sync failed: {e}")
-
     # Annotate (but don't refuse) if a configured remote is archived.
     try:
         from .archive import signpost as _signpost
@@ -71,15 +62,6 @@ def status(
     if imports:
         print()
         _show_import_status(verbose=verbose)
-
-    # Index sync after status
-    try:
-        from . import index as index_mod
-        if index_mod.is_auto_sync_enabled():
-            index_mod.push(quiet=not verbose, verbose=verbose)
-    except Exception as e:
-        if verbose:
-            print(f"Warning: index sync failed: {e}")
 
     return result.returncode
 

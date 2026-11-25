@@ -233,3 +233,109 @@ class TestMoveRemote:
         assert result["method"] == "copy+verify+delete"
         assert result["quick"] is True
         assert not src.exists()
+
+
+class TestCopyNeverReadsThroughLinks:
+    """Planted links in a shared remote never put outside bytes in a copy."""
+
+    SECRET = b'-----BEGIN PRIVATE KEY----- not really\n'
+
+    def _setup(self, tmp_path):
+        src = tmp_path / "remote"
+        _build_remote(src, [b"one\n"])
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "id_key").write_bytes(self.SECRET)
+        (home / ("c" * 30)).write_bytes(self.SECRET)
+        prefix = next((src / "files" / "md5").iterdir())
+        (prefix / ("d" * 30)).symlink_to(home / "id_key")      # file link
+        (src / "files" / "md5" / "cc").symlink_to(home)         # dir link
+        (src / "TOPLEVEL").symlink_to(home / "id_key")          # top-level link
+        return src
+
+    def _leaked(self, dst):
+        return [p for p in dst.rglob("*")
+                if p.is_file() and not p.is_symlink() and p.read_bytes() == self.SECRET]
+
+    @pytest.mark.parametrize("independent", [True, False])
+    def test_copy_skips_and_lists_links(self, tmp_path, independent):
+        src = self._setup(tmp_path)
+        dst = tmp_path / "dst"
+        totals = ops.copy_tree(src, dst, independent=independent, jobs=1)
+        assert self._leaked(dst) == []
+        assert not any(p.is_symlink() for p in dst.rglob("*"))
+        assert "files/md5/cc" in totals["links"]
+        assert "TOPLEVEL" in totals["links"]
+        assert any(l.endswith("d" * 30) for l in totals["links"])
+
+    def test_cross_fs_move_refuses_with_links(self, tmp_path):
+        src = self._setup(tmp_path)
+        dst = tmp_path / "moved"
+        with patch("dt.remote_verify.resolve_local_remote",
+                   return_value=("myremote", str(src), src)), \
+             patch("dt.remote_ops.same_filesystem", return_value=False), \
+             patch("dt.remote_ops.repoint_remotes", return_value=[]):
+            with pytest.raises(RemoteError, match="symbolic link"):
+                ops.move_remote(None, str(dst), jobs=1, verbose=False)
+        assert src.exists()
+        assert self._leaked(dst) == []
+
+    def test_copies_not_world_readable_unless_destination_is(self, tmp_path):
+        src = tmp_path / "remote"; _build_remote(src, [b"one\n"])
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        os.chmod(dst, 0o2770)
+        ops.copy_tree(src, dst, independent=True, jobs=1)
+        blob = next(p for p in (dst / "files" / "md5").rglob("*") if p.is_file())
+        assert os.stat(blob).st_mode & 0o007 == 0
+        dst2 = tmp_path / "dst2"
+        dst2.mkdir()
+        os.chmod(dst2, 0o2775)
+        ops.copy_tree(src, dst2, independent=True, jobs=1)
+        blob2 = next(p for p in (dst2 / "files" / "md5").rglob("*") if p.is_file())
+        assert os.stat(blob2).st_mode & 0o004
+
+
+class TestCopySurvivesParentSwap:
+    SECRET = b'id_rsa contents\n'
+
+    @pytest.mark.parametrize("independent", [True, False])
+    def test_prefix_dir_swapped_after_listing(self, tmp_path, independent):
+        src = tmp_path / "remote"; _build_remote(src, [b"one\n"])
+        home = tmp_path / "home"; home.mkdir()
+        (home / "id_rsa").write_bytes(self.SECRET)
+        os.chmod(home / "id_rsa", 0o600)
+        prefix = next((src / "files" / "md5").iterdir())
+        real_walk = ops._walk_layout
+
+        def walk_then_swap(fd):
+            listed = list(real_walk(fd))
+            os.rename(prefix, tmp_path / "moved-prefix")
+            prefix.symlink_to(home)
+            return iter(listed)
+
+        dst = tmp_path / "dst"
+        with patch("dt.remote_ops._walk_layout", side_effect=walk_then_swap):
+            totals = ops.copy_tree(src, dst, independent=independent, jobs=1)
+        found = [p for p in dst.rglob("*") if p.is_file()
+                 and (p.read_bytes() == self.SECRET
+                      or os.stat(p).st_ino == os.stat(home / "id_rsa").st_ino)]
+        assert found == []
+        assert str(prefix.relative_to(src)) in totals["links"]
+
+    def test_fresh_destination_gets_no_world_read(self, tmp_path):
+        src = tmp_path / "remote"; _build_remote(src, [b"one\n"])
+        dst = tmp_path / "fresh"
+        ops.copy_tree(src, dst, independent=True, jobs=1)
+        blob = next(p for p in (dst / "files" / "md5").rglob("*") if p.is_file())
+        assert os.stat(blob).st_mode & 0o777 == 0o440
+
+
+class TestArchiveRefusesLinkedPrefix:
+    def test_scan_prefixes_raises(self, tmp_path):
+        from dt.archive import operations as aops
+        from dt.errors import ArchiveError
+        src = tmp_path / "remote"; _build_remote(src, [b"one\n"])
+        (src / "files" / "md5" / "ee").symlink_to(tmp_path)
+        with pytest.raises(ArchiveError, match="symbolic link"):
+            aops.scan_prefixes(src, aops.LAYOUT_DVC_V3)

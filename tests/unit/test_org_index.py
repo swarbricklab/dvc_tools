@@ -59,15 +59,34 @@ class TestCacheLocation:
 
     def test_honours_configured_cache_dir(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            org_index.cfg, 'get_value',
-            lambda key, default=None: str(tmp_path) if key == 'deps.cache_dir'
-            else None,
+            org_index.cfg, 'get_trusted_value_with_scope',
+            lambda key, default=None: (str(tmp_path), 'user') if key == 'deps.cache_dir'
+            else (default, None),
         )
         assert org_index.cache_root() == tmp_path
 
+    def test_repository_cache_dir_is_ignored(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(
+            org_index.cfg, 'get_trusted_value_with_scope',
+            lambda key, default=None: (str(tmp_path), 'project'),
+        )
+        assert org_index.cache_root() != tmp_path
+        assert 'ignoring deps.cache_dir' in capsys.readouterr().err
+
+    @pytest.mark.parametrize('org', ['..', '../x', 'a/b', '', '-x', '.', 'a' * 40])
+    def test_org_must_be_one_login(self, cache_dir, org):
+        with pytest.raises(org_index.DepsError):
+            org_index.org_cache_dir(org)
+
+    def test_host_must_be_one_name(self, cache_dir):
+        for host in ('..', 'a/b', ''):
+            with pytest.raises(org_index.DepsError):
+                org_index.org_cache_dir('myorg', host)
+
     def test_falls_back_to_user_cache(self, monkeypatch):
         monkeypatch.setattr(
-            org_index.cfg, 'get_value', lambda key, default=None: None
+            org_index.cfg, 'get_trusted_value_with_scope',
+            lambda key, default=None: (default, None),
         )
         root = org_index.cache_root()
         assert root.name == 'repo-deps'
@@ -153,6 +172,14 @@ class TestPersistence:
         assert org_index.clear_index('testorg') is True
         assert org_index.load_index('testorg').repos == {}
         assert org_index.clear_index('testorg') is False
+
+    def test_clear_removes_only_index_files(self, cache_dir):
+        org_index.save_index(_index(_entry('github.com/testorg/a')))
+        base = org_index.org_cache_dir('testorg')
+        (base / 'keep.txt').write_text('mine')
+        assert org_index.clear_index('testorg') is True
+        assert (base / 'keep.txt').read_text() == 'mine'
+        assert not (base / 'index.json').exists()
 
     def test_scan_method_is_recorded(self, cache_dir):
         """A zero-edge result must say whether it was cloned or inferred."""
@@ -536,3 +563,29 @@ class TestSummary:
         ))
         assert 'Unreadable repos' in out
         assert 'testorg/gone' in out
+
+
+class TestSharedRootSafety:
+    def test_tmp_link_is_not_written_through(self, cache_dir, tmp_path):
+        import os
+        victim = tmp_path / 'victim'
+        victim.write_text('keep')
+        base = org_index.org_cache_dir('testorg')
+        base.mkdir(parents=True)
+        os.symlink(victim, base / 'index.json.tmp')
+        org_index.save_index(_index(_entry('github.com/testorg/a')))
+        assert victim.read_text() == 'keep'
+        assert not (base / 'index.json').is_symlink()
+
+    def test_linked_org_dir_is_refused(self, cache_dir, tmp_path):
+        import os
+        victim = tmp_path / 'victim'
+        (victim / 'edges').mkdir(parents=True)
+        (victim / 'index.json').write_text('{}')
+        (cache_dir / 'github.com').mkdir(parents=True)
+        os.symlink(victim, cache_dir / 'github.com' / 'testorg')
+        with pytest.raises(org_index.DepsError):
+            org_index.clear_index('testorg')
+        with pytest.raises(org_index.DepsError):
+            org_index.save_index(_index(_entry('github.com/testorg/a')))
+        assert (victim / 'index.json').exists()

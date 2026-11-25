@@ -3,7 +3,10 @@
 Handles external shared cache setup and configuration for HPC environments.
 """
 
+import os
+import stat
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -88,19 +91,13 @@ def init_cache_structure(
     cache_dir.mkdir(parents=True, exist_ok=True)
     failed = 0 if utils.set_group_writable(cache_dir, mode=mode) else 1
 
-    # Create runs directory for DVC run cache with 00-ff subdirectories
-    runs_dir = cache_dir / "runs"
-    runs_dir.mkdir(exist_ok=True)
-    if not utils.set_group_writable(runs_dir, mode=mode):
-        failed += 1
-    for i in range(256):
-        subdir = runs_dir / f"{i:02x}"
-        subdir.mkdir(exist_ok=True)
-        if not utils.set_group_writable(subdir, mode=mode):
-            failed += 1
-
-    # Create files/md5 structure with 00-ff subdirectories
-    failed += utils.create_md5_subdirs(cache_dir, verbose=verbose, mode=mode)
+    try:
+        # runs/ (DVC run cache) and files/md5/, each with 00-ff
+        failed += utils.create_prefix_tree(cache_dir, ('runs',), mode)
+        failed += utils.create_md5_subdirs(cache_dir, verbose=verbose, mode=mode)
+    except OSError as e:
+        raise CacheError(f"Cannot set up {cache_dir}: {e} "
+                         f"(a link or non-directory where a store directory belongs?)")
 
     if failed and verbose:
         print(f"  warning: could not set the mode on {failed} director"
@@ -118,6 +115,10 @@ def configure_dvc_cache(repo_path: Path, cache_dir: Path, verbose: bool = True) 
         cache_dir: Path to the cache directory
         verbose: Print progress messages
     """
+    problem = utils.dvc_local_config_problem(repo_path)
+    if problem:
+        raise CacheError(f"Refusing to write DVC local config in {repo_path}: {problem}")
+
     if verbose:
         print(f"Configuring DVC cache: {cache_dir}")
     
@@ -228,26 +229,17 @@ def expand_dir_hashes(
         expanded.append(file_hash)
         
         if file_hash.endswith('.dir'):
-            # Read the .dir file to get contained file hashes
-            cache_path = hash_to_cache_path(cache_dir, file_hash)
+            # Read the (verified) .dir manifest to get contained file hashes;
+            # an unreadable or mismatching one is not expanded.
             dir_path = paths.get(file_hash, '')
-            if cache_path.exists():
-                try:
-                    with open(cache_path, 'r') as f:
-                        dir_contents = json.load(f)
-                    # Each entry has 'md5' key with the file hash and 'relpath'
-                    for entry in dir_contents:
-                        if 'md5' in entry:
-                            child_hash = entry['md5']
-                            if child_hash not in expanded:
-                                expanded.append(child_hash)
-                            # Build path for child
-                            if dir_path and 'relpath' in entry:
-                                child_path = f"{dir_path}/{entry['relpath']}"
-                                paths[child_hash] = child_path
-                except (json.JSONDecodeError, OSError, KeyError):
-                    # If we can't read the .dir file, just skip expansion
-                    pass
+            for entry in utils.read_dir_entries(cache_dir, file_hash) or []:
+                child_hash = entry['md5']
+                if child_hash not in expanded:
+                    expanded.append(child_hash)
+                # Build path for child
+                if dir_path and 'relpath' in entry:
+                    child_path = f"{dir_path}/{entry['relpath']}"
+                    paths[child_hash] = child_path
     
     return expanded, paths
 
@@ -267,22 +259,9 @@ def get_hash_for_path_in_dir(
     Returns:
         The file's hash if found, None otherwise
     """
-    import json
-    
-    cache_path = hash_to_cache_path(cache_dir, dir_hash)
-    if not cache_path.exists():
-        return None
-    
-    try:
-        with open(cache_path, 'r') as f:
-            dir_contents = json.load(f)
-        
-        for entry in dir_contents:
-            if entry.get('relpath') == relative_path:
-                return entry.get('md5')
-    except (json.JSONDecodeError, OSError, KeyError):
-        pass
-    
+    for entry in utils.read_dir_entries(cache_dir, dir_hash) or []:
+        if entry.get('relpath') == relative_path:
+            return entry.get('md5')
     return None
 
 
@@ -400,7 +379,12 @@ def get_cache_file_info(
     """
     results = []
     for file_hash in file_hashes:
-        cache_path = hash_to_cache_path(cache_dir, file_hash)
+        try:
+            cache_path = hash_to_cache_path(cache_dir, file_hash)
+        except ValueError:
+            # Not an object id at all: reported as missing, never touched.
+            results.append((file_hash, None, None))
+            continue
         if cache_path.exists():
             try:
                 size = cache_path.stat().st_size
@@ -411,6 +395,30 @@ def get_cache_file_info(
             results.append((file_hash, cache_path, None))
     
     return results
+
+
+def _confirmed_hashes(cache_dir: Path, hashes: List[str],
+                      hash_to_path: Dict[str, str]) -> Tuple[List[str], List[str]]:
+    """Split *hashes* into those that may be acted on and the rest.
+
+    Outputs themselves always qualify. A file inside a tracked directory
+    qualifies only if that directory's manifest, read and verified from the
+    cache, lists it. Anything that is not an object id never qualifies.
+    """
+    dirs = {hash_to_path.get(h, ''): h for h in hashes if h.endswith('.dir')}
+    listed: set = set()
+    for dir_hash in dirs.values():
+        listed.update(e['md5'] for e in utils.read_dir_entries(cache_dir, dir_hash) or [])
+    keep: List[str] = []
+    dropped: List[str] = []
+    for h in hashes:
+        path = hash_to_path.get(h, '')
+        inside = any(d and path.startswith(d + '/') for d in dirs)
+        if not utils.is_md5_oid(h) or (inside and h not in listed):
+            dropped.append(h)
+        else:
+            keep.append(h)
+    return keep, dropped
 
 
 def remove_cache_files(
@@ -465,9 +473,11 @@ def remove_cache_files(
         }
     
     # _collect_indexes already returns both directory manifests (.dir files)
-    # and all contained files, so no expansion is needed
-    all_hashes = manifest['files']
+    # and all contained files. DVC reads those manifests from the cache as
+    # they are, so a file inside a tracked directory is only removed if the
+    # directory's own (verified) manifest lists it.
     hash_to_path = manifest['paths']
+    all_hashes, unlisted = _confirmed_hashes(cache_dir, manifest['files'], hash_to_path)
     
     # Get cache file info (filter to files that exist)
     file_info = get_cache_file_info(cache_dir, all_hashes)
@@ -485,7 +495,11 @@ def remove_cache_files(
         ]
     
     deleted = []
-    missing = []
+    missing = [(hash_to_path.get(h, h), h) for h in unlisted]
+    if unlisted:
+        print(f"Warning: leaving {len(unlisted)} cache entr"
+              f"{'y' if len(unlisted) == 1 else 'ies'} not listed by a verified "
+              f"directory manifest (or not an object id)", file=sys.stderr)
     failed = []
     total_size = 0
     blocked = False
@@ -514,8 +528,8 @@ def remove_cache_files(
     for file_hash, cache_path, size in file_info:
         workspace_path = hash_to_path.get(file_hash, file_hash)
         
-        if size is None:
-            # File not in cache
+        if size is None or not utils.is_md5_oid(file_hash):
+            # File not in cache (or not a cache object id)
             missing.append((workspace_path, file_hash))
             continue
         
@@ -527,7 +541,7 @@ def remove_cache_files(
         else:
             # Actually delete the file
             try:
-                cache_path.unlink()
+                _unlink_object(cache_path)
                 deleted.append((workspace_path, file_hash, size))
                 if verbose:
                     size_str = f" ({utils.format_size(size)})" if show_size else ""
@@ -594,6 +608,39 @@ def expected_hash_from_path(cache_file: Path) -> str:
     return prefix + suffix
 
 
+def _is_prefix_dir(p: Path) -> bool:
+    """A real (not linked) two-hex-character object prefix directory."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(st.st_mode) and len(p.name) == 2
+            and all(c in '0123456789abcdef' for c in p.name))
+
+
+def _unlink_object(cache_path: Path) -> None:
+    """Remove the object entry ``<prefix>/<name>`` inside its cache directory.
+
+    The prefix directory is opened relative to the cache directory without
+    following links, so the removal can only ever act inside the cache (a link
+    entry itself is removed, never its target).
+    """
+    prefix_dir = cache_path.parent
+    cache_dir = prefix_dir.parent
+    if not _is_prefix_dir(prefix_dir):
+        raise OSError(f"{prefix_dir} is not a cache prefix directory")
+    cfd = os.open(cache_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        pfd = os.open(prefix_dir.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                      dir_fd=cfd)
+        try:
+            os.unlink(cache_path.name, dir_fd=pfd)
+        finally:
+            os.close(pfd)
+    finally:
+        os.close(cfd)
+
+
 def validate_cache_file(cache_file: Path) -> Tuple[bool, str, str]:
     """Validate a single cache file by checking its hash.
     
@@ -624,24 +671,25 @@ def get_parent_dir_hash(
     Returns:
         The .dir hash if found, None otherwise
     """
-    import json
-    
-    # Search all .dir files
-    for subdir in cache_dir.iterdir():
-        if not subdir.is_dir():
+    # Search all (verified) .dir manifests in real prefix dirs
+    try:
+        subdirs = list(cache_dir.iterdir())
+    except OSError:
+        return None
+    for subdir in subdirs:
+        if not _is_prefix_dir(subdir):
             continue
-        for cache_file in subdir.iterdir():
-            if not cache_file.name.endswith('.dir'):
+        try:
+            names = [p.name for p in subdir.iterdir()]
+        except OSError:
+            continue
+        for name in names:
+            dir_hash = subdir.name + name
+            if not name.endswith('.dir') or not utils.is_md5_oid(dir_hash):
                 continue
-            try:
-                with open(cache_file, 'r') as f:
-                    entries = json.load(f)
-                for entry in entries:
-                    if entry.get('md5') == file_hash:
-                        # Found it - return the full .dir hash
-                        return subdir.name + cache_file.name
-            except (json.JSONDecodeError, OSError):
-                pass
+            for entry in utils.read_dir_entries(cache_dir, dir_hash) or []:
+                if entry['md5'] == file_hash:
+                    return dir_hash
     return None
 
 
@@ -685,8 +733,13 @@ def validate_cache(
         file_hashes, hash_to_path = collect_target_hashes_via_index(targets)
         files_to_check = []
         for file_hash in file_hashes:
+            if not utils.is_md5_oid(file_hash):
+                continue  # only md5 objects are validated (and deleted by --fix)
             cache_path = hash_to_cache_path(cache_dir, file_hash)
             workspace_path = hash_to_path.get(file_hash, file_hash)
+            if not _is_prefix_dir(cache_path.parent):
+                missing.append((workspace_path, file_hash))
+                continue
             if cache_path.exists():
                 files_to_check.append((cache_path, file_hash, workspace_path))
             else:
@@ -695,12 +748,15 @@ def validate_cache(
         # Validate entire cache
         files_to_check = []
         for subdir in cache_dir.iterdir():
-            if not subdir.is_dir():
+            # Only real object prefix dirs: a link here could point anywhere.
+            if not _is_prefix_dir(subdir):
                 continue
             for cache_file in subdir.iterdir():
                 if cache_file.name.endswith('.tmp'):
                     continue  # Skip temp files
                 file_hash = subdir.name + cache_file.name
+                if not utils.is_md5_oid(file_hash):
+                    continue  # not an object (e.g. another user's temp file)
                 files_to_check.append((cache_file, file_hash, file_hash))
     
     total = len(files_to_check)
@@ -740,7 +796,7 @@ def validate_cache(
                     if fix:
                         # Delete the corrupted file
                         try:
-                            cache_path.unlink()
+                            _unlink_object(cache_path)
                             fixed.append((workspace_path, file_hash))
                             deleted_paths.add(str(cache_path))
                             if verbose:

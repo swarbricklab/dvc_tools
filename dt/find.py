@@ -14,6 +14,14 @@ from .errors import FindError
 from .utils import get_cache_dir, hash_to_cache_path
 
 
+
+def _cache_path_str(cache_dir, file_hash) -> Optional[str]:
+    """Cache path for *file_hash*, or None if it is not a usable object id."""
+    try:
+        return str(hash_to_cache_path(cache_dir, file_hash))
+    except ValueError:
+        return None
+
 def find_by_hash(
     file_hash: str,
     expand_dirs: bool = True,
@@ -89,7 +97,7 @@ def find_by_hash(
             if show_dvc_file and dvc_file:
                 result['dvc_file'] = dvc_file
             if show_cache_path and cache_dir:
-                result['cache_path'] = str(hash_to_cache_path(cache_dir, out.hash_info.value))
+                result['cache_path'] = _cache_path_str(cache_dir, out.hash_info.value)
             results.append(result)
         
         # If it's a directory and we want to expand, search inside
@@ -116,7 +124,7 @@ def find_by_hash(
                             if show_dir_file:
                                 result['dir_hash'] = dir_hash
                             if show_cache_path and cache_dir:
-                                result['cache_path'] = str(hash_to_cache_path(cache_dir, hash_info.value))
+                                result['cache_path'] = _cache_path_str(cache_dir, hash_info.value)
                             results.append(result)
             except Exception:
                 # Directory tree not available (not in cache)
@@ -155,17 +163,16 @@ def find_hash_in_repo(
         print(f"  Searching for hash {search_hash[:12]}... at {rev_str}...")
     
     # Build command
-    cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', str(repo), '.']
-    if revision:
-        cmd.extend(['--rev', revision])
-    
+    rev_opt = [f'--rev={revision}'] if revision else []
+    cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', *rev_opt,
+           '--', str(repo), '.']
+
     # If repo is a local path, run from that directory
     cwd = str(repo) if Path(repo).is_dir() else None
     if cwd:
         # For local repos, use '.' as the repo arg
-        cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', '.']
-        if revision:
-            cmd.extend(['--rev', revision])
+        cmd = ['dvc', 'list', '--json', '--show-hash', '--recursive', *rev_opt,
+               '--', '.']
     
     result = subprocess.run(
         cmd,

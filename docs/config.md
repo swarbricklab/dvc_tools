@@ -46,8 +46,8 @@ and names the scope to use instead — see
 # Personal defaults, applied in every repository (user scope)
 dt config set owner myorg
 dt config set team analysts
-dt config set cache.root /g/data/a56/dvc_cache
-dt config set remote.root /g/data/a56/dvc_remote
+dt config set cache.root /g/data/ab12/dvc_cache
+dt config set remote.root /g/data/ab12/dvc_remote
 
 # Settings that belong to this repository and its collaborators
 dt config set --project hooks.pre-commit.checks.large-files.max_size 10MB
@@ -71,7 +71,7 @@ owner: swarbricklab
 secrets:
   backend: gcp
   gcp:
-    project: swarbrick-secrets
+    project: my-gcp-project
 YAML
 
 # Them:
@@ -100,7 +100,7 @@ equally be copied into place by hand. What the command adds over `cp`:
 $ dt config import lab-defaults.yaml
 lab-defaults.yaml -> user config (/home/alice/.config/dt/config.yaml)
   + secrets.backend      gcp
-  + secrets.gcp.project  swarbrick-secrets
+  + secrets.gcp.project  my-gcp-project
   ~ owner                mine -> swarbricklab
 
 Replace 1 existing value in user config? [y/N]: y
@@ -137,8 +137,8 @@ published `dt` container images: each aborts on startup with a bare
 `TypeError`, and being immutable, none of them can be fixed.
 
 ```bash
-dt config add remote.root /g/data/px14/dvc/analysis
-dt config remove remote.root /g/data/px14/dvc/analysis
+dt config add remote.root /g/data/cd34/dvc/analysis
+dt config remove remote.root /g/data/cd34/dvc/analysis
 dt config get remote.root
 ```
 
@@ -150,20 +150,20 @@ into the chosen scope — otherwise adding one entry at user scope would silentl
 discard the entries inherited from system scope.
 
 ```
-$ dt config add remote.root /g/data/px14/dvc/analysis --user
+$ dt config add remote.root /g/data/cd34/dvc/analysis --user
 Added to remote.root in user config (6 values):
-  /g/data/a56/dvc/analysis   <- default
-  /g/data/a56/dvc/datasets
-  /g/data/a56/dvc/registries
-  /g/data/a56/dvc/remotes
-  /g/data/a56/dvc/workflows
-  /g/data/px14/dvc/analysis
+  /g/data/ab12/dvc/analysis   <- default
+  /g/data/ab12/dvc/datasets
+  /g/data/ab12/dvc/registries
+  /g/data/ab12/dvc/remotes
+  /g/data/ab12/dvc/workflows
+  /g/data/cd34/dvc/analysis
 ```
 
 A list can also be written directly, though quoting makes it error-prone:
 
 ```bash
-dt config set remote.root '[/g/data/a56/dvc/analysis, /g/data/a56/dvc/datasets]'
+dt config set remote.root '[/g/data/ab12/dvc/analysis, /g/data/ab12/dvc/datasets]'
 ```
 
 `set` does **not** apply the restriction above — it will write a list to any

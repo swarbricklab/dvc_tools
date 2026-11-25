@@ -219,8 +219,9 @@ class TestListTempClones:
         """Test finds git repos in temp clone structure."""
         tmp_clones = tmp_path / ".dt" / "tmp" / "clones"
         repo_path = tmp_clones / "github.com" / "org" / "repo"
-        repo_path.mkdir(parents=True)
-        (repo_path / ".git").mkdir()
+        for d in ("objects", "refs"):
+            (repo_path / ".git" / d).mkdir(parents=True)
+        (repo_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
         
         with patch("dt.offline.get_tmp_dir", return_value=tmp_clones):
             result = list_temp_clones()
@@ -337,8 +338,11 @@ class TestEnable:
         ]):
             with patch("dt.offline.get_ssh_remotes", return_value=[]):
                 with patch("dt.offline.save_offline_state"):
-                    with patch("subprocess.run") as mock_run:
-                        mock_run.return_value = MagicMock(returncode=0)
+                    with patch("subprocess.run") as mock_run, \
+                         patch("dt.offline.get_tmp_dir", return_value=tmp_path / "clones"), \
+                         patch("dt.utils.dvc_local_config_problem", return_value=None):
+                        mock_run.return_value = MagicMock(
+                            returncode=0, stdout="git@github.com:org/repo.git\n")
                         
                         repos, remotes = enable(verbose=False)
                         
@@ -393,3 +397,148 @@ class TestDisable:
                             repos, remotes = disable(verbose=False)
                             
                             assert remotes == ["origin"]
+
+
+# =============================================================================
+# redirect safety
+# =============================================================================
+
+import os
+import subprocess as _sp
+
+
+def _real_clone(path, origin):
+    path.mkdir(parents=True)
+    _sp.run(["git", "init", "-q", str(path)], check=True)
+    _sp.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+    return path
+
+
+class TestRedirectSafety:
+    @pytest.mark.parametrize("host", ["github.com.evil.example", "evilgithub.com",
+                                      "gitlab.com.attacker.io"])
+    def test_lookalike_host_gets_no_forge_urls(self, host):
+        urls = repo_id_to_urls(f"{host}/org/repo")
+        assert urls and all(host in u for u in urls)
+        assert not any("@github.com:" in u or "://github.com/" in u or
+                       "@gitlab.com:" in u or "://gitlab.com/" in u for u in urls)
+
+    def test_exact_host_is_case_insensitive(self):
+        assert "git@github.com:org/repo.git" in repo_id_to_urls("GitHub.com/org/repo")
+
+    def test_malformed_components_give_nothing(self):
+        assert repo_id_to_urls("github.com/../repo") == []
+
+    def test_clone_with_mismatched_origin_gets_no_redirect(self, tmp_path):
+        clones = tmp_path / ".dt" / "tmp" / "clones"
+        good = _real_clone(clones / "github.com" / "org" / "good",
+                           "git@github.com:org/good.git")
+        _real_clone(clones / "github.com" / "org" / "repo",
+                    "https://github.com.evil.example/org/repo")
+        calls = []
+        real_run = _sp.run
+
+        def run(cmd, *a, **k):
+            if cmd[:4] == ["git", "config", "--local", "--add"]:
+                calls.append(cmd)
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return real_run(cmd, *a, **k)
+
+        with patch("dt.offline.get_tmp_dir", return_value=clones), \
+             patch("dt.offline.get_ssh_remotes", return_value=[]), \
+             patch("dt.offline.save_offline_state"), \
+             patch("dt.utils.dvc_local_config_problem", return_value=None), \
+             patch("dt.offline.subprocess.run", side_effect=run):
+            repos, _ = enable(verbose=False)
+        assert repos == ["github.com/org/good"]
+        targets = {c[4] for c in calls}
+        assert targets == {f"url.{os.path.abspath(good)}.insteadOf"}
+
+    def test_listing_ignores_symlinks_and_bare_layouts(self, tmp_path):
+        clones = tmp_path / ".dt" / "tmp" / "clones"
+        real = _real_clone(tmp_path / "elsewhere", "git@github.com:org/x.git")
+        (clones / "github.com" / "org").mkdir(parents=True)
+        (clones / "github.com" / "org" / "x").symlink_to(real)
+        bare = clones / "github.com" / "org" / "bare"
+        bare.mkdir()
+        (bare / "HEAD").write_text("ref: refs/heads/main\n")
+        with patch("dt.offline.get_tmp_dir", return_value=clones):
+            assert list_temp_clones() == []
+
+    def _enable(self, clones, run=None):
+        with patch("dt.offline.get_tmp_dir", return_value=clones), \
+             patch("dt.offline.get_ssh_remotes", return_value=[]), \
+             patch("dt.offline.save_offline_state"), \
+             patch("dt.utils.dvc_local_config_problem", return_value=None):
+            if run is None:
+                return enable(verbose=False)
+            with patch("dt.offline.subprocess.run", side_effect=run):
+                return enable(verbose=False)
+
+    def test_unverified_prefix_sibling_blocks_redirect(self, tmp_path):
+        clones = tmp_path / ".dt" / "tmp" / "clones"
+        _real_clone(clones / "github.com" / "org" / "repo", "git@github.com:org/repo.git")
+        # A sibling git's prefix match would reach, with a foreign origin.
+        _real_clone(clones / "github.com" / "org" / "repo-x",
+                    "https://github.com.evil.example/org/repo-x")
+        repos, _ = self._enable(clones, run=self._recording_run([]))
+        assert repos == []
+
+    def test_verified_prefix_sibling_is_fine(self, tmp_path):
+        clones = tmp_path / ".dt" / "tmp" / "clones"
+        _real_clone(clones / "github.com" / "org" / "repo", "git@github.com:org/repo.git")
+        _real_clone(clones / "github.com" / "org" / "repo-x", "git@github.com:org/repo-x.git")
+        repos, _ = self._enable(clones, run=self._recording_run([]))
+        assert sorted(repos) == ["github.com/org/repo", "github.com/org/repo-x"]
+
+    @pytest.mark.parametrize("extra", ["second", "http"])
+    def test_multi_valued_or_http_origin_is_refused(self, tmp_path, extra):
+        clones = tmp_path / ".dt" / "tmp" / "clones"
+        path = clones / "github.com" / "org" / "repo"
+        if extra == "http":
+            _real_clone(path, "http://github.com/org/repo")
+        else:
+            _real_clone(path, "https://github.com/org/repo")
+            _sp.run(["git", "-C", str(path), "config", "--add", "remote.origin.url",
+                     "https://github.com.evil.example/org/repo"], check=True)
+        repos, _ = self._enable(clones, run=self._recording_run([]))
+        assert repos == []
+
+    def test_stale_redirects_into_clones_are_cleared(self, tmp_path):
+        clones = tmp_path / ".dt" / "tmp" / "clones"
+        stale = clones / "github.com.evil.example" / "org" / "repo"
+        unsets = []
+        real_run = _sp.run
+
+        def run(cmd, *a, **k):
+            if cmd[:4] == ["git", "config", "--local", "--get-regexp"]:
+                return MagicMock(returncode=0, stderr="",
+                                 stdout=f"url.{stale}.insteadof https://github.com/org/repo\n"
+                                        "url./elsewhere.insteadof https://x/y/z\n")
+            if cmd[:4] == ["git", "config", "--local", "--unset-all"]:
+                unsets.append(cmd[4])
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[:4] == ["git", "config", "--local", "--add"]:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return real_run(cmd, *a, **k)
+
+        clones.mkdir(parents=True)
+        with pytest.raises(OfflineError):  # no clones/remotes left to enable
+            self._enable(clones, run=run)
+        _real_clone(clones / "github.com" / "org" / "ok", "git@github.com:org/ok.git")
+        self._enable(clones, run=run)
+        assert f"url.{stale}.insteadOf" in unsets
+        assert "url./elsewhere.insteadOf" not in unsets
+
+    @staticmethod
+    def _recording_run(calls):
+        real_run = _sp.run
+
+        def run(cmd, *a, **k):
+            if cmd[:4] == ["git", "config", "--local", "--add"]:
+                calls.append(cmd)
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[:4] == ["git", "config", "--local", "--get-regexp"]:
+                return MagicMock(returncode=1, stdout="", stderr="")
+            return real_run(cmd, *a, **k)
+        return run

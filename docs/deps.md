@@ -45,17 +45,17 @@ So scanning `.dvc` files is complete, not a heuristic.
 A repo import looks like this:
 
 ```yaml
-md5: ae51b2729e737c5819ff0113342d2549
+md5: 0123456789abcdef0123456789abcdef
 frozen: true
 deps:
 - path: data/final
   repo:
-    url: git@github.com:Swarbricklab/metadata.git
-    rev_lock: 9b0730c70709fb8d73b0a142ea27250821a3e1ac
+    url: git@github.com:Myorg/data-repo.git
+    rev_lock: a1b2c3d4e5f60718293a4b5c6d7e8f9012345678
     rev: main
 outs:
-- md5: ace1a88c79ce2590e589c2bf9afb828a.dir
-  size: 1069722
+- md5: fedcba9876543210fedcba9876543210.dir
+  size: 1000000
   nfiles: 6
   hash: md5
   path: final
@@ -84,12 +84,12 @@ dt deps list
 ```
 
 ```
-Imports in github.com/swarbricklab/bcarc_portal
+Imports in github.com/myorg/example_portal
 
-  github.com/swarbricklab/bcarc_chromium  2 imports  2 revs  1.78G
-  github.com/swarbricklab/bcarc_snp       1 import  rev 838d036c  27.6k
-  github.com/swarbricklab/bcarc_wgs       5 imports  3 revs  30.4G
-  github.com/swarbricklab/metadata        1 import  rev 9b0730c7  1.02M
+  github.com/myorg/example_chromium  2 imports  2 revs  1.50G
+  github.com/myorg/example_snp       1 import  rev c3d4e5f6  20.0k
+  github.com/myorg/example_wgs       5 imports  3 revs  25.0G
+  github.com/myorg/data-repo         1 import  rev a1b2c3d4  1.00M
 
   8 source repos, 21 imports
 ```
@@ -101,9 +101,9 @@ dt deps list --include-paths
 ```
 
 ```
-  github.com/swarbricklab/bcarc_wgs       5 imports  3 revs  30.4G
-      data/sash_aggregate/purple_drivers_somatic.csv -> purple_drivers_somatic.csv
-      data/umccrise_cohort_summary.csv -> wgs_summary.csv
+  github.com/myorg/example_wgs  5 imports  3 revs  25.0G
+      data/calls/drivers.csv -> drivers.csv
+      data/cohort_summary.csv -> wgs_summary.csv
       index.csv -> wgs.csv
       ... and 2 more
 ```
@@ -122,11 +122,11 @@ dt deps list --all-branches
 ```
 
 ```
-Imports in github.com/swarbricklab/bcarc_portal (94 branches, local + origin)
+Imports in github.com/myorg/example_portal (94 branches, local + origin)
 
-  github.com/swarbricklab/bcarc_wgs        5 imports  7 revs  2.21T  94/94 branches
-  github.com/swarbricklab/brca_mega_atlas  1 import  rev 191ac509  368k  16/94 branches  NOT on origin/main
-  github.com/swarbricklab/projects         2 imports  7 revs  12.1M  85/94 branches
+  github.com/myorg/example_wgs    5 imports  7 revs  2.00T  94/94 branches
+  github.com/myorg/mega_atlas     1 import  rev d4e5f607  300k  16/94 branches  NOT on origin/main
+  github.com/myorg/project-index  2 imports  7 revs  10.0M  85/94 branches
 
   9 source repos, 24 imports
   1 source repo not present on origin/main (unmerged imports)
@@ -144,9 +144,9 @@ All repo URLs are normalised to a `host/owner/repo` id before comparison, so
 these all resolve to the same node:
 
 ```
-git@github.com:Swarbricklab/metadata.git
-https://github.com/swarbricklab/metadata
-git@github.com:swarbricklab/metadata
+git@github.com:Myorg/data-repo.git
+https://github.com/myorg/data-repo
+git@github.com:myorg/data-repo
 ```
 
 Owner/repo case is folded for `github.com`, `gitlab.com`, and `bitbucket.org`.
@@ -171,18 +171,18 @@ dt deps list --json
 
 ```json
 {
-  "target": "github.com/swarbricklab/bcarc_portal",
+  "target": "github.com/myorg/example_portal",
   "refs": [],
   "default_ref": "origin/main",
   "edges": [
     {
-      "source": "github.com/swarbricklab/metadata",
-      "source_url": "git@github.com:Swarbricklab/metadata.git",
-      "target": "github.com/swarbricklab/bcarc_portal",
+      "source": "github.com/myorg/data-repo",
+      "source_url": "git@github.com:Myorg/data-repo.git",
+      "target": "github.com/myorg/example_portal",
       "n_imports": 1,
-      "revs": ["9b0730c70709fb8d73b0a142ea27250821a3e1ac"],
-      "sample_paths": ["data/final -> clinical"],
-      "total_size": 1069722,
+      "revs": ["a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"],
+      "sample_paths": ["data/final -> final"],
+      "total_size": 1000000,
       "refs": [],
       "is_self_loop": false
     }
@@ -244,28 +244,28 @@ dt deps graph
 ```
 
 ```
-Repo dependency graph for github.com/swarbricklab/bcarc_portal
+Repo dependency graph for github.com/myorg/example_portal
   (source repos at their default branch)
 
-swarbricklab/bcarc_portal
-├── swarbricklab/bcarc_chromium  (2 imports)
-│   ├── swarbricklab/chromium-preprocessing  (1 import)
-│   │   ├── swarbricklab-registries/references  (1 import)
-│   │   │   └── swarbricklab-registries/references  (1 import)  (cycle)
-│   │   └── swarbricklab/test-data  (5 imports)
-│   │       ├── swarbricklab-registries/chromium-raw  (3 imports)
-│   │       └── swarbricklab/visium  (2 imports)
-│   └── swarbricklab/references  (1 import)  (seen above)
-├── swarbricklab/bcarc_snp  (1 import)
-│   ├── swarbricklab/projects  (1 import)
-│   │   ├── swarbricklab/bcarc_snp  (1 import)  (cycle)
+myorg/example_portal
+├── myorg/example_chromium  (2 imports)
+│   ├── myorg/preprocessing  (1 import)
+│   │   ├── example-registries/references  (1 import)
+│   │   │   └── example-registries/references  (1 import)  (cycle)
+│   │   └── myorg/fixtures  (5 imports)
+│   │       ├── example-registries/raw-registry  (3 imports)
+│   │       └── myorg/spatial-pipeline  (2 imports)
+│   └── myorg/references  (1 import)  (seen above)
+├── myorg/example_snp  (1 import)
+│   ├── myorg/project-index  (1 import)
+│   │   ├── myorg/example_snp  (1 import)  (cycle)
 ...
 
   16 repos (16 resolved), 32 edges
 
 Cycles:
-  swarbricklab-registries/references (imports from itself)
-  swarbricklab/bcarc_snp <-> swarbricklab/bcarc_visium <-> swarbricklab/bcarc_wts <-> swarbricklab/projects
+  example-registries/references (imports from itself)
+  myorg/example_snp <-> myorg/example_visium <-> myorg/example_wts <-> myorg/project-index
 ```
 
 ### Reading the tree
@@ -349,7 +349,7 @@ the small metadata lives in the user cache. Set `deps.cache_dir` to point a whol
 lab at one shared index:
 
 ```bash
-dt config set deps.cache_dir /g/data/a56/dvc-tools/repo-deps
+dt config set deps.cache_dir /g/data/ab12/dvc-tools/repo-deps
 ```
 
 Scan records are written one file per repo so concurrent refreshes cannot
@@ -376,11 +376,11 @@ truncating, so a partial index never reads as a complete one.
 ## Example
 
 ```bash
-dt deps index --org swarbricklab -v
+dt deps index --org myorg -v
 ```
 
 ```
-Import index for swarbricklab (github.com)
+Import index for myorg (github.com)
 
   repos listed:     200
   repos scanned:    20
@@ -406,22 +406,22 @@ configured `owner`.
 
 ```bash
 dt deps downstream                                  # consumers of this repo
-dt deps downstream swarbricklab/references          # of another repo
+dt deps downstream myorg/references          # of another repo
 dt deps downstream --depth 1                        # direct consumers only
-dt deps downstream --org swarbricklab --refresh     # refresh, then query
+dt deps downstream --org myorg --refresh     # refresh, then query
 dt deps downstream --format mermaid -o consumers.md
 ```
 
 ```
-Repos importing from github.com/swarbricklab-registries/references
+Repos importing from github.com/example-registries/references
 
-swarbricklab-registries/references
-├── swarbricklab/brca_atlas-data  (1 import)
-│   └── swarbricklab/brca_atlas  (12 imports)
-├── swarbricklab/mouse_immunotherapy_data  (2 imports)
-├── swarbricklab/prado-data  (1 import)
-└── swarbricklab/references  (1 import)
-    └── swarbricklab/prado-data  (9 imports)
+example-registries/references
+├── myorg/atlas-data  (1 import)
+│   └── myorg/atlas  (12 imports)
+├── myorg/study_data  (2 imports)
+├── myorg/other-data  (1 import)
+└── myorg/references  (1 import)
+    └── myorg/other-data  (9 imports)
 
   6 repos (6 resolved), 6 edges
 ```
@@ -443,7 +443,7 @@ depends on this".
 downstream view, printing both trees:
 
 ```bash
-dt deps graph --downstream --org swarbricklab
+dt deps graph --downstream --org myorg
 ```
 
 ---
@@ -486,7 +486,7 @@ Access gaps (2 repos not fully resolved):
 
   no_access -- no read access (or the repo does not exist -- GitHub does not
   distinguish). Try: dt auth request --repo <url>
-    swarbricklab/private-thing
+    myorg/private-thing
       ERROR: Repository not found.
 
   The graph below these repos is incomplete.

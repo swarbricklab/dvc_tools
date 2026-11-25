@@ -6,7 +6,7 @@ import platform
 import shlex
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -35,6 +35,28 @@ _DEFAULT_KEY_PATH = Path.home() / '.ssh' / f'id_{_DEFAULT_KEY_TYPE}'
 # Helpers
 # =============================================================================
 
+# One hostname (or IP) / one login name: nothing ssh_config would read as
+# whitespace, a pattern (*, ?, !), a comment, a quote or an option.
+_HOST_RE = None
+_USER_RE = None
+
+
+def is_valid_ssh_host(host) -> bool:
+    import re
+    global _HOST_RE
+    if _HOST_RE is None:
+        _HOST_RE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})|\[[0-9A-Fa-f:.]+\]')
+    return isinstance(host, str) and _HOST_RE.fullmatch(host) is not None
+
+
+def is_valid_ssh_user(user) -> bool:
+    import re
+    global _USER_RE
+    if _USER_RE is None:
+        _USER_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}')
+    return isinstance(user, str) and _USER_RE.fullmatch(user) is not None
+
+
 def _extract_ssh_host(url: str) -> Optional[str]:
     """Extract the hostname from an SSH or git URL.
 
@@ -43,33 +65,43 @@ def _extract_ssh_host(url: str) -> Optional[str]:
     """
     import re
 
+    if not isinstance(url, str):
+        return None
     url = url.strip()
+    if any(not c.isprintable() or c.isspace() for c in url):
+        return None
+    host = None
     # ssh://[user@]host/path
     m = re.match(r'ssh://(?:[^@]+@)?([^/:]+)', url)
     if m:
-        return m.group(1)
+        host = m.group(1)
     # Skip non-SSH scheme URLs (s3://, gs://, http://, etc.)
-    if re.match(r'[a-zA-Z][a-zA-Z0-9+.-]*://', url):
+    elif re.match(r'[a-zA-Z][a-zA-Z0-9+.-]*://', url):
         return None
-    # SCP-style: [user@]host:path  (git remotes)
-    m = re.match(r'(?:[^@]+@)?([^:]+):', url)
-    if m and '/' not in m.group(1):
-        return m.group(1)
-    return None
+    else:
+        # SCP-style: [user@]host:path  (git remotes)
+        m = re.match(r'(?:[^@]+@)?([^:]+):', url)
+        if m and '/' not in m.group(1):
+            host = m.group(1)
+    return host if is_valid_ssh_host(host) else None
 
 
 def _extract_ssh_user(url: str) -> Optional[str]:
     """Extract the username from an SSH URL, if present."""
     import re
 
+    if not isinstance(url, str):
+        return None
     url = url.strip()
-    m = re.match(r'ssh://([^@]+)@', url)
+    user = None
+    m = re.match(r'ssh://([^@/]+)@', url)
     if m:
-        return m.group(1)
-    m = re.match(r'([^@]+)@[^:]+:', url)
-    if m:
-        return m.group(1)
-    return None
+        user = m.group(1)
+    else:
+        m = re.match(r'([^@/]+)@[^:]+:', url)
+        if m:
+            user = m.group(1)
+    return user if is_valid_ssh_user(user) else None
 
 
 def _is_forge_host(host: str) -> bool:
@@ -150,7 +182,7 @@ def _key_accepted_by_host(
                 '-o', 'IdentitiesOnly=yes',
                 '-o', f'IdentityFile={key_path}',
                 '-o', 'PreferredAuthentications=publickey',
-                f'{user}@{host}',
+                '--', f'{user}@{host}',
             ],
             capture_output=True,
             text=True,
@@ -206,7 +238,25 @@ def _write_ssh_config_stanza(
     extra: Optional[Dict[str, str]] = None,
     verbose: bool = False,
 ) -> None:
-    """Append a ``Host`` stanza to the SSH config file."""
+    """Append a ``Host`` stanza to the SSH config file.
+
+    Raises:
+        ValueError: If *host*, *user* or an extra option is not a single,
+            plain token (nothing is written then).
+    """
+    if not is_valid_ssh_host(host):
+        raise ValueError(f"Refusing to write an SSH config entry for host {host!r}")
+    if user is not None and not is_valid_ssh_user(user):
+        raise ValueError(f"Refusing to write an SSH config entry for user {user!r}")
+    for k, v in (extra or {}).items():
+        # Only options that cannot run, include or redirect anything.
+        numeric = {'Port', 'ServerAliveInterval', 'ServerAliveCountMax', 'ConnectTimeout'}
+        yes_no = {'ForwardAgent', 'Compression', 'AddKeysToAgent', 'IdentitiesOnly'}
+        if not ((k in numeric and str(v).isdigit() and str(v).isascii())
+                or (k in yes_no and str(v) in ('yes', 'no'))):
+            raise ValueError(f"Refusing to write SSH option {k!r}={v!r}")
+    if any(not c.isprintable() for c in str(identity_file)):
+        raise ValueError(f"Refusing to write IdentityFile {identity_file!r}")
     lines = [f'\nHost {host}']
     lines.append(f'    HostName {host}')
     if user:
@@ -277,7 +327,7 @@ def _deploy_key_ssh_copy_id(
         if verbose:
             print(f"  Deploying key to {target} via ssh-copy-id ...")
         result = subprocess.run(
-            ['ssh-copy-id', '-i', str(pub_key), target],
+            ['ssh-copy-id', '-i', str(pub_key), '--', target],
             capture_output=False,
             stdin=None,
         )
@@ -311,7 +361,7 @@ def _deploy_key_ssh_copy_id(
         f"sh -c {shlex.quote(_AUTHORIZED_KEYS_SH)} {shlex.quote(key_text)}"
     )
     result = subprocess.run(
-        ['ssh', target, remote],
+        ['ssh', '--', target, remote],
         capture_output=False,
         stdin=None,
     )
@@ -530,8 +580,12 @@ def ssh_setup(
     username: Optional[str] = None,
     config_file: Optional[Path] = None,
     verbose: bool = False,
+    add_new_hosts: Optional[bool] = None,
 ) -> List[SSHSetupResult]:
     """Set up SSH access for every discovered SSH and git endpoint.
+
+    Hosts not yet in the SSH config are set up only with the user's
+    agreement (see ``add_new_hosts``, as for ``dt auth setup``).
 
     1. Discover endpoints and collect unique SSH hosts.
     2. Resolve the username for each non-forge host (prompt if needed).
@@ -554,7 +608,11 @@ def ssh_setup(
 
     # -- 1. Discover endpoints and collect hosts ---------------------------
     ssh_git_types = {'ssh', 'git'}
-    endpoints = discover_endpoints(type_filter=ssh_git_types, verbose=verbose)
+    from .setup import contact_gate
+    decisions: Dict[str, bool] = {}
+    endpoints = discover_endpoints(
+        type_filter=ssh_git_types, verbose=verbose,
+        may_contact=contact_gate({}, config_file, add_new_hosts, decisions))
 
     all_eps: List[Endpoint] = []
     for ep in endpoints:
@@ -577,6 +635,18 @@ def ssh_setup(
             print("No SSH hosts found in discovered endpoints.")
         return []
 
+    from .setup import _approve_new_hosts
+    new_hosts = [h for h in all_hosts if not _host_in_ssh_config(h, config_file)]
+    undecided = [h for h in new_hosts if h not in decisions]
+    if undecided:
+        agreed = _approve_new_hosts(undecided, config_file, add_new_hosts)
+        decisions.update({h: agreed for h in undecided})
+    for host in new_hosts:
+        if not decisions[host]:
+            del all_hosts[host]
+    if not all_hosts:
+        return []
+
     # -- 2. Resolve usernames BEFORE any SSH connections -------------------
     host_users: Dict[str, str] = {}
     for host, ep in all_hosts.items():
@@ -593,6 +663,15 @@ def ssh_setup(
                     f"SSH username for {host}",
                     type=str,
                 )
+
+    # Only a plain login name is ever passed to ssh or written to the config.
+    for host in list(host_users):
+        if not is_valid_ssh_user(host_users[host]):
+            print(f"  \u26a0 Skipping {host}: unusable SSH username {host_users[host]!r}")
+            del host_users[host]
+            del all_hosts[host]
+    if not all_hosts:
+        return []
 
     # -- 3. Ensure ~/.ssh and keypair exist --------------------------------
     _ensure_ssh_dir(verbose=verbose)
@@ -628,13 +707,18 @@ def ssh_setup(
 
     for host in all_hosts:
         if not _host_in_ssh_config(host, config_file):
-            _write_ssh_config_stanza(
-                host=host,
-                user=host_users[host],
-                identity_file=key_path,
-                config_path=config_file,
-                verbose=verbose,
-            )
+            try:
+                _write_ssh_config_stanza(
+                    host=host,
+                    user=host_users[host],
+                    identity_file=key_path,
+                    config_path=config_file,
+                    verbose=verbose,
+                )
+            except ValueError as exc:
+                print(f"  \u26a0 {exc}; SSH config left unchanged for it")
+                stanzas_written[host] = False
+                continue
             stanzas_written[host] = True
         else:
             stanzas_written[host] = False
@@ -649,8 +733,14 @@ def ssh_setup(
     # SSH access often doesn't have agent access (e.g. paramiko, sshfs, or
     # PBS batch jobs), so we must also verify that the *specific key file*
     # is accepted — not just that "some" authentication method works.
+    def _kept(ep: Endpoint) -> bool:
+        return (ep.type in ssh_git_types
+                and _extract_ssh_host(ep.url) in all_hosts)
+
+    check_eps = [replace(ep, children=[c for c in ep.children if _kept(c)])
+                 for ep in endpoints if _kept(ep)]
     results_check = check_endpoints(
-        endpoints=endpoints,
+        endpoints=check_eps,
         type_filter=ssh_git_types,
         verbose=False,
     )

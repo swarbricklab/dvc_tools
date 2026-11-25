@@ -48,7 +48,7 @@ content diff.
 |--------|-------------|
 | `terminal` | (default) Tree view for terminal display |
 | `json` | Raw JSON from `dvc diff --json` |
-| `table` | Markdown table from `dvc diff --md` |
+| `table` | Markdown table of status and path (as `dvc diff --md`, with names escaped) |
 | `md` | Tree view in diff code block (with colors on GitHub) |
 | `csv` | CSV with columns: change, path, old_hash, new_hash |
 | `html` | Interactive collapsible HTML tree |
@@ -193,6 +193,10 @@ anything unrecognised. To see what is registered:
 ```bash
 dt diff --list-handlers
 ```
+
+A handler's HTML output is placed in `-o html` reports as is, so a handler
+must escape anything it takes from the files it compares (for example with
+`html.escape`).
 
 ### Supported Formats
 

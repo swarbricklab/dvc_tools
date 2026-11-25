@@ -14,6 +14,7 @@ the standard local > project > user > system precedence.
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -337,32 +338,92 @@ def uninstall(verbose: bool = False) -> List[str]:
 # Check resolution
 # =============================================================================
 
+def _scope_checks(scope: str, hook_name: str) -> Dict:
+    """``hooks.<hook_name>.checks`` from one config scope (empty if unset).
+
+    Only checks with a plain, printable name are kept.
+    """
+    data = cfg.load_scope_config(scope)
+    for part in ('hooks', hook_name, 'checks'):
+        data = data.get(part) if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return {}
+    return {name: settings for name, settings in data.items()
+            if isinstance(name, str) and name and name.isprintable()}
+
+
 def _merge_check_settings(hook_name: str) -> Dict[str, Dict]:
     """Deep-merge the built-in default checks with configured overrides.
 
     The built-in :data:`DEFAULT_HOOKS_CONFIG` provides the baseline so hooks
     work out of the box without any config file being written (and without a
     high-precedence scope silently *forcing* behaviour). Configured scopes
-    override the defaults per leaf — e.g. setting ``dvc-checkout.enabled:
-    false`` at any scope disables it, while unspecified fields fall back to
-    the built-in default. To drop a default check, disable it explicitly;
-    omitting it does not remove it.
+    override the defaults per leaf, lowest precedence first — e.g. setting
+    ``dvc-checkout.enabled: false`` at any scope disables it, while
+    unspecified fields fall back to a lower scope or the built-in default.
+    To drop a default check, disable it explicitly; omitting it does not
+    remove it.
     """
     defaults = (
         DEFAULT_HOOKS_CONFIG['hooks'].get(hook_name, {}).get('checks', {})
     )
-    configured = cfg.get_value(f'hooks.{hook_name}.checks')
-    if not isinstance(configured, dict):
-        configured = {}
+    merged: Dict[str, Dict] = {
+        name: dict(settings) for name, settings in defaults.items()
+        if isinstance(settings, dict)
+    }
+    for scope in reversed(cfg.SCOPES):
+        for name, settings in _scope_checks(scope, hook_name).items():
+            if isinstance(settings, dict):
+                merged.setdefault(name, {}).update(settings)
 
-    merged: Dict[str, Dict] = {}
-    for name in list(defaults) + [n for n in configured if n not in defaults]:
-        settings = dict(defaults.get(name, {}))
-        override = configured.get(name)
-        if isinstance(override, dict):
-            settings.update(override)
-        merged[name] = settings
+    for name in list(merged):
+        settings = merged[name]
+        if settings.get('command') is None:
+            continue
+        own = _own_command(hook_name, name)
+        if own is None:
+            _note_unused_command(hook_name, name, settings['command'])
+            if name not in defaults:
+                del merged[name]
+                continue
+        settings['command'] = own
     return merged
+
+
+_noted_commands: set = set()
+
+
+def _own_command(hook_name: str, check_name: str) -> Optional[str]:
+    """The check's ``command`` from user or system config, if either sets it.
+
+    A command runs in a shell, so it is taken only from config the user
+    (or the site) wrote, never from config that came with a repository.
+    """
+    for scope in cfg.TRUSTED_SCOPES:
+        settings = _scope_checks(scope, hook_name).get(check_name)
+        if isinstance(settings, dict):
+            value = settings.get('command')
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _note_unused_command(hook_name: str, check_name: str, command) -> None:
+    key = (hook_name, check_name)
+    if key in _noted_commands:
+        return
+    _noted_commands.add(key)
+    msg = (f"dt: {hook_name}: not running {check_name!r} command "
+           f"{command!r} from repository config")
+    text = str(command)
+    if (text.isprintable() and str(check_name).isprintable()
+            and '.' not in str(check_name)):
+        msg += (f"; to run it, set it in your own config:\n"
+                f"  dt config set hooks.{hook_name}.checks.{check_name}.command "
+                f"{shlex.quote(text)}")
+    else:
+        msg += "; to run it, add it to your own dt config"
+    print(msg, file=sys.stderr)
 
 
 def _get_checks(hook_name: str) -> List[Dict]:
@@ -423,13 +484,7 @@ def _get_checks_with_sources(hook_name: str) -> List[Dict]:
             _upsert(name, settings, 'default')
 
     for scope in reversed(cfg.SCOPES):
-        scope_data = cfg.load_scope_config(scope)
-        scope_checks = (
-            scope_data
-            .get('hooks', {})
-            .get(hook_name, {})
-            .get('checks', {})
-        )
+        scope_checks = _scope_checks(scope, hook_name)
         if not isinstance(scope_checks, dict):
             continue
         for name, settings in scope_checks.items():
@@ -442,6 +497,12 @@ def _get_checks_with_sources(hook_name: str) -> List[Dict]:
             base.pop('source', None)
             base.update(settings)
             _upsert(name, base, scope)
+    for check in checks:
+        if check['command'] is not None:
+            own = _own_command(hook_name, check['name'])
+            if own is None:
+                check['command_ignored'] = check['command']
+            check['command'] = own
     return checks
 
 
@@ -568,7 +629,7 @@ def _lock_out_paths(rev: str) -> Optional[set]:
         return None
 
     result = subprocess.run(
-        ['git', 'show', f'{rev}:dvc.lock'],
+        ['git', 'show', '--end-of-options', f'{rev}:dvc.lock'],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -987,26 +1048,13 @@ def _dvc_push_needs_internet() -> bool:
 
 
 def _run_index_sync(verbose: bool = False) -> bool:
-    """Pull then push the site cache index."""
-    from . import index as index_mod
+    """No-op: the index archive mirror (dt index push|pull) was removed.
 
-    if not index_mod.is_auto_sync_enabled():
-        if verbose:
-            print("  index-sync: not configured, skipping")
-        return True
-
-    try:
-        index_mod.pull(quiet=not verbose, verbose=verbose)
-    except Exception as e:
-        if verbose:
-            print(f"  index-sync: pull warning: {e}")
-
-    try:
-        index_mod.push(quiet=not verbose, verbose=verbose)
-    except Exception as e:
-        if verbose:
-            print(f"  index-sync: push warning: {e}")
-
+    Kept so hook configs that still enable ``index-sync`` don't fail.
+    """
+    if verbose:
+        print("  index-sync: index archive mirror removed; skipping "
+              "(disable with: dt config unset hooks.pre-commit.checks.index-sync)")
     return True
 
 
@@ -1163,9 +1211,9 @@ def hook_list() -> Dict[str, List[Dict]]:
 def _get_hook_results_dir() -> Path:
     """Return the .dt/hook-results directory, creating it if needed."""
     root = utils.find_git_root() or Path.cwd()
-    results_dir = root / '.dt' / HOOK_RESULTS_DIR_NAME
-    results_dir.mkdir(parents=True, exist_ok=True)
-    return results_dir
+    # .dt and .dt/hook-results must be real directories in the repo: a
+    # committed link here would redirect writes and `--clear` deletions.
+    return utils.dt_subdir(HOOK_RESULTS_DIR_NAME, root=Path(root))
 
 
 def _save_hook_result(

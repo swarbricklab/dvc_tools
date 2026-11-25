@@ -711,13 +711,13 @@ class TestCacheRootFromOdbPath:
 
     def test_strips_files_md5_suffix(self):
         assert utils.cache_root_from_odb_path(
-            Path('/g/data/a56/dvc/cache/files/md5')
-        ) == Path('/g/data/a56/dvc/cache')
+            Path('/g/data/ab12/dvc/cache/files/md5')
+        ) == Path('/g/data/ab12/dvc/cache')
 
     def test_leaves_bare_root_alone(self):
         assert utils.cache_root_from_odb_path(
-            Path('/g/data/a56/dvc/cache')
-        ) == Path('/g/data/a56/dvc/cache')
+            Path('/g/data/ab12/dvc/cache')
+        ) == Path('/g/data/ab12/dvc/cache')
 
     def test_does_not_strip_partial_match(self):
         """`md5` without a `files` parent is a real directory name."""
@@ -840,7 +840,7 @@ class TestDescribeMixedTree:
     def test_names_the_files_and_the_dvcignore_remedy(self):
         msg = utils.describe_mixed_tree(
             ['.gitignore'], 'data/annotations',
-            'git@github.com:swarbricklab/images.git', action='rebuild',
+            'git@github.com:swarbricklab/image-repo.git', action='rebuild',
         )
         assert 'data/annotations' in msg
         assert '.gitignore' in msg
@@ -944,3 +944,433 @@ class TestUnresolvableTargetsInsideTrackedDir:
     def test_file_under_untracked_dir_is_unresolvable(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         assert utils.unresolvable_targets(['dir/b.txt']) == ['dir/b.txt']
+
+
+class TestRevAndPathValidation:
+    @pytest.mark.parametrize('rev', [
+        'deadbeef', 'a' * 40, 'main', 'feature/x-y_z', 'v1.2.3', 'HEAD~1',
+        'v1^{commit}', 'release@2024', 'fix#123', 'release=1',
+    ])
+    def test_accepts_normal_revs(self, rev):
+        assert utils.is_valid_git_rev(rev)
+
+    @pytest.mark.parametrize('rev', [
+        None, '', '-x', '--upload-pack=x', 'a b', 'a:b', 'a..b', 'a\nb', 'abc\n', 'a' * 256,
+    ])
+    def test_rejects_malformed_revs(self, rev):
+        assert not utils.is_valid_git_rev(rev)
+
+    @pytest.mark.parametrize('path,ok', [
+        ('data/x.csv', True), ('data', True), ('', False), ('-r', False),
+        ('--all', False), ('a\nb', False), (None, False),
+    ])
+    def test_repo_path(self, path, ok):
+        assert utils.is_valid_repo_path(path) is ok
+
+
+class TestDvcLocalConfigProblem:
+    def _repo(self, tmp_path):
+        repo = tmp_path / 'repo'
+        (repo / '.dvc').mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        return repo
+
+    def test_clean_repo_is_fine(self, tmp_path):
+        repo = self._repo(tmp_path)
+        assert utils.dvc_local_config_problem(repo) is None
+        (repo / '.dvc' / 'config.local').write_text('[core]\n')
+        (repo / '.dvc' / 'tmp').mkdir()
+        assert utils.dvc_local_config_problem(repo) is None
+
+    def test_not_a_dvc_repo_is_left_to_dvc(self, tmp_path):
+        assert utils.dvc_local_config_problem(tmp_path) is None
+
+    def test_symlinked_config_local(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config.local').symlink_to(tmp_path / 'elsewhere')
+        assert 'not a regular file' in utils.dvc_local_config_problem(repo)
+
+    def test_hard_linked_config_local(self, tmp_path):
+        repo = self._repo(tmp_path)
+        other = tmp_path / 'other'
+        other.write_text('')
+        os.link(other, repo / '.dvc' / 'config.local')
+        assert 'hard links' in utils.dvc_local_config_problem(repo)
+
+    def test_symlinked_dvc_dir(self, tmp_path):
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        (repo / '.dvc').symlink_to(tmp_path)
+        assert 'not a directory' in utils.dvc_local_config_problem(repo)
+
+    def test_symlinked_tmp_dir_and_links_inside(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'tmp').symlink_to(tmp_path)
+        assert 'not a directory' in utils.dvc_local_config_problem(repo)
+        (repo / '.dvc' / 'tmp').unlink()
+        (repo / '.dvc' / 'tmp').mkdir()
+        (repo / '.dvc' / 'tmp' / 'lock').symlink_to(tmp_path / 'x')
+        assert 'is a link' in utils.dvc_local_config_problem(repo)
+
+    def test_tracked_config_local(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config.local').write_text('[core]\n')
+        subprocess.run(['git', '-C', str(repo), 'add', '-f', '.dvc/config.local'], check=True)
+        assert 'tracks DVC local state' in utils.dvc_local_config_problem(repo)
+
+    def test_found_from_a_subdirectory(self, tmp_path, monkeypatch):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config.local').symlink_to(tmp_path / 'x')
+        (repo / 'sub').mkdir()
+        monkeypatch.chdir(repo / 'sub')
+        assert 'not a regular file' in utils.dvc_local_config_problem()
+
+    def test_symlinked_project_config(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config').symlink_to(tmp_path / 'x')
+        assert 'not a regular file' in utils.dvc_local_config_problem(repo)
+
+    def test_git_failure_fails_closed(self, tmp_path):
+        repo = tmp_path / 'repo'
+        (repo / '.dvc').mkdir(parents=True)
+        (repo / '.git').mkdir()  # not a valid git dir
+        assert 'could not check' in utils.dvc_local_config_problem(repo)
+
+    def test_nested_links_under_tmp_are_not_flagged(self, tmp_path):
+        repo = self._repo(tmp_path)
+        exp = repo / '.dvc' / 'tmp' / 'exps' / 'tmpabc'
+        exp.mkdir(parents=True)
+        (exp / 'ref').symlink_to(tmp_path)
+        assert utils.dvc_local_config_problem(repo) is None
+
+    def test_inherited_git_env_is_ignored(self, tmp_path, monkeypatch):
+        repo = self._repo(tmp_path)
+        (repo / '.dvc' / 'config.local').write_text('')
+        subprocess.run(['git', '-C', str(repo), 'add', '-f', '.dvc/config.local'], check=True)
+        other = tmp_path / 'other'
+        subprocess.run(['git', 'init', '-q', str(other)], check=True)
+        monkeypatch.setenv('GIT_DIR', str(other / '.git'))
+        assert 'tracks DVC local state' in utils.dvc_local_config_problem(repo)
+
+    def test_ensure_dt_gitignore_refuses_symlinked_dt(self, tmp_path):
+        from dt.errors import DTError
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (repo / '.dt').symlink_to(outside)
+        with pytest.raises(DTError, match='Refusing'):
+            utils.ensure_dt_gitignore(repo)
+        assert list(outside.iterdir()) == []
+
+    def test_tracked_in_subdir_dvc_project(self, tmp_path):
+        outer = tmp_path / 'mono'
+        sub = outer / 'proj'
+        (sub / '.dvc').mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q', str(outer)], check=True)
+        (sub / '.dvc' / 'config.local').write_text('')
+        subprocess.run(['git', '-C', str(outer), 'add', '-f', 'proj/.dvc/config.local'], check=True)
+        assert 'tracks DVC local state' in utils.dvc_local_config_problem(sub)
+
+    def test_no_scm_repo_is_fine(self, tmp_path):
+        repo = tmp_path / 'noscm'
+        (repo / '.dvc').mkdir(parents=True)
+        assert utils.dvc_local_config_problem(repo) is None
+
+    def test_committed_symlink_never_written_through(self, tmp_path):
+        """End to end: a source clone's committed config.local link."""
+        from dt import import_data
+        from dt.errors import ImportError_
+        target = tmp_path / 'victim-config.local'
+        target.write_text('[core]\n    remote = mine\n')
+        clone = self._repo(tmp_path)
+        (clone / '.dvc' / 'config.local').symlink_to(target)
+        subprocess.run(['git', '-C', str(clone), 'add', '-f', '.dvc/config.local'], check=True)
+        with pytest.raises(ImportError_, match='Refusing'):
+            import_data.configure_clone_cache(clone, str(tmp_path / 'attacker-cache'))
+        assert target.read_text() == '[core]\n    remote = mine\n'
+
+
+class TestObjectIdPaths:
+    @pytest.mark.parametrize('oid', ['0' * 32, 'a' * 32 + '.dir', '0123456789abcdef' * 2])
+    def test_valid_md5_ids(self, oid):
+        assert utils.is_md5_oid(oid)
+        prefix, rest = utils.oid_path_parts(oid)
+        assert prefix == oid[:2] and '/' not in rest
+
+    @pytest.mark.parametrize('oid', [
+        'ab/../../../../etc/x.dir', 'a/' + 'b' * 30 + '.dir', '..' + 'a' * 30,
+        'A' * 32, 'g' * 32, 'a' * 31, 'a' * 33, 'a' * 32 + '.dir\n', '', None,
+    ])
+    def test_invalid_md5_ids_rejected(self, oid):
+        assert not utils.is_md5_oid(oid)
+        with pytest.raises(ValueError):
+            utils.oid_path_parts(oid)
+
+    @pytest.mark.parametrize('oid', ['ab/c', '..cdef', 'a', 'ab..', 'x\0y'])
+    def test_non_strict_still_blocks_escape(self, oid, tmp_path):
+        with pytest.raises(ValueError):
+            utils.hash_to_cache_path(tmp_path, oid)
+
+    def test_non_strict_allows_other_hash_kinds(self, tmp_path):
+        assert utils.hash_to_cache_path(tmp_path, 'abc123etag-5') == tmp_path / 'ab' / 'c123etag-5'
+
+
+class TestDtDirLinksAreRefused:
+    def _repo(self, tmp_path):
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        return repo
+
+    def test_hook_results_link_is_not_written_or_cleared(self, tmp_path, monkeypatch):
+        from dt import install
+        from dt.errors import DTError
+        repo = self._repo(tmp_path)
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (outside / 'keep.json').write_text('{}')
+        (repo / '.dt').mkdir()
+        (repo / '.dt' / install.HOOK_RESULTS_DIR_NAME).symlink_to(outside)
+        monkeypatch.chdir(repo)
+        with pytest.raises(DTError, match='real directory'):
+            install._save_hook_result('c', 'pre-commit', True, 'out')
+        assert install.clear_hook_results() == 0
+        assert install.count_unread_results() == 0
+        assert sorted(p.name for p in outside.iterdir()) == ['keep.json']
+
+    def test_dvcignore_link_is_left_unchanged(self, tmp_path):
+        from dt.errors import DTError
+        repo = self._repo(tmp_path)
+        target = tmp_path / 'victim.cfg'
+        target.write_text('strict=1\n')
+        (repo / '.dvcignore').symlink_to(target)
+        with pytest.raises(DTError, match='regular file'):
+            utils.ensure_dvcignore(repo)
+        assert target.read_text() == 'strict=1\n'
+
+    def test_dt_subdir_refuses_links_at_any_level(self, tmp_path):
+        from dt.errors import DTError
+        repo = self._repo(tmp_path)
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (repo / '.dt').mkdir()
+        (repo / '.dt' / 'tmp').symlink_to(outside)
+        with pytest.raises(DTError):
+            utils.dt_subdir('tmp', 'push', root=repo)
+        assert list(outside.iterdir()) == []
+
+    def test_local_config_write_refuses_linked_dt(self, tmp_path, monkeypatch):
+        from dt import config as cfg
+        from dt.errors import DTError
+        repo = self._repo(tmp_path)
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (repo / '.dt').symlink_to(outside)
+        monkeypatch.chdir(repo)
+        with patch('dt.config.get_config_paths',
+                   return_value={'local': repo / '.dt' / 'config.local.yaml'}):
+            with pytest.raises(DTError):
+                cfg.set_values({'owner': 'x'}, scope='local')
+        assert list(outside.iterdir()) == []
+
+
+class TestProjectRootMustBeTrusted:
+    """A .git/.dt in someone else's directory is not this user's project."""
+
+    @pytest.fixture
+    def foreign(self, tmp_path, monkeypatch):
+        """tmp_path with a .git and .dt/config.yaml, made to look foreign."""
+        (tmp_path / '.git').mkdir()
+        (tmp_path / '.dt').mkdir()
+        (tmp_path / '.dt' / 'config.yaml').write_text('owner: someone-else\n')
+        sub = tmp_path / 'work'
+        sub.mkdir()
+        monkeypatch.chdir(sub)
+        real = os.geteuid()
+        monkeypatch.setattr(utils.os, 'geteuid', lambda: real + 1)
+        monkeypatch.setattr(utils, '_trusted_cache', {})
+        return tmp_path
+
+    def test_foreign_root_is_located_but_not_trusted(self, foreign):
+        assert utils.find_project_root() == foreign.resolve()
+        assert utils.is_trusted_root(foreign.resolve()) is False
+
+    def test_foreign_project_config_is_ignored(self, foreign):
+        from dt import config as cfg
+        assert cfg.get_value('owner') != 'someone-else'
+        assert cfg.load_scope_config('project') == {}
+
+    def test_no_dt_state_or_config_writes_there(self, foreign):
+        """Not in the foreign root, and not in the user's own subfolder of it."""
+        from dt import config as cfg
+        from dt.errors import DTError
+        for call in (utils.get_dt_dir, lambda: utils.dt_subdir('tmp'),
+                     utils.ensure_dt_gitignore,
+                     lambda: cfg.set_value('owner', 'x', scope='project'),
+                     lambda: cfg.set_value('owner', 'x', scope='local'),
+                     lambda: cfg.unset_value('owner', scope='project')):
+            with pytest.raises(DTError):
+                call()
+        assert not (foreign / '.dt' / 'tmp').exists()
+        assert not (foreign / '.dt' / '.gitignore').exists()
+        assert not (foreign / 'work' / '.dt').exists()
+
+    def test_init_refuses_before_doing_anything(self, foreign):
+        from dt import init as init_mod
+        from dt.errors import DTError
+        with patch.object(init_mod, 'init_git') as git:
+            with pytest.raises(DTError):
+                init_mod.init_project(repo_path=foreign, verbose=False)
+        git.assert_not_called()
+
+
+class TestTrustedRootDetails:
+    def test_foreign_marker_in_own_dir(self, tmp_path, monkeypatch):
+        (tmp_path / '.git').mkdir()
+        real_lstat = os.lstat
+        st = real_lstat(tmp_path)
+
+        class _Other:
+            st_uid = os.geteuid() + 1
+            st_mode = st.st_mode
+        monkeypatch.setattr(utils, '_trusted_cache', {})
+        monkeypatch.setattr(utils.os, 'lstat', lambda p, *a, **k: _Other()
+                            if str(p).endswith('/.git') else real_lstat(p, *a, **k))
+        assert utils.is_trusted_root(tmp_path) is False
+
+    def test_root_not_yet_created_is_ours(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(utils, '_trusted_cache', {})
+        assert utils.is_trusted_root(tmp_path / 'new') is True
+
+    def test_untrusted_note_printed_once(self, tmp_path, monkeypatch, capsys):
+        real = os.geteuid()
+        monkeypatch.setattr(utils.os, 'geteuid', lambda: real + 1)
+        monkeypatch.setattr(utils, '_trusted_cache', {})
+        monkeypatch.setattr(utils, '_warned_untrusted', set())
+        for _ in range(3):
+            utils.is_trusted_root(tmp_path)
+            utils._trusted_cache.clear()
+        assert capsys.readouterr().err.count('ignoring') == 1
+
+
+class TestSharedDirModeNeverFollowsForeignLinks:
+    def test_link_owned_by_someone_else_is_not_followed(self, tmp_path, monkeypatch):
+        import stat as stat_mod
+        victim = tmp_path / 'private'
+        victim.mkdir(mode=0o700)
+        before = stat_mod.S_IMODE(victim.stat().st_mode)
+        link = tmp_path / 'store' / '.dt-verify'
+        link.parent.mkdir()
+        link.symlink_to(victim)
+        real_lstat = os.lstat
+
+        class _Other:
+            def __init__(self, st):
+                self.st_mode, self.st_uid = st.st_mode, os.geteuid() + 1
+        monkeypatch.setattr(utils.os, 'lstat', lambda p, *a, **k:
+                            _Other(real_lstat(p)) if str(p) == str(link) else real_lstat(p, *a, **k))
+        assert utils.set_group_writable(link) is False
+        assert stat_mod.S_IMODE(victim.stat().st_mode) == before
+
+    def test_real_directory_is_changed(self, tmp_path):
+        import stat as stat_mod
+        d = tmp_path / 'd'
+        d.mkdir(mode=0o700)
+        assert utils.set_group_writable(d, mode=0o2770) is True
+        assert stat_mod.S_IMODE(d.stat().st_mode) == 0o2770
+
+    def test_md5_prefix_link_is_left_alone(self, tmp_path):
+        import stat as stat_mod
+        victim = tmp_path / 'private'
+        victim.mkdir(mode=0o700)
+        before = stat_mod.S_IMODE(victim.stat().st_mode)
+        store = tmp_path / 'store'
+        (store / 'files' / 'md5').mkdir(parents=True)
+        (store / 'files' / 'md5' / 'ab').symlink_to(victim)
+        failed = utils.create_md5_subdirs(store, mode=0o2770)
+        assert failed == 1
+        assert stat_mod.S_IMODE(victim.stat().st_mode) == before
+        assert stat_mod.S_IMODE((store / 'files' / 'md5' / '00').stat().st_mode) == 0o2770
+
+    def test_new_store_files_dir_gets_shared_mode(self, tmp_path):
+        import stat as stat_mod
+        store = tmp_path / 'store'
+        assert utils.create_md5_subdirs(store, mode=0o2770) == 0
+        for d in (store / 'files', store / 'files' / 'md5', store / 'files' / 'md5' / 'ff'):
+            assert stat_mod.S_IMODE(d.stat().st_mode) == 0o2770
+
+    def test_linked_files_dir_is_refused(self, tmp_path):
+        import stat as stat_mod
+        victim = tmp_path / 'private'
+        victim.mkdir(mode=0o700)
+        before = stat_mod.S_IMODE(victim.stat().st_mode)
+        store = tmp_path / 'store'
+        store.mkdir()
+        (store / 'files').symlink_to(victim)
+        with pytest.raises(OSError):
+            utils.create_md5_subdirs(store, mode=0o2770)
+        assert stat_mod.S_IMODE(victim.stat().st_mode) == before
+        assert list(victim.iterdir()) == []
+
+    def test_cache_runs_link_is_refused(self, tmp_path):
+        from dt import cache
+        from dt.errors import CacheError
+        victim = tmp_path / 'private'
+        victim.mkdir(mode=0o700)
+        store = tmp_path / 'cache'
+        store.mkdir()
+        (store / 'runs').symlink_to(victim)
+        with pytest.raises(CacheError):
+            cache.init_cache_structure(store)
+        assert list(victim.iterdir()) == []
+
+
+class TestGitNetEnv:
+    def test_ext_transport_refused_even_if_config_allows(self, tmp_path, monkeypatch):
+        import subprocess
+        from dt import utils
+        marker = tmp_path / 'ran'
+        monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
+        monkeypatch.setenv('GIT_CONFIG_KEY_0', 'protocol.allow')
+        monkeypatch.setenv('GIT_CONFIG_VALUE_0', 'always')
+        monkeypatch.setenv('GIT_ALLOW_PROTOCOL', 'ext:fd:file')
+        result = subprocess.run(
+            ['git', 'clone', '--', f'ext::sh -c touch% {marker}', str(tmp_path / 'c')],
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=30)
+        assert result.returncode != 0
+        assert not marker.exists()
+
+    def test_local_clone_still_works(self, tmp_path):
+        import subprocess
+        from dt import utils
+        src = tmp_path / 'src'
+        subprocess.run(['git', 'init', '-q', str(src)], check=True)
+        subprocess.run(['git', '-C', str(src), '-c', 'user.name=t', '-c',
+                        'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 'x'],
+                       check=True)
+        result = subprocess.run(
+            ['git', 'clone', '-q', '--', str(src), str(tmp_path / 'c')],
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+
+
+def test_other_users_repo_gets_plain_hint(tmp_path, monkeypatch):
+    import subprocess
+    from unittest.mock import MagicMock
+    from dt import utils
+    (tmp_path / '.dvc').mkdir()
+    (tmp_path / '.dvc' / 'config').write_text('')
+    (tmp_path / '.git').mkdir()
+    real_run = subprocess.run
+
+    def fake_run(cmd, *a, **k):
+        if 'ls-files' in cmd:
+            return MagicMock(returncode=128, stdout='',
+                             stderr="fatal: detected dubious ownership in repository")
+        return real_run(cmd, *a, **k)
+    monkeypatch.setattr(utils.subprocess, 'run', fake_run)
+    msg = utils.dvc_local_config_problem(tmp_path)
+    assert 'your own clone' in msg and 'dt clone' in msg

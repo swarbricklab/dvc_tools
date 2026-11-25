@@ -45,6 +45,23 @@ class Identity:
         }
 
 
+def own_config_value(key: str):
+    """*key* from user or system config only.
+
+    Who the user is and where their requests go are not a repository's to
+    say: a value for *key* in a repository's ``.dt`` config is ignored (with
+    a warning, via :func:`config.get_trusted_value_with_scope`).
+    """
+    value, scope = cfg.get_trusted_value_with_scope(key)
+    if scope in cfg.TRUSTED_SCOPES:
+        return value
+    if scope is not None:
+        import sys
+        print(f"Warning: ignoring {key} from {scope} config (set it in "
+              f"user or system config)", file=sys.stderr)
+    return None
+
+
 def get_identities() -> List[Identity]:
     """Read stored identities from config + local username.
 
@@ -65,7 +82,7 @@ def get_identities() -> List[Identity]:
 
     for key, label in _IDENTITY_KEYS:
         try:
-            val = cfg.get_value(key)
+            val = own_config_value(key)
             if val:
                 ids.append(Identity(system=label, value=str(val), source='config'))
         except Exception:
@@ -320,7 +337,9 @@ def save_detected_identities(detected: List[Identity]) -> int:
 
         # Check if config already has this value
         try:
-            existing = cfg.get_value(key)
+            existing = cfg.load_scope_config('user')
+            for part in key.split('.'):
+                existing = existing.get(part) if isinstance(existing, dict) else None
             if str(existing) == ident.value:
                 continue  # Already saved
         except Exception:

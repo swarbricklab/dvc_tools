@@ -57,14 +57,10 @@ def get_file_sizes(file_hashes: List[str]) -> Dict[str, int]:
         return sizes
 
     for file_hash in file_hashes:
-        # Handle .dir suffix
-        hash_clean = file_hash.replace('.dir', '')
-        prefix = hash_clean[:2]
-        suffix = hash_clean[2:]
-        if file_hash.endswith('.dir'):
-            suffix += '.dir'
-
-        cache_file = cache_dir / prefix / suffix
+        try:
+            cache_file = utils.hash_to_cache_path(cache_dir, file_hash)
+        except ValueError:
+            continue  # not an object id
         if cache_file.exists():
             try:
                 sizes[file_hash] = cache_file.stat().st_size

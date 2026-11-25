@@ -146,9 +146,7 @@ def ensure_v3_cache_entry(
     dest = cache_ops.get_cache_file_path(
         md5 + suffix, cache_root, use_v3_layout=True,
     )
-    if not dest.exists():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(content)
+    cache_ops.write_object(dest, content)
     return dest
 
 
@@ -284,7 +282,14 @@ def migrate_directory_output(
         out['hash'] = 'md5'
         return out
 
-    old_manifest = json.loads(dir_cache_path.read_bytes())
+    from .cache_ops import read_dir_manifest
+    raw = read_dir_manifest(dir_cache_path, old_md5)
+    if raw is None:
+        raise MigrateError(
+            f"{rel_path}: the cached directory manifest {old_md5[:12]}… "
+            f"({dir_cache_path}) could not be read or does not match its "
+            f"hash; not migrating from it.")
+    old_manifest = json.loads(raw)
 
     # Re-hash each child file from cache, building a new Tree
     new_tree = Tree()

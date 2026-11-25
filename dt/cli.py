@@ -50,6 +50,12 @@ from .archive import backends as archive_backends
 from .archive import registry as archive_registry
 
 
+
+def _own_username():
+    """The ``username`` setting from user or system config (not a repo's)."""
+    value, scope = cfg.get_trusted_value_with_scope('username')
+    return value if scope in cfg.TRUSTED_SCOPES else None
+
 @click.group()
 @click.version_option(package_name='dvc-tools')
 def cli():
@@ -104,7 +110,7 @@ def init(name, owner, team, cache_root, remote_root, site_cache_root, site_cache
 @click.argument('repository', metavar='REPOSITORY')
 @click.argument('path', required=False)
 @click.option('--owner', help='Override the GitHub owner for short names')
-@click.option('--username', '-u', default=lambda: cfg.get_value('username'), help='Default SSH username for auth setup (default: username from config)')
+@click.option('--username', '-u', default=lambda: _own_username(), help='Default SSH username for auth setup (default: username from config)')
 @click.option('--no-init', is_flag=True,
               help='Skip cache, site-cache and remote setup after cloning')
 @click.option('--no-submodules', is_flag=True, help='Skip cloning git submodules')
@@ -119,9 +125,12 @@ def init(name, owner, team, cache_root, remote_root, site_cache_root, site_cache
 @click.option('--no-hooks', is_flag=True, help='Skip installing git hooks and merge driver')
 @click.option('--rev', default=None, help='Check out a specific revision after cloning')
 @click.option('--overwrite', is_flag=True, help='Remove the target directory if it already exists')
+@click.option('--add-ssh-hosts', is_flag=True, default=None,
+              help='Add hosts named by the project\'s remotes to ~/.ssh/config '
+                   'without asking')
 def clone(repository, path, owner, username, no_init, no_submodules, cache_name, remote_name,
           site_cache_root, site_cache_path, no_site_cache,
-          shallow, do_pull, no_auth, no_hooks, rev, overwrite):
+          shallow, do_pull, no_auth, no_hooks, rev, overwrite, add_ssh_hosts):
     """Clone an existing DVC project from GitHub.
 
     REPOSITORY can be either:
@@ -162,6 +171,7 @@ def clone(repository, path, owner, username, no_init, no_submodules, cache_name,
             no_hooks=no_hooks,
             rev=rev,
             overwrite=overwrite,
+            add_ssh_hosts=add_ssh_hosts,
         )
     except clone_mod.CloneError as e:
         raise click.ClickException(str(e))
@@ -327,7 +337,7 @@ def config_add(key, value, local, project, user, system):
 
     \b
     Examples:
-        dt config add remote.root /g/data/px14/dvc/analysis
+        dt config add remote.root /g/data/cd34/dvc/analysis
         dt config list | grep remote.root
     """
     if _count_scope_flags(local, project, user, system) > 1:
@@ -361,7 +371,7 @@ def config_remove(key, value, local, project, user, system):
 
     \b
     Examples:
-        dt config remove remote.root /g/data/px14/dvc/analysis
+        dt config remove remote.root /g/data/cd34/dvc/analysis
     """
     if _count_scope_flags(local, project, user, system) > 1:
         raise click.UsageError("Only one scope flag can be specified.")
@@ -517,7 +527,6 @@ _PATH_KEYS = (
     'cache.root',
     'remote.root',
     'site_cache.root',
-    'index.mirror_root',
     'archive.staging_dir',
     'archive.registry_path',
     'deps.cache_dir',
@@ -981,7 +990,7 @@ def _run_perms(kind, do_fix, sticky, allow_other, jobs, json_output, verbose,
                 reports, fixed_mode=do_fix, sticky=sticky,
             ))
 
-        if do_fix and any(r.unfixed for r in reports):
+        if do_fix and any(r.unfixed or r.links or r.inaccessible for r in reports):
             raise SystemExit(1)
 
     except errors.CleanError as e:
@@ -1668,8 +1677,12 @@ def remote_quarantine(remote_name, from_report, from_list, run_verify,
             click.echo("No bad blobs to quarantine.")
             return
 
+        # A saved report lives where other users can write it, so its
+        # entries are re-checked before anything moves; a fresh verify or an
+        # operator-supplied list is taken as given.
         result = remote_quarantine_mod.quarantine(
-            path, entries, verbose=verbose, dry_run=dry_run)
+            path, entries, verbose=verbose, dry_run=dry_run,
+            confirm=not (run_verify or from_list))
 
         if json_output:
             click.echo(_json.dumps(result, indent=2))
@@ -1685,6 +1698,11 @@ def remote_quarantine(remote_name, from_report, from_list, run_verify,
                    f"({n_bad} bad + {n_dir} enclosing .dir) from {name}.")
         if result['quarantine_dir'] and not dry_run:
             click.echo(f"  -> {result['quarantine_dir']}")
+        if result.get('refused'):
+            click.echo(f"  Refused {len(result['refused'])} report entr"
+                       f"{'ies' if len(result['refused']) != 1 else 'y'} that "
+                       f"are not actually bad (e.g. {result['refused'][0]['path']}: "
+                       f"{result['refused'][0]['reason']}).")
         if result['missing']:
             click.echo(f"  {len(result['missing'])} listed blob(s) already "
                        f"absent from the remote.")
@@ -1749,6 +1767,9 @@ def remote_copy(args, as_name, force_copy, group_writable, jobs, verbose):
                f"{utils.format_size(result['bytes'])}"
                + (f", {result['skipped']:,} skipped"
                   if result['skipped'] else ""))
+    if result.get('links'):
+        click.echo(f"  Warning: {len(result['links'])} symbolic link(s) in the "
+                   f"source were not copied (e.g. {result['links'][0]})")
     if result['registered']:
         click.echo(f"  Registered DVC remote '{result['registered']}' "
                    f"-> {result['dest']}")
@@ -1981,7 +2002,11 @@ def remote_fsck(remote_name, repair, json_output, verbose):
                 f"Remote '{report.remote_name}' ({report.layout}): "
                 f"{report.total} symlink(s) — "
                 f"{len(report.resolvable)} resolvable, "
-                f"{len(report.dangling)} dangling."
+                f"{len(report.dangling)} dangling"
+                + (f", {len(report.linked_prefix_dirs)} linked prefix "
+                   f"director{'y' if len(report.linked_prefix_dirs) == 1 else 'ies'}"
+                   if report.linked_prefix_dirs else '')
+                + "."
             )
             if repair:
                 click.echo(f"  Repaired: {repaired}")
@@ -1994,7 +2019,8 @@ def remote_fsck(remote_name, repair, json_output, verbose):
                                f"(use --json for the full list)")
             else:
                 for f in report.findings[:20]:
-                    state = "ok" if f.resolves else "DANGLING"
+                    state = ("LINKED DIR" if f.is_prefix_dir
+                             else "ok" if f.resolves else "DANGLING")
                     click.echo(f"  [{state}] {f.rel} ({f.owner}) -> {f.target}")
                 if report.total > 20:
                     click.echo(f"  ... and {report.total - 20} more "
@@ -2437,7 +2463,8 @@ def remote_archive_restore(name, to_path, object_hash, prefix, verbose):
 
     Without --object or --prefix, performs a full restore. Without
     --to, restores to the manifest's source_remote path (i.e. puts the
-    data back where it came from before pruning).
+    data back where it came from before pruning), after you type that
+    path to confirm it.
     """
     try:
         written = archive_ops.restore_archive(
@@ -2571,10 +2598,16 @@ def remote_archive_build_prefix(name, prefix, staging_dir):
 @click.option('--force', is_flag=True,
               help='Allow pruning when extras outside files/md5/ exist '
                    '(NEVER bypasses verify).')
-def remote_archive_prune(name, yes, force):
+@click.option('--source', 'source', type=click.Path(), default=None,
+              help='The remote directory to prune; must be the one the '
+                   'archive was made from. Without it, you are asked to '
+                   'type the path (even with --yes).')
+def remote_archive_prune(name, yes, force, source):
     """Delete the on-disk DVC remote after verifying its archive."""
     try:
-        result = archive_ops.prune_archive(name, yes=yes, force=force)
+        result = archive_ops.prune_archive(
+            name, yes=yes, force=force,
+            source=Path(source) if source else None)
     except errors.ArchiveError as e:
         raise click.ClickException(str(e))
     click.echo(click.style(
@@ -2647,7 +2680,7 @@ def _ensure_remote_ref_fresh(rev):
                          default=True, err=True):
             click.echo(f"  Fetching {remote}/{branch}…", err=True)
             result = subprocess.run(
-                ['git', 'fetch', remote, branch],
+                ['git', 'fetch', '--end-of-options', remote, branch],
                 capture_output=True, text=True,
             )
             if result.returncode != 0:
@@ -2897,7 +2930,7 @@ def auth():
 
 
 @auth.command('setup')
-@click.option('-u', '--username', default=lambda: cfg.get_value('username'),
+@click.option('-u', '--username', default=lambda: _own_username(),
               help='Default SSH username for remote hosts (default: username from config).')
 @click.option('--config', 'config_path',
               type=click.Path(exists=True, dir_okay=False),
@@ -2909,9 +2942,13 @@ def auth():
               help='SSH config file path (default: ~/.ssh/config).')
 @click.option('--repo', 'repo_url', default=None,
               help='Set up access to a remote repo (URL or short name).')
+@click.option('--add-ssh-hosts', is_flag=True, default=None,
+              help='Add hosts named by the project\'s remotes to the SSH '
+                   'config without asking.')
 @click.option('-v', '--verbose', is_flag=True,
               help='Show detailed progress.')
-def auth_setup(username, config_path, ssh_config_file, repo_url, verbose):
+def auth_setup(username, config_path, ssh_config_file, repo_url, add_ssh_hosts,
+               verbose):
     """Set up SSH keys, config, and credentials in one step.
 
     Discovers all endpoints, then:
@@ -2925,7 +2962,7 @@ def auth_setup(username, config_path, ssh_config_file, repo_url, verbose):
     \b
       hosts:
         gadi-dm.nci.org.au:
-          username: jr9959
+          username: xy1234
         github.com: {}
 
     Use --repo to set up access to a repo you have not cloned — enough to
@@ -2938,7 +2975,7 @@ def auth_setup(username, config_path, ssh_config_file, repo_url, verbose):
     \b
     Examples:
       dt auth setup                        # interactive
-      dt auth setup -u jr9959              # default SSH username
+      dt auth setup -u xy1234              # default SSH username
       dt auth setup --config hosts.yaml    # non-interactive
       dt auth setup --repo data-repo       # a repo you have not cloned
       dt auth setup -v                     # verbose output
@@ -2955,6 +2992,7 @@ def auth_setup(username, config_path, ssh_config_file, repo_url, verbose):
             ssh_config_file=ssh_cfg,
             repo_url=repo_url,
             verbose=verbose,
+            add_ssh_hosts=add_ssh_hosts,
         )
         click.echo(format_setup_report(report))
 
@@ -3217,7 +3255,7 @@ def auth_teams_repo(repo_url, as_json):
 
     \b
       dt auth teams repo git@github.com:org/data-repo.git
-      dt auth teams repo neochemo
+      dt auth teams repo projx
     """
     try:
         teams = auth_mod.list_repo_teams(repo_url)
@@ -3268,9 +3306,9 @@ def auth_teams_add_to_repo(team_slug, repo_url, permission, dry):
 
     \b
       dt auth teams add-to-repo data-team git@github.com:org/repo.git
-      dt auth teams add-to-repo data-team neochemo
-      dt auth teams add-to-repo data-team neochemo --permission pull
-      dt auth teams add-to-repo data-team neochemo --dry
+      dt auth teams add-to-repo data-team projx
+      dt auth teams add-to-repo data-team projx --permission pull
+      dt auth teams add-to-repo data-team projx --dry
     """
     try:
         repo_url = auth_mod.resolve_repo_url(repo_url)
@@ -3335,7 +3373,7 @@ def auth_credentials():
     \b
     Listing and checking secrets:
       dt auth credentials list              # list all secrets in backend
-      dt auth credentials check neochemo   # check a specific secret
+      dt auth credentials check projx   # check a specific secret
       dt auth credentials status           # show installed vs expected
 
     \b
@@ -3353,8 +3391,8 @@ def auth_credentials():
 
     \b
     Writing a secret (admin / setup):
-      dt auth credentials set neochemo --file creds.ini
-      cat creds.ini | dt auth credentials set neochemo
+      dt auth credentials set projx --file creds.ini
+      cat creds.ini | dt auth credentials set projx
     """
 
 
@@ -3370,7 +3408,7 @@ def auth_credentials_list():
     # secrets.gcp.project (system vs user vs repo scope), so a bare list is
     # ambiguous about which project it came from -- and that ambiguity is
     # exactly what makes a misdirected access grant so hard to spot.
-    project = cfg.get_value('secrets.gcp.project') or '<not configured>'
+    project = cfg.get_trusted_value('secrets.gcp.project') or '<not configured>'
 
     if not names:
         click.echo(f"No secrets visible in project '{project}'.")
@@ -3391,8 +3429,8 @@ def auth_credentials_check(repo_name):
     Verifies the secret exists and its content is readable DVC INI.
 
     \b
-      dt auth credentials check neochemo
-      dt auth credentials check bcarc_wgs
+      dt auth credentials check projx
+      dt auth credentials check example_wgs
     """
     info = auth_mod.check_secret(repo_name)
 
@@ -3434,8 +3472,13 @@ def auth_credentials_status():
 @auth_credentials.command('install')
 @click.argument('repo_name', required=False, default=None,
                 metavar='[REPO_NAME]')
+@click.option('--replace', is_flag=True,
+              help='Overwrite an existing AWS profile dt did not install from '
+                   'this secret.')
+@click.option('--allow-repo-store', is_flag=True,
+              help="Use a secret store named only by this repository's config.")
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def auth_credentials_install(repo_name, verbose):
+def auth_credentials_install(repo_name, replace, allow_repo_store, verbose):
     """Fetch credentials from secret manager and install into DVC global config.
 
     Without REPO_NAME, discovers all repos with S3 remotes and installs all.
@@ -3443,10 +3486,14 @@ def auth_credentials_install(repo_name, verbose):
 
     \b
       dt auth credentials install               # all repos
-      dt auth credentials install bcarc_wgs     # one repo only
+      dt auth credentials install example_wgs     # one repo only
     """
+    if replace and not repo_name:
+        raise click.ClickException("--replace needs a REPO_NAME (one profile at a time)")
     try:
-        results = auth_mod.install_credentials(verbose=verbose, repo_name=repo_name)
+        results = auth_mod.install_credentials(verbose=verbose, repo_name=repo_name,
+                                               replace=replace,
+                                               allow_repo_store=allow_repo_store)
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 
@@ -3513,8 +3560,13 @@ def auth_credentials_configure_remotes(endpoint, verbose):
                 metavar='[REPO_NAME]')
 @click.option('--dry-run', is_flag=True,
               help='Show what would change without writing anything.')
+@click.option('--replace', is_flag=True,
+              help='Overwrite an existing AWS profile dt did not install from '
+                   'this secret.')
+@click.option('--allow-repo-store', is_flag=True,
+              help="Use a secret store named only by this repository's config.")
 @click.option('-v', '--verbose', is_flag=True)
-def auth_credentials_migrate(repo_name, dry_run, verbose):
+def auth_credentials_migrate(repo_name, dry_run, replace, allow_repo_store, verbose):
     """Migrate legacy secrets and credentials to the AWS-files layout.
 
     For each repo (or REPO_NAME if given):
@@ -3526,9 +3578,12 @@ def auth_credentials_migrate(repo_name, dry_run, verbose):
       3. Remove now-redundant credential keys from ``~/.config/dvc/config``
          for S3 remotes in the current project.
     """
+    if replace and not repo_name:
+        raise click.ClickException("--replace needs a REPO_NAME (one profile at a time)")
     try:
         result = auth_mod.migrate_credentials(
             repo_name=repo_name, dry_run=dry_run, verbose=verbose,
+            replace=replace, allow_repo_store=allow_repo_store,
         )
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
@@ -3540,7 +3595,9 @@ def auth_credentials_migrate(repo_name, dry_run, verbose):
 @click.option('--file', 'input_file', default=None,
               type=click.Path(exists=True, dir_okay=False),
               help='Read INI content from this file (default: stdin)')
-def auth_credentials_set(repo_name, input_file):
+@click.option('--allow-repo-store', is_flag=True,
+              help="Use a secret store named only by this repository's config.")
+def auth_credentials_set(repo_name, input_file, allow_repo_store):
     """Create or update the secret for REPO_NAME.
 
     Content must be raw AWS-INI format, e.g.:
@@ -3551,8 +3608,8 @@ def auth_credentials_set(repo_name, input_file):
       aws_secret_access_key = xxxxx
 
     \b
-      dt auth credentials set neochemo --file creds.ini
-      cat creds.ini | dt auth credentials set neochemo
+      dt auth credentials set projx --file creds.ini
+      cat creds.ini | dt auth credentials set projx
     """
     if input_file:
         content = click.open_file(input_file).read()
@@ -3562,8 +3619,9 @@ def auth_credentials_set(repo_name, input_file):
         content = click.get_text_stream('stdin').read()
 
     try:
-        auth_mod.set_secret(repo_name, content)
-        click.echo(click.style(f"✓ Secret updated for '{repo_name}'", fg='green'))
+        destination = auth_mod.set_secret(repo_name, content,
+                                          allow_repo_store=allow_repo_store)
+        click.echo(click.style(f"✓ Updated {destination}", fg='green'))
     except auth_mod.AuthError as e:
         raise click.ClickException(str(e))
 
@@ -4712,7 +4770,7 @@ def tmp_clean(repository, owner, clean_all):
     
     \b
     Examples:
-        dt tmp clean neochemo     # Remove specific repo
+        dt tmp clean projx     # Remove specific repo
         dt tmp clean --all        # Remove all cached repos
     """
     if not repository and not clean_all:
@@ -4772,16 +4830,16 @@ def import_cmd(repository, path, out, owner, no_checkout, no_refresh, no_downloa
 
     \b
     Examples:
-        dt import neochemo data/processed
-        dt import neochemo data/samples.h5ad -o my_samples.h5ad
+        dt import projx data/processed
+        dt import projx data/samples.h5ad -o my_samples.h5ad
         dt import git@github.com:lab/project.git results/model
-        dt import neochemo data/large --no-checkout
-        dt import neochemo data/file --no-refresh
-        dt import neochemo data/file --rev dev
-        dt import neochemo data/file --no-download
-        dt import neochemo data/file --no-download --rev abc123
-        dt import neochemo --csv paths.csv
-        dt import neochemo --csv paths.csv --no-download
+        dt import projx data/large --no-checkout
+        dt import projx data/file --no-refresh
+        dt import projx data/file --rev dev
+        dt import projx data/file --no-download
+        dt import projx data/file --no-download --rev abc123
+        dt import projx --csv paths.csv
+        dt import projx --csv paths.csv --no-download
     """
     # --csv mode: path argument is not required
     if force and resume:
@@ -5449,67 +5507,13 @@ def offline_status():
 
 @cli.group()
 def index():
-    """Manage DVC site cache index mirror.
-    
-    The site cache index allows DVC to quickly look up files across caches.
-    This command syncs the local index with a shared mirror so all users
-    benefit from the same index without rebuilding it.
-    
-    \b
-    Configure with:
-        dt config set index.mirror_root /g/data/a56/dvc/mirror
+    """Manage DVC's site cache index and dt's cache index.
+
+    The site cache index (core.site_cache_dir) lets DVC quickly look up
+    files across caches; the cache index lets dt fetch skip objects that
+    are already cached.
     """
     pass
-
-
-@index.command('pull')
-@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
-@click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
-def index_pull(verbose, quiet, dry):
-    """Pull index from mirror to local.
-    
-    Syncs the shared index mirror to your local site cache index.
-    This brings in index entries created by other users.
-    
-    \b
-    Examples:
-        dt index pull           # Pull latest index
-        dt index pull -v        # Verbose output
-        dt index pull -q        # Quiet (no output)
-        dt index pull --dry     # Preview what would sync
-    """
-    try:
-        success = index_mod.pull(verbose=verbose, quiet=quiet, dry=dry)
-        if not success:
-            raise SystemExit(1)
-    except index_mod.IndexError as e:
-        raise click.ClickException(str(e))
-
-
-@index.command('push')
-@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-@click.option('-q', '--quiet', is_flag=True, help='Suppress all output')
-@click.option('--dry', '--dry-run', is_flag=True, help='Show what would be synced')
-def index_push(verbose, quiet, dry):
-    """Push index from local to mirror.
-    
-    Syncs your local site cache index to the shared mirror.
-    This shares your index entries with other users.
-    
-    \b
-    Examples:
-        dt index push           # Push index to mirror
-        dt index push -v        # Verbose output
-        dt index push -q        # Quiet (no output)
-        dt index push --dry     # Preview what would sync
-    """
-    try:
-        success = index_mod.push(verbose=verbose, quiet=quiet, dry=dry)
-        if not success:
-            raise SystemExit(1)
-    except index_mod.IndexError as e:
-        raise click.ClickException(str(e))
 
 
 @index.command('build')
@@ -5549,11 +5553,7 @@ def index_build(verbose, dry, cache_path):
 @index.command('status')
 @click.option('-v', '--verbose', is_flag=True, help='Show additional details')
 def index_status(verbose):
-    """Show index mirror status.
-    
-    Displays information about the local index and mirror,
-    including paths, existence, and lock status.
-    """
+    """Show where DVC's site cache index lives and whether it is private."""
     # Show site_cache_dir up front so users see what DVC is actually using.
     try:
         current_sc = site_cache_mod.get_current()
@@ -5561,42 +5561,15 @@ def index_status(verbose):
         if current_sc:
             click.echo(f"  Configured: {current_sc}")
             click.echo(f"  Exists:     {'yes' if current_sc.exists() else 'no'}")
+            risk = site_cache_mod.describe_risk(current_sc)
+            if risk:
+                click.echo(f"  Warning:    {risk}; re-run 'dt index set' to move to a private dir")
         else:
             click.echo("  Configured: (DVC default — usually /var/tmp/dvc)")
         click.echo()
     except site_cache_mod.SiteCacheError as e:
         click.echo(f"Site cache check failed: {e}")
         click.echo()
-
-    info = index_mod.status(verbose=verbose)
-
-    if not info['configured']:
-        click.echo("Index mirror not configured")
-        if 'error' in info:
-            click.echo(f"  {info['error']}")
-        click.echo()
-        click.echo("Configure with:")
-        click.echo("  dt config set index.mirror_root /g/data/a56/dvc/mirror")
-        return
-    
-    click.echo("Index configuration:")
-    click.echo(f"  Local:  {info['local_index']}")
-    click.echo(f"  Mirror: {info['mirror_path']}")
-    click.echo()
-    
-    click.echo("Status:")
-    click.echo(f"  Local exists:  {'yes' if info['local_exists'] else 'no'}")
-    click.echo(f"  Mirror exists: {'yes' if info['mirror_exists'] else 'no'}")
-    
-    if info.get('local_locked'):
-        owner = info.get('local_lock_owner', 'unknown')
-        age = info.get('local_lock_age', 0)
-        click.echo(f"  Local locked:  yes (by {owner}, {age:.0f}s ago)")
-    
-    if info.get('mirror_locked'):
-        owner = info.get('mirror_lock_owner', 'unknown')
-        age = info.get('mirror_lock_age', 0)
-        click.echo(f"  Mirror locked: yes (by {owner}, {age:.0f}s ago)")
 
 
 @index.command('set')
@@ -5611,8 +5584,8 @@ def index_set(site_cache_root, site_cache_path, name):
 
     \b
     Examples:
-        dt index set --root /scratch/a56/jr9959/dvc/site
-        dt index set --path /scratch/a56/jr9959/dvc/site/my-repo
+        dt index set --root /scratch/ab12/xy1234/dvc/site
+        dt index set --path /scratch/ab12/xy1234/dvc/site/my-repo
     """
     try:
         target = site_cache_mod.init_site_cache(
@@ -5640,8 +5613,8 @@ def index_migrate(site_cache_root, site_cache_path, name):
 
     \b
     Examples:
-        dt index migrate --root /scratch/a56/jr9959/dvc/site
-        dt index migrate --path /scratch/a56/jr9959/dvc/site/my-repo
+        dt index migrate --root /scratch/ab12/xy1234/dvc/site
+        dt index migrate --path /scratch/ab12/xy1234/dvc/site/my-repo
     """
     try:
         target = site_cache_mod.resolve_path(
@@ -5649,7 +5622,7 @@ def index_migrate(site_cache_root, site_cache_path, name):
             site_cache_root=site_cache_root,
             site_cache_path=site_cache_path,
         )
-        site_cache_mod.migrate(target=target, verbose=True)
+        site_cache_mod.migrate(target=target, verbose=True, site_cache_root=site_cache_root)
     except site_cache_mod.SiteCacheError as e:
         raise click.ClickException(str(e))
 
@@ -5815,7 +5788,7 @@ def deps():
               help='Branches to list per source repo with --show-refs')
 @click.option('--external', is_flag=True,
               help='Also report dvc import-url sources (s3://, https://, ...)')
-@click.option('--owner', default=lambda: cfg.get_value('owner'),
+@click.option('--owner', default=lambda: cfg.get_trusted_value('owner'),
               help='Owner used to expand short repo names')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def deps_list(ref, all_branches, include_paths, max_paths, show_refs, max_refs,
@@ -5901,7 +5874,7 @@ def deps_list(ref, all_branches, include_paths, max_paths, show_refs, max_refs,
               help='Use cached clones without fetching updates')
 @click.option('--strict', is_flag=True,
               help='Exit non-zero if any repo could not be resolved')
-@click.option('--owner', default=lambda: cfg.get_value('owner'),
+@click.option('--owner', default=lambda: cfg.get_trusted_value('owner'),
               help='Owner used to expand short repo names')
 @click.option('-v', '--verbose', is_flag=True, help='Print progress')
 def deps_graph(depth, mode, fmt, output, all_branches, downstream, org,
@@ -5981,7 +5954,7 @@ def deps_graph(depth, mode, fmt, output, all_branches, downstream, org,
 
 
 @deps.command('index')
-@click.option('--org', default=lambda: cfg.get_value('owner'),
+@click.option('--org', default=lambda: cfg.get_trusted_value('owner'),
               help='GitHub organisation or user (default: configured owner)')
 @click.option('--jobs', '-j', type=int, default=8, show_default=True,
               help='Concurrent clone/scan workers')
@@ -6067,7 +6040,7 @@ def deps_index(org, jobs, force, include_archived, include_forks, limit,
 
 @deps.command('downstream')
 @click.argument('repository', required=False)
-@click.option('--org', default=lambda: cfg.get_value('owner'),
+@click.option('--org', default=lambda: cfg.get_trusted_value('owner'),
               help='GitHub organisation or user (default: configured owner)')
 @click.option('--depth', type=int, default=None,
               help='Maximum depth to expand (default: unlimited)')
@@ -6090,7 +6063,7 @@ def deps_downstream(repository, org, depth, fmt, output, refresh):
     \b
     Examples:
         dt deps downstream                       # Consumers of this repo
-        dt deps downstream metadata              # Consumers of another repo
+        dt deps downstream data-repo             # Consumers of another repo
         dt deps downstream --depth 1             # Direct consumers only
         dt deps downstream --format mermaid
     """
@@ -6153,7 +6126,7 @@ def deps_downstream(repository, org, depth, fmt, output, refresh):
               help='Use cached clones without fetching updates')
 @click.option('--strict', is_flag=True,
               help='Exit non-zero if any repo could not be resolved')
-@click.option('--owner', default=lambda: cfg.get_value('owner'),
+@click.option('--owner', default=lambda: cfg.get_trusted_value('owner'),
               help='Owner used to expand short repo names')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def deps_gaps(depth, jobs, no_refresh, strict, owner, json_output):
@@ -6401,6 +6374,12 @@ def hook_run(hook_name, args, verbose):
         raise SystemExit(1)
 
 
+def _shown(value) -> str:
+    """*value* as text, escaped if it holds control characters."""
+    text = str(value)
+    return text if text.isprintable() else repr(text)
+
+
 @hook.command('list')
 def hook_list():
     """Show configured checks for each git hook.
@@ -6421,7 +6400,7 @@ def hook_list():
             continue
         for check in checks:
             name = check['name']
-            mode = check.get('mode', 'sync')
+            mode = _shown(check.get('mode', 'sync'))
             source = check.get('source', '?')
             enabled = check.get('enabled', True)
 
@@ -6430,8 +6409,11 @@ def hook_list():
             # Show extra settings
             if check.get('command'):
                 parts.append(f"  command: {check['command']}")
+            elif check.get('command_ignored'):
+                parts.append(f"  command (repository config, not run): "
+                             f"{check['command_ignored']!r}")
             if name == 'large-files':
-                parts.append(f"  max_size={check.get('max_size', '1MB')}")
+                parts.append(f"  max_size={_shown(check.get('max_size', '1MB'))}")
             if not enabled:
                 parts.append("  DISABLED")
 
@@ -6593,8 +6575,7 @@ def status(ctx, imports, verbose):
     """Show DVC pipeline and stage status.
 
     Wraps ``dvc status``. Reports changed deps, outs, and missing cache
-    entries. Pulls the index archive first only if ``index.auto_sync`` is
-    enabled (off by default).
+    entries.
 
     Use --imports to additionally check if imports are stale.
 

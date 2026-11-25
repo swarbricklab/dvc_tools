@@ -586,14 +586,14 @@ class TestLabelStores:
         ]
 
     def test_collision_across_roots_sharing_a_basename(self):
-        """a56/dvc/analysis and px14/dvc/analysis both end in 'analysis'."""
+        """ab12/dvc/analysis and cd34/dvc/analysis both end in 'analysis'."""
         got = dict(tmp_sweep.label_stores([
-            Path('/g/data/a56/dvc/analysis/foo'),
-            Path('/g/data/px14/dvc/analysis/foo'),
+            Path('/g/data/ab12/dvc/analysis/foo'),
+            Path('/g/data/cd34/dvc/analysis/foo'),
         ]))
         labels = sorted(got)
         assert len(set(labels)) == 2
-        assert all('a56' in l or 'px14' in l for l in labels)
+        assert all('ab12' in l or 'cd34' in l for l in labels)
 
     def test_mixed_unique_and_colliding(self):
         got = dict(tmp_sweep.label_stores([

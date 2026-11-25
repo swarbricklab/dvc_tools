@@ -116,20 +116,10 @@ def get_dir_file_count(repo, dir_hash: str) -> int:
     Returns:
         Number of files in the directory
     """
-    import json
-    
+    from .utils import read_dir_entries
     cache_dir = Path(repo.cache.local.path)
-    cache_path = hash_to_cache_path(cache_dir, dir_hash)
-    
-    if cache_path.exists():
-        try:
-            with open(cache_path, 'r') as f:
-                contents = json.load(f)
-            return len(contents)
-        except (json.JSONDecodeError, OSError):
-            pass
-    
-    return 1
+    entries = read_dir_entries(cache_dir, dir_hash)
+    return len(entries) if entries is not None else 1
 
 
 def get_cached_size(cache_dir: Path, file_info: Dict[str, Any]) -> int:
@@ -142,10 +132,12 @@ def get_cached_size(cache_dir: Path, file_info: Dict[str, Any]) -> int:
     Returns:
         Size in bytes of cached data (0 if not cached)
     """
-    import json
-    
+    from .utils import read_dir_entries
     file_hash = file_info['hash']
-    cache_path = hash_to_cache_path(cache_dir, file_hash)
+    try:
+        cache_path = hash_to_cache_path(cache_dir, file_hash)
+    except ValueError:
+        return 0
     
     if not cache_path.exists():
         return 0
@@ -154,23 +146,15 @@ def get_cached_size(cache_dir: Path, file_info: Dict[str, Any]) -> int:
         # For directories, sum up sizes of all contained files
         total = 0
         try:
-            dir_size = cache_path.stat().st_size
-            total += dir_size  # The .dir file itself
-            
-            with open(cache_path, 'r') as f:
-                contents = json.load(f)
-            
-            for entry in contents:
-                if 'md5' in entry:
-                    child_path = hash_to_cache_path(cache_dir, entry['md5'])
-                    if child_path.exists():
-                        try:
-                            total += child_path.stat().st_size
-                        except OSError:
-                            pass
-        except (json.JSONDecodeError, OSError):
+            total += cache_path.stat().st_size  # The .dir file itself
+        except OSError:
             pass
-        
+        for entry in read_dir_entries(cache_dir, file_hash) or []:
+            child_path = hash_to_cache_path(cache_dir, entry['md5'])
+            try:
+                total += child_path.stat().st_size
+            except OSError:
+                pass
         return total
     else:
         try:
@@ -189,29 +173,19 @@ def get_cached_file_count(cache_dir: Path, file_info: Dict[str, Any]) -> int:
     Returns:
         Number of cached files (0 if not cached)
     """
-    import json
-    
+    from .utils import read_dir_entries
     file_hash = file_info['hash']
-    cache_path = hash_to_cache_path(cache_dir, file_hash)
+    try:
+        cache_path = hash_to_cache_path(cache_dir, file_hash)
+    except ValueError:
+        return 0
     
     if not cache_path.exists():
         return 0
     
     if file_info['is_dir']:
-        count = 0
-        try:
-            with open(cache_path, 'r') as f:
-                contents = json.load(f)
-            
-            for entry in contents:
-                if 'md5' in entry:
-                    child_path = hash_to_cache_path(cache_dir, entry['md5'])
-                    if child_path.exists():
-                        count += 1
-        except (json.JSONDecodeError, OSError):
-            pass
-        
-        return count
+        return sum(1 for entry in read_dir_entries(cache_dir, file_hash) or []
+                   if hash_to_cache_path(cache_dir, entry['md5']).exists())
     else:
         return 1
 

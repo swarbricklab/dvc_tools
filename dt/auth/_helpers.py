@@ -103,7 +103,7 @@ def _get_import_urls(repo_path: Optional[Path] = None) -> Dict[str, List[str]]:
             repo = dep.get('repo') if isinstance(dep, dict) else None
             if repo and isinstance(repo, dict):
                 url = repo.get('url')
-                if url:
+                if isinstance(url, str) and url:
                     import_urls.setdefault(url, []).append(rel)
 
     return import_urls

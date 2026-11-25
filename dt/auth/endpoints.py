@@ -21,7 +21,7 @@ from ..errors import AuthError
 def resolve_repo_url(repo: str) -> str:
     """Resolve a repository short name or URL to a full git URL.
 
-    Supports short names (e.g. ``neochemo``) when the ``owner`` config
+    Supports short names (e.g. ``projx``) when the ``owner`` config
     key is set, as well as full SSH/HTTPS URLs.
 
     Raises:
@@ -59,6 +59,9 @@ class Endpoint:
         local_path: For SSH remotes on a local host, the equivalent
             local filesystem path.
         children: Secondary endpoints discovered *through* this one.
+        other_repo: Found in a repository other than the current
+            directory's (``--repo``), so the current DVC repo's settings
+            do not describe it.
     """
 
     type: str
@@ -66,6 +69,7 @@ class Endpoint:
     source: str
     local_path: Optional[str] = None
     children: List['Endpoint'] = field(default_factory=list)
+    other_repo: bool = False
 
     @property
     def key(self) -> Tuple[str, str]:
@@ -93,7 +97,7 @@ class Endpoint:
 def classify_url(url: str) -> str:
     """Return the endpoint type string for a URL.
 
-    >>> classify_url('/g/data/a56/dvc_cache')
+    >>> classify_url('/g/data/ab12/dvc_cache')
     'filesystem'
     >>> classify_url('ssh://gadi.nci.org.au/data')
     'ssh'
@@ -249,8 +253,13 @@ def _discover_git_remotes(repo_path: Optional[Path] = None) -> List[Endpoint]:
 def _discover_import_sources(
     repo_path: Optional[Path] = None,
     verbose: bool = False,
+    may_contact=None,
 ) -> List[Endpoint]:
-    """Endpoints from import ``.dvc`` files (``deps.repo.url``)."""
+    """Endpoints from import ``.dvc`` files (``deps.repo.url``).
+
+    Each source repo is cloned to list its own remotes, unless
+    *may_contact* (a ``url -> bool`` callable) says no.
+    """
     from ._helpers import _get_import_urls, _short_repo_name
 
     endpoints: List[Endpoint] = []
@@ -267,6 +276,10 @@ def _discover_import_sources(
             url=url,
             source=source_label,
         )
+
+        if may_contact is not None and not may_contact(url):
+            endpoints.append(ep)
+            continue
 
         try:
             source_remotes = remote_mod.list_remotes_from_repo(
@@ -307,8 +320,13 @@ def discover_endpoints(
     repo_path: Optional[Path] = None,
     type_filter: Optional[Set[str]] = None,
     verbose: bool = False,
+    may_contact=None,
 ) -> List[Endpoint]:
-    """Discover every storage endpoint the current project relies on."""
+    """Discover every storage endpoint the current project relies on.
+
+    *may_contact* (``url -> bool``) decides whether an import source may be
+    cloned to find its remotes; by default every one is.
+    """
     from ._helpers import _apply_type_filter, _merge_children
 
     project_name = utils.get_project_name()
@@ -331,7 +349,8 @@ def discover_endpoints(
     if verbose and git_eps:
         print(f"  git remotes: {len(git_eps)} endpoint(s)")
 
-    import_eps = _discover_import_sources(repo_path, verbose=verbose)
+    import_eps = _discover_import_sources(repo_path, verbose=verbose,
+                                          may_contact=may_contact)
     all_eps.extend(import_eps)
     if verbose and import_eps:
         print(f"  import sources: {len(import_eps)} endpoint(s)")
@@ -369,6 +388,7 @@ def discover_endpoints_from_repo(
     repo_url: str,
     type_filter: Optional[Set[str]] = None,
     verbose: bool = False,
+    may_contact=None,
 ) -> List[Endpoint]:
     """Discover endpoints for a remote repository via a temporary clone."""
     import tempfile
@@ -384,7 +404,8 @@ def discover_endpoints_from_repo(
 
         result = subprocess.run(
             ['git', 'clone', '--depth', '1', '--single-branch',
-             repo_url, str(clone_path)],
+             '--', repo_url, str(clone_path)],
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
@@ -396,7 +417,12 @@ def discover_endpoints_from_repo(
             repo_path=clone_path,
             type_filter=type_filter,
             verbose=verbose,
+            may_contact=may_contact,
         )
+        for ep in endpoints:
+            ep.other_repo = True
+            for child in ep.children:
+                child.other_repo = True
         return endpoints
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

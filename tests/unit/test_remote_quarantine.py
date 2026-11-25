@@ -53,6 +53,15 @@ class TestReverseMap:
         assert dir_rel in rev[child]
 
 
+    def test_ignores_manifest_not_matching_its_name(self, tmp_path):
+        remote = tmp_path / "remote"
+        child = _place_blob(remote, b"member\n")
+        dir_rel = _place_dir_manifest(remote, [(child, "sub/member.txt")])
+        (remote / dir_rel).write_bytes(
+            json.dumps([{"md5": child, "relpath": "other"}]).encode())
+        assert q.build_dir_reverse_map(remote) == {}
+
+
 class TestPlanQuarantine:
     def test_bad_member_pulls_in_enclosing_dir(self, tmp_path):
         remote = tmp_path / "remote"
@@ -305,3 +314,258 @@ class TestExternalListQuarantineEndToEnd:
         assert dir_rel in restored['restored']
         assert (remote / bad_rel).exists()
         assert (remote / dir_rel).exists()
+
+
+class TestQuarantineStaysInsideRemote:
+    def test_paths_outside_layout_are_not_planned(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        outside = tmp_path / 'home' / 'keep.txt'
+        outside.parent.mkdir()
+        outside.write_text('mine')
+        entries = [
+            {'path': '../home/keep.txt', 'status': rv.STATUS_MISMATCH},
+            {'path': str(outside), 'status': rv.STATUS_MISMATCH},
+            {'path': f'files/md5/{good[:2]}/{good[2:]}', 'expected_md5': good,
+             'status': rv.STATUS_MISMATCH},
+        ]
+        plan = q.plan_quarantine(remote, entries)
+        assert [p['path'] for p in plan] == [f'files/md5/{good[:2]}/{good[2:]}']
+        assert outside.read_text() == 'mine'
+
+
+class TestQuarantineNeverFollowsLinks:
+    def _victim(self, tmp_path):
+        v = tmp_path / 'home' / 'private.cfg'
+        v.parent.mkdir()
+        v.write_text('secret=1\n')
+        import os
+        os.chmod(v, 0o600)
+        return v
+
+    def _state(self, p):
+        import os
+        return (p.read_text(), os.stat(p).st_mode & 0o7777)
+
+    def test_failed_rename_does_not_touch_link_target(self, tmp_path):
+        import errno, os
+        from unittest.mock import patch
+        from dt.errors import RemoteError
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        victim = self._victim(tmp_path)
+        rel = f'files/md5/{good[:2]}/{"f" * 30}'
+        (remote / rel).symlink_to(victim)
+        before = self._state(victim)
+        entries = [{'path': rel, 'status': rv.STATUS_SYMLINK}]
+        real_rename = os.rename
+
+        def eperm(src, dst, *a, **k):
+            if str(src).endswith('f' * 30):
+                raise PermissionError(errno.EPERM, 'sticky')
+            return real_rename(src, dst, *a, **k)
+
+        with patch('dt.remote_quarantine.os.rename', side_effect=eperm):
+            with pytest.raises(RemoteError):
+                q.quarantine(remote, entries=entries)
+        assert self._state(victim) == before
+
+    def test_cross_device_moves_link_as_link(self, tmp_path):
+        import errno, os
+        from unittest.mock import patch
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        victim = self._victim(tmp_path)
+        rel = f'files/md5/{good[:2]}/{"f" * 30}'
+        (remote / rel).symlink_to(victim)
+        before = self._state(victim)
+
+        def exdev(src, dst, *a, **k):
+            raise OSError(errno.EXDEV, 'cross-device')
+
+        with patch('dt.remote_quarantine.os.rename', side_effect=exdev):
+            res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_SYMLINK}])
+        moved_to = Path(res['quarantine_dir']) / rel
+        assert os.path.islink(moved_to) and not os.path.lexists(remote / rel)
+        assert self._state(victim) == before
+
+    def test_linked_quarantine_root_is_refused(self, tmp_path):
+        import os
+        from dt.errors import RemoteError
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        elsewhere = tmp_path / 'elsewhere'
+        elsewhere.mkdir()
+        (remote / rv.LEDGER_DIRNAME).mkdir(exist_ok=True)
+        (remote / rv.LEDGER_DIRNAME / q.QUARANTINE_DIRNAME).symlink_to(elsewhere)
+        entries = [{'path': f'files/md5/{good[:2]}/{good[2:]}', 'status': rv.STATUS_MISMATCH}]
+        with pytest.raises(RemoteError, match='real directory'):
+            q.quarantine(remote, entries=entries, confirm=False)
+        assert list(elsewhere.iterdir()) == []
+
+    def test_restore_ignores_forged_manifest_paths(self, tmp_path):
+        import json, os
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        res = q.quarantine(remote, entries=[{'path': f'files/md5/{good[:2]}/{good[2:]}',
+                                             'status': rv.STATUS_MISMATCH}],
+                           confirm=False)
+        qdir = Path(res['quarantine_dir'])
+        outside = tmp_path / 'home' / 'keep.txt'
+        outside.parent.mkdir()
+        outside.write_text('mine')
+        man = qdir / q.MANIFEST_FILENAME
+        data = json.loads(man.read_text())
+        data['entries'].append({'path': '../../../home/keep.txt'})
+        man.write_text(json.dumps(data))
+        out = q.restore_quarantine(remote, qdir.name)
+        assert outside.read_text() == 'mine'
+        assert '../../../home/keep.txt' in out['absent']
+        assert f'files/md5/{good[:2]}/{good[2:]}' in out['restored']
+
+
+
+class TestRestoreOnlyOwnBatches:
+    def _batch(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        rel = f'files/md5/{good[:2]}/{good[2:]}'
+        res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH}],
+                           confirm=False)
+        return remote, Path(res['quarantine_dir']), rel
+
+    def test_new_batch_is_not_writable_by_others(self, tmp_path):
+        import os, stat
+        _, qdir, _ = self._batch(tmp_path)
+        for p in (qdir, qdir / q.MANIFEST_FILENAME):
+            assert not os.stat(p).st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+
+    def test_other_users_batch_is_refused(self, tmp_path, monkeypatch):
+        import os
+        remote, qdir, rel = self._batch(tmp_path)
+        real = os.getuid()
+        monkeypatch.setattr(os, 'getuid', lambda: real + 1)
+        with pytest.raises(q.RemoteError, match='another user'):
+            q.restore_quarantine(remote, qdir.name)
+        assert not (remote / rel).exists()
+
+    @pytest.mark.parametrize('target', ['dir', 'manifest'])
+    def test_group_writable_batch_is_refused(self, tmp_path, target):
+        import os
+        remote, qdir, rel = self._batch(tmp_path)
+        path = qdir if target == 'dir' else qdir / q.MANIFEST_FILENAME
+        os.chmod(path, 0o775 if target == 'dir' else 0o664)
+        with pytest.raises(q.RemoteError, match='writable by others'):
+            q.restore_quarantine(remote, qdir.name)
+        assert not (remote / rel).exists()
+
+    def test_restore_does_not_follow_linked_remote_dir(self, tmp_path):
+        import os, shutil
+        remote, qdir, rel = self._batch(tmp_path)
+        prefix = remote / rel.rsplit('/', 1)[0]
+        elsewhere = tmp_path / 'elsewhere'
+        elsewhere.mkdir()
+        shutil.rmtree(prefix)
+        os.symlink(elsewhere, prefix)
+        with pytest.raises(q.RemoteError):
+            q.restore_quarantine(remote, qdir.name)
+        assert list(elsewhere.iterdir()) == []
+
+    def test_restore_does_not_follow_linked_batch_subdir(self, tmp_path):
+        """A link inside the batch is never moved through."""
+        import os, shutil
+        remote, qdir, rel = self._batch(tmp_path)
+        sub = qdir / rel.rsplit('/', 1)[0]
+        moved = tmp_path / 'moved'
+        shutil.move(str(sub), str(moved))
+        os.symlink(moved, sub)
+        out = q.restore_quarantine(remote, qdir.name)
+        assert rel in out['absent']
+        assert not (remote / rel).exists()
+
+
+    @pytest.mark.parametrize('part', ['ledger', 'root'])
+    def test_quarantine_never_chmods_or_writes_through_links(self, tmp_path, part):
+        import os, stat
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        rel = f'files/md5/{good[:2]}/{good[2:]}'
+        victim = tmp_path / 'victim'
+        victim.mkdir(mode=0o700)
+        before = stat.S_IMODE(os.stat(victim).st_mode)
+        if part == 'ledger':
+            os.symlink(victim, remote / rv.LEDGER_DIRNAME)
+        else:
+            (remote / rv.LEDGER_DIRNAME).mkdir()
+            os.symlink(victim, remote / rv.LEDGER_DIRNAME / q.QUARANTINE_DIRNAME)
+        with pytest.raises(q.RemoteError):
+            q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH}],
+                         confirm=False)
+        assert stat.S_IMODE(os.stat(victim).st_mode) == before
+        assert list(victim.iterdir()) == []
+        assert (remote / rel).exists()
+
+
+    def test_manifest_written_when_a_move_fails(self, tmp_path, monkeypatch):
+        remote = tmp_path / 'remote'
+        a = _place_blob(remote, b'one\n')
+        b = _place_blob(remote, b'two\n')
+        rels = [f'files/md5/{h[:2]}/{h[2:]}' for h in (a, b)]
+        real_move = q._move_entry
+        calls = []
+
+        def flaky(sdir, name, ddir):
+            calls.append(name)
+            if len(calls) == 2:
+                raise OSError(5, 'boom')
+            real_move(sdir, name, ddir)
+
+        monkeypatch.setattr(q, '_move_entry', flaky)
+        with pytest.raises(q.RemoteError):
+            q.quarantine(remote, entries=[{'path': r, 'status': rv.STATUS_MISMATCH}
+                                          for r in rels], confirm=False)
+        [batch] = q.list_quarantines(remote)
+        assert batch['count'] == 1
+        monkeypatch.setattr(q, '_move_entry', real_move)
+        out = q.restore_quarantine(remote, batch['timestamp'])
+        assert len(out['restored']) == 1
+
+
+class TestReportEntriesAreConfirmed:
+    def test_forged_entry_for_intact_blob_is_refused(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'healthy\n')
+        rel = f'files/md5/{good[:2]}/{good[2:]}'
+        res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH,
+                                             'expected_md5': good}])
+        assert (remote / rel).exists()
+        assert res['moved'] == []
+        assert res['refused'][0]['path'] == rel
+
+    def test_genuinely_corrupt_blob_is_still_quarantined(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'healthy\n')
+        rel = f'files/md5/{good[:2]}/{good[2:]}'
+        p = remote / rel
+        p.chmod(0o644)
+        p.write_bytes(b'corrupted')
+        res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH,
+                                             'expected_md5': good}])
+        assert not p.exists()
+        assert [m['path'] for m in res['moved']] == [rel]
+
+    @pytest.mark.parametrize('rel', ['../../etc/passwd', '/etc/passwd',
+                                     'files/md5/ab/../../../../home/x'])
+    def test_out_of_tree_report_paths_move_nothing(self, tmp_path, rel):
+        remote = tmp_path / 'remote'
+        _place_blob(remote, b'healthy\n')
+        res = q.quarantine(remote, entries=[{'path': rel, 'status': rv.STATUS_MISMATCH}])
+        assert res['moved'] == []
+
+    def test_from_list_rejects_dotdot_tokens(self, tmp_path):
+        remote = tmp_path / 'remote'
+        _place_blob(remote, b'healthy\n')
+        entries, rejected = q.entries_from_list(
+            remote, ['files/md5/ab/../../../home/' + 'c' * 30, 'ab/..'])
+        assert entries == []
+        assert len(rejected) == 2

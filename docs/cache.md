@@ -48,8 +48,8 @@ policy.
 dt cache init
 
 # Set up cache with custom name and root
-# Uses: /scratch/a56/dvc/cache/my-project
-dt cache init --name my-project --cache-root /scratch/a56/dvc/cache
+# Uses: /scratch/ab12/dvc/cache/my-project
+dt cache init --name my-project --cache-root /scratch/ab12/dvc/cache
 
 # Set up cache with complete custom path (absolute)
 dt cache init --cache-path /completely/different/location/shared-cache

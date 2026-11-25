@@ -64,6 +64,9 @@ def _iter_cache_blobs(cache_root: Path, layout: str) -> Iterator[Tuple[str, Path
             # Object files only; ignore stray subdirs / ledger dirs.
             if not blob.is_file() and not os.path.islink(blob):
                 continue
+            # Stray files (DVC temp files, .nfs*) are not objects.
+            if not utils.is_md5_oid(hex_prefix + name):
+                continue
             yield hex_prefix + name, blob
 
 
@@ -77,7 +80,7 @@ def _remote_blob_path(remote_root: Path, remote_layout: str,
     """
     from .archive import operations as ops
 
-    prefix, rest = md5[:2], md5[2:]
+    prefix, rest = utils.oid_path_parts(md5)  # raises on a malformed id
     candidates: List[Path] = []
     if remote_layout in (ops.LAYOUT_DVC_V3, ops.LAYOUT_DVC_MIXED):
         candidates.append(remote_root / 'files' / 'md5' / prefix / rest)

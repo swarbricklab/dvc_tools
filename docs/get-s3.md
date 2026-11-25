@@ -50,7 +50,7 @@ post-hoc re-read, not a weaker one.
 ## Verified foundations
 
 Everything below was checked in the `dt3` environment
-(`/g/data/a56/conda/envs/dt3`, Python 3.14.4). **No new dependencies are required.**
+(`/g/data/ab12/conda/envs/dt3`, Python 3.14.4). **No new dependencies are required.**
 
 | package | version | role |
 |---|---|---|
@@ -158,12 +158,12 @@ directory name (`dt/auth/credentials.py:512` → `utils.get_project_name()`) —
 `~/.aws/credentials` as the user's own AWS profiles. On a real machine today:
 
 ```
-default, ummcr, bcarc_wts, bcarc_wgs, bcarc_visium,
-bcarc_xenium, bcarc_chromium, 533267394226_Garvan.Data.Upload, umccr
+default, partnr, example_wts, example_wgs, example_visium,
+example_xenium, example_chromium, 123456789012_Upload, partner
 ```
 
-The `bcarc_*` entries are dt-managed **R2** profiles. So `--dest-profile bcarc_wts` would aim the
-destination at R2. Note also `ummcr` alongside `umccr` — a mistyped profile name that happens to be
+The `example_*` entries are dt-managed **R2** profiles. So `--dest-profile example_wts` would aim the
+destination at R2. Note also `partnr` alongside `partner` — a mistyped profile name that happens to be
 another valid profile never raises `ProfileNotFound`. **`--dest-profile` alone is not sufficient
 protection.**
 

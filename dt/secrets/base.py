@@ -67,7 +67,7 @@ class SecretBackend(ABC):
                 endpointurl = https://...
         
         Args:
-            repo_name: Name of the repository (e.g., 'neochemo').
+            repo_name: Name of the repository (e.g., 'projx').
             
         Returns:
             Raw config text to append to .dvc/config.local.

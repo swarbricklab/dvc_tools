@@ -16,7 +16,7 @@ from . import remote as remote_mod
 from . import site_cache as site_cache_mod
 from . import utils
 from .auth import setup as auth_setup_mod
-from .errors import CloneError
+from .errors import CloneError, DTError
 
 
 def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:
@@ -41,7 +41,7 @@ def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:
     
     # It's a short name - need owner
     if not owner:
-        owner = cfg.get_value('owner')
+        owner = cfg.get_own_value('owner')
     
     if not owner:
         raise CloneError(
@@ -89,6 +89,7 @@ def clone_repository(
     no_hooks: bool = False,
     rev: Optional[str] = None,
     overwrite: bool = False,
+    add_ssh_hosts: Optional[bool] = None,
 ) -> Path:
     """Clone a DVC repository with proper cache setup.
 
@@ -97,6 +98,8 @@ def clone_repository(
         path: Target directory (defaults to repo name)
         owner: GitHub owner for short names
         username: Default SSH username passed to auth setup
+        add_ssh_hosts: Passed to auth setup; ``None`` asks before adding
+            hosts named by the project's remotes to the SSH config.
         no_init: Skip the project configuration steps -- cache, site cache
             and remote. Hooks and auth are governed by no_hooks/no_auth.
         no_submodules: Skip cloning submodules
@@ -133,7 +136,12 @@ def clone_repository(
             )
 
         if is_current_dir:
-            # Minimal safe support for cloning into '.': only when empty.
+            # Minimal safe support for cloning into '.': only when empty,
+            # and only into a directory of this user's own.
+            try:
+                utils._require_trusted_root(target_dir.resolve())
+            except DTError as e:
+                raise CloneError(str(e))
             if any(target_dir.iterdir()):
                 raise CloneError(
                     "Destination path '.' is not empty. "
@@ -164,10 +172,10 @@ def clone_repository(
         git_cmd.extend(['--depth', '1'])
     if not no_submodules:
         git_cmd.append('--recurse-submodules')
-    git_cmd.extend([repository_url, str(target_dir)])
+    git_cmd.extend(['--', repository_url, str(target_dir)])
 
     # Execute git clone
-    result = subprocess.run(git_cmd)
+    result = subprocess.run(git_cmd, env=utils.git_net_env(prompt=True))
     if result.returncode != 0:
         raise CloneError("Git clone failed.")
 
@@ -175,7 +183,9 @@ def clone_repository(
     if rev:
         if verbose:
             print(f"Checking out revision: {rev}")
-        result = subprocess.run(['git', 'checkout', rev], cwd=target_dir)
+        if not utils.is_valid_git_rev(rev):
+            raise CloneError(f"Invalid revision: {rev!r}")
+        result = subprocess.run(['git', 'checkout', rev, '--'], cwd=target_dir)
         if result.returncode != 0:
             raise CloneError(f"Failed to checkout revision '{rev}'.")
     
@@ -185,11 +195,23 @@ def clone_repository(
             print("Updating submodules...")
         subprocess.run(
             ['git', 'submodule', 'update', '--init', '--recursive'],
-            cwd=target_dir
+            cwd=target_dir, env=utils.git_net_env(prompt=True),
         )
     
+    # dt writes workspace-local DVC config below; that must stay in this repo.
+    if not no_init:
+        problem = utils.dvc_local_config_problem(target_dir)
+        if problem:
+            raise CloneError(
+                f"Cloned to {target_dir}, but not configuring DVC there: {problem}. "
+                f"Fix the repository, or re-run with --no-init."
+            )
+
     # Ensure .dt/.gitignore is up to date
-    utils.ensure_dt_gitignore(target_dir)
+    try:
+        utils.ensure_dt_gitignore(target_dir)
+    except DTError as e:
+        raise CloneError(f"Cloned to {target_dir}, but {e}")
 
     # Set up cache using the cache module
     if not no_init:
@@ -263,7 +285,9 @@ def clone_repository(
         original_dir = os.getcwd()
         try:
             os.chdir(target_dir)
-            report = auth_setup_mod.auth_setup(username=username, verbose=verbose)
+            report = auth_setup_mod.auth_setup(
+                username=username, verbose=verbose,
+                add_ssh_hosts=add_ssh_hosts)
         except Exception as exc:
             report = None
             if verbose:

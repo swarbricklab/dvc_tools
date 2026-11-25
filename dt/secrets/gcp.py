@@ -33,7 +33,7 @@ def _configured_secret_locations() -> Optional[str]:
     given region(s), which is required under a ``gcp.resourceLocations`` org
     policy that forbids creating secrets in ``global`` (issue #149).
     """
-    value = cfg.get_value('secrets.gcp.locations', None)
+    value = cfg.get_trusted_value('secrets.gcp.locations', None)
     if value is None:
         return None
     if isinstance(value, (list, tuple)):
@@ -530,55 +530,49 @@ class GCPSecretBackend(SecretBackend):
 
     def _cli_set_secret(self, repo_name: str, content: str) -> None:
         """Create or update a secret via gcloud CLI."""
-        import tempfile
         gcloud = self._require_gcloud()
         secret_id = self._get_secret_id(repo_name)
 
-        # Write to a temp file so we can pipe into gcloud
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False) as f:
-            f.write(content)
-            tmp_path = f.name
-
-        try:
-            # Create secret if it doesn't exist
-            if not self._cli_secret_exists(repo_name):
-                result = subprocess.run(
-                    [gcloud, 'secrets', 'create', secret_id,
-                     f'--project={self.project}',
-                     *_replication_create_flags(),
-                     f'--data-file={tmp_path}'],
-                    capture_output=True, text=True,
+        # The content goes to gcloud on stdin, never to a file on disk.
+        if not self._cli_secret_exists(repo_name):
+            result = subprocess.run(
+                [gcloud, 'secrets', 'create', secret_id,
+                 f'--project={self.project}',
+                 *_replication_create_flags(),
+                 '--data-file=-'],
+                input=content, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise SecretError(
+                    f"Failed to create secret '{secret_id}': "
+                    f"{result.stderr.strip()}"
                 )
-                if result.returncode != 0:
-                    raise SecretError(
-                        f"Failed to create secret '{secret_id}': "
-                        f"{result.stderr.strip()}"
-                    )
-            else:
-                # Add a new version
-                result = subprocess.run(
-                    [gcloud, 'secrets', 'versions', 'add', secret_id,
-                     f'--project={self.project}',
-                     f'--data-file={tmp_path}'],
-                    capture_output=True, text=True,
+        else:
+            # Add a new version
+            result = subprocess.run(
+                [gcloud, 'secrets', 'versions', 'add', secret_id,
+                 f'--project={self.project}',
+                 '--data-file=-'],
+                input=content, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise SecretError(
+                    f"Failed to update secret '{secret_id}': "
+                    f"{result.stderr.strip()}"
                 )
-                if result.returncode != 0:
-                    raise SecretError(
-                        f"Failed to update secret '{secret_id}': "
-                        f"{result.stderr.strip()}"
-                    )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
 
     def _cli_access_secret(self, repo_name: str, cause: Optional[Exception] = None,
                            prior_identity: Optional[str] = None) -> str:
         gcloud = self._require_gcloud(cause)
         secret_id = self._get_secret_id(repo_name)
-        result = subprocess.run(
-            [gcloud, 'secrets', 'versions', 'access', 'latest',
-             f'--secret={secret_id}', f'--project={self.project}'],
-            capture_output=True, text=True,
-        )
+        try:
+            result = subprocess.run(
+                [gcloud, 'secrets', 'versions', 'access', 'latest',
+                 f'--secret={secret_id}', f'--project={self.project}'],
+                capture_output=True, text=True,
+            )
+        except UnicodeDecodeError as e:
+            raise SecretError(f"Secret '{repo_name}' is not UTF-8 text: {e}")
         if result.returncode == 0:
             return result.stdout
         if 'NOT_FOUND' in result.stderr:
@@ -692,8 +686,13 @@ class GCPSecretBackend(SecretBackend):
         except Exception as e:
             raise SecretError(f"Error fetching secret: {e}")
         
-        # Return raw payload as text
-        return response.payload.data.decode('utf-8')
+        # Return the payload as text, with line endings normalised the way
+        # the gcloud CLI path (text mode) does, so both read the same.
+        try:
+            text = response.payload.data.decode('utf-8')
+        except UnicodeDecodeError as e:
+            raise SecretError(f"Secret '{repo_name}' is not UTF-8 text: {e}")
+        return text.replace('\r\n', '\n').replace('\r', '\n')
 
     def list_secrets(self) -> list:
         """List secret IDs matching the prefix."""

@@ -14,6 +14,16 @@ The `dt` configuration system uses hierarchical scopes, similar to git and DVC.
 The local and project paths are relative to the project root — the git root if
 there is one, else the DVC root, else the current directory.
 
+Each person works in their own clone (the DVC cache is what is shared). dt
+reads a project's `.dt` config and keeps `.dt/` state only if the project root
+(and its `.git`/`.dvc`) belongs to you. Under a root that belongs to someone
+else, dt ignores its `.dt/config.yaml` and `.dt/config.local.yaml` and refuses
+to write `.dt/` state there; a `.dt` config file in your own clone that
+belongs to someone else is ignored too.
+
+Settings that decide where your credentials or secrets go (`secrets.*`) are
+read from user and system config first; see [auth](auth.md).
+
 **Precedence:** local > project > user > system
 
 When a key exists in multiple scopes, the more specific scope wins. Local overrides project, which overrides user, which overrides system.
@@ -29,8 +39,8 @@ Personal settings that apply in every repository you work in.
 
 ```bash
 dt config set owner myorg
-dt config set username jr9959
-dt config set cache.root /g/data/a56/dvc_cache
+dt config set username xy1234
+dt config set cache.root /g/data/ab12/dvc_cache
 ```
 
 Use for: almost everything — GitHub owner, SSH username, cache and remote
@@ -60,10 +70,10 @@ Because project scope outranks user scope, a value committed here overrides
 what a collaborator set for themselves. `dt config set` says so when it happens:
 
 ```
-$ dt config set cache.root /scratch/a56/jr9959/cache
-Set cache.root=/scratch/a56/jr9959/cache in user config (/home/jr9959/.config/dt/config.yaml).
+$ dt config set cache.root /scratch/ab12/xy1234/cache
+Set cache.root=/scratch/ab12/xy1234/cache in user config (/home/xy1234/.config/dt/config.yaml).
 Note: cache.root is also set in project config (/path/to/repo/.dt/config.yaml), which takes
-      precedence over user — the effective value is unchanged ('/g/data/a56/dvc_cache').
+      precedence over user — the effective value is unchanged ('/g/data/ab12/dvc_cache').
       Precedence is local > project > user > system. To change the value that applies,
       target that scope: --project.
 ```
@@ -73,7 +83,7 @@ Note: cache.root is also set in project config (/path/to/repo/.dt/config.yaml), 
 Settings for your current workspace only. Not tracked by git (`.dt/config.local.yaml` is gitignored).
 
 ```bash
-dt config set --local ssh.host alternate-host.example.org
+dt config set --local hooks.verbosity quiet
 ```
 
 Use for: temporary overrides, testing, machine-specific paths.
@@ -110,10 +120,10 @@ colon-separated directory is checked in turn and the first one containing
 
 ```bash
 # Add to module file or .bashrc
-export XDG_CONFIG_DIRS="/g/data/a56/config/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
+export XDG_CONFIG_DIRS="/g/data/ab12/config/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
 ```
 
-The config at `/g/data/a56/config/xdg/dt/config.yaml` will be loaded automatically.
+The config at `/g/data/ab12/config/xdg/dt/config.yaml` will be loaded automatically.
 
 If no directory in the list contains the file, `dt` reports the first
 directory as the system path — that is where `--system` writes.

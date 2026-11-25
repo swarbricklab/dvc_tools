@@ -35,6 +35,13 @@ def isolate_from_working_repo(tmp_path_factory, monkeypatch):
     empty = tmp_path_factory.mktemp('xdg')
     monkeypatch.setenv('XDG_CONFIG_HOME', str(empty))
     monkeypatch.setenv('XDG_CONFIG_DIRS', str(empty))
+    # Per-user caches (e.g. the cache OID index) must never land in the real
+    # ~/.cache -- including via the index's fallback to ~/.cache.
+    xdg_cache = tmp_path_factory.mktemp('xdg-cache')
+    monkeypatch.setenv('XDG_CACHE_HOME', str(xdg_cache))
+    from dt import cache_index
+    monkeypatch.setattr(cache_index, '_candidate_dirs',
+                        lambda: [xdg_cache / 'dt' / 'oid-index'])
 
 
 # =============================================================================

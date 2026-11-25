@@ -50,11 +50,11 @@ policy.
 dt remote init
 
 # Set up remote with custom root
-# Uses: /g/data/a56/my-dvc-storage/my-project  
-dt remote init --name my-project --remote-root /g/data/a56/my-dvc-storage
+# Uses: /g/data/ab12/my-dvc-storage/my-project  
+dt remote init --name my-project --remote-root /g/data/ab12/my-dvc-storage
 
 # Set up remote with complete custom path (absolute)
-dt remote init --remote-path /g/data/a56/special-project/custom-remote
+dt remote init --remote-path /g/data/ab12/special-project/custom-remote
 
 # Set up remote with relative path
 dt remote init --remote-path ../shared-remote
@@ -125,11 +125,11 @@ dt remote list otherproject --owner myorg
 
 ```
 $ dt remote list
-storage (default): ssh://gadi-dm.nci.org.au/g/data/a56/dvc/neochemo
+storage (default): ssh://gadi-dm.nci.org.au/g/data/ab12/dvc/projx
 
 $ dt remote list --all
-storage: ssh://gadi-dm.nci.org.au/g/data/a56/dvc/neochemo
-local (default): /g/data/a56/dvc/neochemo
+storage: ssh://gadi-dm.nci.org.au/g/data/ab12/dvc/projx
+local (default): /g/data/ab12/dvc/projx
 ```
 
 The `(default)` marker is `core.remote` **as read in the same scopes as the
@@ -173,7 +173,7 @@ recursive `LIST`, giving each object's `ContentLength`) and compares each to the
 definitive corruption signal at zero egress.
 
 ```bash
-dt remote verify wgs --no-egress               # size check the s3://wgs remote
+dt remote verify wgs --no-egress               # size check the s3://demo-wgs remote
 dt remote verify wgs --no-egress --report r.json  # feed quarantine via a report
 ```
 
@@ -212,7 +212,7 @@ bad at the last scan (from `bad.json`), the total blob count, and how many are
 incremental run).
 
 ```
-Remote: bcarc_xenium  (dvc-v3)
+Remote: example_xenium  (dvc-v3)
   Verified OK: 12,500 (last scan 2026-07-01T09:14:00+00:00)
   Bad:         2 (as of 2026-07-01T09:14:00+00:00)
   Total blobs: 12,840 (1.2 TB)
@@ -250,7 +250,7 @@ fresh scan first), `--dry-run`, `--restore <timestamp>`, `--list`, `--json`.
 
 **Acting on an externally-known bad set (`--from-list`).** Sometimes the bad
 blobs are already known from a source of truth other than `dt remote verify` —
-e.g. on `bcarc_wgs` 310 bad R2 blobs were identified by comparing remote blob
+e.g. a few hundred bad R2 blobs were identified by comparing remote blob
 sizes against the intact upstream S3 objects. Running a full `dt remote verify`
 just to regenerate that list could egress terabytes. `--from-list` feeds the
 known set straight into the same quarantine machinery:
@@ -289,7 +289,9 @@ quarantines each enclosing `.dir` alongside its bad members. It handles v2/v3/
 mixed layouts and the case where the bad blob *is* a `.dir`.
 
 Quarantined blobs land in `<remote>/.dt-verify/quarantine/<timestamp>/<rel-path>`
-with a `manifest.json` restore map.
+with a `manifest.json` restore map. A batch can be restored only by the user
+who created it, and only while no one else can write to it (older batches may
+need `chmod -R go-w` first); likewise only the creator can delete it.
 
 ## dt remote perms
 
@@ -370,7 +372,7 @@ never moves where `dt remote init` puts things.
 
 ```bash
 dt remote perms --all                                   # every configured root
-dt remote perms --all --root /g/data/px14/dvc/analysis  # ad-hoc, repeatable
+dt remote perms --all --root /g/data/cd34/dvc/analysis  # ad-hoc, repeatable
 ```
 
 Store names are not unique across roots, so each is labelled with just enough of
@@ -393,13 +395,13 @@ Repair is therefore inherently per-owner. The report is grouped that way, and
 its main output is the worklist telling each person what only they can run:
 
 ```
-1603 directories deviate from policy, 344 prefix directories missing
+1500 directories deviate from policy, 300 prefix directories missing
 
 Needs the owner to run it:
-  hz7248         772 directories
-  jr9959         357 directories  (you)
-  sl6147         266 directories
-  hk8797         196 directories
+  cd5678         700 directories
+  xy1234         350 directories  (you)
+  ef9012         250 directories
+  gh3456         200 directories
 
 Each owner: dt remote perms --all --fix
 ```
@@ -522,7 +524,7 @@ directory that blocked it, since that is what has to change:
 
 ```
   3 could not be removed (12.1G)
-      /g/data/px14/dvc/datasets/foo/files/md5/3a  drwxr-sr-x  dir owner: ab1234
+      /g/data/cd34/dvc/datasets/foo/files/md5/3a  drwxr-sr-x  dir owner: ab1234
         3 file(s), 12.1G -- permission denied
       files owned by: cd5678 2, ef9012 1
 ```

@@ -19,17 +19,17 @@ restore can work without contacting the backend.
 dt config set archive.staging_dir /scratch/${PROJECT}/${USER}/dt-archive
 
 # Single-node archive (small archives that finish in one walltime).
-dt remote archive create neochemo-2026-05
+dt remote archive create projx-2026-05
 
 # Split workflow (recommended for multi-TB archives).
-dt remote archive stage   neochemo-2026-05   # compute node (parallel CPUs)
-dt remote archive deposit neochemo-2026-05   # data mover (mdss access)
+dt remote archive stage   projx-2026-05   # compute node (parallel CPUs)
+dt remote archive deposit projx-2026-05   # data mover (mdss access)
 
 # Verify it.
-dt remote archive verify neochemo-2026-05
+dt remote archive verify projx-2026-05
 
 # Once you're confident, delete the local copy.
-dt remote archive prune  neochemo-2026-05
+dt remote archive prune  projx-2026-05 --source /g/data/ab12/dvc/projx
 ```
 
 ## Where to run each subcommand
@@ -168,7 +168,7 @@ For sources too large to tar within a single node's walltime,
 running inline:
 
 ```bash
-dt remote archive stage neochemo-2026-05 --via-qxub
+dt remote archive stage projx-2026-05 --via-qxub
 ```
 
 Each worker is a single-CPU job invoking the internal
@@ -237,7 +237,11 @@ typical post-prune workflow is just:
 dt remote archive restore <name>
 ```
 
-…and the source remote pops back into existence. A full restore also
+…and the source remote pops back into existence. Because that path comes
+from the manifest, restore shows it and asks you to type it back before
+writing there; with no terminal to ask (e.g. under `qx`), pass it as `--to`.
+It also refuses when the path is not one of the project's DVC remotes, or
+overlaps the project's own DVC cache. A full restore also
 clears the `ARCHIVED.yaml` signpost since the data is no longer
 archived. Partial restores (`--prefix` / `--object`) leave the
 signpost in place because most of the data is still on the backend.
@@ -319,11 +323,16 @@ Refuses to run unless:
    recorded in the manifest — `files/md5/` for `dvc-v3`, the top-level
    `00` … `ff` prefix dirs for `dvc-v2`, both for `dvc-mixed`
    (extras). `--force` skips this check.
+3. You name the remote: `--source <path>` must be the directory the archive
+   was made from, or, without it, prune shows that path and asks you to
+   type it back (`--yes` does not skip this). The path must also be one of
+   the project's DVC remotes and must not overlap the project's own DVC
+   cache.
 
-When both conditions are met, deletes those same blob directories
+When all conditions are met, deletes those same blob directories
 (`<source-remote>/files/md5/` for a v3 remote, the top-level hex prefix
 dirs for a v2 remote, both for a mixed one) and reports the bytes
-freed. `--yes` skips the interactive confirmation.
+freed. `--yes` skips the final yes/no confirmation.
 
 ## Parallelism
 
@@ -356,17 +365,17 @@ Stage on a normal compute node:
 
 ```bash
 #!/bin/bash
-#PBS -P a56
+#PBS -P ab12
 #PBS -q normal
 #PBS -l ncpus=8
 #PBS -l mem=32GB
 #PBS -l jobfs=400GB
 #PBS -l walltime=24:00:00
-#PBS -l storage=gdata/a56+scratch/a56
+#PBS -l storage=gdata/ab12+scratch/ab12
 
 cd /path/to/repo
-dt remote archive stage neochemo-2026-05 \
-    --staging-dir /scratch/a56/${USER}/dt-archive \
+dt remote archive stage projx-2026-05 \
+    --staging-dir /scratch/ab12/${USER}/dt-archive \
     -v
 ```
 
@@ -374,16 +383,16 @@ Deposit on a data mover:
 
 ```bash
 #!/bin/bash
-#PBS -P a56
+#PBS -P ab12
 #PBS -q copyq
 #PBS -l ncpus=1
 #PBS -l mem=4GB
 #PBS -l walltime=10:00:00
-#PBS -l storage=gdata/a56+scratch/a56+massdata/a56
+#PBS -l storage=gdata/ab12+scratch/ab12+massdata/ab12
 
 cd /path/to/repo
-dt remote archive deposit neochemo-2026-05 \
-    --staging-dir /scratch/a56/${USER}/dt-archive \
+dt remote archive deposit projx-2026-05 \
+    --staging-dir /scratch/ab12/${USER}/dt-archive \
     -v
 ```
 
@@ -396,28 +405,28 @@ extra storage flag for the data they touch:
 
 ```bash
 #!/bin/bash
-#PBS -P a56
+#PBS -P ab12
 #PBS -q copyq
 #PBS -l ncpus=1
 #PBS -l mem=4GB
 #PBS -l walltime=01:00:00
-#PBS -l storage=gdata/a56+massdata/a56   # + scratch/a56 for restore --to / verify --deep
+#PBS -l storage=gdata/ab12+massdata/ab12   # + scratch/ab12 for restore --to / verify --deep
                                           # + gdata/<other> for the source remote (prune only)
 
 cd /path/to/repo
-dt remote archive verify  neochemo-2026-05
-# or restore: dt remote archive restore neochemo-2026-05 --to /scratch/a56/$USER/restored
-# or destroy: dt remote archive destroy neochemo-2026-05 --yes
-# or prune:   dt remote archive prune   neochemo-2026-05 --yes
+dt remote archive verify  projx-2026-05
+# or restore: dt remote archive restore projx-2026-05 --to /scratch/ab12/$USER/restored
+# or destroy: dt remote archive destroy projx-2026-05 --yes
+# or prune:   dt remote archive prune   projx-2026-05 --yes --source /g/data/ab12/dvc/projx
 ```
 
 Or wrap any of them in a one-liner via `qxub`:
 
 ```bash
 qxub exec --env dt --queue copyq --time 01:00:00 --mem 4GB \
-    --storage 'gdata/a56+massdata/a56' \
-    -N dt-verify-neochemo \
-    -- dt remote archive verify neochemo-2026-05
+    --storage 'gdata/ab12+massdata/ab12' \
+    -N dt-verify-projx \
+    -- dt remote archive verify projx-2026-05
 ```
 
 ## Backends
@@ -475,14 +484,14 @@ is the "signpost" — a small subset of the manifest that:
 # This DVC remote was archived to cold storage by `dt remote archive prune`.
 # ... full comment block ...
 dt_archive_signpost: 1
-archive_name: neochemo-2026-05
+archive_name: projx-2026-05
 backend: mdss
-backend_dir: dt-archive/neochemo/neochemo-2026-05/
+backend_dir: dt-archive/projx/projx-2026-05/
 source_layout: dvc-v3
-source_remote: /g/data/<proj>/dvc/neochemo
+source_remote: /g/data/<proj>/dvc/projx
 git_url: git@github.com:<org>/<repo>.git
 git_ref: <sha>
-manifest_in_repo: .dt/archives/neochemo-2026-05.yaml
+manifest_in_repo: .dt/archives/projx-2026-05.yaml
 pruned_at: 2026-05-30T12:34:56+00:00
 pruned_by: <user>
 ```
