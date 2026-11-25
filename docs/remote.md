@@ -318,7 +318,6 @@ B: nci  (dvc-mixed)
   Common:    79,779 (2.1T)
   Only in A: 4 (199G)
   Only in B: 160,833 (3.3T)
-  B is a subset of A (top-up B with: dt remote merge A B).
 ```
 
 Blobs are compared **by their path in the remote, namespace by namespace**. A
@@ -333,9 +332,11 @@ location with neither a superset of the other, so `dvc pull` against the
 configured remote fails for the handful that only ever reached the old location
 and they look simply "missing". `--list` prints the differing blob paths (and
 common ones whose sizes differ); `--json` emits the full machine-readable
-structure. Prefix directories or entries that cannot be read are listed as a
-warning and make the command exit non-zero — they are never counted as absent.
-A path with no object directories is an error unless it is an empty directory.
+structure. Prefix directories or entries that cannot be read, and links where
+a prefix directory (or `files`, `files/md5`) belongs, are listed as a warning
+and are never counted as absent; so are common objects whose sizes differ. Any
+of these makes the command exit non-zero (with `--json` too) and suppresses the
+"subset" verdict. Both arguments must have object directories.
 
 ## dt remote merge
 
@@ -363,9 +364,15 @@ Properties:
 - **Same path, same namespace** — each blob is copied to the path it has in
   `SRC`, so legacy (root) and `files/md5` objects stay where DVC looks for them.
 - **Real files only** — only regular files that live in `SRC`'s prefix
-  directories are read; links there are skipped, and a link (or anything other
-  than a file) where a `DST` prefix directory or blob belongs is reported as an
-  error rather than followed or counted as present.
+  directories are read. A link where a prefix directory belongs, on either
+  side, is reported and not followed; a link or anything other than a file
+  where a `DST` blob belongs is reported as an error, never counted as present.
+- **Durable before visible** — each copy is flushed to disk before it gets its
+  final name. If the destination cannot take hard links, the command stops
+  before copying anything.
+- **Size check** — an object already in `DST` under the same name but with a
+  different size is reported (and left alone); check it with
+  `dt remote verify`.
 - **Verifying** (`--verify`) — re-hash each copied blob against its
   content-addressed filename *before* publishing it (a root object also
   matches its `md5-dos2unix` hash); a mismatch is reported and the blob is
@@ -385,12 +392,15 @@ dt remote merge /g/data/ab12/dvc/analysis/projx nci --verify
 dt remote verify nci --recheck     # optional: confirm the newly-landed blobs
 ```
 
-If `DST` does not exist yet it is created (give it as a path — a bare word
-must be a configured remote) and every `SRC` blob is treated as missing (a
-plain full copy); `--dry-run` just reports that. Newly created prefix
-directories get the shared-directory mode when `DST`'s root is group-writable
-or setgid, or always with `--group-writable`; otherwise they follow your umask.
-A source with unreadable paths makes the command exit non-zero. On the same filesystem
+If `DST` does not exist yet it is created once `SRC` has been checked —
+give it as a path whose parent already exists (a bare word must be a
+configured remote, and a configured remote's directory must exist) — and every
+`SRC` blob is treated as missing (a plain full copy); `--dry-run` just reports
+that. Newly created directories get the shared-directory mode when `DST`'s root
+is group-writable, or always with `--group-writable` (which also applies to a
+`DST` root the command creates); otherwise they follow your umask. Unreadable
+or linked paths on either side, size differences and failed copies all make the
+command exit non-zero. On the same filesystem
 the copy is a real byte copy (content-addressed stores are not reflinked here to
 keep the destination independent of the soon-to-be-retired source).
 

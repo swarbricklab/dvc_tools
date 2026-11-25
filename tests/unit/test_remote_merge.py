@@ -342,8 +342,9 @@ class TestMergeEntries:
         other = tmp_path / "other"
         oh = _place_v2(other, b"other\n")
         (src / "files" / "md5" / oh[:2]).symlink_to(other / oh[:2])
-        index, _, _ = ops.index_remote(src)
+        index, _, bad = ops.index_remote(src)
         assert _v2(oh) not in index and _v3(oh) not in index
+        assert bad == [f"files/md5/{oh[:2]} (link, not followed)"]
 
     def test_linked_destination_prefix_is_an_error(self, tmp_path):
         src = tmp_path / "src"
@@ -447,7 +448,7 @@ class TestMergeNamespacesAndChecks:
             res = ops.merge_remotes(src, dst)
         finally:
             os.chmod(src / hidden[:2], 0o755)
-        assert res['unreadable'] == [hidden[:2]]
+        assert res['src_unreadable'] == [hidden[:2]]
         assert res['copied'] == 1
 
     def test_source_without_objects_is_refused(self, tmp_path):
@@ -534,3 +535,59 @@ class TestMergeNamespacesAndChecks:
         link.symlink_to(real)
         _label, path = ops.resolve_remote_arg(str(link))
         assert path == link
+
+
+class TestMergeReporting:
+    def test_size_difference_is_reported(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        h = _place_v3(src, b"x" * 1000)
+        d = dst / "files" / "md5" / h[:2]
+        d.mkdir(parents=True)
+        (d / h[2:]).write_bytes(b"x" * 10)
+        res = ops.merge_remotes(src, dst, verify=True)
+        assert res['size_differs'] == [_v3(h)]
+        assert (d / h[2:]).read_bytes() == b"x" * 10
+
+    def test_missing_parent_is_not_created(self, tmp_path):
+        src = tmp_path / "src"
+        _place_v3(src, b"x\n")
+        with pytest.raises(RemoteError, match="parent"):
+            ops.merge_remotes(src, tmp_path / "typo" / "deep" / "dst")
+        assert not (tmp_path / "typo").exists()
+
+    def test_bad_source_creates_nothing(self, tmp_path):
+        src = tmp_path / "not-a-remote"
+        src.mkdir()
+        (src / "README").write_text("hi\n")
+        with pytest.raises(RemoteError):
+            ops.merge_remotes(src, tmp_path / "dst")
+        assert not (tmp_path / "dst").exists()
+
+    def test_unpublishable_destination_fails_before_copying(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        _place_v3(src, b"x\n")
+        real_link = os.link
+
+        def no_links(*a, **k):
+            raise OSError(1, "Operation not permitted")
+        monkeypatch.setattr(ops.os, 'link', no_links)
+        with pytest.raises(RemoteError, match="hard links"):
+            ops.merge_remotes(src, dst)
+        monkeypatch.setattr(ops.os, 'link', real_link)
+        assert [p for p in dst.rglob("*") if p.is_file()] == []
+
+    def test_diff_json_fails_on_unreadable(self, tmp_path):
+        from click.testing import CliRunner
+        from dt.cli import cli
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        _place_v3(a, b"x\n")
+        _place_v3(b, b"x\n")
+        (b / "files" / "md5" / "zz").mkdir()
+        other = tmp_path / "other"
+        other.mkdir()
+        (b / "files" / "md5" / "ab").symlink_to(other)
+        r = CliRunner().invoke(cli, ['remote', 'diff', str(a), str(b), '--json'])
+        assert r.exit_code == 1

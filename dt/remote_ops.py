@@ -739,11 +739,15 @@ def index_remote(
         layout = ops.detect_source_layout(remote_dir)
     except ArchiveError:
         if allow_empty:
+            if not os.path.lexists(remote_dir):
+                return {}, 'empty', []
             try:
-                with os.scandir(remote_dir) as it:
-                    empty = next(it, None) is None
-            except FileNotFoundError:
-                empty = True
+                fd = _open_src_root(remote_dir)
+                try:
+                    with os.scandir(fd) as it:
+                        empty = next(it, None) is None
+                finally:
+                    os.close(fd)
             except OSError as e:
                 raise RemoteError(f"Cannot read {remote_dir}: {e.strerror or e}")
             if empty:
@@ -756,7 +760,13 @@ def index_remote(
     unreadable: List[str] = []
     root_fd = _open_src_root(remote_dir)
     try:
-        dirs = [parts for parts, kind in _walk_layout(root_fd) if kind == 'dir']
+        dirs = []
+        for parts, kind in _walk_layout(root_fd):
+            if kind == 'dir':
+                dirs.append(parts)
+            else:
+                # Not followed, and not taken for absent either.
+                unreadable.append(f"{'/'.join(parts)} (link, not followed)")
         if progress:
             print(f"Indexing {remote_dir} ({layout}) across {len(dirs)} "
                   f"prefix(es) with {n_jobs} worker(s) ...",
@@ -821,7 +831,7 @@ def _shared_new_dirs(dst_root_fd: int, group_writable: bool) -> Optional[int]:
     """Mode for directories the merge creates, or None to leave the umask's.
 
     New prefix dirs follow a shared destination: if its root is group
-    writable or setgid they get the shared-directory mode, as with
+    writable they get the shared-directory mode, as with
     ``--group-writable``, so other members' pushes into them keep working.
     """
     if group_writable:
@@ -830,7 +840,7 @@ def _shared_new_dirs(dst_root_fd: int, group_writable: bool) -> Optional[int]:
         st = os.fstat(dst_root_fd)
     except OSError:
         return None
-    if st.st_mode & (stat.S_IWGRP | stat.S_ISGID):
+    if st.st_mode & stat.S_IWGRP:
         return utils.shared_dir_mode()
     return None
 
@@ -889,6 +899,38 @@ def _link_open_file(fd: int, dir_fd: int, name: str) -> bool:
         return False
 
 
+_LINK_UNSUPPORTED = (errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EXDEV)
+
+
+def _check_can_publish(dst_root_fd: int) -> None:
+    """Fail once, up front, if this destination cannot take the link step.
+
+    Every copy is published by linking its open temporary file into place;
+    without that there is no way to add a name without risking a replace,
+    so rather than copy everything and fail each blob, say so now.
+    """
+    import secrets
+    tmp = f".{secrets.token_urlsafe(16)}.tmp"
+    probe = f".{secrets.token_urlsafe(16)}.tmp"
+    fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 0o600, dir_fd=dst_root_fd)
+    try:
+        try:
+            os.link(f'/proc/self/fd/{fd}', probe, dst_dir_fd=dst_root_fd,
+                    follow_symlinks=True)
+        except OSError as e:
+            raise RemoteError(
+                f"Cannot publish copies in this destination ({e.strerror or e}): "
+                f"merge needs hard links and /proc/self/fd.")
+        os.unlink(probe, dir_fd=dst_root_fd)
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(tmp, dir_fd=dst_root_fd)
+        except OSError:
+            pass
+
+
 def _md5_matches(dfd: int, plain: str, expected: str, namespace: str) -> bool:
     """Whether the written bytes carry the name they will be published under.
 
@@ -907,7 +949,7 @@ def _md5_matches(dfd: int, plain: str, expected: str, namespace: str) -> bool:
 
 
 def _copy_blob(src_dir_fd: int, dst_dir_fd: int, name: str, expected: str,
-               namespace: str, verify: bool, mode: int,
+               namespace: str, verify: bool, mode: int, stop=None,
                ) -> Tuple[str, int, Optional[str]]:
     """Copy blob ``name`` between two directory handles.
 
@@ -917,7 +959,8 @@ def _copy_blob(src_dir_fd: int, dst_dir_fd: int, name: str, expected: str,
     ``name`` only if nothing is there yet. Returns ``(status, size,
     actual_md5)`` with status ``'copied'``, ``'skipped'``, ``'occupied'``
     (something other than a file holds the name), ``'mismatch'``,
-    ``'short'`` (fewer bytes than the source's size) or ``'not-regular'``.
+    ``'changed'`` (the source's size changed while copying),
+    ``'interrupted'`` or ``'not-regular'``.
     """
     import hashlib
     import secrets
@@ -938,6 +981,9 @@ def _copy_blob(src_dir_fd: int, dst_dir_fd: int, name: str, expected: str,
         st = os.fstat(sfd)
         if not stat.S_ISREG(st.st_mode):
             return 'not-regular', 0, None
+        # Non-blocking was only for the open (a FIFO must not hang it).
+        fcntl.fcntl(sfd, fcntl.F_SETFL,
+                    fcntl.fcntl(sfd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
         tmp = f".{secrets.token_urlsafe(16)}.tmp"  # the shape `dt remote clean` sweeps
         dfd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                       0o600, dir_fd=dst_dir_fd)
@@ -945,6 +991,8 @@ def _copy_blob(src_dir_fd: int, dst_dir_fd: int, name: str, expected: str,
             h = hashlib.md5() if verify else None
             size = 0
             while True:
+                if stop is not None and stop.is_set():
+                    return 'interrupted', size, None
                 chunk = os.read(sfd, 1 << 20)
                 if not chunk:
                     break
@@ -955,13 +1003,18 @@ def _copy_blob(src_dir_fd: int, dst_dir_fd: int, name: str, expected: str,
                 while view:  # a write may be partial (network filesystems)
                     n = os.write(dfd, view)
                     view = view[n:]
-            if size != st.st_size:
-                return 'short', size, None
+            if size != st.st_size or os.fstat(sfd).st_size != st.st_size:
+                return 'changed', size, None
+            # Deferred write errors (quota, I/O) must surface before the
+            # file gets its final name, not after.
+            os.fsync(dfd)
             if h is not None and not _md5_matches(dfd, h.hexdigest(), expected,
                                                   namespace):
                 return 'mismatch', size, h.hexdigest()
             os.fchmod(dfd, mode)
             if not _link_open_file(dfd, dst_dir_fd, name):
+                if _entry_kind(dst_dir_fd, name) == 'other':
+                    return 'occupied', 0, None
                 return 'skipped', 0, None
             # Stamp after publishing: a finished temporary file must not look
             # old enough for a concurrent sweep while it is still in use.
@@ -971,7 +1024,10 @@ def _copy_blob(src_dir_fd: int, dst_dir_fd: int, name: str, expected: str,
                 pass
             return 'copied', size, None
         finally:
-            os.close(dfd)
+            try:
+                os.close(dfd)
+            except OSError:
+                pass
             try:
                 os.unlink(tmp, dir_fd=dst_dir_fd)
             except OSError:
@@ -1035,7 +1091,7 @@ def _topup_one_prefix(
             try:
                 status, size, actual = _copy_blob(
                     src_fds[dir_parts], dst_fds[dir_parts], name, expected,
-                    _namespace(dir_parts), verify, mode)
+                    _namespace(dir_parts), verify, mode, stop)
             except OSError as e:
                 _err(rel, str(e))
                 continue
@@ -1050,8 +1106,10 @@ def _topup_one_prefix(
                                    'actual_md5': actual})
             elif status == 'occupied':
                 _err(rel, 'destination name is held by something other than a file')
-            elif status == 'short':
-                _err(rel, 'source changed while copying (short read)')
+            elif status == 'changed':
+                _err(rel, 'source size changed while copying')
+            elif status == 'interrupted':
+                break
             else:
                 _err(rel, 'not a regular file')
     finally:
@@ -1097,8 +1155,11 @@ def merge_remotes(
         'dry_run': dry_run, 'verify': verify,
         'missing_in_dest': len(to_copy),
         'missing_in_dest_bytes': planned_bytes,
-        'unreadable': (list(diff.get('a_unreadable', []))
-                       + list(diff.get('b_unreadable', []))),
+        'src_unreadable': list(diff.get('a_unreadable', [])),
+        'dst_unreadable': list(diff.get('b_unreadable', [])),
+        # Same name, different size: replacing is not this command's job,
+        # but it must not pass for complete (see `dt remote verify`).
+        'size_differs': list(diff.get('size_differs', [])),
         'copied': 0, 'copied_bytes': 0, 'skipped': 0,
         'mismatch': 0, 'errors': 0,
         'mismatches': [], 'error_entries': [],
@@ -1124,9 +1185,18 @@ def merge_remotes(
               file=sys.stderr, flush=True)
 
     done = 0
+    futures = []
     stop = threading.Event()
+    # Only now, with the source checked, create a missing destination --
+    # its parent must exist, so a mistyped path does not grow a new tree.
+    created_root = False
     if not os.path.lexists(dst_dir):
-        Path(dst_dir).mkdir(parents=True)
+        try:
+            Path(dst_dir).mkdir()
+        except FileNotFoundError:
+            raise RemoteError(
+                f"Cannot create {dst_dir}: its parent directory does not exist.")
+        created_root = True
     src_root_fd = _open_src_root(src_dir)
     try:
         dst_root_fd = perms._open_root(dst_dir)
@@ -1135,6 +1205,9 @@ def merge_remotes(
         raise RemoteError(f"Cannot open {dst_dir}: {e.strerror or e}")
     pool = ThreadPoolExecutor(max_workers=n_jobs)
     try:
+        if created_root and group_writable:
+            perms._fchmod_path_fd(dst_root_fd, utils.shared_dir_mode())
+        _check_can_publish(dst_root_fd)
         mode = _blob_mode_fd(dst_root_fd)
         new_dir_mode = _shared_new_dirs(dst_root_fd, group_writable)
         futures = [
@@ -1157,7 +1230,12 @@ def merge_remotes(
         # Interrupted (e.g. Ctrl-C): stop queued and running prefixes, and
         # keep the shared handles open until every worker has returned.
         stop.set()
-        pool.shutdown(wait=True, cancel_futures=True)
+        if sys.version_info >= (3, 9):
+            pool.shutdown(wait=True, cancel_futures=True)
+        else:
+            for f in futures:
+                f.cancel()
+            pool.shutdown(wait=True)
         raise
     finally:
         pool.shutdown(wait=True)

@@ -1873,6 +1873,8 @@ def remote_diff(remote_a, remote_b, jobs, list_blobs, json_output, verbose):
             payload.pop('only_in_a', None)
             payload.pop('only_in_b', None)
         click.echo(_json.dumps(payload, indent=2))
+        if d['a_unreadable'] or d['b_unreadable'] or d['size_differs']:
+            raise SystemExit(1)
         return
 
     click.echo(f"A: {a_label}  ({d['a_layout']})")
@@ -1887,10 +1889,13 @@ def remote_diff(remote_a, remote_b, jobs, list_blobs, json_output, verbose):
                f"({utils.format_size(d['only_in_a_bytes'])})")
     click.echo(f"  Only in B: {d['only_in_b_count']:,} "
                f"({utils.format_size(d['only_in_b_bytes'])})")
-    if not d['only_in_a_count'] and not d['only_in_b_count']:
+    unsure = d['a_unreadable'] or d['b_unreadable'] or d['size_differs']
+    if unsure:
+        pass  # no verdict on a partial or inconsistent picture
+    elif not d['only_in_a_count'] and not d['only_in_b_count']:
         click.echo("  The two remotes hold the same objects.")
     elif not d['only_in_a_count']:
-        click.echo("  A is a subset of B.")
+        click.echo("  A is a subset of B (top-up A with: dt remote merge B A).")
     elif not d['only_in_b_count']:
         click.echo("  B is a subset of A (top-up B with: dt remote merge A B).")
     if d['size_differs']:
@@ -1910,7 +1915,7 @@ def remote_diff(remote_a, remote_b, jobs, list_blobs, json_output, verbose):
             click.echo(f"    only-in-B  {k}")
         for k in d['size_differs']:
             click.echo(f"    size-diff  {k}")
-    if unreadable:
+    if unsure:
         raise SystemExit(1)
 
 
@@ -1961,10 +1966,6 @@ def remote_merge(src, dst, dry_run, verify, group_writable, jobs,
         # DST may be created by the merge, so it need not exist yet.
         dst_label, dst_path = remote_ops_mod.resolve_remote_arg(
             dst, must_exist=False)
-        if not dst_path.is_symlink() and not dst_path.exists() and not dry_run:
-            # An absent destination has no blobs, so everything in SRC is
-            # missing; create it (a dry run just reports that).
-            dst_path.mkdir(parents=True)
         result = remote_ops_mod.merge_remotes(
             src_path, dst_path, dry_run=dry_run, verify=verify,
             group_writable=group_writable, jobs=jobs, progress=verbose)
@@ -1980,7 +1981,8 @@ def remote_merge(src, dst, dry_run, verify, group_writable, jobs,
         click.echo(f"[dry-run] {src_label} -> {dst_label}")
         click.echo(f"  Would copy {result['missing_in_dest']:,} object(s), "
                    f"{utils.format_size(result['missing_in_dest_bytes'])}")
-        if not result['missing_in_dest'] and not result['unreadable']:
+        if not (result['missing_in_dest'] or result['src_unreadable']
+                or result['dst_unreadable'] or result['size_differs']):
             click.echo("  Destination already holds every source object.")
     else:
         click.echo(f"Topped up {dst_label} from {src_label}")
@@ -1999,13 +2001,23 @@ def remote_merge(src, dst, dry_run, verify, group_writable, jobs,
                        f"copied:", err=True)
             for e in result['error_entries'][:10]:
                 click.echo(f"    {e['path']}: {e['error']}", err=True)
-    if result['unreadable'] and not json_output:
-        click.echo(f"  WARNING: {len(result['unreadable']):,} path(s) could not "
-                   f"be read and were left out:", err=True)
-        for u in result['unreadable'][:10]:
-            click.echo(f"    {u}", err=True)
+    if not json_output:
+        for side, key in (('source', 'src_unreadable'),
+                          ('destination', 'dst_unreadable')):
+            if result[key]:
+                click.echo(f"  WARNING: {len(result[key]):,} {side} path(s) could "
+                           f"not be read and were left out:", err=True)
+                for u in result[key][:10]:
+                    click.echo(f"    {u}", err=True)
+        if result['size_differs']:
+            click.echo(f"  WARNING: {len(result['size_differs']):,} object(s) in "
+                       f"the destination differ in size from the source and were "
+                       f"left alone (check with: dt remote verify):", err=True)
+            for u in result['size_differs'][:10]:
+                click.echo(f"    {u}", err=True)
 
-    if result.get('mismatch') or result.get('errors') or result.get('unreadable'):
+    if (result.get('mismatch') or result.get('errors') or result['src_unreadable']
+            or result['dst_unreadable'] or result['size_differs']):
         raise SystemExit(1)
 
 
