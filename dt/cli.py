@@ -5833,8 +5833,9 @@ def index_cache():
     already cached without expensive per-file stat() calls on network
     filesystems.
 
-    The index lives at <cache_root>/.dt/cache.db/ and is shared by all
-    repos that use the same cache.
+    The index is per user and per cache: it lives in
+    ${XDG_CACHE_HOME:-~/.cache}/dt/oid-index/, one file per cache, and is
+    shared by all of your repos that use the same cache.
 
     \b
     Commands:
