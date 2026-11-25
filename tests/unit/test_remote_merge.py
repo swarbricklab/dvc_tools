@@ -47,7 +47,13 @@ def _place_v2(remote_dir: Path, content: bytes, is_dir: bool = False) -> str:
     return h
 
 
-def _logical(h: str, is_dir: bool = False) -> str:
+def _v3(h: str, is_dir: bool = False) -> str:
+    """A blob's path in the md5 namespace (files/md5/ab/cdef...)."""
+    return f"files/md5/{h[:2]}/{h[2:]}" + ('.dir' if is_dir else '')
+
+
+def _v2(h: str, is_dir: bool = False) -> str:
+    """A blob's path in the legacy root namespace (ab/cdef...)."""
     return f"{h[:2]}/{h[2:]}" + ('.dir' if is_dir else '')
 
 
@@ -60,24 +66,20 @@ class TestIndexRemote:
         r = tmp_path / "r"
         h1 = _place_v3(r, b"one\n")
         h2 = _place_v3(r, b"two\n")
-        index, layout = ops.index_remote(r, jobs=2)
-        assert layout == "dvc-v3"
-        assert set(index) == {_logical(h1), _logical(h2)}
-        rel, size = index[_logical(h1)]
-        assert rel == f"files/md5/{h1[:2]}/{h1[2:]}"
-        assert size == len(b"one\n")
+        index, layout, bad = ops.index_remote(r, jobs=2)
+        assert layout == "dvc-v3" and bad == []
+        assert set(index) == {_v3(h1), _v3(h2)}
+        assert index[_v3(h1)] == len(b"one\n")
 
-    def test_v2_and_v3_share_logical_key(self, tmp_path):
-        """The same content stored under v2 and v3 has one logical identity."""
+    def test_namespaces_are_kept_apart(self, tmp_path):
+        """The same name at the root and under files/md5 is two objects."""
         content = b"shared\n"
-        v2 = tmp_path / "v2"
-        v3 = tmp_path / "v3"
-        h = _place_v2(v2, content)
-        assert _place_v3(v3, content) == h
-        i2, l2 = ops.index_remote(v2)
-        i3, l3 = ops.index_remote(v3)
-        assert l2 == "dvc-v2" and l3 == "dvc-v3"
-        assert set(i2) == set(i3) == {_logical(h)}
+        r = tmp_path / "r"
+        h = _place_v2(r, content)
+        assert _place_v3(r, content) == h
+        index, layout, _ = ops.index_remote(r)
+        assert layout == "dvc-mixed"
+        assert set(index) == {_v2(h), _v3(h)}
 
     def test_skips_stray_non_blob(self, tmp_path):
         r = tmp_path / "r"
@@ -85,14 +87,14 @@ class TestIndexRemote:
         # A stray *.tmp left by a killed transfer must not be indexed.
         d = next((r / "files" / "md5").iterdir())
         (d / "deadbeef.tmp").write_bytes(b"junk")
-        index, _ = ops.index_remote(r)
+        index, _, _ = ops.index_remote(r)
         assert len(index) == 1
 
     def test_dir_object_indexed_distinctly(self, tmp_path):
         r = tmp_path / "r"
         h = _place_v3(r, b'{"a": 1}\n', is_dir=True)
-        index, _ = ops.index_remote(r)
-        assert set(index) == {_logical(h, is_dir=True)}
+        index, _, _ = ops.index_remote(r)
+        assert set(index) == {_v3(h, is_dir=True)}
 
 
 # --------------------------------------------------------------------------- #
@@ -110,28 +112,27 @@ class TestDiffRemotes:
         only_b = _place_v3(b, b"only-b\n")
 
         d = ops.diff_remotes(a, b)
-        assert d['only_in_a'] == sorted([_logical(only_a), _logical(only_a2)])
-        assert d['only_in_b'] == [_logical(only_b)]
+        assert d['only_in_a'] == sorted([_v3(only_a), _v3(only_a2)])
+        assert d['only_in_b'] == [_v3(only_b)]
         assert d['common_count'] == 1
         assert d['only_in_a_count'] == 2
         assert d['only_in_b_count'] == 1
         assert d['only_in_a_bytes'] == len(b"only-a-1\n") + len(b"only-a-2\n")
         assert d['only_in_b_bytes'] == len(b"only-b\n")
 
-    def test_cross_layout_blobs_are_common(self, tmp_path):
-        """A v2 old remote vs a v3 new remote: shared content is not a diff."""
+    def test_other_namespace_does_not_count(self, tmp_path):
+        """A legacy object is still missing when B has it only under files/md5."""
         a = tmp_path / "a"  # old, v2
         b = tmp_path / "b"  # new, v3
-        _place_v2(a, b"shared\n")
+        shared = _place_v2(a, b"shared\n")
         _place_v3(b, b"shared\n")
-        only_old = _place_v2(a, b"old-only\n")
 
         d = ops.diff_remotes(a, b)
         assert d['a_layout'] == "dvc-v2"
         assert d['b_layout'] == "dvc-v3"
-        assert d['common_count'] == 1
-        assert d['only_in_a'] == [_logical(only_old)]
-        assert d['only_in_b'] == []
+        assert d['common_count'] == 0
+        assert d['only_in_a'] == [_v2(shared)]
+        assert d['only_in_b'] == [_v3(shared)]
 
     def test_mixed_layout_remote(self, tmp_path):
         a = tmp_path / "a"
@@ -142,8 +143,8 @@ class TestDiffRemotes:
         _place_v3(b, b"v3blob\n")  # b only has the v3 one
         d = ops.diff_remotes(a, b)
         assert d['a_layout'] == "dvc-mixed"
-        assert d['only_in_a'] == [_logical(hv2)]
-        assert set(d['_a_index']) == {_logical(hv2), _logical(hv3)}
+        assert d['only_in_a'] == [_v2(hv2)]
+        assert set(d['_a_index']) == {_v2(hv2), _v3(hv3)}
 
 
 # --------------------------------------------------------------------------- #
@@ -229,9 +230,8 @@ class TestMergeRemotes:
         (d / h[2:]).write_bytes(b"SENTINEL\n")
         stale_diff = {
             'a_layout': 'dvc-v3', 'b_layout': 'dvc-v3',
-            'only_in_a': [_logical(h)], 'only_in_a_bytes': len(b"payload\n"),
-            '_a_index': {_logical(h): (f"files/md5/{h[:2]}/{h[2:]}",
-                                       len(b"payload\n"))},
+            'only_in_a': [_v3(h)], 'only_in_a_bytes': len(b"payload\n"),
+            '_a_index': {_v3(h): len(b"payload\n")},
         }
         res = ops.merge_remotes(src, dst, diff=stale_diff)
         assert res['copied'] == 0
@@ -293,8 +293,8 @@ class TestResolveRemoteArg:
         r = tmp_path / "r"
         r.mkdir()
         label, path = ops.resolve_remote_arg(str(r))
-        assert path == r.resolve()
-        assert label == str(r.resolve())
+        assert path == Path(os.path.abspath(r))
+        assert label == os.path.abspath(r)
 
     def test_missing_path_raises(self, tmp_path):
         with pytest.raises(RemoteError):
@@ -303,7 +303,7 @@ class TestResolveRemoteArg:
     def test_missing_allowed_when_not_required(self, tmp_path):
         target = tmp_path / "new"
         label, path = ops.resolve_remote_arg(str(target), must_exist=False)
-        assert path == target.resolve()
+        assert path == Path(os.path.abspath(target))
 
     def test_configured_remote_name(self, tmp_path, monkeypatch):
         r = tmp_path / "configured"
@@ -333,8 +333,8 @@ class TestMergeEntries:
         d = src / "files" / "md5" / oh[:2]
         d.mkdir(parents=True, exist_ok=True)
         (d / oh[2:]).symlink_to(outside)
-        index, _ = ops.index_remote(src)
-        assert set(index) == {_logical(h)}
+        index, _, _ = ops.index_remote(src)
+        assert set(index) == {_v3(h)}
 
     def test_linked_source_prefix_is_not_entered(self, tmp_path):
         src = tmp_path / "src"
@@ -342,8 +342,8 @@ class TestMergeEntries:
         other = tmp_path / "other"
         oh = _place_v2(other, b"other\n")
         (src / "files" / "md5" / oh[:2]).symlink_to(other / oh[:2])
-        index, _ = ops.index_remote(src)
-        assert _logical(oh) not in index
+        index, _, _ = ops.index_remote(src)
+        assert _v2(oh) not in index and _v3(oh) not in index
 
     def test_linked_destination_prefix_is_an_error(self, tmp_path):
         src = tmp_path / "src"
@@ -361,13 +361,47 @@ class TestMergeEntries:
         d = tmp_path / "d"
         d.mkdir()
         (d / "name").write_bytes(b"keep\n")
-        (d / "tmp").write_bytes(b"new\n")
-        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        dirfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        fd = os.open("new", os.O_RDWR | os.O_CREAT, 0o600, dir_fd=dirfd)
         try:
-            assert ops._publish_noreplace(fd, "tmp", "name") is False
+            os.write(fd, b"new\n")
+            assert ops._link_open_file(fd, dirfd, "name") is False
         finally:
             os.close(fd)
+            os.close(dirfd)
         assert (d / "name").read_bytes() == b"keep\n"
+
+    def test_written_file_is_what_gets_its_name(self, tmp_path):
+        """Whatever sits at the temporary name later is not what is published."""
+        d = tmp_path / "d"
+        d.mkdir()
+        dirfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        fd = os.open(".t.tmp", os.O_RDWR | os.O_CREAT, 0o600, dir_fd=dirfd)
+        try:
+            os.write(fd, b"mine\n")
+            os.rename(d / ".t.tmp", d / "moved")
+            (d / ".t.tmp").write_bytes(b"other\n")
+            assert ops._link_open_file(fd, dirfd, "name") is True
+        finally:
+            os.close(fd)
+            os.close(dirfd)
+        assert (d / "name").read_bytes() == b"mine\n"
+
+    def test_removed_temporary_file_is_not_published(self, tmp_path):
+        d = tmp_path / "d"
+        d.mkdir()
+        dirfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        fd = os.open(".t.tmp", os.O_RDWR | os.O_CREAT, 0o600, dir_fd=dirfd)
+        try:
+            os.write(fd, b"mine\n")
+            os.unlink(d / ".t.tmp")
+            (d / ".t.tmp").write_bytes(b"other\n")
+            with pytest.raises(OSError):
+                ops._link_open_file(fd, dirfd, "name")
+        finally:
+            os.close(fd)
+            os.close(dirfd)
+        assert not (d / "name").exists()
 
     def test_unexpected_plan_path_is_refused(self, tmp_path):
         src = tmp_path / "src"
@@ -375,8 +409,8 @@ class TestMergeEntries:
         h = _place_v3(src, b"payload\n")
         plan = {
             'a_layout': 'dvc-v3', 'b_layout': 'empty',
-            'only_in_a': [_logical(h)], 'only_in_a_bytes': 8,
-            '_a_index': {_logical(h): (f"../{h[:2]}/{h[2:]}", 8)},
+            'only_in_a': [f"../{h[:2]}/{h[2:]}"], 'only_in_a_bytes': 8,
+            '_a_index': {f"../{h[:2]}/{h[2:]}": 8},
         }
         res = ops.merge_remotes(src, dst, diff=plan)
         assert res['copied'] == 0 and res['errors'] == 1
@@ -389,3 +423,114 @@ class TestMergeEntries:
         res = ops.merge_remotes(src, dst, verify=True)
         assert res['copied'] == 2
         assert [p for p in dst.rglob("*") if p.name.endswith(".tmp")] == []
+
+
+class TestMergeNamespacesAndChecks:
+    def test_both_namespaces_copied(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        h = _place_v2(src, b"same\n")
+        _place_v3(src, b"same\n")
+        res = ops.merge_remotes(src, dst)
+        assert res['copied'] == 2
+        assert (dst / _v2(h)).read_bytes() == b"same\n"
+        assert (dst / _v3(h)).read_bytes() == b"same\n"
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads everything")
+    def test_unreadable_source_prefix_is_reported(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        _place_v3(src, b"readable\n")
+        hidden = _place_v2(src, b"hidden\n")
+        os.chmod(src / hidden[:2], 0)
+        try:
+            res = ops.merge_remotes(src, dst)
+        finally:
+            os.chmod(src / hidden[:2], 0o755)
+        assert res['unreadable'] == [hidden[:2]]
+        assert res['copied'] == 1
+
+    def test_source_without_objects_is_refused(self, tmp_path):
+        src = tmp_path / "not-a-remote"
+        src.mkdir()
+        (src / "README").write_text("hi\n")
+        with pytest.raises(RemoteError):
+            ops.merge_remotes(src, tmp_path / "dst")
+
+    def test_empty_destination_is_fine(self, tmp_path):
+        src = tmp_path / "src"
+        _place_v3(src, b"x\n")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        assert ops.merge_remotes(src, dst)['copied'] == 1
+
+    def test_shared_destination_gets_shared_dirs(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        h = _place_v3(src, b"x\n")
+        dst.mkdir()
+        os.chmod(dst, 0o2770)
+        monkeypatch.setattr(ops.utils, 'shared_dir_mode', lambda: 0o2770)
+        old = os.umask(0o077)
+        try:
+            ops.merge_remotes(src, dst)
+        finally:
+            os.umask(old)
+        mode = stat.S_IMODE((dst / "files" / "md5" / h[:2]).stat().st_mode)
+        assert mode & 0o070 == 0o070
+
+    def test_private_destination_keeps_umask(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        h = _place_v3(src, b"x\n")
+        dst.mkdir()
+        os.chmod(dst, 0o700)
+        old = os.umask(0o077)
+        try:
+            ops.merge_remotes(src, dst)
+        finally:
+            os.umask(old)
+        mode = stat.S_IMODE((dst / "files" / "md5" / h[:2]).stat().st_mode)
+        assert mode & 0o077 == 0
+
+    def test_legacy_text_object_verifies(self, tmp_path):
+        """Root names fold CRLF to LF for text; --verify accepts that."""
+        import hashlib
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        body = b"a\r\nb\r\n"
+        h = hashlib.md5(b"a\nb\n").hexdigest()
+        d = src / h[:2]
+        d.mkdir(parents=True)
+        (d / h[2:]).write_bytes(body)
+        res = ops.merge_remotes(src, dst, verify=True)
+        assert res['copied'] == 1 and res['mismatch'] == 0
+        assert (dst / _v2(h)).read_bytes() == body
+
+    def test_md5_namespace_does_not_fold_line_endings(self, tmp_path):
+        import hashlib
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        h = hashlib.md5(b"a\nb\n").hexdigest()
+        d = src / "files" / "md5" / h[:2]
+        d.mkdir(parents=True)
+        (d / h[2:]).write_bytes(b"a\r\nb\r\n")
+        res = ops.merge_remotes(src, dst, verify=True)
+        assert res['copied'] == 0 and res['mismatch'] == 1
+
+    def test_unknown_bare_word_is_not_a_new_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(ops.remote_mod, 'list_remotes',
+                            lambda project_only=False: [('nci', '/x', True)])
+        with pytest.raises(RemoteError, match="not a configured remote"):
+            ops.resolve_remote_arg('ncii', must_exist=False)
+        label, path = ops.resolve_remote_arg('./ncii', must_exist=False)
+        assert path == tmp_path / "ncii"
+
+    def test_path_argument_keeps_links_for_the_root_check(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        _label, path = ops.resolve_remote_arg(str(link))
+        assert path == link

@@ -14,8 +14,9 @@ Operations on a locally-accessible DVC remote's blob tree:
   the other lacks (diagnoses a half-finished migration).
 - :func:`merge_remotes` — top-up one remote from another: copy blobs present
   in the source but missing from the destination, so the destination becomes
-  a superset. Additive (never deletes/overwrites), atomic (tmp + ``os.replace``),
-  idempotent/resumable and optionally re-hash-verifying.
+  a superset. Additive (never deletes/overwrites), atomic (a temporary file
+  linked into place only while the name is free), idempotent/resumable and
+  optionally re-hash-verifying.
 
 The bulk transfer is parallelised per md5 prefix (like :mod:`dt.remote_verify`),
 reusing the layout-aware prefix enumerator from :mod:`dt.archive.operations`.
@@ -120,6 +121,16 @@ def _blob_mode(dst_root: Path) -> int:
     destination root already grants world read."""
     try:
         if os.stat(dst_root).st_mode & stat.S_IROTH:
+            return 0o444
+    except OSError:
+        pass
+    return 0o440
+
+
+def _blob_mode_fd(root_fd: int) -> int:
+    """:func:`_blob_mode` for an open destination root."""
+    try:
+        if os.fstat(root_fd).st_mode & stat.S_IROTH:
             return 0o444
     except OSError:
         pass
@@ -648,81 +659,101 @@ def move_remote(
 # (new) remote then fails for the blobs that only ever made it to the old
 # location, and they look simply "missing".
 #
-# A blob's identity is content-addressed and layout-independent: its md5 is the
-# 2-char prefix directory name concatenated with the filename (``.dir`` objects
-# carry that suffix on both the filename and nothing else). The same blob stored
-# in a v2 remote (``ab/cdef...``) and a v3 remote (``files/md5/ab/cdef...``)
-# shares the identity ``ab/cdef...`` even though the on-disk paths differ. We key
-# every blob by that **logical key** (``"<prefix>/<name>"``) so the diff treats
-# v2 and v3 copies of one blob as the same object and never re-copies it.
+# A remote holds two object namespaces, and DVC 3 reads them separately:
+# legacy (``md5-dos2unix``) objects at the root (``ab/cdef...``) and ``md5``
+# objects under ``files/md5/ab/cdef...``. The same name in the two is not
+# interchangeable -- a root name hashes the text with CRLF folded to LF, and a
+# reader looks only in the namespace its ``.dvc`` file's hash names. So blobs
+# are keyed by their path in the remote (namespace + prefix + name), compared
+# namespace by namespace, and copied to the same path in the destination.
 
 
-def _logical_key(hex_prefix: str, name: str) -> str:
-    """Layout-independent content identity for a blob: ``"<prefix>/<name>"``."""
-    return f"{hex_prefix}/{name}"
+def _namespace(parts) -> str:
+    """``'legacy'`` for a root prefix dir, ``'md5'`` for ``files/md5/..``."""
+    return 'md5' if tuple(parts[:-1]) == ('files', 'md5') else 'legacy'
 
 
 def _index_one_prefix(
     root_fd: int, parts: Tuple[str, ...],
-) -> Dict[str, Tuple[str, int]]:
+) -> Tuple[Dict[str, int], List[str]]:
     """Index every real blob in one prefix dir (reached from ``root_fd``).
 
-    Returns ``{logical_key: (rel_path, size)}`` where ``rel_path`` is the
-    blob's layout-specific path relative to the remote root. Only regular
-    files that live in the dir count; links and stray non-blob artefacts
-    (e.g. a leftover ``*.tmp``) are skipped so they are never diffed or copied.
+    Returns ``({rel_path: size}, unreadable)``. Only regular files that live
+    in the dir count; links and stray non-blob artefacts (e.g. a leftover
+    ``*.tmp``) are skipped. ``unreadable`` lists the dir or entries that could
+    not be read, so a caller never takes them for absent.
     """
-    out: Dict[str, Tuple[str, int]] = {}
+    out: Dict[str, int] = {}
+    bad: List[str] = []
+    rel_dir = '/'.join(parts)
     hex_prefix = parts[-1]
     try:
         pfd = _open_rel(root_fd, parts)
     except OSError:
-        return out
+        return out, [rel_dir]
     try:
-        with os.scandir(pfd) as it:
-            entries = list(it)
+        try:
+            with os.scandir(pfd) as it:
+                entries = list(it)
+        except OSError:
+            return out, [rel_dir]
         for ent in entries:
+            expected = remote_verify.expected_md5_for_blob(hex_prefix, ent.name)
+            if not remote_verify._HASH_RE.fullmatch(expected):
+                continue  # stray / *.tmp — not a real blob
             try:
                 if not ent.is_file(follow_symlinks=False):
                     continue
                 size = ent.stat(follow_symlinks=False).st_size
             except OSError:
+                bad.append(f"{rel_dir}/{ent.name}")
                 continue
-            expected = remote_verify.expected_md5_for_blob(hex_prefix, ent.name)
-            if not remote_verify._HASH_RE.fullmatch(expected):
-                continue  # stray / *.tmp — not a real blob
-            out[_logical_key(hex_prefix, ent.name)] = (
-                '/'.join(tuple(parts) + (ent.name,)), size)
+            out[f"{rel_dir}/{ent.name}"] = size
     finally:
         os.close(pfd)
-    return out
+    return out, bad
 
 
 def index_remote(
     remote_dir: Path,
     jobs: Optional[int] = None,
     progress: bool = False,
-) -> Tuple[Dict[str, Tuple[str, int]], str]:
-    """Index a remote's blobs by layout-independent content identity.
+    allow_empty: bool = True,
+) -> Tuple[Dict[str, int], str, List[str]]:
+    """Index a remote's blobs by their path in the remote.
 
-    Returns ``(index, layout)`` where ``index`` maps each blob's logical key
-    (``"<prefix>/<name>"``) to ``(rel_path, size)``. Walks the layout-aware
-    prefix dirs in parallel through directory handles opened without
-    following links; a link where a prefix dir belongs is not entered.
+    Returns ``(index, layout, unreadable)``; ``index`` maps each blob's
+    remote-relative path to its size. Prefix dirs are walked in parallel
+    through handles opened without following links; a link where a prefix
+    dir belongs is not entered.
+
+    A location with no DVC layout yields ``'empty'`` when ``allow_empty``
+    (a destination that has not been written to yet) and only if it is
+    absent or a readable, empty directory; anything else is an error, so a
+    mistyped or unreadable source is never taken for an empty one.
     """
     from .archive import operations as ops
     from .errors import ArchiveError
 
-    # An absent or never-pushed-to remote simply has no blobs — a legitimate
-    # endpoint for a diff/merge (e.g. topping-up a freshly-created destination),
-    # not an error.
     try:
         layout = ops.detect_source_layout(remote_dir)
     except ArchiveError:
-        return {}, 'empty'
+        if allow_empty:
+            try:
+                with os.scandir(remote_dir) as it:
+                    empty = next(it, None) is None
+            except FileNotFoundError:
+                empty = True
+            except OSError as e:
+                raise RemoteError(f"Cannot read {remote_dir}: {e.strerror or e}")
+            if empty:
+                return {}, 'empty', []
+        raise RemoteError(f"{remote_dir} does not look like a DVC remote "
+                          f"(no object directories found).")
     n_jobs = jobs if jobs and jobs > 0 else ops.default_scan_jobs()
 
-    index: Dict[str, Tuple[str, int]] = {}
+    index: Dict[str, int] = {}
+    unreadable: List[str] = []
     root_fd = _open_src_root(remote_dir)
     try:
         dirs = [parts for parts, kind in _walk_layout(root_fd) if kind == 'dir']
@@ -734,10 +765,12 @@ def index_remote(
             futures = [pool.submit(_index_one_prefix, root_fd, tuple(parts))
                        for parts in dirs]
             for fut in as_completed(futures):
-                index.update(fut.result())
+                part, bad = fut.result()
+                index.update(part)
+                unreadable.extend(bad)
     finally:
         os.close(root_fd)
-    return index, layout
+    return index, layout, sorted(unreadable)
 
 
 def diff_remotes(
@@ -745,23 +778,28 @@ def diff_remotes(
     b_dir: Path,
     jobs: Optional[int] = None,
     progress: bool = False,
+    b_may_be_empty: bool = True,
 ) -> dict:
-    """Compare two remotes' blob sets by content identity.
+    """Compare two remotes' blob sets, namespace by namespace.
 
-    Returns a dict with per-side counts/bytes and the sorted lists of logical
-    keys only in A, only in B, and in common. ``_a_index`` / ``_b_index`` carry
-    the raw indexes so :func:`merge_remotes` can reuse them without re-walking.
+    Returns per-side counts/bytes, the sorted remote-relative paths only in
+    A, only in B, and in common, and any paths either side could not read.
+    ``_a_index`` / ``_b_index`` carry the raw indexes so :func:`merge_remotes`
+    can reuse them without re-walking.
     """
-    a_index, a_layout = index_remote(a_dir, jobs=jobs, progress=progress)
-    b_index, b_layout = index_remote(b_dir, jobs=jobs, progress=progress)
+    a_index, a_layout, a_bad = index_remote(a_dir, jobs=jobs, progress=progress,
+                                            allow_empty=False)
+    b_index, b_layout, b_bad = index_remote(b_dir, jobs=jobs, progress=progress,
+                                            allow_empty=b_may_be_empty)
 
     a_keys, b_keys = set(a_index), set(b_index)
     only_a = a_keys - b_keys
     only_b = b_keys - a_keys
     common = a_keys & b_keys
+    size_differs = sorted(k for k in common if a_index[k] != b_index[k])
 
     def _bytes(index, keys):
-        return sum(index[k][1] for k in keys)
+        return sum(index[k] for k in keys)
 
     return {
         'a_dir': str(a_dir), 'b_dir': str(b_dir),
@@ -773,15 +811,36 @@ def diff_remotes(
         'only_in_a_bytes': _bytes(a_index, only_a),
         'only_in_b_bytes': _bytes(b_index, only_b),
         'common_count': len(common), 'common_bytes': _bytes(a_index, common),
+        'size_differs': size_differs,
+        'a_unreadable': a_bad, 'b_unreadable': b_bad,
         '_a_index': a_index, '_b_index': b_index,
     }
 
 
-def _open_dest_dir(root_fd: int, parts, group_writable: bool) -> int:
+def _shared_new_dirs(dst_root_fd: int, group_writable: bool) -> Optional[int]:
+    """Mode for directories the merge creates, or None to leave the umask's.
+
+    New prefix dirs follow a shared destination: if its root is group
+    writable or setgid they get the shared-directory mode, as with
+    ``--group-writable``, so other members' pushes into them keep working.
+    """
+    if group_writable:
+        return utils.shared_dir_mode()
+    try:
+        st = os.fstat(dst_root_fd)
+    except OSError:
+        return None
+    if st.st_mode & (stat.S_IWGRP | stat.S_ISGID):
+        return utils.shared_dir_mode()
+    return None
+
+
+def _open_dest_dir(root_fd: int, parts, new_mode: Optional[int]) -> int:
     """Open (creating as needed) ``root/parts...`` one component at a time.
 
     Nothing is followed: a link where a directory belongs is an error. Only
-    directories created here get the shared mode.
+    directories created here, and still this user's own when opened, get
+    ``new_mode``.
     """
     from . import perms
     fd = os.dup(root_fd)
@@ -796,67 +855,78 @@ def _open_dest_dir(root_fd: int, parts, group_writable: bool) -> int:
             nfd = os.open(part, _RDIR, dir_fd=fd)
             os.close(fd)
             fd = nfd
-            if created and group_writable:
-                perms._fchmod_path_fd(fd, utils.shared_dir_mode())
+            if created and new_mode is not None \
+                    and os.fstat(fd).st_uid == os.geteuid():
+                perms._fchmod_path_fd(fd, new_mode)
         return fd
     except Exception:
         os.close(fd)
         raise
 
 
-def _lexists_at(dir_fd: int, name: str) -> bool:
+def _entry_kind(dir_fd: int, name: str) -> Optional[str]:
+    """``None`` if nothing is at ``name``; else ``'file'`` or ``'other'``."""
     try:
-        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-        return True
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
-        return False
+        return None
+    return 'file' if stat.S_ISREG(st.st_mode) else 'other'
 
 
-def _publish_noreplace(dir_fd: int, tmp: str, name: str) -> bool:
-    """Give the file ``tmp`` the final ``name`` unless something has it already.
+def _link_open_file(fd: int, dir_fd: int, name: str) -> bool:
+    """Give the open file ``fd`` the name ``name`` unless something has it.
 
-    Returns False, leaving the existing entry untouched, if ``name`` exists.
-    A hard link is the atomic no-replace step; where links are unavailable,
-    ``renameat2(RENAME_NOREPLACE)``, and failing that check-then-rename.
-    The caller removes ``tmp`` afterwards.
+    Links exactly the inode behind ``fd`` (through ``/proc/self/fd``), so
+    whatever is at the temporary name by now does not matter. Returns False,
+    leaving the existing entry untouched, if ``name`` exists. Raises if the
+    filesystem cannot link -- there is no fallback that could replace.
     """
-    from . import remote_quarantine as rq
     try:
-        os.link(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd,
-                follow_symlinks=False)
+        os.link(f'/proc/self/fd/{fd}', name, dst_dir_fd=dir_fd,
+                follow_symlinks=True)
         return True
     except FileExistsError:
         return False
-    except OSError as e:
-        if e.errno not in (errno.EPERM, errno.EOPNOTSUPP, errno.EMLINK,
-                           errno.ENOSYS):
-            raise
+
+
+def _md5_matches(dfd: int, plain: str, expected: str, namespace: str) -> bool:
+    """Whether the written bytes carry the name they will be published under.
+
+    Root (legacy) names are ``md5-dos2unix`` -- CRLF folded to LF for text --
+    so those are also checked that way before being called a mismatch.
+    """
+    if plain == expected:
+        return True
+    if namespace != 'legacy':
+        return False
     try:
-        if rq._rename_noreplace(dir_fd, tmp, dir_fd, name):
-            return True
-    except FileExistsError:
+        return utils._dvc_file_md5(f'/proc/self/fd/{dfd}',
+                                   name='md5-dos2unix') == expected
+    except Exception:
         return False
-    if _lexists_at(dir_fd, name):
-        return False
-    os.rename(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-    return True
 
 
 def _copy_blob(src_dir_fd: int, dst_dir_fd: int, name: str, expected: str,
-               verify: bool, mode: int) -> Tuple[str, int, Optional[str]]:
+               namespace: str, verify: bool, mode: int,
+               ) -> Tuple[str, int, Optional[str]]:
     """Copy blob ``name`` between two directory handles.
 
     The source is opened without following links and must be a regular
     file. The bytes go to an exclusively created temporary file (hashed on
-    the way through when ``verify``) and are published under ``name`` only
-    if nothing is there yet. Returns ``(status, size, actual_md5)`` with
-    status ``'copied'``, ``'skipped'``, ``'mismatch'`` or ``'not-regular'``.
+    the way through when ``verify``) whose inode is then linked under
+    ``name`` only if nothing is there yet. Returns ``(status, size,
+    actual_md5)`` with status ``'copied'``, ``'skipped'``, ``'occupied'``
+    (something other than a file holds the name), ``'mismatch'``,
+    ``'short'`` (fewer bytes than the source's size) or ``'not-regular'``.
     """
     import hashlib
     import secrets
 
-    if _lexists_at(dst_dir_fd, name):
+    kind = _entry_kind(dst_dir_fd, name)
+    if kind == 'file':
         return 'skipped', 0, None
+    if kind == 'other':
+        return 'occupied', 0, None
     try:
         sfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                       dir_fd=src_dir_fd)
@@ -869,52 +939,55 @@ def _copy_blob(src_dir_fd: int, dst_dir_fd: int, name: str, expected: str,
         if not stat.S_ISREG(st.st_mode):
             return 'not-regular', 0, None
         tmp = f".{secrets.token_urlsafe(16)}.tmp"  # the shape `dt remote clean` sweeps
-        dfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        dfd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                       0o600, dir_fd=dst_dir_fd)
-        published = False
         try:
             h = hashlib.md5() if verify else None
             size = 0
-            try:
-                while True:
-                    chunk = os.read(sfd, 1 << 20)
-                    if not chunk:
-                        break
-                    if h is not None:
-                        h.update(chunk)
-                    size += len(chunk)
-                    view = memoryview(chunk)
-                    while view:  # a write may be partial (network filesystems)
-                        n = os.write(dfd, view)
-                        view = view[n:]
-                os.utime(dfd, ns=(st.st_atime_ns, st.st_mtime_ns))
-                os.fchmod(dfd, mode)
-            finally:
-                os.close(dfd)
-            if h is not None and h.hexdigest() != expected:
+            while True:
+                chunk = os.read(sfd, 1 << 20)
+                if not chunk:
+                    break
+                if h is not None:
+                    h.update(chunk)
+                size += len(chunk)
+                view = memoryview(chunk)
+                while view:  # a write may be partial (network filesystems)
+                    n = os.write(dfd, view)
+                    view = view[n:]
+            if size != st.st_size:
+                return 'short', size, None
+            if h is not None and not _md5_matches(dfd, h.hexdigest(), expected,
+                                                  namespace):
                 return 'mismatch', size, h.hexdigest()
-            published = _publish_noreplace(dst_dir_fd, tmp, name)
-            return ('copied' if published else 'skipped'), size, None
+            os.fchmod(dfd, mode)
+            if not _link_open_file(dfd, dst_dir_fd, name):
+                return 'skipped', 0, None
+            # Stamp after publishing: a finished temporary file must not look
+            # old enough for a concurrent sweep while it is still in use.
+            try:
+                os.utime(dfd, ns=(st.st_atime_ns, st.st_mtime_ns))
+            except OSError:
+                pass
+            return 'copied', size, None
         finally:
+            os.close(dfd)
             try:
                 os.unlink(tmp, dir_fd=dst_dir_fd)
-            except FileNotFoundError:
-                pass
             except OSError:
-                if not published:
-                    raise
+                pass  # left for `dt remote clean`; never the published name
     finally:
         os.close(sfd)
 
 
 def _topup_one_prefix(
     keys: List[str],
-    a_index: Dict[str, Tuple[str, int]],
     src_root_fd: int,
     dst_root_fd: int,
     verify: bool,
-    group_writable: bool,
+    new_dir_mode: Optional[int],
     mode: int,
+    stop,
 ) -> Tuple[Dict[str, int], List[dict], List[dict]]:
     """Copy one prefix's worth of missing blobs between the two remote roots.
 
@@ -927,33 +1000,44 @@ def _topup_one_prefix(
     errors: List[dict] = []
     src_fds: Dict[Tuple[str, ...], int] = {}
     dst_fds: Dict[Tuple[str, ...], int] = {}
+    broken: Dict[Tuple[str, ...], str] = {}
+
+    def _err(rel, msg):
+        counts['errors'] += 1
+        errors.append({'path': rel, 'error': msg})
 
     try:
-        for key in keys:
-            rel, _size = a_index[key]
+        for rel in keys:
+            if stop.is_set():
+                break
             parts = tuple(rel.split('/'))
             dir_parts, name = parts[:-1], parts[-1]
-            hex_prefix, logical_name = key.split('/', 1)
-            expected = remote_verify.expected_md5_for_blob(hex_prefix, logical_name)
-            # The plan names a layout path; accept only the shapes a remote uses.
-            if (name != logical_name or not dir_parts or dir_parts[-1] != hex_prefix
-                    or dir_parts[:-1] not in ((), ('files', 'md5'))
-                    or not remote_verify._HASH_RE.fullmatch(expected)):
-                counts['errors'] += 1
-                errors.append({'path': rel, 'error': 'unexpected blob path'})
+            # The plan names a remote path; accept only the shapes a remote uses.
+            if (not dir_parts or dir_parts[:-1] not in ((), ('files', 'md5'))
+                    or not remote_verify._HASH_RE.fullmatch(
+                        remote_verify.expected_md5_for_blob(dir_parts[-1], name))):
+                _err(rel, 'unexpected blob path')
+                continue
+            expected = remote_verify.expected_md5_for_blob(dir_parts[-1], name)
+            if dir_parts in broken:
+                _err(rel, broken[dir_parts])
                 continue
             try:
                 if dir_parts not in src_fds:
                     src_fds[dir_parts] = _open_rel(src_root_fd, dir_parts)
                 if dir_parts not in dst_fds:
                     dst_fds[dir_parts] = _open_dest_dir(
-                        dst_root_fd, dir_parts, group_writable)
+                        dst_root_fd, dir_parts, new_dir_mode)
+            except OSError as e:
+                broken[dir_parts] = str(e)
+                _err(rel, str(e))
+                continue
+            try:
                 status, size, actual = _copy_blob(
                     src_fds[dir_parts], dst_fds[dir_parts], name, expected,
-                    verify, mode)
+                    _namespace(dir_parts), verify, mode)
             except OSError as e:
-                counts['errors'] += 1
-                errors.append({'path': rel, 'error': str(e)})
+                _err(rel, str(e))
                 continue
             if status == 'copied':
                 counts['copied'] += 1
@@ -964,9 +1048,12 @@ def _topup_one_prefix(
                 counts['mismatch'] += 1
                 mismatches.append({'path': rel, 'expected_md5': expected,
                                    'actual_md5': actual})
+            elif status == 'occupied':
+                _err(rel, 'destination name is held by something other than a file')
+            elif status == 'short':
+                _err(rel, 'source changed while copying (short read)')
             else:
-                counts['errors'] += 1
-                errors.append({'path': rel, 'error': 'not a regular file'})
+                _err(rel, 'not a regular file')
     finally:
         for fd in list(src_fds.values()) + list(dst_fds.values()):
             os.close(fd)
@@ -987,17 +1074,20 @@ def merge_remotes(
     """Top-up ``dst_dir`` with every blob present in ``src_dir`` but missing from it.
 
     Additive: never deletes or overwrites a destination blob. Each copy is
-    atomic and (with ``verify``) re-hashed against its content-addressed name
-    before being published, so corruption is reported rather than propagated.
-    Idempotent and resumable — a second run, or a run after an interruption,
-    only copies what is still missing.
+    written to a temporary file and linked into place only if the name is
+    still free, and (with ``verify``) re-hashed against its content-addressed
+    name first, so corruption is reported rather than propagated. Idempotent
+    and resumable — a second run, or a run after an interruption, only copies
+    what is still missing. Blobs are copied to the same path (and so the same
+    namespace) they have in the source.
 
     With ``dry_run`` nothing is written; the returned dict reports the counts
     and bytes that *would* transfer. ``diff`` may carry a precomputed
     :func:`diff_remotes` result to avoid re-walking both remotes.
     """
+    import threading
+
     diff = diff or diff_remotes(src_dir, dst_dir, jobs=jobs, progress=progress)
-    a_index = diff['_a_index']
     to_copy = diff['only_in_a']
     planned_bytes = diff['only_in_a_bytes']
 
@@ -1007,6 +1097,8 @@ def merge_remotes(
         'dry_run': dry_run, 'verify': verify,
         'missing_in_dest': len(to_copy),
         'missing_in_dest_bytes': planned_bytes,
+        'unreadable': (list(diff.get('a_unreadable', []))
+                       + list(diff.get('b_unreadable', []))),
         'copied': 0, 'copied_bytes': 0, 'skipped': 0,
         'mismatch': 0, 'errors': 0,
         'mismatches': [], 'error_entries': [],
@@ -1015,17 +1107,15 @@ def merge_remotes(
     if dry_run or not to_copy:
         return result
 
-    # Group the missing blobs by their 2-char prefix so each worker owns a
-    # disjoint subtree (bounded fan-out: at most 256 tasks regardless of count).
+    # Group the missing blobs by prefix dir so each worker owns a disjoint
+    # subtree (bounded fan-out: at most 512 tasks regardless of count).
     by_prefix: Dict[str, List[str]] = defaultdict(list)
-    for key in to_copy:
-        by_prefix[key.split('/', 1)[0]].append(key)
+    for rel in to_copy:
+        by_prefix[rel.rsplit('/', 1)[0]].append(rel)
 
     from .archive import operations as ops
     from . import perms
     n_jobs = jobs if jobs and jobs > 0 else ops.default_scan_jobs()
-    mode = _blob_mode(dst_dir)
-    dst_dir.mkdir(parents=True, exist_ok=True)
 
     if progress:
         print(f"Topping up {dst_dir} from {src_dir}: {len(to_copy)} blob(s), "
@@ -1034,31 +1124,43 @@ def merge_remotes(
               file=sys.stderr, flush=True)
 
     done = 0
+    stop = threading.Event()
+    if not os.path.lexists(dst_dir):
+        Path(dst_dir).mkdir(parents=True)
     src_root_fd = _open_src_root(src_dir)
     try:
         dst_root_fd = perms._open_root(dst_dir)
-    except OSError:
+    except OSError as e:
         os.close(src_root_fd)
-        raise
+        raise RemoteError(f"Cannot open {dst_dir}: {e.strerror or e}")
+    pool = ThreadPoolExecutor(max_workers=n_jobs)
     try:
-        with ThreadPoolExecutor(max_workers=n_jobs) as pool:
-            futures = {
-                pool.submit(_topup_one_prefix, keys, a_index, src_root_fd,
-                            dst_root_fd, verify, group_writable, mode): prefix
-                for prefix, keys in by_prefix.items()
-            }
-            for fut in as_completed(futures):
-                counts, mismatches, errors = fut.result()
-                for k in ('copied', 'copied_bytes', 'skipped', 'mismatch', 'errors'):
-                    result[k] += counts[k]
-                result['mismatches'].extend(mismatches)
-                result['error_entries'].extend(errors)
-                done += 1
-                if progress and done % 16 == 0:
-                    print(f"  [{done:>3}/{len(by_prefix)}] {result['copied']} copied, "
-                          f"{utils.format_size(result['copied_bytes'])}",
-                          file=sys.stderr, flush=True)
+        mode = _blob_mode_fd(dst_root_fd)
+        new_dir_mode = _shared_new_dirs(dst_root_fd, group_writable)
+        futures = [
+            pool.submit(_topup_one_prefix, keys, src_root_fd, dst_root_fd,
+                        verify, new_dir_mode, mode, stop)
+            for keys in by_prefix.values()
+        ]
+        for fut in as_completed(futures):
+            counts, mismatches, errors = fut.result()
+            for k in ('copied', 'copied_bytes', 'skipped', 'mismatch', 'errors'):
+                result[k] += counts[k]
+            result['mismatches'].extend(mismatches)
+            result['error_entries'].extend(errors)
+            done += 1
+            if progress and done % 16 == 0:
+                print(f"  [{done:>3}/{len(by_prefix)}] {result['copied']} copied, "
+                      f"{utils.format_size(result['copied_bytes'])}",
+                      file=sys.stderr, flush=True)
+    except BaseException:
+        # Interrupted (e.g. Ctrl-C): stop queued and running prefixes, and
+        # keep the shared handles open until every worker has returned.
+        stop.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
     finally:
+        pool.shutdown(wait=True)
         os.close(src_root_fd)
         os.close(dst_root_fd)
 
@@ -1089,8 +1191,17 @@ def resolve_remote_arg(
             name, _url, path = remote_verify.resolve_local_remote(arg_str)
             return name, path
 
-    path = Path(arg_str).expanduser().resolve()
-    if must_exist and not path.exists():
-        raise RemoteError(
-            f"'{arg_str}' is neither a configured remote nor an existing path.")
+    # Absolute, but links are left for the root check when it is opened
+    # (a link at a remote root must be this user's or root's own).
+    path = Path(os.path.abspath(os.path.expanduser(arg_str)))
+    if not os.path.lexists(path):
+        if must_exist:
+            raise RemoteError(
+                f"'{arg_str}' is neither a configured remote nor an existing path.")
+        if '/' not in arg_str and not arg_str.startswith(('.', '~')):
+            # A bare word is a remote name; never turn a typo into a new
+            # directory beside the current one.
+            raise RemoteError(
+                f"'{arg_str}' is not a configured remote. To create a new "
+                f"directory, give it as a path (e.g. ./{arg_str}).")
     return str(path), path

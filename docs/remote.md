@@ -303,16 +303,17 @@ dt remote diff REMOTE_A REMOTE_B [--list] [--json] [-j N]
 
 Each argument is either a configured remote **name** or a filesystem **path**.
 A bare token that matches a configured remote resolves to that remote; anything
-containing a `/` (or any non-remote token) is treated as a path — so the *old*
-location, which is usually not a configured remote, can be compared directly.
+containing a `/` (or starting with `.` or `~`) is treated as a path — so the
+*old* location, which is usually not a configured remote, can be compared
+directly. A bare word that is neither a remote nor an existing path is an error.
 
 The report gives, for each side, the object count and total size, plus how many
 objects are **only in A**, **only in B**, and **common**:
 
 ```
-A: /g/data/ab12/dvc/analysis/projx  (dvc-v2)
+A: /g/data/ab12/dvc/analysis/projx  (dvc-mixed)
    79,783 object(s), 2.1T
-B: nci  (dvc-v3)
+B: nci  (dvc-mixed)
    240,612 object(s), 5.4T
   Common:    79,779 (2.1T)
   Only in A: 4 (199G)
@@ -320,14 +321,21 @@ B: nci  (dvc-v3)
   B is a subset of A (top-up B with: dt remote merge A B).
 ```
 
-Blob identity is **content-addressed and layout-independent**: the same object
-stored under a v2 layout (`ab/cdef…`) in one remote and a v3 layout
-(`files/md5/ab/cdef…`) in the other is counted as *common*, not differing. This
-is what diagnoses a half-finished migration — the case where blobs are split
-across an old and a new location with neither a superset of the other, so
-`dvc pull` against the configured remote fails for the handful that only ever
-reached the old location and they look simply "missing". `--list` prints the
-differing blob keys; `--json` emits the full machine-readable structure.
+Blobs are compared **by their path in the remote, namespace by namespace**. A
+remote holds legacy objects (`md5-dos2unix`, from DVC 2 or `.dvc` files that
+still name that hash) at the root as `ab/cdef…`, and `md5` objects under
+`files/md5/ab/cdef…`. DVC 3 looks only in the namespace a `.dvc` file's hash
+names, and a root name folds CRLF to LF for text, so the same name in the
+other namespace does not stand in for it: it counts as *only in* one side.
+
+This diagnoses a half-finished migration — blobs split across an old and a new
+location with neither a superset of the other, so `dvc pull` against the
+configured remote fails for the handful that only ever reached the old location
+and they look simply "missing". `--list` prints the differing blob paths (and
+common ones whose sizes differ); `--json` emits the full machine-readable
+structure. Prefix directories or entries that cannot be read are listed as a
+warning and make the command exit non-zero — they are never counted as absent.
+A path with no object directories is an error unless it is an empty directory.
 
 ## dt remote merge
 
@@ -352,12 +360,17 @@ Properties:
   DVC uses, so `dt remote clean` sweeps any left by an interrupted run) and then
   linked into place under its final name only if nothing has that name yet, so
   a concurrent reader never sees a partial blob and nothing is replaced.
+- **Same path, same namespace** — each blob is copied to the path it has in
+  `SRC`, so legacy (root) and `files/md5` objects stay where DVC looks for them.
 - **Real files only** — only regular files that live in `SRC`'s prefix
-  directories are read; links there are skipped, and a link where a `DST`
-  prefix directory belongs is reported as an error rather than followed.
+  directories are read; links there are skipped, and a link (or anything other
+  than a file) where a `DST` prefix directory or blob belongs is reported as an
+  error rather than followed or counted as present.
 - **Verifying** (`--verify`) — re-hash each copied blob against its
-  content-addressed filename *before* publishing it; a mismatch is reported and
-  the blob is **not** copied, so corruption is never propagated.
+  content-addressed filename *before* publishing it (a root object also
+  matches its `md5-dos2unix` hash); a mismatch is reported and the blob is
+  **not** copied, so corruption is never propagated. Without `--verify` a blob
+  that comes out shorter than the source file is still refused.
 - **Idempotent / resumable** — a second run, or a run after an interruption,
   only copies what is still missing.
 - Works on a `SRC`/`DST` **path** that is not a configured remote.
@@ -372,9 +385,12 @@ dt remote merge /g/data/ab12/dvc/analysis/projx nci --verify
 dt remote verify nci --recheck     # optional: confirm the newly-landed blobs
 ```
 
-If `DST` does not exist yet it is created and every `SRC` blob is treated as
-missing (a plain full copy); `--group-writable` makes any newly-created prefix
-directories group-writable + setgid for shared access. On the same filesystem
+If `DST` does not exist yet it is created (give it as a path — a bare word
+must be a configured remote) and every `SRC` blob is treated as missing (a
+plain full copy); `--dry-run` just reports that. Newly created prefix
+directories get the shared-directory mode when `DST`'s root is group-writable
+or setgid, or always with `--group-writable`; otherwise they follow your umask.
+A source with unreadable paths makes the command exit non-zero. On the same filesystem
 the copy is a real byte copy (content-addressed stores are not reflinked here to
 keep the destination independent of the soon-to-be-retired source).
 

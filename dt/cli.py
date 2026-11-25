@@ -1842,8 +1842,9 @@ def remote_diff(remote_a, remote_b, jobs, list_blobs, json_output, verbose):
     other. Each argument is either a configured remote name or a filesystem
     path (the old location is usually not a configured remote).
 
-    Blob identity is content-addressed and layout-independent, so the same
-    object stored under a v2 and a v3 layout counts as common, not differing.
+    Blobs are compared by their path in the remote: legacy (v2-style) objects
+    at the root and md5 objects under files/md5 are separate namespaces that
+    DVC reads separately, so a copy in one does not stand in for the other.
 
     \b
     Examples:
@@ -1855,7 +1856,8 @@ def remote_diff(remote_a, remote_b, jobs, list_blobs, json_output, verbose):
         a_label, a_path = remote_ops_mod.resolve_remote_arg(remote_a)
         b_label, b_path = remote_ops_mod.resolve_remote_arg(remote_b)
         d = remote_ops_mod.diff_remotes(a_path, b_path, jobs=jobs,
-                                        progress=verbose)
+                                        progress=verbose,
+                                        b_may_be_empty=False)
     except remote_mod.RemoteError as e:
         raise click.ClickException(str(e))
     except Exception as e:  # ArchiveError etc. (no DVC layout, unreadable)
@@ -1891,11 +1893,25 @@ def remote_diff(remote_a, remote_b, jobs, list_blobs, json_output, verbose):
         click.echo("  A is a subset of B.")
     elif not d['only_in_b_count']:
         click.echo("  B is a subset of A (top-up B with: dt remote merge A B).")
+    if d['size_differs']:
+        click.echo(f"  WARNING: {len(d['size_differs']):,} common object(s) "
+                   f"differ in size between A and B.", err=True)
+    unreadable = [('A', u) for u in d['a_unreadable']] + \
+                 [('B', u) for u in d['b_unreadable']]
+    if unreadable:
+        click.echo(f"  WARNING: {len(unreadable):,} path(s) could not be read; "
+                   f"the counts above leave them out:", err=True)
+        for side, u in unreadable[:10]:
+            click.echo(f"    {side}: {u}", err=True)
     if list_blobs:
         for k in d['only_in_a']:
             click.echo(f"    only-in-A  {k}")
         for k in d['only_in_b']:
             click.echo(f"    only-in-B  {k}")
+        for k in d['size_differs']:
+            click.echo(f"    size-diff  {k}")
+    if unreadable:
+        raise SystemExit(1)
 
 
 @remote.command('merge')
@@ -1908,8 +1924,9 @@ def remote_diff(remote_a, remote_b, jobs, list_blobs, json_output, verbose):
                    'name before publishing it; report mismatches instead of '
                    'propagating corruption.')
 @click.option('--group-writable', is_flag=True,
-              help='Make any newly-created destination prefix directories '
-                   'group-writable + setgid for shared access.')
+              help='Give newly-created destination prefix directories the '
+                   'shared mode even when the destination root is not '
+                   'already group-writable or setgid.')
 @click.option('--jobs', '-j', type=int, default=None,
               help='Number of parallel transfer threads.')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON.')
@@ -1924,9 +1941,12 @@ def remote_merge(src, dst, dry_run, verify, group_writable, jobs,
     name or a filesystem path (the old location is usually not configured).
 
     The copy is additive (never deletes or overwrites a blob already in DST),
-    atomic (written to a .tmp sibling then renamed, so readers never see a
-    partial blob), and idempotent/resumable (re-running only copies what is
-    still missing). It does not touch .dvc/config — unlike `dt remote move`,
+    atomic (written to a .tmp sibling, then linked into place only while the
+    name is free, so readers never see a partial blob), and idempotent/
+    resumable (re-running only copies what is still missing). Each blob keeps
+    its path, so legacy (root) and md5 (files/md5) objects stay in their own
+    namespaces. New directories in a shared (group-writable or setgid)
+    destination get the shared mode. It does not touch .dvc/config — unlike `dt remote move`,
     nothing is relocated or repointed, so other repos still pointing at SRC
     are unaffected.
 
@@ -1941,14 +1961,10 @@ def remote_merge(src, dst, dry_run, verify, group_writable, jobs,
         # DST may be created by the merge, so it need not exist yet.
         dst_label, dst_path = remote_ops_mod.resolve_remote_arg(
             dst, must_exist=False)
-        if not dst_path.exists():
-            # Need an existing destination to diff against; an absent one has
-            # no blobs, so everything in SRC is "missing" — create it.
-            if dry_run:
-                raise click.ClickException(
-                    f"Destination '{dst_label}' does not exist; nothing to "
-                    f"diff against. Create it or drop --dry-run.")
-            dst_path.mkdir(parents=True, exist_ok=True)
+        if not dst_path.is_symlink() and not dst_path.exists() and not dry_run:
+            # An absent destination has no blobs, so everything in SRC is
+            # missing; create it (a dry run just reports that).
+            dst_path.mkdir(parents=True)
         result = remote_ops_mod.merge_remotes(
             src_path, dst_path, dry_run=dry_run, verify=verify,
             group_writable=group_writable, jobs=jobs, progress=verbose)
@@ -1964,7 +1980,7 @@ def remote_merge(src, dst, dry_run, verify, group_writable, jobs,
         click.echo(f"[dry-run] {src_label} -> {dst_label}")
         click.echo(f"  Would copy {result['missing_in_dest']:,} object(s), "
                    f"{utils.format_size(result['missing_in_dest_bytes'])}")
-        if not result['missing_in_dest']:
+        if not result['missing_in_dest'] and not result['unreadable']:
             click.echo("  Destination already holds every source object.")
     else:
         click.echo(f"Topped up {dst_label} from {src_label}")
@@ -1983,8 +1999,13 @@ def remote_merge(src, dst, dry_run, verify, group_writable, jobs,
                        f"copied:", err=True)
             for e in result['error_entries'][:10]:
                 click.echo(f"    {e['path']}: {e['error']}", err=True)
+    if result['unreadable'] and not json_output:
+        click.echo(f"  WARNING: {len(result['unreadable']):,} path(s) could not "
+                   f"be read and were left out:", err=True)
+        for u in result['unreadable'][:10]:
+            click.echo(f"    {u}", err=True)
 
-    if result.get('mismatch') or result.get('errors'):
+    if result.get('mismatch') or result.get('errors') or result.get('unreadable'):
         raise SystemExit(1)
 
 
