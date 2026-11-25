@@ -10,16 +10,12 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 |--------|-------------|---------|
 | `owner` | Default GitHub owner (user or org) for [short repository names](clone.md#short-name-feature) | `myorg` |
 | `team` | GitHub team for [`gh repo create --team`](https://cli.github.com/manual/gh_repo_create) | `analysts` |
-| `username` | Default SSH username for remote hosts, used by [`dt clone`](clone.md) and [`dt auth setup`](auth.md) | `ab1234` |
+| `username` | Default SSH username for remote hosts, used by [`dt clone`](clone.md) and [`dt auth setup`](auth.md) | `xy1234` |
 | `cache.root` | Root director**y** for [shared external caches](cache.md). May also be a list, in which case the **first** entry is the primary cache and the rest are reported by `dt auth list`. Manage with `dt config add/remove cache.root <path>` | `/g/data/ab12/dvc_cache` |
 | `remote.root` | Root director**ies** for [DVC remote storage](remote.md). A single path, or a list. The **first** entry is where new remotes are created; the rest are also scanned by `--all`. Manage with `dt config add/remove remote.root <path>` | `/g/data/ab12/dvc/analysis` |
 | `ssh.host` | SSH hostname for remote access | `gadi-dm.nci.org.au` |
 | `site_cache.root` | Root directory for shared DVC [`site_cache_dir`](index.md) | `/g/data/ab12/dvc/site` |
 | `site_cache.enabled` | Whether `dt init`/`dt clone` configure `core.site_cache_dir` | `true` |
-| `index.mirror_root` | Root directory for the [index archive](index.md) | `/g/data/ab12/dvc/index-archive` |
-| `index.auto_sync` | Sync the index archive from `dt status` and the pre-commit hook | `false` |
-| `index.lock_timeout` | Seconds to wait for `local.lock` / `mirror.lock` | `120` |
-| `index.retry_interval` | Initial retry interval for locks | `5` |
 | `add.max_threads` | Maximum threads for checksum computation | `192` |
 | `add.mem_per_thread` | GB of RAM per thread for `dt add` | `1` |
 | `qxub.env` | Conda environment for parallel workers | `dt` |
@@ -44,7 +40,7 @@ See [dt config](config.md) for command usage and [Configuration Scopes](config_s
 | `secrets.gcp.locations` | Region(s) for new GCP secrets; unset means GCP automatic (global) replication | `australia-southeast1` |
 | `secrets.default_endpointurl` | Fallback S3 endpoint for [`dt auth credentials configure-remotes`](auth.md#dt-auth-credentials-configure-remotes) when `--endpoint` is omitted | `https://<account>.r2.cloudflarestorage.com` |
 | `summary.output_dir` | Output directory for [summary files](summary.md) | `docs` |
-| `archive.staging_dir` | Local staging directory for [`dt remote archive`](archive.md#configuration) inner tarballs (no default — required) | `/scratch/ab12/ab1234/dt-archive` |
+| `archive.staging_dir` | Local staging directory for [`dt remote archive`](archive.md#configuration) inner tarballs (no default — required) | `/scratch/ab12/xy1234/dt-archive` |
 | `archive.backend_root` | Base path on the archive backend (default `dt-archive`) | `dt-archive` |
 | `archive.registry_path` | Central archive register directory; unset disables registration | `/g/data/ab12/dt-archives/registry` |
 | `archive.stage_jobs` | Parallel workers for `archive stage` (default `min(PBS_NCPUS or nproc, 8)`) | `8` |
@@ -75,7 +71,7 @@ Used by `dt init` when suggesting the `gh repo create` command. If set, adds `--
 Default SSH username used when setting up access to remote hosts (e.g. your NCI login for `gadi-dm.nci.org.au`). Both `dt clone` and `dt auth setup` use it as the default for `--username`, so setting it once avoids being prompted for your username on every run.
 
 ```bash
-dt config set --user username ab1234
+dt config set --user username xy1234
 ```
 
 Resolution order during auth setup: a per-host `--config` YAML file, then `--username` (which defaults to this config value), then a username embedded in the remote URL, then an interactive prompt. SSH/forge hosts like `github.com` always use `git` and ignore this setting.
@@ -122,15 +118,15 @@ to stay unambiguous.
 
 ### `ssh.host`
 
-Hostname used when configuring SSH remotes. This allows DVC to push/pull data from external machines.
+Hostname used when configuring SSH remotes. This allows DVC to push/pull data from external machines. Read only from user or system config (not a repo's `.dt/config.yaml` or `.dt/config.local.yaml`).
 
 ## Index Options
 
-These options configure the [index archive](index.md) used by `dt index pull|push` and the shared DVC `site_cache_dir`.
+These options configure the shared DVC [`site_cache_dir`](index.md).
 
 ### `site_cache.root`
 
-Root directory for the shared DVC `site_cache_dir`. When set, `dt init` and `dt clone` write `core.site_cache_dir = {site_cache.root}/{project_name}` to `.dvc/config.local`, so every node mounting the workspace shares one live index.
+Root directory for the shared DVC `site_cache_dir`. When set, `dt init` and `dt clone` write `core.site_cache_dir = {site_cache.root}/{user}/{project_name}` to `.dvc/config.local`, so every node mounting the workspace shares one live index. Read only from user or system config (not a repo's `.dt/config.yaml`).
 
 ```bash
 dt config set site_cache.root /g/data/<project>/dvc/site
@@ -144,49 +140,7 @@ Leave unset to fall back to DVC's per-node default (typically `/var/tmp/dvc`).
 
 Master switch. Set to `false` to make `dt init` and `dt clone` skip `core.site_cache_dir` configuration even when `site_cache.root` is set. Per-invocation `--no-site-cache` always takes precedence.
 
-### `index.mirror_root`
-
-Root directory for the shared index archive. The actual archive path is `{mirror_root}/repo/{repo_hash}/`, where `repo_hash` is the basename of the repo's DVC `site_cache_dir`. Must be a local or networked filesystem path — `gs://` / `s3://` are not supported.
-
-```bash
-dt config set index.mirror_root /g/data/<project>/dvc/index-archive
-```
-
-### `index.auto_sync`
-
-**Default:** `false`
-
-When `true`, `dt status` pulls the index archive before running, and the
-`index-sync` hook check pulls then pushes it. (That check is not one of the
-built-in defaults — enable it too, e.g.
-`dt config set hooks.pre-commit.checks.index-sync.enabled true`.) Off by default: the
-implicit sync raced concurrent `dvc` invocations and added latency to commands
-that did not need it. Run `dt index pull|push` explicitly instead.
-
-```bash
-dt config set index.auto_sync true
-```
-
-### `index.lock_timeout`
-
-**Default:** `120`
-
-Maximum seconds to wait for `local.lock` or `mirror.lock` (held during `dt index pull|push`) before giving up.
-
-```bash
-# Wait up to 5 minutes for locks
-dt config set index.lock_timeout 300
-```
-
-### `index.retry_interval`
-
-**Default:** `5`
-
-Initial retry interval in seconds when waiting for a lock. Uses exponential backoff up to 30 seconds.
-
-```bash
-dt config set index.retry_interval 10
-```
+The former `index.mirror_root`, `index.auto_sync`, `index.lock_timeout` and `index.retry_interval` settings belonged to the removed `dt index push|pull` and are ignored.
 
 ## qxub Options
 
@@ -365,7 +319,9 @@ dt config set summary.output_dir .
 dt config set summary.output_dir project_docs
 ```
 
-The `--out` flag on `dt summary` overrides this setting.
+The `--out` flag on `dt summary` overrides this setting. A value from the
+repository's own `.dt` config must be a relative path inside the project, and
+summary files are written without following links.
 
 ## secrets Options
 

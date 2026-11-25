@@ -197,15 +197,39 @@ def cache_root() -> Path:
     Honours the ``deps.cache_dir`` config key, which lets a site point every
     user at one shared index instead of each rebuilding their own.
     """
-    configured = cfg.get_value('deps.cache_dir')
+    # Where dt writes (and --clear deletes) is the user's or the site's
+    # choice, never a repository's own .dt config.
+    configured, scope = cfg.get_trusted_value_with_scope('deps.cache_dir')
+    if configured and scope in cfg.REPO_SCOPES:
+        import sys
+        print(f"Warning: ignoring deps.cache_dir from {scope} config "
+              f"(set it in user or system config)", file=sys.stderr)
+        configured = None
     if configured:
-        return Path(configured).expanduser()
+        path = Path(str(configured)).expanduser()
+        if not path.is_absolute():
+            raise DepsError(f"deps.cache_dir must be an absolute path, not {configured!r}")
+        return path
 
     from platformdirs import user_cache_dir
     return Path(user_cache_dir('dvc-tools')) / 'repo-deps'
 
 
+_LOGIN_RE = None
+
+
 def org_cache_dir(org: str, host: str = DEFAULT_HOST) -> Path:
+    """``<cache-root>/<host>/<org>``; both names must be plain components."""
+    import re
+    global _LOGIN_RE
+    if _LOGIN_RE is None:
+        _LOGIN_RE = (re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})'),
+                     re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})'))
+    login_re, host_re = _LOGIN_RE
+    if not (isinstance(org, str) and login_re.fullmatch(org)):
+        raise DepsError(f"Not a valid organisation or user name: {org!r}")
+    if not (isinstance(host, str) and host_re.fullmatch(host) and '..' not in host):
+        raise DepsError(f"Not a valid host name: {host!r}")
     return cache_root() / host / org
 
 
@@ -214,11 +238,19 @@ def _safe_filename(repo_id: str) -> str:
 
 
 def _write_atomic(path: Path, text: str) -> None:
-    """Write via a temp file and rename, so a crash cannot truncate the cache."""
+    """Write via a private temp file and rename, so a crash cannot truncate
+    the cache and nothing planted at a temp name is written through."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + '.tmp')
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    utils.write_text_atomic(path, text)
+
+
+def _require_real_dirs(base: Path) -> None:
+    """``<host>`` and ``<org>`` under the cache root must be real
+    directories (a shared root may hold others' links)."""
+    root = cache_root()
+    for d in (base.parent, base):
+        if os.path.islink(d) or (os.path.lexists(d) and not os.path.isdir(d)):
+            raise DepsError(f"Refusing to use {d}: not a real directory under {root}")
 
 
 def load_index(org: str, host: str = DEFAULT_HOST) -> OrgIndex:
@@ -267,8 +299,10 @@ def save_index(index: OrgIndex) -> Path:
     cannot poison the whole cache.
     """
     base = org_cache_dir(index.org, index.host)
+    _require_real_dirs(base)
     edges_dir = base / 'edges'
     edges_dir.mkdir(parents=True, exist_ok=True)
+    _require_real_dirs(edges_dir)
 
     index.generated_at = _now()
     manifest = {
@@ -307,13 +341,39 @@ def _prune_scans(scans: Dict[str, ScanRecord]) -> Dict[str, ScanRecord]:
 
 
 def clear_index(org: str, host: str = DEFAULT_HOST) -> bool:
-    """Delete a cached org index. Returns True if anything was removed."""
-    import shutil
+    """Delete a cached org index. Returns True if anything was removed.
+
+    Only the files the index consists of (``index.json`` and the JSON
+    records under ``edges/``) are removed, then the directories if empty.
+    """
+    import stat as stat_mod
     base = org_cache_dir(org, host)
-    if not base.exists():
-        return False
-    shutil.rmtree(base)
-    return True
+    _require_real_dirs(base)
+    removed = False
+
+    def _remove_file(path: Path) -> None:
+        nonlocal removed
+        try:
+            if stat_mod.S_ISREG(os.lstat(path).st_mode):
+                os.unlink(path)
+                removed = True
+        except OSError:
+            pass
+
+    edges = base / 'edges'
+    if edges.is_dir() and not edges.is_symlink():
+        for entry in os.listdir(edges):
+            if entry.endswith('.json') or entry.endswith('.json.tmp'):
+                _remove_file(edges / entry)
+    _remove_file(base / 'index.json')
+    _remove_file(base / 'index.json.tmp')
+    for d in (edges, base):
+        try:
+            if not d.is_symlink():
+                d.rmdir()
+        except OSError:
+            pass
+    return removed
 
 
 def _now() -> str:
@@ -439,7 +499,8 @@ def ls_remote_heads(url: str) -> Dict[str, str]:
     API call -- but useful for checking a single repo's freshness precisely.
     """
     result = subprocess.run(
-        ['git', 'ls-remote', '--heads', url],
+        ['git', 'ls-remote', '--heads', '--', url],
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         capture_output=True, text=True,
     )
     if result.returncode != 0:

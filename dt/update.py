@@ -131,6 +131,8 @@ def _resolve_rev(clone_path: Path, rev: str) -> Optional[str]:
     Returns:
         The full 40-char sha, or None if the spec does not resolve.
     """
+    if not utils.is_valid_git_rev(rev):
+        return None
     for candidate in (rev, f'origin/{rev}'):
         result = subprocess.run(
             ['git', 'rev-parse', '--verify', '--quiet', f'{candidate}^{{commit}}'],
@@ -372,15 +374,19 @@ def _get_file_listing(
     if verbose:
         print(f"  Querying source: dvc list {repo_url} {path} --rev {revision[:12]}...")
     
+    if not utils.is_valid_repo_path(path):
+        raise UpdateError(f"invalid import path: {path!r}")
+
     cmd = [
         'dvc', 'list',
         '--json',
         '--show-hash',
         '--size',
         '--recursive',
+        '--rev', revision,
+        '--',
         repo_url,
         path,
-        '--rev', revision,
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -518,13 +524,13 @@ def _write_dir_to_cache(
     # Take the workspace lock around the cache write so a concurrent `dvc`
     # process cannot observe a half-written .dir manifest.
     with dvc_lock.repo_lock():
-        if not dest_file.exists():
-            dest_file.parent.mkdir(parents=True, exist_ok=True)
-            dest_file.write_bytes(manifest_content)
-            if verbose:
-                print(f"  Created .dir file: {dest_file}")
-        elif verbose:
-            print(f"  .dir file already exists: {dest_file}")
+        try:
+            created = cache_ops.write_object(dest_file, manifest_content)
+        except OSError as e:
+            raise UpdateError(f"Cannot write .dir file: {e}")
+        if verbose:
+            print(f"  Created .dir file: {dest_file}" if created
+                  else f"  .dir file already exists: {dest_file}")
     
     return dir_hash, dest_file
 
@@ -1139,7 +1145,7 @@ def update(
         for target in updated_targets:
             try:
                 result = subprocess.run(
-                    ['dvc', 'checkout', target],
+                    ['dvc', 'checkout', '--', target],
                     capture_output=True,
                     text=True,
                 )

@@ -6,10 +6,15 @@ Uses the DVC-preferred order: reflink → hardlink → symlink → copy.
 
 import errno
 import fcntl
+import hashlib
 import os
+import secrets
 import shutil
+import stat
 from pathlib import Path
 from typing import Dict, Literal, Optional, Tuple
+
+from . import utils
 
 LinkType = Literal['reflink', 'hardlink', 'symlink', 'copy', 'skipped', 'failed']
 CacheType = Literal['reflink', 'hardlink', 'symlink', 'copy']
@@ -95,37 +100,119 @@ def _try_symlink(source: Path, dest: Path) -> bool:
 
 
 def _try_copy(source: Path, dest: Path) -> bool:
-    """Try to copy the file."""
-    # Unlike link(2)/symlink(2), shutil.copy2 does not fail on an existing
-    # destination -- it truncates and rewrites it in place, and with it every
-    # hardlink to that inode, including the shared remote object the cache
-    # entry was linked from. So this is the one primitive that needs an
-    # explicit existence check to honour link_file's skip-if-present contract.
-    # The stat only costs anything on the copy fallback, which a new file
-    # never reaches.
-    if dest.exists():
-        return False
+    """Try to copy the file into a newly created ``dest``.
+
+    ``dest`` is created exclusively and without following links, so anything
+    already at that name -- a file, or a link, dangling or not -- makes this
+    fail rather than be written through or truncated. Everything after the
+    create works on the open descriptor.
+    """
     try:
-        shutil.copy2(source, dest)
-        return True
+        src_fd = os.open(source, os.O_RDONLY)
     except OSError:
         return False
+    try:
+        try:
+            dest_fd = os.open(
+                dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        except OSError:
+            return False
+        ok = False
+        try:
+            with os.fdopen(src_fd, 'rb', closefd=False) as fsrc, \
+                    os.fdopen(dest_fd, 'wb', closefd=False) as fdst:
+                shutil.copyfileobj(fsrc, fdst, 1 << 20)
+            st = os.fstat(src_fd)
+            os.utime(dest_fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+            ok = True
+        except OSError:
+            pass
+        finally:
+            os.close(dest_fd)
+            if not ok:
+                try:
+                    os.unlink(dest)
+                except OSError:
+                    pass
+        return ok
+    finally:
+        os.close(src_fd)
+
+
+def write_object(dest: Path, data: bytes) -> bool:
+    """Create the cache object ``dest`` holding ``data``, read-only.
+
+    The bytes go to a private temporary file (random name, exclusive, no
+    links followed) that is then published with ``link(2)``, which never
+    follows or replaces whatever is at ``dest``.
+
+    Returns:
+        True if created; False if a regular object already existed there.
+
+    Raises:
+        OSError: If something other than a regular file (e.g. a link,
+            dangling or not) occupies ``dest``, or the write fails.
+    """
+    def existing() -> bool:
+        st = os.lstat(dest)
+        if stat.S_ISREG(st.st_mode):
+            return True
+        raise OSError(errno.EEXIST, f"{dest} exists and is not a regular file")
+
+    try:
+        if existing():
+            return False
+    except FileNotFoundError:
+        pass
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, 0o444)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, dest)
+        except FileExistsError:
+            # A concurrent writer got there first (fine), or something was
+            # planted (refused).
+            existing()
+            return False
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return True
 
 
 def _make_readonly(path: Path) -> None:
     """Make a file read-only (matching DVC cache protection).
     
     Sets permissions to 0o444 (read-only for user, group, and others).
-    This matches DVC's cache file protection behavior.
+    This matches DVC's cache file protection behavior. Only a regular file
+    at ``path`` itself is changed; a link there is left alone.
     
     Args:
         path: Path to the file to protect.
     """
     try:
-        os.chmod(path, 0o444)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            os.fchmod(fd, 0o444)
     except OSError:
         # Best effort - don't fail if chmod fails (e.g., on some network filesystems)
         pass
+    finally:
+        os.close(fd)
 
 
 def link_file(
@@ -252,18 +339,12 @@ def get_cache_file_path(
     Returns:
         Path to the cache file.
     """
-    # Handle .dir suffix
-    if md5.endswith('.dir'):
-        hash_only = md5[:-4]
-        filename = hash_only[2:] + '.dir'
-    else:
-        hash_only = md5
-        filename = hash_only[2:]
-    
+    prefix, filename = utils.oid_path_parts(md5)
+
     if use_v3_layout:
-        return cache_root / 'files' / 'md5' / hash_only[:2] / filename
+        return cache_root / 'files' / 'md5' / prefix / filename
     else:
-        return cache_root / hash_only[:2] / filename
+        return cache_root / prefix / filename
 
 
 def find_source_file(
@@ -279,24 +360,119 @@ def find_source_file(
     Returns:
         Path to the source file if found, None otherwise.
     """
-    # Handle .dir suffix
-    if md5.endswith('.dir'):
-        hash_only = md5[:-4]
-        filename = hash_only[2:] + '.dir'
-    else:
-        hash_only = md5
-        filename = hash_only[2:]
-    
+    try:
+        prefix, filename = utils.oid_path_parts(md5)
+    except ValueError:
+        return None
+
     # Try v3 path first
-    v3_path = source_cache / 'files' / 'md5' / hash_only[:2] / filename
+    v3_path = source_cache / 'files' / 'md5' / prefix / filename
     if v3_path.exists():
         return v3_path
     
     # Fall back to v2 path
-    v2_path = source_cache / hash_only[:2] / filename
+    v2_path = source_cache / prefix / filename
     if v2_path.exists():
         return v2_path
     
+    return None
+
+
+# Upper bound on a .dir manifest read into memory.
+MAX_DIR_MANIFEST_BYTES = 2 << 30
+
+
+def read_dir_manifest(path: Path, md5: str) -> Optional[bytes]:
+    """Bytes of the ``.dir`` object at ``path``, if they hash to ``md5``.
+
+    A ``.dir`` object's name is the md5 of its bytes, so content that does
+    not match is not that object and is not returned.
+    """
+    if not md5.endswith('.dir'):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_DIR_MANIFEST_BYTES:
+            return None
+        chunks = []
+        remaining = MAX_DIR_MANIFEST_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1 << 20, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    raw = b''.join(chunks)
+    if hashlib.md5(raw).hexdigest() != md5[:-4]:
+        return None
+    return raw
+
+
+def place_dir_object(dest: Path, md5: str, data: bytes) -> Optional[bool]:
+    """Make ``dest`` this user's own copy of the checked ``.dir`` bytes.
+
+    An existing object is kept only if it is a regular, unshared file
+    holding the right bytes; otherwise (a link, a file shared with another
+    path, other content) it is replaced by a fresh copy.
+
+    Returns:
+        True if written, False if a good copy was already there, None if
+        it could not be written.
+    """
+    try:
+        if write_object(dest, data):
+            return True
+    except OSError:
+        pass
+    try:
+        st = os.lstat(dest)
+        if (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+                and read_dir_manifest(dest, md5) is not None):
+            return False
+    except OSError:
+        pass
+    tmp = dest.with_name(f".{dest.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, 0o444)
+        finally:
+            os.close(fd)
+        os.rename(tmp, dest)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return None
+    return True
+
+
+def find_dir_manifest(md5: str, source_cache: Path) -> Optional[bytes]:
+    """Read the ``.dir`` object ``md5`` from ``source_cache`` (either layout).
+
+    Only content matching ``md5`` is returned; see :func:`read_dir_manifest`.
+    """
+    try:
+        prefix, filename = utils.oid_path_parts(md5)
+    except ValueError:
+        return None
+    for path in (source_cache / 'files' / 'md5' / prefix / filename,
+                 source_cache / prefix / filename):
+        raw = read_dir_manifest(path, md5)
+        if raw is not None:
+            return raw
     return None
 
 
@@ -369,6 +545,16 @@ def populate_cache_file(
         return None
     
     dest_path = get_cache_file_path(md5, Path(dest_cache), use_v3_layout)
+
+    if md5.endswith('.dir'):
+        # Manifests are small and are read back later: store the checked
+        # bytes themselves rather than a link to the source's file.
+        raw = find_dir_manifest(md5, Path(source_cache))
+        if raw is None:
+            if verbose:
+                print(f"  {md5[:12]}...: .dir content does not match its name")
+            return None
+        return place_dir_object(dest_path, md5, raw)
     
     # Note: We don't check dest_path.exists() here - it's slow on network
     # filesystems. link_file() handles existing files efficiently by catching

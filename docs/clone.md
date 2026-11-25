@@ -30,6 +30,7 @@ dt clone [options] <repository> [path]
 - `--shallow`: Perform a shallow clone (only recent history)
 - `--pull`: Run `dt pull` after cloning to fetch all data files
 - `--no-auth`: Skip running `dt auth setup` after cloning
+- `--add-ssh-hosts`: Let `dt auth setup` add hosts named by the project's remotes to `~/.ssh/config` without asking
 - `--no-hooks`: Skip installing git hooks and DVC merge driver
 - `--rev <revision>`: Check out a specific branch, tag, or commit after cloning
 - `--overwrite`: Remove the target directory if it already exists before cloning
@@ -212,8 +213,8 @@ If you need additional setup after cloning:
 
 ```bash
 # Clone the repository
-dt clone demo_study
-cd demo_study
+dt clone projx
+cd projx
 
 # Set up local remote override for faster transfers
 dt remote init

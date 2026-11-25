@@ -948,3 +948,100 @@ class TestConfigImport:
         r = runner.invoke(cli, ['config', 'import', f])
         assert r.exit_code == 0
         assert 'do not exist' not in r.stderr
+
+
+class TestTrustedValues:
+    """Settings that pick where secrets go: user/system outrank the repo."""
+
+    def _write(self, path, text):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+
+    def test_user_value_outranks_repository(self, isolated_config, capsys):
+        d = isolated_config
+        self._write(os.path.join(d['home'], '.config', 'dt', 'config.yaml'),
+                    'secrets:\n  gcp:\n    project: mine\n')
+        self._write(os.path.join(d['project'], '.dt', 'config.yaml'),
+                    'secrets:\n  gcp:\n    project: theirs\n')
+        cfg._warned_overrides.clear()
+        assert cfg.get_trusted_value_with_scope('secrets.gcp.project') == ('mine', 'user')
+        err = capsys.readouterr().err
+        assert 'theirs' in err and 'mine' in err
+
+    def test_system_value_outranks_repository(self, isolated_config):
+        d = isolated_config
+        self._write(os.path.join(d['system'], 'dt', 'config.yaml'),
+                    'secrets:\n  prefix: site-\n')
+        self._write(os.path.join(d['project'], '.dt', 'config.local.yaml'),
+                    'secrets:\n  prefix: other-\n')
+        assert cfg.get_trusted_value('secrets.prefix') == 'site-'
+
+    def test_repository_value_used_when_nothing_else_sets_it(self, isolated_config):
+        d = isolated_config
+        self._write(os.path.join(d['project'], '.dt', 'config.yaml'),
+                    'secrets:\n  gcp:\n    project: theirs\n')
+        assert cfg.get_trusted_value_with_scope('secrets.gcp.project') == ('theirs', 'project')
+        assert cfg.get_trusted_value('secrets.prefix', 'dflt') == 'dflt'
+
+    def test_own_value_ignores_repository(self, isolated_config, capsys):
+        d = isolated_config
+        self._write(os.path.join(d['project'], '.dt', 'config.yaml'),
+                    'qxub:\n  env: /scratch/other/env\n')
+        cfg._warned_overrides.clear()
+        assert cfg.get_own_value('qxub.env', 'dt') == 'dt'
+        assert 'qxub.env' in capsys.readouterr().err
+        self._write(os.path.join(d['system'], 'dt', 'config.yaml'),
+                    'qxub:\n  env: site-env\n')
+        assert cfg.get_own_value('qxub.env', 'dt') == 'site-env'
+
+    def test_secret_store_set_by_repo(self, isolated_config):
+        from dt.auth.credentials import secret_store_set_by_repo
+        d = isolated_config
+        self._write(os.path.join(d['project'], '.dt', 'config.yaml'),
+                    'secrets:\n  backend: gcp\n  gcp:\n    project: theirs\n')
+        assert secret_store_set_by_repo() is True
+        self._write(os.path.join(d['system'], 'dt', 'config.yaml'),
+                    'secrets:\n  backend: gcp\n  gcp:\n    project: site\n')
+        assert secret_store_set_by_repo() is False
+
+    def test_repo_prefix_ignored_for_trusted_project(self, isolated_config):
+        from unittest.mock import patch
+        from dt.auth.credentials import _get_secret_backend
+        from dt.secrets import GCPSecretBackend
+        d = isolated_config
+        self._write(os.path.join(d['system'], 'dt', 'config.yaml'),
+                    'secrets:\n  backend: gcp\n  gcp:\n    project: site\n')
+        self._write(os.path.join(d['project'], '.dt', 'config.yaml'),
+                    'secrets:\n  prefix: steer-\n')
+        with patch.object(GCPSecretBackend, '_has_adc_credentials', return_value=True):
+            b = _get_secret_backend()
+        assert (b.project, b.prefix) == ('site', 'dvc-remote-')
+        assert b._repo_scoped is False
+
+    def test_repo_prefix_alone_does_not_make_store_repo_chosen(self, isolated_config):
+        from dt.auth.credentials import secret_store_set_by_repo, _configured_source
+        d = isolated_config
+        self._write(os.path.join(d['system'], 'dt', 'config.yaml'),
+                    'secrets:\n  backend: gcp\n  gcp:\n    project: site\n')
+        self._write(os.path.join(d['project'], '.dt', 'config.yaml'),
+                    'secrets:\n  prefix: steer-\n')
+        assert secret_store_set_by_repo() is False
+        assert _configured_source('r') == 'gcp:site/dvc-remote-r'
+
+    def test_repo_config_planted_by_third_user_is_ignored(self, isolated_config, monkeypatch):
+        d = isolated_config
+        local = os.path.join(d['project'], '.dt', 'config.local.yaml')
+        self._write(local, 'owner: planted\n')
+        real_lstat = os.lstat
+
+        class _St:
+            def __init__(self, st):
+                self.st_uid = os.geteuid() + 7
+                self.st_mode = st.st_mode
+
+        monkeypatch.setattr(cfg.os, 'lstat',
+                            lambda p, *a, **k: _St(real_lstat(p)) if str(p) == local
+                            else real_lstat(p, *a, **k))
+        assert cfg.get_value('owner') != 'planted'
+        assert cfg.load_scope_config('local') == {}

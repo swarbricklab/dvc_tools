@@ -270,7 +270,7 @@ def render_mermaid(graph: RepoGraph, include_counts: bool = True) -> str:
     for repo_id in sorted(graph.nodes):
         node = graph.nodes[repo_id]
         nid = _mermaid_id(repo_id, ids)
-        label = _short(repo_id)
+        label = _mermaid_text(_short(repo_id))
         if node.status in GAP_STATUSES:
             label += f"<br/>{node.status}"
         elif node.status == STATUS_NO_DVC:
@@ -304,6 +304,23 @@ def render_mermaid(graph: RepoGraph, include_counts: bool = True) -> str:
 # Graphviz
 # =============================================================================
 
+def _mermaid_text(text: str) -> str:
+    """Repository-derived text for inside a quoted Mermaid label."""
+    out = []
+    for c in str(text):
+        if c in '"<>&#;' or not c.isprintable():
+            out.append(f'#{ord(c)};')
+        else:
+            out.append(c)
+    return ''.join(out)
+
+
+def _dot_id(text: str) -> str:
+    """A double-quoted DOT string holding *text* literally."""
+    text = ''.join(c if c.isprintable() else ' ' for c in str(text))
+    return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
 def render_dot(graph: RepoGraph) -> str:
     """Render as a Graphviz digraph, for graphs too large for Mermaid."""
     lines = ["digraph repo_deps {", "    rankdir=LR;",
@@ -311,7 +328,7 @@ def render_dot(graph: RepoGraph) -> str:
 
     for repo_id in sorted(graph.nodes):
         node = graph.nodes[repo_id]
-        attrs = [f'label="{_short(repo_id)}"']
+        attrs = [f'label={_dot_id(_short(repo_id))}']
         if node.is_root:
             attrs.append('penwidth=3')
         if node.status in GAP_STATUSES:
@@ -319,11 +336,11 @@ def render_dot(graph: RepoGraph) -> str:
             attrs.append(f'xlabel="{node.status}"')
         elif node.status == STATUS_NO_DVC:
             attrs.append('style=dotted')
-        lines.append(f'    "{repo_id}" [{", ".join(attrs)}];')
+        lines.append(f'    {_dot_id(repo_id)} [{", ".join(attrs)}];')
 
     for (source, target), edge in sorted(graph.edges.items()):
         lines.append(
-            f'    "{source}" -> "{target}" [label="{edge.n_imports}"];'
+            f'    {_dot_id(source)} -> {_dot_id(target)} [label="{edge.n_imports}"];'
         )
 
     lines.append("}")

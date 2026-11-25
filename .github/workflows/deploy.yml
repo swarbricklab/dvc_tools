@@ -17,17 +17,23 @@ on:
 
 env:
   IMAGE_REPO: ghcr.io/swarbricklab/dt
-  REMOTE_BUILDER_NAME: gcp-builder
-  REMOTE_BUILDER_HOST: absconda-builder
-  GCP_REGION: australia-southeast1
-  GCP_ZONE: australia-southeast1-a
+  # Deployment-specific values come from repository secrets (masked in logs).
+  REMOTE_BUILDER_NAME: ${{ secrets.REMOTE_BUILDER_NAME }}
+  REMOTE_BUILDER_HOST: ${{ secrets.REMOTE_BUILDER_HOST }}
+  REMOTE_BUILDER_WORKSPACE: ${{ secrets.REMOTE_BUILDER_WORKSPACE }}
+  GCP_REGION: ${{ secrets.GCP_REGION }}
+  GCP_ZONE: ${{ secrets.GCP_ZONE }}
+  QXUB_VENV: ${{ secrets.QXUB_VENV }}
+  GHCR_TOKEN_SECRET: ${{ secrets.GHCR_TOKEN_SECRET }}
+  GHCR_USERNAME_SECRET: ${{ secrets.GHCR_USERNAME_SECRET }}
+  NCI_SCRATCH_ROOT: ${{ secrets.NCI_SCRATCH_ROOT }}
 
 jobs:
   publish:
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.skip_publish != true) ||
       github.event.pull_request.merged == true
-    runs-on: [self-hosted, qxub-runner]
+    runs-on: [self-hosted, "${{ vars.RUNNER_LABEL }}"]
     permissions:
       contents: read
       id-token: write
@@ -49,10 +55,20 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      - name: Check deployment settings
+        run: |
+          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV GHCR_TOKEN_SECRET GHCR_USERNAME_SECRET NCI_SCRATCH_ROOT; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error::Repository secret $v is not set" >&2
+              exit 1
+            fi
+          done
+
       - name: Resolve OS Login username
         run: |
           GCP_OS_LOGIN_USER=$(gcloud compute os-login describe-profile \
             --format='value(posixAccounts[0].username)')
+          echo "::add-mask::$GCP_OS_LOGIN_USER"
           echo "GCP_OS_LOGIN_USER=$GCP_OS_LOGIN_USER" >> "$GITHUB_ENV"
 
       - name: Install absconda
@@ -71,7 +87,7 @@ jobs:
 
           BUILDER="remote_builders.${REMOTE_BUILDER_NAME}"
           absconda config set "${BUILDER}.host" "$REMOTE_BUILDER_HOST"
-          absconda config set "${BUILDER}.workspace" /var/lib/absconda
+          absconda config set "${BUILDER}.workspace" "$REMOTE_BUILDER_WORKSPACE"
           absconda config set "${BUILDER}.ssh_key" "$HOME/.ssh/google_compute_engine"
           absconda config set "${BUILDER}.ssh_port" 22
           absconda config set "${BUILDER}.project" "$GCP_PROJECT"
@@ -85,8 +101,6 @@ jobs:
             "[\"gcloud\",\"compute\",\"instances\",\"stop\",\"${REMOTE_BUILDER_HOST}\",\"--zone=${GCP_ZONE}\",\"--project=${GCP_PROJECT}\"]"
           absconda config set "${BUILDER}.health_command" \
             "[\"gcloud\",\"compute\",\"instances\",\"describe\",\"${REMOTE_BUILDER_HOST}\",\"--zone=${GCP_ZONE}\",\"--project=${GCP_PROJECT}\",\"--format=value(status)\"]"
-
-          absconda config list
 
       - name: Resolve image tag from project version
         id: version
@@ -103,7 +117,8 @@ jobs:
         # and poll SSH until it answers.
         run: |
           gcloud compute instances start "$REMOTE_BUILDER_HOST" \
-            --zone="$GCP_ZONE" --project="$GCP_PROJECT" >/dev/null
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" >/dev/null 2>&1 \
+            || { echo "Could not start the builder instance." >&2; exit 1; }
           for attempt in $(seq 1 30); do
             if gcloud compute ssh "$REMOTE_BUILDER_HOST" \
                  --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
@@ -145,31 +160,18 @@ jobs:
 
       - name: Publish image via remote builder
         run: |
-          mkdir -p build-logs
-          LOG_FILE="build-logs/publish-${IMAGE_TAG}.log"
-          echo "PUBLISH_LOG=$LOG_FILE" >> "$GITHUB_ENV"
-          set -o pipefail
-          echo "::group::absconda publish output (full log uploaded as artifact)"
+          echo "::group::absconda publish output"
+          status=0
           absconda publish \
             --file "$PINNED_ENV" \
             --repository "$IMAGE_REPO" \
             --tag "$IMAGE_TAG" \
             --env-name dt \
             --remote-builder "$REMOTE_BUILDER_NAME" \
-            --remote-off 2>&1 | tee "$LOG_FILE"
-          status=${PIPESTATUS[0]}
+            --remote-off 2>&1 || status=$?
           echo "::endgroup::"
           echo "absconda publish exit status: $status"
           exit "$status"
-
-      - name: Upload publish log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: publish-log-${{ steps.version.outputs.image_tag }}
-          path: build-logs/
-          retention-days: 30
-          if-no-files-found: warn
 
   deploy:
     needs: publish
@@ -181,7 +183,7 @@ jobs:
       always() &&
       (needs.publish.result == 'success' || needs.publish.result == 'skipped') &&
       (github.event_name != 'pull_request' || github.event.pull_request.merged == true)
-    runs-on: [self-hosted, qxub-runner]
+    runs-on: [self-hosted, "${{ vars.RUNNER_LABEL }}"]
     permissions:
       contents: read
       id-token: write
@@ -200,10 +202,20 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      - name: Check deployment settings
+        run: |
+          for v in REMOTE_BUILDER_NAME REMOTE_BUILDER_HOST REMOTE_BUILDER_WORKSPACE GCP_REGION GCP_ZONE QXUB_VENV GHCR_TOKEN_SECRET GHCR_USERNAME_SECRET NCI_SCRATCH_ROOT; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error::Repository secret $v is not set" >&2
+              exit 1
+            fi
+          done
+
       - name: Resolve OS Login username
         run: |
           GCP_OS_LOGIN_USER=$(gcloud compute os-login describe-profile \
             --format='value(posixAccounts[0].username)')
+          echo "::add-mask::$GCP_OS_LOGIN_USER"
           echo "GCP_OS_LOGIN_USER=$GCP_OS_LOGIN_USER" >> "$GITHUB_ENV"
 
       - name: Resolve image tag
@@ -227,16 +239,19 @@ jobs:
           echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Upgrade qxub to latest
-        run: /opt/qxub-venv/bin/pip install --force-reinstall --no-deps git+https://github.com/swarbricklab/qxub.git
+        run: |
+          "$QXUB_VENV/bin/pip" install --force-reinstall --no-deps git+https://github.com/swarbricklab/qxub.git
 
       - name: Fetch GHCR token from Secret Manager
         run: |
           GHCR_TOKEN=$(gcloud secrets versions access latest \
-            --secret=absconda-github-token \
+            --secret="$GHCR_TOKEN_SECRET" \
             --project="$GCP_PROJECT")
           GHCR_USERNAME=$(gcloud secrets versions access latest \
-            --secret=absconda-github-username \
+            --secret="$GHCR_USERNAME_SECRET" \
             --project="$GCP_PROJECT")
+          echo "::add-mask::$GHCR_TOKEN"
+          echo "::add-mask::$GHCR_USERNAME"
           # Runner has no shared filesystem with NCI (qxub SSHes to gadi), so
           # stage the token locally in RUNNER_TEMP and scp to gadi in the next
           # step. Filename is namespaced by GITHUB_RUN_ID to avoid collisions.
@@ -266,36 +281,33 @@ jobs:
           #!/bin/bash
           set -euo pipefail
           TOKEN_FILE="\$HOME/${GHCR_REMOTE_CRED}"
-          echo "Token file: \$TOKEN_FILE"
-          ls -la "\$TOKEN_FILE"
-          echo "Token byte count: \$(wc -c < "\$TOKEN_FILE")"
           singularity remote login \\
             --username "${GHCR_USERNAME}" \\
             --password-stdin \\
             docker://ghcr.io \\
-            < "\$TOKEN_FILE"
+            < "\$TOKEN_FILE" >/dev/null
           EOF
           chmod 700 "$LOCAL_SCRIPT"
 
-          scp -v -o StrictHostKeyChecking=accept-new \
+          scp -q -o StrictHostKeyChecking=accept-new \
             "$GHCR_LOCAL_CRED" "gadi:$GHCR_REMOTE_CRED"
-          scp -v -o StrictHostKeyChecking=accept-new \
+          scp -q -o StrictHostKeyChecking=accept-new \
             "$LOCAL_SCRIPT" "gadi:$REMOTE_SCRIPT"
           ssh -o StrictHostKeyChecking=accept-new gadi \
-            "ls -la '$GHCR_REMOTE_CRED' '$REMOTE_SCRIPT' && chmod 600 '$GHCR_REMOTE_CRED' && chmod 700 '$REMOTE_SCRIPT'"
+            "chmod 600 '$GHCR_REMOTE_CRED' && chmod 700 '$REMOTE_SCRIPT'"
 
           echo "GHCR_REMOTE_SCRIPT=$REMOTE_SCRIPT" >> "$GITHUB_ENV"
           echo "GHCR_LOCAL_SCRIPT=$LOCAL_SCRIPT" >> "$GITHUB_ENV"
 
       - name: Refresh Singularity GHCR credentials on NCI compute node
         run: |
-          # NCI's singularity reads credentials from ~/.singularity/remote.yaml,
+          # NCI's singularity reads registry credentials from its own config,
           # not from SINGULARITY_DOCKER_* env vars. Run `singularity remote
           # login` on a compute node (where absconda deploy will later run) so
           # the config is written to the correct ~/.singularity for that
           # context. The script is invoked by absolute path under $HOME so
           # we don't depend on PBS's CWD.
-          qxub exec -v --mod singularity --mem 1GB --internet \
+          qxub exec --mod singularity --mem 1GB --internet \
             -- \
             bash "\$HOME/$GHCR_REMOTE_SCRIPT"
 
@@ -314,15 +326,15 @@ jobs:
           NCI_USER="${{ secrets.USER_NAME }}"
           if [[ -z "$NCI_USER" ]]; then
             echo "::error::USER_NAME secret is empty -- refusing to write the" \
-                 "Singularity cache to /scratch/ab12//.singularity/cache" >&2
+                 "Singularity cache to the scratch root itself" >&2
             exit 1
           fi
 
-          CACHE_DIR="/scratch/ab12/${NCI_USER}/.singularity/cache"
+          CACHE_DIR="${NCI_SCRATCH_ROOT}/${NCI_USER}/.singularity/cache"
           ssh -o StrictHostKeyChecking=accept-new gadi \
             "mkdir -p '$CACHE_DIR' && test -w '$CACHE_DIR'" \
             || { echo "::error::Cannot create or write $CACHE_DIR on NCI." \
-                      "Check the USER_NAME secret names an account with /scratch/ab12 access." >&2; exit 1; }
+                      "Check the USER_NAME secret names an account with access to NCI_SCRATCH_ROOT." >&2; exit 1; }
 
           echo "SINGULARITY_CACHEDIR=$CACHE_DIR" >> "$GITHUB_ENV"
 
@@ -330,7 +342,7 @@ jobs:
         run: |
           IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
 
-          qxub exec -v --mod absconda --mem 4GB --resources jobfs=4GB --internet \
+          qxub exec --mod absconda --mem 4GB --resources jobfs=4GB --internet \
             --var "SINGULARITY_CACHEDIR=$SINGULARITY_CACHEDIR" \
             -- \
             absconda deploy "$IMAGE_REF" \

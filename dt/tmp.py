@@ -9,7 +9,10 @@ both need more of the tree than a sparse checkout carries. No DVC-tracked data
 is downloaded either way.
 """
 
+import hashlib
+import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -53,7 +56,7 @@ def resolve_repository_url(repo: str, owner: Optional[str] = None) -> str:
     
     # It's a short name - need owner
     if not owner:
-        owner = cfg.get_value('owner')
+        owner = cfg.get_trusted_value('owner')
     
     if not owner:
         raise TmpError(
@@ -89,7 +92,8 @@ def get_repo_id(repo_spec: str, owner: Optional[str] = None) -> str:
         path = ssh_match.group(2)
         return f"{host}/{path}"
     
-    # Handle HTTPS format: https://github.com/owner/repo
+    # Handle HTTPS format: https://github.com/owner/repo (credentials dropped)
+    url = utils.strip_url_credentials(url)
     https_match = re.match(r'https?://([^/]+)/(.+?)(?:\.git)?$', url)
     if https_match:
         host = https_match.group(1)
@@ -102,6 +106,84 @@ def get_repo_id(repo_spec: str, owner: Optional[str] = None) -> str:
     return safe.strip('-')
 
 
+
+
+_ID_COMPONENT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+
+
+def clone_path_for(repo_id: str, tmp_dir: Optional[Path] = None) -> Path:
+    """Directory under ``.dt/tmp/clones`` for ``repo_id``.
+
+    ``host/owner/repo`` ids map to that nested path; anything else (other
+    depths, unusual characters) maps to a flat, hashed name under ``_other/``.
+    The result is always strictly inside the clones directory and never
+    inside another clone.
+
+    Raises:
+        TmpError: If the path would pass through a symlink.
+    """
+    tmp_dir = Path(tmp_dir) if tmp_dir is not None else get_tmp_dir()
+    # .dt, .dt/tmp and .dt/tmp/clones themselves must be real directories.
+    for comp in (tmp_dir, tmp_dir.parent, tmp_dir.parent.parent):
+        if os.path.islink(comp):
+            raise TmpError(f"Refusing clone dir {tmp_dir}: {comp} is a symlink")
+    parts = str(repo_id).split('/')
+    if len(parts) == 3 and all(len(p) <= 100 and _ID_COMPONENT.fullmatch(p) for p in parts):
+        rel = Path(*parts)
+    else:
+        flat = re.sub(r'[^A-Za-z0-9._-]+', '-', str(repo_id)).strip('-.')[:80] or 'repo'
+        digest = hashlib.sha256(str(repo_id).encode()).hexdigest()[:12]
+        rel = Path('_other') / f'{flat}-{digest}'
+    path = tmp_dir / rel
+    # No symlinks between the clones dir and the clone.
+    for comp in [path, *path.parents]:
+        if comp == tmp_dir:
+            break
+        if os.path.islink(comp):
+            raise TmpError(f"Refusing clone path {path}: {comp} is a symlink")
+    return path
+
+
+def _require_clone_root(repo_path: Path) -> None:
+    """Require ``repo_path`` to be a clone root created by this user: a real
+    directory with its own real ``.git`` directory (HEAD and objects present),
+    both owned by the caller."""
+    repo_path = Path(repo_path)
+    uid = os.geteuid()
+    try:
+        root_st = os.lstat(repo_path)
+        git_st = os.lstat(repo_path / '.git')
+        head_st = os.lstat(repo_path / '.git' / 'HEAD')
+        obj_st = os.lstat(repo_path / '.git' / 'objects')
+        refs_st = os.lstat(repo_path / '.git' / 'refs')
+    except FileNotFoundError:
+        raise TmpError(f"{repo_path} is not a dt clone (no git directory)")
+    if not (stat.S_ISDIR(root_st.st_mode) and stat.S_ISDIR(git_st.st_mode)
+            and stat.S_ISREG(head_st.st_mode) and stat.S_ISDIR(obj_st.st_mode)
+            and stat.S_ISDIR(refs_st.st_mode)):
+        raise TmpError(f"{repo_path} is not a dt clone (not a git directory)")
+    if root_st.st_uid != uid or git_st.st_uid != uid:
+        raise TmpError(
+            f"{repo_path} is not a dt clone owned by you; remove it "
+            f"(rm -rf {repo_path}) and retry"
+        )
+
+
+def require_dvc_root(repo_path: Path) -> None:
+    """Require ``repo_path`` to have its own real ``.dvc`` directory, so DVC
+    run there acts on the clone and not on an enclosing repo."""
+    try:
+        st = os.lstat(Path(repo_path) / '.dvc')
+    except FileNotFoundError:
+        raise TmpError(f"{repo_path} is not a DVC repository")
+    if not stat.S_ISDIR(st.st_mode):
+        raise TmpError(f"{repo_path} is not a DVC repository (.dvc is not a directory)")
+
+
+def _git(repo_path: Path, *args: str) -> list:
+    """git command bound explicitly to the clone at ``repo_path``."""
+    repo_path = Path(repo_path)
+    return ['git', f'--git-dir={repo_path / ".git"}', f'--work-tree={repo_path}', *args]
 
 
 def clone_repo(
@@ -138,16 +220,20 @@ def clone_repo(
     except utils.DependencyError as e:
         raise TmpError(str(e))
 
+    if rev is not None and not utils.is_valid_git_rev(rev):
+        raise TmpError(f"Invalid git revision: {rev!r}")
+
     url = resolve_repository_url(repo_spec, owner)
     repo_id = get_repo_id(repo_spec, owner)
 
     tmp_dir = get_tmp_dir()
-    repo_path = tmp_dir / repo_id
+    repo_path = clone_path_for(repo_id, tmp_dir)
 
     # Ensure .dt/.gitignore is up to date (covers /tmp/ and other entries)
     utils.ensure_dt_gitignore()
 
-    if repo_path.exists():
+    if os.path.lexists(repo_path):
+        _require_clone_root(repo_path)
         if refresh:
             if verbose:
                 print(f"Refreshing {repo_id}...")
@@ -157,14 +243,15 @@ def clone_repo(
                 print(f"Using cached {repo_id}")
     else:
         # Create parent directory
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        repo_path.parent.mkdir(parents=True, exist_ok=True)
 
         if verbose:
             print(f"Cloning {url} to .dt/tmp/clones/{repo_id}...")
 
         # Full clone for dvc.yaml etc and to support dvc diff against any revision
         result = subprocess.run(
-            ['git', 'clone', url, str(repo_path)],
+            ['git', 'clone', '--', url, str(repo_path)],
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
         )
@@ -199,30 +286,36 @@ def _checkout_rev(repo_path: Path, rev: str, verbose: bool = True) -> Path:
     Raises:
         TmpError: If the revision cannot be fetched or checked out.
     """
+    if not utils.is_valid_git_rev(rev):
+        raise TmpError(f"Invalid git revision: {rev!r}")
+    _require_clone_root(repo_path)
+
     if verbose:
         print(f"Checking out revision {rev}...")
 
     # Fetch the specific rev (may not be present in a shallow clone). Try a
     # shallow fetch first, then a full fetch as a fallback.
     fetched = subprocess.run(
-        ['git', 'fetch', '--depth', '1', 'origin', rev],
+        _git(repo_path, 'fetch', '--depth', '1', '--end-of-options', 'origin', rev),
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         cwd=repo_path, capture_output=True, text=True,
     )
     if fetched.returncode != 0:
         fetched = subprocess.run(
-            ['git', 'fetch', 'origin', rev],
+            _git(repo_path, 'fetch', '--end-of-options', 'origin', rev),
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             cwd=repo_path, capture_output=True, text=True,
         )
 
     # Prefer checking out the named rev; fall back to FETCH_HEAD (covers the
     # case where the rev was only reachable via the explicit fetch above).
     checkout = subprocess.run(
-        ['git', 'checkout', rev],
+        _git(repo_path, 'checkout', rev, '--'),
         cwd=repo_path, capture_output=True, text=True,
     )
     if checkout.returncode != 0:
         checkout = subprocess.run(
-            ['git', 'checkout', 'FETCH_HEAD'],
+            _git(repo_path, 'checkout', 'FETCH_HEAD', '--'),
             cwd=repo_path, capture_output=True, text=True,
         )
         if checkout.returncode != 0:
@@ -245,9 +338,12 @@ def _refresh_clone(repo_path: Path, verbose: bool = True) -> Path:
     Raises:
         TmpError: If refresh fails
     """
+    _require_clone_root(repo_path)
+
     # Fetch latest
     result = subprocess.run(
-        ['git', 'fetch', '--depth', '1', 'origin'],
+        _git(repo_path, 'fetch', '--depth', '1', 'origin'),
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -258,7 +354,7 @@ def _refresh_clone(repo_path: Path, verbose: bool = True) -> Path:
     
     # Reset to origin/HEAD
     result = subprocess.run(
-        ['git', 'reset', '--hard', 'origin/HEAD'],
+        _git(repo_path, 'reset', '--hard', 'origin/HEAD'),
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -328,14 +424,18 @@ def clean_repos(repo_spec: Optional[str] = None, owner: Optional[str] = None) ->
     if repo_spec:
         # Remove specific repo
         repo_id = get_repo_id(repo_spec, owner)
-        repo_path = tmp_dir / repo_id
-        if repo_path.exists():
+        repo_path = clone_path_for(repo_id, tmp_dir)
+        try:
+            _require_clone_root(repo_path)
+        except TmpError:
+            repo_path = None
+        if repo_path is not None:
             shutil.rmtree(repo_path)
             removed.append(repo_id)
     else:
         # Remove all
         for path in tmp_dir.iterdir():
-            if path.is_dir() and (path / ".git").exists():
+            if path.is_dir() and not path.is_symlink() and (path / ".git").exists():
                 shutil.rmtree(path)
                 removed.append(path.name)
         
@@ -390,12 +490,24 @@ def checkout_path_at_revision(
     Returns:
         True if successful, False otherwise.
     """
+    if not utils.is_valid_git_rev(revision):
+        if verbose:
+            print(f"  Error: invalid revision {revision!r}")
+        return False
+    try:
+        _require_clone_root(repo_path)
+    except TmpError as e:
+        if verbose:
+            print(f"  Error: {e}")
+        return False
+
     # First, fetch the specific commit (it may not be in our shallow clone)
     if verbose:
         print(f"  Fetching revision {revision[:12]}...")
     
     result = subprocess.run(
-        ['git', 'fetch', '--depth', '1', 'origin', revision],
+        _git(repo_path, 'fetch', '--depth', '1', '--end-of-options', 'origin', revision),
+        env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -406,7 +518,8 @@ def checkout_path_at_revision(
             print(f"  Warning: Could not fetch revision: {result.stderr.strip()}")
         # Try without depth in case it's already available
         result = subprocess.run(
-            ['git', 'fetch', 'origin', revision],
+            _git(repo_path, 'fetch', '--end-of-options', 'origin', revision),
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             cwd=repo_path,
             capture_output=True,
             text=True,
@@ -421,7 +534,7 @@ def checkout_path_at_revision(
         print(f"  Disabling sparse checkout to access full tree...")
     
     result = subprocess.run(
-        ['git', 'sparse-checkout', 'disable'],
+        _git(repo_path, 'sparse-checkout', 'disable'),
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -433,7 +546,7 @@ def checkout_path_at_revision(
         print(f"  Checking out revision {revision[:12]}...")
     
     result = subprocess.run(
-        ['git', 'checkout', revision],
+        _git(repo_path, 'checkout', revision, '--'),
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -444,7 +557,7 @@ def checkout_path_at_revision(
         if verbose:
             print(f"  Trying checkout of FETCH_HEAD...")
         result = subprocess.run(
-            ['git', 'checkout', 'FETCH_HEAD'],
+            _git(repo_path, 'checkout', 'FETCH_HEAD', '--'),
             cwd=repo_path,
             capture_output=True,
             text=True,

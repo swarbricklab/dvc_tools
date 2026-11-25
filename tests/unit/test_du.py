@@ -25,6 +25,21 @@ from dt.errors import DuError
 # Path matching helper tests
 # =============================================================================
 
+
+def _real_dir(cache_dir, children):
+    """Write a .dir manifest named by its content; return its id."""
+    import hashlib
+    raw = json.dumps([{"relpath": r, "md5": h} for r, h in children]).encode()
+    h = hashlib.md5(raw).hexdigest()
+    (cache_dir / h[:2]).mkdir(parents=True, exist_ok=True)
+    (cache_dir / h[:2] / (h[2:] + ".dir")).write_bytes(raw)
+    return h + ".dir"
+
+
+def _blob(cache_dir, h, data):
+    (cache_dir / h[:2]).mkdir(parents=True, exist_ok=True)
+    (cache_dir / h[:2] / h[2:]).write_bytes(data)
+
 class TestNormalizePath:
     """Tests for the _normalize_path function."""
 
@@ -207,23 +222,21 @@ class TestGetDirFileCount:
 
     def test_returns_count_from_dir_manifest(self, tmp_path):
         """Test that file count is read from .dir manifest."""
-        # Create a mock .dir file
         cache_dir = tmp_path / "files" / "md5"
-        (cache_dir / "ab").mkdir(parents=True)
-        dir_file = cache_dir / "ab" / "cdef123456.dir"
-        dir_file.write_text(json.dumps([
-            {"relpath": "file1.txt", "md5": "hash1"},
-            {"relpath": "file2.txt", "md5": "hash2"},
-            {"relpath": "file3.txt", "md5": "hash3"},
-        ]))
-        
+        dir_hash = _real_dir(cache_dir, [("file1.txt", "11111111111111111111111111111111"), ("file2.txt", "22222222222222222222222222222222"),
+                                         ("file3.txt", "33333333333333333333333333333333")])
         mock_repo = MagicMock()
         mock_repo.cache.local.path = str(cache_dir)
-        
-        with patch("dt.du.hash_to_cache_path", return_value=dir_file):
-            count = get_dir_file_count(mock_repo, "abcdef123456.dir")
-            
-            assert count == 3
+        assert get_dir_file_count(mock_repo, dir_hash) == 3
+
+    def test_manifest_not_matching_its_id_is_not_trusted(self, tmp_path):
+        cache_dir = tmp_path / "files" / "md5"
+        dir_hash = _real_dir(cache_dir, [("file1.txt", "11111111111111111111111111111111")])
+        p = cache_dir / dir_hash[:2] / (dir_hash[2:-4] + ".dir")
+        p.write_text(json.dumps([{"relpath": "x", "md5": "11111111111111111111111111111111"}] * 5))
+        mock_repo = MagicMock()
+        mock_repo.cache.local.path = str(cache_dir)
+        assert get_dir_file_count(mock_repo, dir_hash) == 1
 
     def test_returns_1_when_cache_path_not_exists(self, tmp_path):
         """Test returns 1 when cache file doesn't exist."""
@@ -292,44 +305,13 @@ class TestGetCachedSize:
     def test_sums_sizes_for_directories(self, tmp_path):
         """Test that sizes are summed for directory files."""
         cache_dir = tmp_path / "files" / "md5"
-        (cache_dir / "ab").mkdir(parents=True)
-        (cache_dir / "11").mkdir(parents=True)
-        (cache_dir / "22").mkdir(parents=True)
-        
-        # Create .dir manifest
-        dir_file = cache_dir / "ab" / "cdef123456.dir"
-        dir_file.write_text(json.dumps([
-            {"relpath": "file1.txt", "md5": "11aa"},
-            {"relpath": "file2.txt", "md5": "22bb"},
-        ]))
-        
-        # Create cached files
-        child1 = cache_dir / "11" / "aa"
-        child1.write_bytes(b"x" * 100)
-        child2 = cache_dir / "22" / "bb"
-        child2.write_bytes(b"y" * 200)
-        
-        file_info = {"hash": "abcdef123456.dir", "is_dir": True}
-        
-        def mock_hash_to_cache(cache_dir, file_hash):
-            clean = file_hash.replace(".dir", "")
-            prefix = clean[:2]
-            suffix = clean[2:]
-            if file_hash.endswith(".dir"):
-                suffix += ".dir"
-            return cache_dir / prefix / suffix
-        
-        with patch("dt.du.hash_to_cache_path", side_effect=mock_hash_to_cache):
-            size = get_cached_size(cache_dir, file_info)
-            
-            # Size of .dir file + child1 + child2
-            dir_size = dir_file.stat().st_size
-            assert size == dir_size + 100 + 200
-
-
-# =============================================================================
-# get_cached_file_count tests
-# =============================================================================
+        dir_hash = _real_dir(cache_dir, [("file1.txt", "11111111111111111111111111111111"), ("file2.txt", "22222222222222222222222222222222"),
+                                         ("x", "../../../etc/passwd")])
+        _blob(cache_dir, "11111111111111111111111111111111", b"x" * 100)
+        _blob(cache_dir, "22222222222222222222222222222222", b"y" * 200)
+        dir_size = (cache_dir / dir_hash[:2] / (dir_hash[2:-4] + ".dir")).stat().st_size
+        size = get_cached_size(cache_dir, {"hash": dir_hash, "is_dir": True})
+        assert size == dir_size + 100 + 200
 
 class TestGetCachedFileCount:
     """Tests for the get_cached_file_count function."""
@@ -364,41 +346,10 @@ class TestGetCachedFileCount:
     def test_counts_cached_files_in_directory(self, tmp_path):
         """Test that cached files are counted for directories."""
         cache_dir = tmp_path / "files" / "md5"
-        (cache_dir / "ab").mkdir(parents=True)
-        (cache_dir / "11").mkdir(parents=True)
-        # 22 is NOT created - file not cached
-        
-        # Create .dir manifest
-        dir_file = cache_dir / "ab" / "cdef123456.dir"
-        dir_file.write_text(json.dumps([
-            {"relpath": "file1.txt", "md5": "11aa"},
-            {"relpath": "file2.txt", "md5": "22bb"},  # Not cached
-        ]))
-        
-        # Create only first cached file
-        child1 = cache_dir / "11" / "aa"
-        child1.write_bytes(b"x" * 100)
-        
-        file_info = {"hash": "abcdef123456.dir", "is_dir": True}
-        
-        def mock_hash_to_cache(cache_dir, file_hash):
-            clean = file_hash.replace(".dir", "")
-            prefix = clean[:2]
-            suffix = clean[2:]
-            if file_hash.endswith(".dir"):
-                suffix += ".dir"
-            return cache_dir / prefix / suffix
-        
-        with patch("dt.du.hash_to_cache_path", side_effect=mock_hash_to_cache):
-            count = get_cached_file_count(cache_dir, file_info)
-            
-            # Only 1 file is cached
-            assert count == 1
-
-
-# =============================================================================
-# aggregate_by_depth tests
-# =============================================================================
+        dir_hash = _real_dir(cache_dir, [("file1.txt", "11111111111111111111111111111111"), ("file2.txt", "22222222222222222222222222222222")])
+        _blob(cache_dir, "11111111111111111111111111111111", b"x" * 100)  # 22222222222222222222222222222222 is not cached
+        count = get_cached_file_count(cache_dir, {"hash": dir_hash, "is_dir": True})
+        assert count == 1
 
 class TestAggregateByDepth:
     """Tests for the aggregate_by_depth function."""

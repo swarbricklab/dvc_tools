@@ -76,10 +76,10 @@ dt import otherproject data/processed --rev dev
 dt import otherproject data/processed --rev v1.2.0
 
 # Import without checking out (just create .dvc file)
-dt import demo_study data/large_dataset --no-checkout
+dt import projx data/large_dataset --no-checkout
 
 # Fail fast when source cache is off-world (disable delegation)
-dt import demo_study data/large_dataset --no-dvc-import-fallback
+dt import projx data/large_dataset --no-dvc-import-fallback
 ```
 
 The `--rev` value is resolved to the exact commit and recorded as the import's

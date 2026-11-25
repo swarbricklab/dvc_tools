@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import config as cfg
+from . import utils
+from .errors import DTError
 
 
 # Default configuration
@@ -56,6 +58,9 @@ def set_checksum_jobs(threads: int) -> None:
     Args:
         threads: Number of threads for checksum computation.
     """
+    problem = utils.dvc_local_config_problem()
+    if problem:
+        raise DTError(f"Refusing to write DVC local config: {problem}")
     subprocess.run(
         ['dvc', 'config', '--local', 'core.checksum_jobs', str(threads)],
         check=True,
@@ -65,6 +70,8 @@ def set_checksum_jobs(threads: int) -> None:
 
 def unset_checksum_jobs() -> None:
     """Unset ``core.checksum_jobs`` at local scope."""
+    if utils.dvc_local_config_problem():
+        return
     subprocess.run(
         ['dvc', 'config', '--local', '--unset', 'core.checksum_jobs'],
         capture_output=True,  # Don't fail if not set
@@ -222,7 +229,7 @@ def submit_via_qxub(
         threads, file_count=file_count, config_prefix=config_prefix,
     )
 
-    conda_env = cfg.get_value('qxub.env', DEFAULT_ENV)
+    conda_env = cfg.get_own_value('qxub.env', DEFAULT_ENV)
     queue = cfg.get_value('qxub.queue', DEFAULT_COMPUTE_QUEUE)
     walltime = cfg.get_value('qxub.walltime', DEFAULT_WALLTIME)
 

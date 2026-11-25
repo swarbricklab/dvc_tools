@@ -284,6 +284,126 @@ class TestGetChecks:
         assert checks['dvc-checkout']['network'] is True
 
 
+class TestCheckCommandScope:
+    """A check's ``command`` comes from the user's or site's own config."""
+
+    @pytest.fixture
+    def repo(self, tmp_path, monkeypatch):
+        import yaml
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / '.git').mkdir()
+        (tmp_path / '.dt').mkdir()
+        monkeypatch.setattr(install, '_noted_commands', set())
+
+        def write(path, checks):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(yaml.safe_dump(
+                {'hooks': {'pre-commit': {'checks': checks}}}))
+        return tmp_path, write
+
+    def test_repo_only_command_check_is_dropped(self, repo, capsys):
+        root, write = repo
+        write(root / '.dt' / 'config.yaml',
+              {'black': {'mode': 'sync', 'command': 'black --check .'}})
+        names = {c['name'] for c in install._get_checks('pre-commit')}
+        assert 'black' not in names
+        err = capsys.readouterr().err
+        assert 'black --check .' in err
+        assert 'dt config set hooks.pre-commit.checks.black.command' in err
+
+    def test_local_scope_command_is_dropped(self, repo):
+        root, write = repo
+        write(root / '.dt' / 'config.local.yaml',
+              {'lint': {'command': 'true'}})
+        names = {c['name'] for c in install._get_checks('pre-commit')}
+        assert 'lint' not in names
+
+    def test_command_on_builtin_check_falls_back_to_builtin(self, repo):
+        root, write = repo
+        write(root / '.dt' / 'config.yaml',
+              {'large-files': {'command': 'touch x', 'max_size': '5MB'}})
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        assert checks['large-files']['command'] is None
+        assert checks['large-files']['max_size'] == '5MB'
+
+    def test_user_command_runs(self, repo, tmp_path):
+        root, write = repo
+        write(tmp_path / 'xdg_home' / 'dt' / 'config.yaml',
+              {'black': {'command': 'black --check .'}})
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        assert checks['black']['command'] == 'black --check .'
+
+    def test_user_command_outranks_repo_command(self, repo, tmp_path):
+        root, write = repo
+        write(tmp_path / 'xdg_home' / 'dt' / 'config.yaml',
+              {'black': {'command': 'black --check .'}})
+        write(root / '.dt' / 'config.yaml',
+              {'black': {'command': 'echo other', 'mode': 'async'}})
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        assert checks['black']['command'] == 'black --check .'
+        assert checks['black']['mode'] == 'async'
+
+    def test_repo_command_not_run_by_hook(self, repo, tmp_path):
+        root, write = repo
+        marker = tmp_path / 'ran'
+        write(root / '.dt' / 'config.yaml',
+              {'mark': {'command': f'touch {marker}'},
+               'dvc-status': {'enabled': False},
+               'large-files': {'enabled': False}})
+        assert install.hook_run('pre-commit') is True
+        assert not marker.exists()
+
+    def test_user_command_survives_repo_settings_for_check(self, repo, tmp_path):
+        root, write = repo
+        write(tmp_path / 'xdg_home' / 'dt' / 'config.yaml',
+              {'black': {'command': 'black --check .'}})
+        write(root / '.dt' / 'config.yaml', {'black': {'mode': 'async'}})
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        assert checks['black']['command'] == 'black --check .'
+        assert checks['black']['mode'] == 'async'
+
+    def test_user_check_survives_repo_settings_for_other_checks(self, repo, tmp_path):
+        root, write = repo
+        write(tmp_path / 'xdg_home' / 'dt' / 'config.yaml',
+              {'black': {'command': 'black --check .'}})
+        write(root / '.dt' / 'config.yaml', {'large-files': {'max_size': '5MB'}})
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        assert checks['black']['command'] == 'black --check .'
+        assert checks['large-files']['max_size'] == '5MB'
+
+    def test_dotted_user_check_name_runs(self, repo, tmp_path):
+        root, write = repo
+        write(tmp_path / 'xdg_home' / 'dt' / 'config.yaml',
+              {'lint.py': {'command': 'true'}})
+        checks = {c['name']: c for c in install._get_checks('pre-commit')}
+        assert checks['lint.py']['command'] == 'true'
+
+    def test_note_omits_suggestion_for_unprintable_command(self, repo, capsys):
+        root, write = repo
+        write(root / '.dt' / 'config.yaml',
+              {'x': {'command': 'true\x1b[2K\rrm -rf ~'}})
+        install._get_checks('pre-commit')
+        err = capsys.readouterr().err
+        assert '\x1b' not in err and 'dt config set' not in err
+
+    def test_unprintable_check_name_is_dropped(self, repo):
+        root, write = repo
+        write(root / '.dt' / 'config.yaml',
+              {'ok\x1b[2Kx': {'enabled': True}, 1: {'enabled': True}})
+        names = {c['name'] for c in install._get_checks('pre-commit')}
+        assert names == {'dvc-status', 'large-files'}
+        names = {c['name'] for c in install.hook_list()['pre-commit']}
+        assert names == {'dvc-status', 'large-files'}
+
+    def test_hook_list_shows_repo_command_as_not_run(self, repo):
+        root, write = repo
+        write(root / '.dt' / 'config.yaml',
+              {'black': {'command': 'black --check .'}})
+        checks = {c['name']: c for c in install.hook_list()['pre-commit']}
+        assert checks['black']['command'] is None
+        assert checks['black']['command_ignored'] == 'black --check .'
+
+
 # =============================================================================
 # hook_run
 # =============================================================================

@@ -12,6 +12,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import utils
 from .errors import LsError
 
 
@@ -106,20 +107,21 @@ def run_dvc_list(
         (100k+ files) that is the expensive, mmap-heavy path, so only request
         them when the caller actually needs the values.
     """
-    cmd = ['dvc', 'list', url, '--json']
+    cmd = ['dvc', 'list', '--json']
 
     if size:
         cmd.append('--size')
     if show_hash:
         cmd.append('--show-hash')
-    if path:
-        cmd.append(path)
     if rev:
         cmd.extend(['--rev', rev])
     if recursive:
         cmd.append('--recursive')
     if dvc_only:
         cmd.append('--dvc-only')
+    cmd.extend(['--', url])
+    if path:
+        cmd.append(path)
     
     try:
         result = subprocess.run(
@@ -272,7 +274,7 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Build a nested directory tree from ``dvc list`` items.
 
     Each node is a dict mapping subdirectory names to child nodes, plus a
-    special ``_files`` key holding this level's file entries. A file entry is
+    special ``/files`` key holding this level's file entries. A file entry is
     ``{'name': str, 'gh': Optional[str]}`` where ``gh`` is the GitHub blob URL
     for a git-tracked file (set by :func:`_annotate_github`, else None).
     Directories are derived from the path components of each item, so a
@@ -284,7 +286,7 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     Returns:
         Nested dict representing the directory tree
     """
-    tree: Dict[str, Any] = {'_files': []}
+    tree: Dict[str, Any] = {'/files': []}
 
     for item in items:
         path = item.get('path', '')
@@ -298,7 +300,7 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         for part in parts[:-1]:
             child = current.get(part)
             if not isinstance(child, dict):
-                child = {'_files': []}
+                child = {'/files': []}
                 current[part] = child
             current = child
 
@@ -306,19 +308,19 @@ def build_tree(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         if item.get('isdir'):
             # Ensure the directory node exists (it may otherwise be empty).
             if not isinstance(current.get(leaf), dict):
-                current[leaf] = {'_files': []}
+                current[leaf] = {'/files': []}
         else:
-            current['_files'].append({'name': leaf, 'gh': item.get('_gh')})
+            current['/files'].append({'name': leaf, 'gh': item.get('_gh')})
 
     return tree
 
 
 def _count_tree(tree: Dict[str, Any]) -> Tuple[int, int]:
     """Count (files, directories) contained in a tree, recursively."""
-    files = len(tree.get('_files', []))
+    files = len(tree.get('/files', []))
     dirs = 0
     for key, value in tree.items():
-        if key.startswith('_'):
+        if key.startswith('/'):
             continue
         dirs += 1
         sub_files, sub_dirs = _count_tree(value)
@@ -333,17 +335,17 @@ def _subtree_file_count(node: Dict[str, Any]) -> int:
     Rendering asks for this count at every directory (fold-up summaries and
     collapse placeholders). Computing it naively re-walks each subtree once
     per ancestor -- super-linear on wide trees. Caching the result under the
-    reserved ``_nf`` key makes the whole render O(number of nodes).
+    reserved ``/nf`` key makes the whole render O(number of nodes).
     """
-    cached = node.get('_nf')
+    cached = node.get('/nf')
     if cached is not None:
         return cached
-    n = len(node.get('_files', []))
+    n = len(node.get('/files', []))
     for key, value in node.items():
-        if key.startswith('_'):
+        if key.startswith('/'):
             continue
         n += _subtree_file_count(value)
-    node['_nf'] = n
+    node['/nf'] = n
     return n
 
 
@@ -354,8 +356,8 @@ def _n_files(n: int) -> str:
 
 def _tree_entries(tree: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any]]]:
     """Return (sorted subdirectory names, sorted file entries) for a node."""
-    subdirs = sorted(k for k in tree if not k.startswith('_'))
-    files = sorted(tree.get('_files', []), key=lambda f: f['name'])
+    subdirs = sorted(k for k in tree if not k.startswith('/'))
+    files = sorted(tree.get('/files', []), key=lambda f: f['name'])
     return subdirs, files
 
 
@@ -382,15 +384,22 @@ def _render_tree_text(
     for i, (name, is_dir) in enumerate(entries):
         is_last = (i == len(entries) - 1)
         connector = "└── " if is_last else "├── "
+        shown = _printable(name)
         if is_dir:
-            lines.append(f"{prefix}{connector}{name}/")
+            lines.append(f"{prefix}{connector}{shown}/")
             child_prefix = prefix + ("    " if is_last else "│   ")
             lines.extend(_render_tree_text(
                 tree[name], child_prefix, max_level, current_level + 1,
             ))
         else:
-            lines.append(f"{prefix}{connector}{name}")
+            lines.append(f"{prefix}{connector}{shown}")
     return lines
+
+
+def _printable(text: str) -> str:
+    """*text* with control characters shown as escapes, so a name cannot
+    start a new line (or end a fenced block) in text/markdown output."""
+    return ''.join(c if c.isprintable() else repr(c)[1:-1] for c in str(text))
 
 
 def _split_repo_url(src: str) -> Optional[Tuple[str, str]]:
@@ -519,6 +528,12 @@ def _format_tree_text(
     return '\n'.join(lines)
 
 
+def _md_text(text) -> str:
+    """*text* as plain markdown text: control characters shown as escapes,
+    markup characters backslash-escaped."""
+    return re.sub(r'([\\`*_{}\[\]<>()#+!|~])', r'\\\1', _printable(text))
+
+
 def _format_tree_md(
     tree: Dict[str, Any], repo: Dict[str, Optional[str]], base: str,
     rev: Optional[str], revinfo: Optional[Dict[str, Any]] = None,
@@ -527,12 +542,17 @@ def _format_tree_md(
     """Format a tree as markdown (a fenced code block plus a summary line)."""
     files, dirs = _count_tree(tree)
     label = _root_label(repo, base, rev)
-    heading = f"[{label}]({repo['web_url']})" if repo['web_url'] else label
+    text = _md_text(label)
+    if repo['web_url']:
+        url = urllib.parse.quote(_printable(repo['web_url']), safe=":/?#@!$&'*+,;=%~.-_")
+        heading = f"[{text}]({url})"
+    else:
+        heading = text
     lines = [f"**Repository tree:** {heading} — {dirs} directories, {files} files"]
     rline = _revision_line(revinfo)
     if rline:
         lines.append("")
-        lines.append(f"_{rline}_")
+        lines.append(f"_{_md_text(rline)}_")
     lines.extend(["", "```text", label,
                   *_render_tree_text(tree, max_level=max_level), "```"])
     return '\n'.join(lines)
@@ -920,19 +940,35 @@ def _format_tree_html(
     counts = f'{dirs} directories, {files} files'
 
     html_tree = _render_tree_html(tree, max_level=max_level, parent=base)
-    script = (_TREE_HTML_SCRIPT
-              .replace('%%HTTPS_JS%%', json.dumps(repo['https_url']))
-              .replace('%%SSH_JS%%', json.dumps(repo['ssh_url']))
-              .replace('%%REV_JS%%', json.dumps(rev or '')))
+    script = _fill(_TREE_HTML_SCRIPT, {
+        'HTTPS_JS': _script_json(repo['https_url']),
+        'SSH_JS': _script_json(repo['ssh_url']),
+        'REV_JS': _script_json(rev or ''),
+    })
 
-    return (_TREE_HTML_TEMPLATE
-            .replace('%%TITLE%%', html.escape(_root_label(repo, base, rev)))
-            .replace('%%STYLE%%', _TREE_HTML_STYLE)
-            .replace('%%HEADER%%', header)
-            .replace('%%SUBTITLE%%', subtitle)
-            .replace('%%COUNTS%%', counts)
-            .replace('%%TREE%%', html_tree)
-            .replace('%%SCRIPT%%', script))
+    # One pass: text substituted for one placeholder is never re-scanned
+    # for another (a file could be named %%SCRIPT%%).
+    return _fill(_TREE_HTML_TEMPLATE, {
+        'TITLE': html.escape(_root_label(repo, base, rev)),
+        'STYLE': _TREE_HTML_STYLE,
+        'HEADER': header,
+        'SUBTITLE': subtitle,
+        'COUNTS': counts,
+        'TREE': html_tree,
+        'SCRIPT': script,
+    })
+
+
+def _fill(template: str, values: Dict[str, str]) -> str:
+    """Replace ``%%NAME%%`` placeholders in a single pass."""
+    return re.sub(r'%%([A-Z_]+)%%',
+                  lambda m: values.get(m.group(1), m.group(0)), template)
+
+
+def _script_json(value: Any) -> str:
+    """JSON for inside a ``<script>`` element: it cannot end the element."""
+    return (json.dumps(value).replace('<', '\\u003c').replace('>', '\\u003e')
+            .replace('&', '\\u0026'))
 
 
 def _run_git(args: List[str]) -> Optional[str]:
@@ -970,6 +1006,8 @@ def _git_revision_info(rev: Optional[str]) -> Optional[Dict[str, Any]]:
     Defaults to HEAD. Returns None outside a git repo or if the ref is unknown.
     """
     ref = rev or 'HEAD'
+    if not utils.is_valid_git_rev(ref):
+        return None
     sha = _run_git(['rev-parse', '--short', ref])
     if not sha:
         return None

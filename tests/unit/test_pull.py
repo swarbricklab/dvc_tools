@@ -4,7 +4,9 @@ The pull module has been simplified to be essentially `dt fetch` + `dvc checkout
 These tests cover the remaining utility functions.
 """
 
+import os
 import pytest
+from unittest.mock import MagicMock, patch
 
 from dt import pull
 
@@ -60,3 +62,53 @@ class TestPullFunction:
         assert network_param.default is True, \
             "network should default to True for pull (unlike fetch)"
 
+
+
+class TestDeleteDirManifestsValidatesHashes:
+    def _out(self, value, fs_path='/proj/data'):
+        out = MagicMock()
+        out.hash_info.isdir = True
+        out.hash_info.value = value
+        out.fs_path = fs_path
+        return out
+
+    def test_crafted_hash_deletes_nothing_outside_cache(self, tmp_path):
+        from dt import pull as pull_mod
+        cache = tmp_path / 'cache' / 'files' / 'md5'
+        cache.mkdir(parents=True)
+        victim = tmp_path / 'remote' / 'xx.dir'
+        victim.parent.mkdir()
+        victim.write_text('manifest')
+        good = 'a' * 32 + '.dir'
+        (cache / 'aa').mkdir()
+        (cache / 'aa' / ('a' * 30 + '.dir')).write_text('[]')
+        outs = [self._out(f'ab/../../../remote/xx.dir'),
+                self._out(f'..{"/.." * 3}/remote/xx.dir'),
+                self._out(good)]
+        repo = MagicMock()
+        repo.index.outs = outs
+        repo.cache.local.path = str(cache)
+        repo.root_dir = str(tmp_path)
+        with patch('dt.pull.Repo', return_value=repo):
+            deleted = pull_mod.delete_dir_manifests(verbose=False)
+        assert victim.exists()
+        assert deleted == [good]
+
+    def test_linked_manifest_in_cache_is_still_removed(self, tmp_path):
+        from dt import pull as pull_mod
+        cache = tmp_path / 'cache' / 'files' / 'md5'
+        (cache / 'aa').mkdir(parents=True)
+        remote_blob = tmp_path / 'remote' / 'aa' / ('a' * 30 + '.dir')
+        remote_blob.parent.mkdir(parents=True)
+        remote_blob.write_text('[]')
+        link = cache / 'aa' / ('a' * 30 + '.dir')
+        link.symlink_to(remote_blob)
+        repo = MagicMock()
+        repo.index.outs = [self._out('a' * 32 + '.dir')]
+        repo.cache.local.path = str(cache)
+        repo.root_dir = str(tmp_path)
+        with patch('dt.pull.Repo', return_value=repo):
+            deleted = pull_mod.delete_dir_manifests(verbose=False)
+        assert deleted == ['a' * 32 + '.dir']
+        assert not os.path.lexists(link)
+        assert remote_blob.exists()  # the link was removed, not its target

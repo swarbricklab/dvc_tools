@@ -25,14 +25,10 @@ class TestStatusFunction:
 
     @patch('dt.status.subprocess.run')
     @patch('dt.status.utils.check_dvc')
-    @patch('dt.status.index_mod', create=True)
-    def test_status_calls_dvc_status(self, mock_index, mock_check_dvc, mock_run):
+    def test_status_calls_dvc_status(self, mock_check_dvc, mock_run):
         """Status calls dvc status."""
         mock_run.return_value = MagicMock(returncode=0)
-        # Make index import work
-        with patch('dt.status.index_mod') as mock_idx:
-            mock_idx.is_auto_sync_enabled.return_value = False
-            rc = status_mod.status()
+        rc = status_mod.status()
         assert rc == 0
 
     @patch('dt.status.subprocess.run')
@@ -40,7 +36,6 @@ class TestStatusFunction:
     def test_status_passes_dvc_args(self, mock_check_dvc, mock_run):
         """Extra args are passed through to dvc status."""
         mock_run.return_value = MagicMock(returncode=0)
-        # Index sync will fail silently (no real repo), which is fine
         status_mod.status(dvc_args=['--granular'])
 
         # Find the call that runs 'dvc status ...'

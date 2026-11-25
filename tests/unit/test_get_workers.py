@@ -33,6 +33,12 @@ from tests.unit.test_get_s3 import FakeODB, FakeS3FS, md5_of
 # Fakes
 # =============================================================================
 
+@pytest.fixture(autouse=True)
+def _clone_is_dvc_repo():
+    """clone_repo is mocked in these tests; skip the source-clone DVC check."""
+    with patch('dt.get._require_dvc_clone'):
+        yield
+
 class FakeRepo:
     """Stands in for the DVC Repo opened against the source clone."""
 

@@ -29,9 +29,11 @@ disables it entirely (also the fallback for read-only remotes).
 """
 
 import datetime as _dt
+import errno
 import json
 import os
 import re
+import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -46,6 +48,8 @@ STATUS_MISMATCH = 'mismatch'
 STATUS_UNREADABLE = 'unreadable'
 STATUS_INCOMPLETE = 'incomplete'
 STATUS_MISSING = 'missing'
+# A link where a blob belongs: reported, never followed or hashed.
+STATUS_SYMLINK = 'symlink'
 # No-egress size check: the remote object's size disagrees with the size DVC
 # recorded for that blob (truncation / interrupted transfer). Detected from
 # object-store metadata only, without downloading the blob (issue #196).
@@ -82,6 +86,52 @@ def expected_md5_for_blob(prefix: str, name: str) -> str:
     return prefix + base
 
 
+_BLOB_REL_RE = re.compile(r'(?:files/md5/)?[0-9a-f]{2}/[^/\x00]+')
+
+
+def safe_blob_rel(rel) -> bool:
+    """True if ``rel`` is a plain blob path inside a remote's object layout.
+
+    Paths read back from a report are data other users can edit, so only
+    ``files/md5/<xx>/<name>`` or ``<xx>/<name>`` (no ``.``/``..``) qualify.
+    """
+    return (isinstance(rel, str) and bool(_BLOB_REL_RE.fullmatch(rel))
+            and rel.rsplit('/', 1)[-1] not in ('.', '..'))
+
+
+def _dirs_are_real(remote_dir: Path, rel_dir: str) -> bool:
+    """Every directory from ``remote_dir`` down to ``rel_dir`` is not a link."""
+    cur = Path(remote_dir)
+    for part in [p for p in rel_dir.split('/') if p]:
+        cur = cur / part
+        if os.path.islink(cur):
+            return False
+    return True
+
+
+def _hash_blob(path: Path) -> Tuple[int, int, str]:
+    """``(size, mtime_ns, md5)`` of the regular file at ``path`` itself.
+
+    Opened without following links, so a link swapped in after the caller's
+    check fails instead of being read.
+    """
+    import hashlib
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
+        h = hashlib.md5()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+        return st.st_size, st.st_mtime_ns, h.hexdigest()
+    finally:
+        os.close(fd)
+
+
 def _prefix_dirs(
     remote_dir: Path,
     layout: str,
@@ -99,7 +149,7 @@ def _prefix_dirs(
     from .archive import operations as ops
 
     entries = []
-    for key, path in ops._enumerate_prefix_dirs(remote_dir, layout):
+    for key, path in ops._enumerate_prefix_dirs(remote_dir, layout, include_links=True):
         hex_prefix = key[-2:]
         if only_prefixes is not None and hex_prefix not in only_prefixes:
             continue
@@ -121,23 +171,52 @@ def _load_prefix_ledger(ledger_dir: Path, key: str) -> Dict[str, list]:
         return {}
 
 
+def _write_ledger_json(ledger_dir: Path, name: str, text: str) -> bool:
+    """Atomically replace ``ledger_dir/name`` with ``text`` (mode 0o664).
+
+    The ledger dir is shared, so the temporary file gets a random name and is
+    created exclusively, and both it and the final name are reached through
+    the directory's own descriptor without following links.
+    """
+    import secrets
+    try:
+        dfd = os.open(ledger_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    tmp = f'.{name}.{secrets.token_hex(8)}.tmp'
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=dfd)
+        try:
+            with os.fdopen(fd, 'w') as f:
+                fd = None
+                f.write(text)
+                f.flush()
+                try:
+                    os.fchmod(f.fileno(), 0o664)  # group-writable for shared remotes
+                except OSError:
+                    pass
+        finally:
+            if fd is not None:
+                os.close(fd)
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+        return False
+    finally:
+        os.close(dfd)
+
+
 def _write_prefix_ledger(
     ledger_dir: Path, key: str, mapping: Dict[str, list],
 ) -> bool:
     """Atomically write a per-prefix ledger. Best-effort: returns success."""
-    final = _ledger_file(ledger_dir, key)
-    tmp = ledger_dir / f'.{key}.json.tmp'
-    try:
-        with open(tmp, 'w') as f:
-            json.dump(mapping, f)
-        os.replace(tmp, final)
-        try:
-            os.chmod(final, 0o664)  # group-writable for shared remotes
-        except OSError:
-            pass
-        return True
-    except OSError:
-        return False
+    return _write_ledger_json(ledger_dir, _ledger_file(ledger_dir, key).name,
+                              json.dumps(mapping))
 
 
 # =============================================================================
@@ -168,19 +247,8 @@ def write_bad_report(remote_dir: Path, report: dict) -> bool:
         'bad': report.get('bad', []),
         'incomplete': report.get('incomplete', []),
     }
-    final = bad_report_file(remote_dir)
-    tmp = ledger_dir / f'.{BAD_REPORT_FILENAME}.tmp'
-    try:
-        with open(tmp, 'w') as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, final)
-        try:
-            os.chmod(final, 0o664)
-        except OSError:
-            pass
-        return True
-    except OSError:
-        return False
+    return _write_ledger_json(ledger_dir, BAD_REPORT_FILENAME,
+                              json.dumps(payload, indent=2))
 
 
 def load_bad_report(path: Path) -> Optional[dict]:
@@ -216,13 +284,29 @@ def _verify_one_prefix(
                   else _load_prefix_ledger(ledger_dir, key))
     new_ledger: Dict[str, list] = {}
 
+    rel_dir = str(Path(dir_path).relative_to(remote_dir))
+    if not _dirs_are_real(remote_dir, rel_dir):
+        counts['bad'] += 1
+        bad_entries.append({'path': rel_dir, 'status': STATUS_SYMLINK})
+        return counts, bad_entries, incomplete_entries
+
     try:
         children = list(dir_path.iterdir())
     except OSError:
         return counts, bad_entries, incomplete_entries
 
     for f in children:
-        if not f.is_file():
+        try:
+            lst = os.lstat(f)
+        except OSError:
+            continue
+        if stat.S_ISLNK(lst.st_mode):
+            counts['objects'] += 1
+            counts['bad'] += 1
+            bad_entries.append({'path': str(f.relative_to(remote_dir)),
+                                'status': STATUS_SYMLINK})
+            continue
+        if not stat.S_ISREG(lst.st_mode):
             continue
         counts['objects'] += 1
         name = f.name
@@ -231,7 +315,7 @@ def _verify_one_prefix(
 
         # A name that doesn't reconstruct to a valid md5 (e.g. a *.tmp left
         # behind by a killed transfer) is an incomplete artefact, not a blob.
-        if not _HASH_RE.match(expected):
+        if not _HASH_RE.fullmatch(expected):
             counts['incomplete'] += 1
             incomplete_entries.append({
                 'path': rel,
@@ -239,16 +323,7 @@ def _verify_one_prefix(
             })
             continue
 
-        try:
-            st = f.stat()
-            size, mtime_ns = st.st_size, st.st_mtime_ns
-        except OSError:
-            counts['bad'] += 1
-            bad_entries.append({
-                'path': rel, 'expected_md5': expected, 'actual_md5': None,
-                'size_bytes': None, 'status': STATUS_UNREADABLE,
-            })
-            continue
+        size, mtime_ns = lst.st_size, lst.st_mtime_ns
 
         counts['bytes'] += size
         sig = [size, mtime_ns]
@@ -260,7 +335,8 @@ def _verify_one_prefix(
             continue
 
         try:
-            actual = utils.md5_file(f)
+            size, mtime_ns, actual = _hash_blob(f)
+            sig = [size, mtime_ns]
         except OSError:
             counts['bad'] += 1
             bad_entries.append({
@@ -290,10 +366,16 @@ def _setup_ledger_dir(remote_dir: Path) -> Optional[Path]:
     ledger_dir = remote_dir / LEDGER_DIRNAME
     try:
         ledger_dir.mkdir(parents=True, exist_ok=True)
-        utils.set_group_writable(ledger_dir, setgid=True)
-        return ledger_dir
+        fd = os.open(ledger_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return None
+    try:
+        os.fchmod(fd, utils.shared_dir_mode())
+    except OSError:
+        pass  # not ours to chmod
+    finally:
+        os.close(fd)
+    return ledger_dir
 
 
 def verify_remote(
@@ -485,7 +567,7 @@ def _md5_from_cloud_key(rel: str) -> Tuple[str, str, bool, bool]:
     parts = rel.strip('/').split('/')
     name = parts[-1]
     prefix = parts[-2] if len(parts) >= 2 else ''
-    if not _PREFIX_RE.match(prefix):
+    if not _PREFIX_RE.fullmatch(prefix):
         return '', prefix, False, False
     is_dir = name.endswith('.dir')
     md5 = expected_md5_for_blob(prefix, name)
@@ -525,7 +607,7 @@ def compare_remote_sizes(
 
         # A name under a hex prefix that doesn't reconstruct a valid md5 (e.g. a
         # ``*.tmp`` left by a killed multipart upload) is a stray artefact.
-        if not _HASH_RE.match(md5):
+        if not _HASH_RE.fullmatch(md5):
             totals['incomplete'] += 1
             incomplete_entries.append({'path': rel,
                                        'status': STATUS_INCOMPLETE})
@@ -790,18 +872,24 @@ def recheck_entries(
 
     for entry in entries:
         rel = entry.get('path')
-        if not rel:
+        # Report entries are data other users can edit: only plain blob paths
+        # inside the remote are looked at.
+        if not safe_blob_rel(rel) or not _dirs_are_real(remote_dir, rel.rsplit('/', 1)[0]):
             continue
         totals['objects'] += 1
         f = remote_dir / rel
         name = rel.split('/')[-1]
+        if os.path.islink(f):
+            totals['bad'] += 1
+            still_bad.append({'path': rel, 'status': STATUS_SYMLINK})
+            continue
 
         # Stray / non-blob artefact (name doesn't reconstruct a valid md5).
         expected = entry.get('expected_md5')
         if expected is None:
             hex_prefix = _prefix_key_for_rel(rel, layout)[0][-2:]
             expected = expected_md5_for_blob(hex_prefix, name)
-        if not _HASH_RE.match(expected or ''):
+        if not _HASH_RE.fullmatch(expected or ''):
             # Stray file: gone means the fix (deletion) worked; else still stray.
             if not f.exists():
                 totals['ok'] += 1
@@ -811,7 +899,7 @@ def recheck_entries(
             continue
 
         try:
-            st = f.stat()
+            st = os.lstat(f)
         except OSError as exc:
             # ENOENT => the blob is genuinely gone (e.g. quarantined, not yet
             # re-pushed). Any other errno (EACCES, EIO, ...) is a present but
@@ -827,7 +915,7 @@ def recheck_entries(
             continue
 
         try:
-            actual = utils.md5_file(f)
+            _size, _mtime, actual = _hash_blob(f)
         except OSError:
             totals['bad'] += 1
             still_bad.append({

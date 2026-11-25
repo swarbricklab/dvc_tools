@@ -496,8 +496,8 @@ class TestBuildTree:
         assert 'data' in tree
         assert 'raw' in tree['data']
         assert 'processed' in tree['data']
-        assert len(tree['data']['raw']['_files']) == 2
-        assert len(tree['data']['processed']['_files']) == 1
+        assert len(tree['data']['raw']['/files']) == 2
+        assert len(tree['data']['processed']['/files']) == 1
 
     def test_counts_propagate_up_tree(self):
         """Test that counts are propagated up the tree."""
@@ -515,12 +515,12 @@ class TestBuildTree:
         tree = _build_tree(diff_data)
         
         # Root counts
-        assert tree['_counts']['added'] == 3
-        assert tree['_counts']['modified'] == 1
+        assert tree['/counts']['added'] == 3
+        assert tree['/counts']['modified'] == 1
         
         # Directory counts
-        assert tree['data']['_counts']['added'] == 3
-        assert tree['data']['a']['_counts']['added'] == 2
+        assert tree['data']['/counts']['added'] == 3
+        assert tree['data']['a']['/counts']['added'] == 2
 
     def test_handles_empty_diff(self):
         """Test handling of empty diff output."""
@@ -533,8 +533,8 @@ class TestBuildTree:
 
         tree = _build_tree(diff_data)
 
-        assert tree['_files'] == []
-        assert sum(tree['_counts'].values()) == 0
+        assert tree['/files'] == []
+        assert sum(tree['/counts'].values()) == 0
 
     def test_handles_renamed_items_with_dict_path(self):
         """Test that renamed items with path as {"old": ..., "new": ...} are handled."""
@@ -549,9 +549,9 @@ class TestBuildTree:
 
         tree = _build_tree(diff_data)
 
-        assert tree['_counts']['renamed'] == 1
+        assert tree['/counts']['renamed'] == 1
         assert 'data' in tree
-        renamed_files = tree['data']['_files']
+        renamed_files = tree['data']['/files']
         assert len(renamed_files) == 1
         assert renamed_files[0]['name'] == 'new_name.csv'
         assert renamed_files[0]['path'] == 'data/new_name.csv'
@@ -594,14 +594,14 @@ class TestRenderTree:
     def test_renders_simple_tree(self):
         """Test rendering a simple tree structure."""
         tree = {
-            '_files': [],
-            '_counts': {'added': 2},
+            '/files': [],
+            '/counts': {'added': 2},
             'data': {
-                '_files': [
+                '/files': [
                     {'name': 'file1.csv', 'status': 'added', 'path': 'data/file1.csv'},
                     {'name': 'file2.csv', 'status': 'added', 'path': 'data/file2.csv'},
                 ],
-                '_counts': {'added': 2},
+                '/counts': {'added': 2},
             }
         }
         
@@ -615,31 +615,31 @@ class TestRenderTree:
     def test_respects_max_level(self):
         """Test that max_level limits tree depth."""
         tree = {
-            '_files': [],
-            '_counts': {'added': 3},
+            '/files': [],
+            '/counts': {'added': 3},
             'a': {
-                '_files': [],
-                '_counts': {'added': 3},
+                '/files': [],
+                '/counts': {'added': 3},
                 'b': {
-                    '_files': [],
-                    '_counts': {'added': 3},
+                    '/files': [],
+                    '/counts': {'added': 3},
                     'c': {
-                        '_files': [
+                        '/files': [
                             {'name': 'file.csv', 'status': 'added', 'path': 'a/b/c/file.csv'},
                         ],
-                        '_counts': {'added': 1},
+                        '/counts': {'added': 1},
                     },
                     'd': {
-                        '_files': [
+                        '/files': [
                             {'name': 'file2.csv', 'status': 'added', 'path': 'a/b/d/file2.csv'},
                         ],
-                        '_counts': {'added': 1},
+                        '/counts': {'added': 1},
                     },
                     'e': {
-                        '_files': [
+                        '/files': [
                             {'name': 'file3.csv', 'status': 'added', 'path': 'a/b/e/file3.csv'},
                         ],
-                        '_counts': {'added': 1},
+                        '/counts': {'added': 1},
                     },
                 }
             }
@@ -659,11 +659,11 @@ class TestFindAutoLevel:
     def test_returns_level_for_small_tree(self):
         """Test that small trees get high level."""
         tree = {
-            '_files': [],
-            '_counts': {'added': 1},
+            '/files': [],
+            '/counts': {'added': 1},
             'data': {
-                '_files': [{'name': 'file.csv', 'status': 'added', 'path': 'data/file.csv'}],
-                '_counts': {'added': 1},
+                '/files': [{'name': 'file.csv', 'status': 'added', 'path': 'data/file.csv'}],
+                '/counts': {'added': 1},
             }
         }
         
@@ -865,8 +865,8 @@ class TestFormatMd:
     def test_wraps_in_diff_code_block(self):
         """Test that output is wrapped in diff code block."""
         tree = {
-            '_counts': {'added': 1},
-            '_files': [{'name': 'file.csv', 'status': 'added'}],
+            '/counts': {'added': 1},
+            '/files': [{'name': 'file.csv', 'status': 'added'}],
         }
         diff_data = {'added': [{'path': 'file.csv'}], 'deleted': [], 'modified': [], 'renamed': []}
         
@@ -878,8 +878,8 @@ class TestFormatMd:
     def test_includes_summary_header(self):
         """Test that markdown includes summary."""
         tree = {
-            '_counts': {'added': 2, 'deleted': 1},
-            '_files': [],
+            '/counts': {'added': 2, 'deleted': 1},
+            '/files': [],
         }
         diff_data = {'added': [], 'deleted': [], 'modified': [], 'renamed': []}
         
@@ -895,8 +895,8 @@ class TestFormatHtml:
     def test_returns_valid_html(self):
         """Test that output is valid HTML structure."""
         tree = {
-            '_counts': {'added': 1},
-            '_files': [{'name': 'file.csv', 'status': 'added'}],
+            '/counts': {'added': 1},
+            '/files': [{'name': 'file.csv', 'status': 'added'}],
         }
         diff_data = {'added': [{'path': 'file.csv'}], 'deleted': [], 'modified': [], 'renamed': []}
         
@@ -908,7 +908,7 @@ class TestFormatHtml:
 
     def test_includes_css_styles(self):
         """Test that HTML includes CSS styles."""
-        tree = {'_counts': {}, '_files': []}
+        tree = {'/counts': {}, '/files': []}
         diff_data = {'added': [], 'deleted': [], 'modified': [], 'renamed': []}
         
         result = _format_html(tree, diff_data, 'HEAD', None)
@@ -920,11 +920,11 @@ class TestFormatHtml:
     def test_includes_collapsible_details(self):
         """Test that directories use details elements."""
         tree = {
-            '_counts': {'added': 1},
-            '_files': [],
+            '/counts': {'added': 1},
+            '/files': [],
             'data': {
-                '_counts': {'added': 1},
-                '_files': [{'name': 'file.csv', 'status': 'added'}],
+                '/counts': {'added': 1},
+                '/files': [{'name': 'file.csv', 'status': 'added'}],
             },
         }
         diff_data = {'added': [{'path': 'data/file.csv'}], 'deleted': [], 'modified': [], 'renamed': []}
@@ -936,7 +936,7 @@ class TestFormatHtml:
 
     def test_includes_expand_collapse_buttons(self):
         """Test that HTML includes expand all / collapse all buttons."""
-        tree = {'_counts': {'added': 1}, '_files': [{'name': 'f.csv', 'status': 'added'}]}
+        tree = {'/counts': {'added': 1}, '/files': [{'name': 'f.csv', 'status': 'added'}]}
         diff_data = {'added': [{'path': 'f.csv'}], 'deleted': [], 'modified': [], 'renamed': []}
 
         result = _format_html(tree, diff_data, 'HEAD', None)
@@ -952,8 +952,8 @@ class TestRenderTreeDiffStyle:
     def test_added_files_have_plus_prefix(self):
         """Test that added files start with + prefix."""
         tree = {
-            '_counts': {'added': 1},
-            '_files': [{'name': 'new.csv', 'status': 'added'}],
+            '/counts': {'added': 1},
+            '/files': [{'name': 'new.csv', 'status': 'added'}],
         }
         
         lines = _render_tree_diff_style(tree)
@@ -963,8 +963,8 @@ class TestRenderTreeDiffStyle:
     def test_deleted_files_have_minus_prefix(self):
         """Test that deleted files start with - prefix."""
         tree = {
-            '_counts': {'deleted': 1},
-            '_files': [{'name': 'old.csv', 'status': 'deleted'}],
+            '/counts': {'deleted': 1},
+            '/files': [{'name': 'old.csv', 'status': 'deleted'}],
         }
         
         lines = _render_tree_diff_style(tree)
@@ -1071,7 +1071,7 @@ class TestDiscoverChangedTargets:
 
     @patch('dt.diff.subprocess.run')
     def test_maps_dvc_files_to_outputs_rev_vs_rev(self, mock_run):
-        mock_run.return_value = _git_result('data/a.dvc\nmodels/b.dvc\n')
+        mock_run.return_value = _git_result('data/a.dvc\0models/b.dvc\0')
 
         targets, lock_changed = _discover_changed_targets('v1', 'v2')
 
@@ -1080,7 +1080,7 @@ class TestDiscoverChangedTargets:
         # rev-vs-rev uses the double-dot range form
         cmd = mock_run.call_args[0][0]
         assert 'v1..v2' in cmd
-        assert cmd[:3] == ['git', 'diff', '--name-only']
+        assert 'diff' in cmd and '--name-only' in cmd and '-z' in cmd
 
     @patch('dt.diff.subprocess.run')
     def test_empty_when_no_control_files_changed(self, mock_run):
@@ -1093,7 +1093,7 @@ class TestDiscoverChangedTargets:
 
     @patch('dt.diff.subprocess.run')
     def test_lock_change_flags_fallback(self, mock_run):
-        mock_run.return_value = _git_result('dvc.lock\ndata/a.dvc\n')
+        mock_run.return_value = _git_result('dvc.lock\0data/a.dvc\0')
 
         targets, lock_changed = _discover_changed_targets('v1', 'v2')
 
@@ -1102,7 +1102,7 @@ class TestDiscoverChangedTargets:
 
     @patch('dt.diff.subprocess.run')
     def test_yaml_change_flags_fallback(self, mock_run):
-        mock_run.return_value = _git_result('dvc.yaml\n')
+        mock_run.return_value = _git_result('dvc.yaml\0')
 
         targets, lock_changed = _discover_changed_targets('v1', 'v2')
 
@@ -1111,7 +1111,7 @@ class TestDiscoverChangedTargets:
 
     @patch('dt.diff.subprocess.run')
     def test_dedups_and_sorts_targets(self, mock_run):
-        mock_run.return_value = _git_result('z/c.dvc\na/b.dvc\na/b.dvc\n')
+        mock_run.return_value = _git_result('z/c.dvc\0a/b.dvc\0a/b.dvc\0')
 
         targets, _ = _discover_changed_targets('v1', 'v2')
 
@@ -1121,8 +1121,8 @@ class TestDiscoverChangedTargets:
     def test_workspace_mode_includes_untracked_dvc(self, mock_run):
         # First call: git diff against working tree; second: git ls-files others
         mock_run.side_effect = [
-            _git_result('tracked/a.dvc\n'),
-            _git_result('new/b.dvc\n'),
+            _git_result('tracked/a.dvc\0'),
+            _git_result('new/b.dvc\0'),
         ]
 
         targets, lock_changed = _discover_changed_targets('HEAD', None)
@@ -1134,7 +1134,7 @@ class TestDiscoverChangedTargets:
         assert 'HEAD' in first_cmd
         assert not any('..' in part for part in first_cmd)
         second_cmd = mock_run.call_args_list[1][0][0]
-        assert second_cmd[:2] == ['git', 'ls-files']
+        assert 'ls-files' in second_cmd and '-z' in second_cmd
 
     @patch('dt.diff.subprocess.run')
     def test_raises_on_git_failure(self, mock_run):
@@ -1143,6 +1143,12 @@ class TestDiscoverChangedTargets:
         with pytest.raises(DiffError, match='git diff failed'):
             _discover_changed_targets('v1', 'v2')
 
+
+    @patch('dt.diff.subprocess.run')
+    def test_unusual_names_are_not_dropped(self, mock_run):
+        mock_run.return_value = _git_result('caf\u00e9.dvc\0a\nb.dvc\0')
+        targets, _ = _discover_changed_targets('v1', 'v2')
+        assert targets == ['a\nb', 'caf\u00e9']
 
 class TestTreeDiffScoping:
     """Tests for tree_diff scope behaviour."""
@@ -1222,3 +1228,72 @@ class TestTreeDiffScoping:
         mock_run_md.assert_called_once()
         passed_targets = mock_run_md.call_args[0][2]
         assert passed_targets == ['data/a']
+
+
+class TestRepositoryNamesAreShownAsText:
+    EVIL = '<img src=x onerror=alert(1)>'
+
+    def _data(self):
+        return {'added': [{'path': f'data/{self.EVIL}/f.txt'},
+                          {'path': f'data/{self.EVIL}'},
+                          {'path': 'data/line\nbreak.txt'},
+                          {'path': 'data/a,"b".txt'}],
+                'deleted': [], 'modified': [], 'renamed': []}
+
+    def test_html_escapes_names_and_revs(self):
+        from dt.diff import _format_md
+        data = self._data()
+        out = _format_html(_build_tree(data), data, '<b>old', '<i>new')
+        assert '<img' not in out and '<b>old' not in out and '<i>new' not in out
+        assert '&lt;img src=x onerror=alert(1)&gt;' in out
+
+    def test_markdown_names_cannot_break_lines(self):
+        from dt.diff import _format_md
+        data = self._data()
+        out = _format_md(_build_tree(data), data, 'a', 'b', 10)
+        assert 'line\\nbreak.txt' in out
+        assert not any(line.startswith('break.txt') for line in out.splitlines())
+
+    def test_csv_quotes_per_rfc4180(self):
+        import csv, io
+        rows = list(csv.reader(io.StringIO(_format_csv(self._data()))))
+        paths = [r[1] for r in rows[1:]]
+        assert 'data/a,"b".txt' in paths and 'data/line\nbreak.txt' in paths
+        assert all(len(r) == 4 for r in rows)
+
+
+def test_markdown_rev_cannot_close_its_code_span():
+    from dt.diff import _md_code
+    span = _md_code('a`b|c')
+    assert span.startswith('``') and span.endswith('``') and 'a`b|c' in span
+
+
+def test_verbose_scoping_note_goes_to_stderr(capsys):
+    from dt import diff as d
+    with patch.object(d, '_discover_changed_targets', return_value=(['<img src=x>'], False)), \
+         patch.object(d, '_run_dvc_diff', return_value={'added': [], 'deleted': [],
+                                                             'modified': [], 'renamed': []}):
+        d.tree_diff('a', 'b', output_format='html', verbose=True)
+    assert '<img' not in capsys.readouterr().out
+
+
+
+class TestReportCells:
+    def test_table_cells_are_plain(self):
+        from dt import diff
+        out = diff._format_table({'added': [{'path': 'a|b\n<img>'}],
+                                  'renamed': [{'path': {'old': 'x', 'new': 'y'}}]})
+        lines = out.splitlines()
+        assert lines[0] == '| Status | Path |'
+        assert '| added | a\\|b\\\\n\\<img\\> |' in lines
+        assert all(line.count('|') - line.count('\\|') == 3 for line in lines[2:])
+
+    def test_table_without_changes(self):
+        from dt import diff
+        assert diff._format_table({}) == 'No changes detected.'
+
+    def test_csv_formula_prefix(self):
+        from dt import diff
+        out = diff._format_csv({'added': [{'path': '=HYPERLINK("x")'}, {'path': 'ok'}]})
+        assert "'=HYPERLINK" in out
+        assert '\nadded,ok,' in out

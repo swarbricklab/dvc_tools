@@ -158,12 +158,12 @@ directory name (`dt/auth/credentials.py:512` → `utils.get_project_name()`) —
 `~/.aws/credentials` as the user's own AWS profiles. On a real machine today:
 
 ```
-default, collab, demo_wts, demo_wgs, demo_visium,
-demo_xenium, demo_chromium, 123456789012_example-institute.Data.Upload, collab
+default, partnr, example_wts, example_wgs, example_visium,
+example_xenium, example_chromium, 123456789012_Upload, partner
 ```
 
-The `demo_*` entries are dt-managed **R2** profiles. So `--dest-profile demo_wts` would aim the
-destination at R2. Note also `collab` alongside `collab` — a mistyped profile name that happens to be
+The `example_*` entries are dt-managed **R2** profiles. So `--dest-profile example_wts` would aim the
+destination at R2. Note also `partnr` alongside `partner` — a mistyped profile name that happens to be
 another valid profile never raises `ProfileNotFound`. **`--dest-profile` alone is not sufficient
 protection.**
 

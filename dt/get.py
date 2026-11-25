@@ -34,7 +34,7 @@ from . import hpc
 from . import remote as remote_mod
 from . import tmp as tmp_mod
 from . import utils
-from .errors import GetError
+from .errors import DTError, GetError
 
 # What to try, in order, when the source repo has no cache.type configured --
 # which is the normal case for someone outside our setup. Deliberately excludes
@@ -148,6 +148,16 @@ def _run_dvc_list(cmd: List[str], attempts: int = 4) -> subprocess.CompletedProc
     return result
 
 
+def _plain_relpath(relpath) -> bool:
+    """A relative path that stays below its root: no absolute path, no
+    empty, ``.`` or ``..`` component, no control characters."""
+    if not isinstance(relpath, str) or not relpath.isprintable():
+        return False
+    if relpath.startswith('/'):
+        return False
+    return all(part not in ('', '.', '..') for part in relpath.split('/'))
+
+
 def list_source_files(
     source: Path,
     path: str,
@@ -171,9 +181,10 @@ def list_source_files(
     Raises:
         GetError: If the listing fails or the path is not tracked.
     """
-    cmd = ['dvc', 'list', '--json', '--show-hash', '--size', '-R', str(source), path]
+    cmd = ['dvc', 'list', '--json', '--show-hash', '--size', '-R']
     if rev:
         cmd += ['--rev', rev]
+    cmd += ['--', str(source), path]
 
     result = _run_dvc_list(cmd)
     if result.returncode != 0:
@@ -197,8 +208,12 @@ def list_source_files(
             continue
         md5 = entry.get('md5')
         relpath = entry.get('path')
-        if not md5 or not relpath or md5.endswith('.dir'):
+        if not md5 or not relpath or str(md5).endswith('.dir'):
             continue
+        if not utils.is_md5_oid(md5) or not _plain_relpath(relpath):
+            raise GetError(
+                f"The listing of {path} names an unusable file entry "
+                f"{relpath!r} ({md5!r}); refusing to copy from it.")
         files.append({
             'relpath': relpath,
             'md5': md5,
@@ -470,10 +485,10 @@ def fetch_via_remote(
                 continue
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = ['dvc', 'get', str(clone), source_path,
-               '--out', str(dest), '--jobs', str(jobs)]
+        cmd = ['dvc', 'get', '--out', str(dest), '--jobs', str(jobs)]
         if rev:
             cmd += ['--rev', rev]
+        cmd += ['--', str(clone), source_path]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             problems.append(f'{relpath}: {_dvc_error_detail(result)}')
@@ -548,6 +563,8 @@ def _upload_one(
     if action == 'bad':
         return relpath, False, note
 
+    if not utils.is_md5_oid(md5):
+        return relpath, False, f"invalid object id {md5!r}"
     source = odb.oid_to_path(md5)
     try:
         if not odb.fs.exists(source):
@@ -849,6 +866,7 @@ def distributed_upload_to_s3(
     clone = tmp_mod.clone_repo(
         repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
     )
+    _require_dvc_clone(clone)
 
     resolved = _resolve_rows(
         clone, [row_path for row_path, _ in targets], rev, jobs, path_col
@@ -1054,6 +1072,7 @@ def _resolve_source(
     clone = tmp_mod.clone_repo(
         repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
     )
+    _require_dvc_clone(clone)
 
     found = remote_mod.find_local_remote_from_repo(repository, owner=owner)
     if found:
@@ -1111,6 +1130,7 @@ def get_data(
         clone = tmp_mod.clone_repo(
             repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
         )
+        _require_dvc_clone(clone)
         _, placed = upload_to_s3(
             clone, [(path, dest)], rev, jobs, force, resume, check,
             chunk_size, verbose,
@@ -1199,6 +1219,7 @@ def get_from_csv(
         clone = tmp_mod.clone_repo(
             repository, owner=owner, refresh=refresh, verbose=verbose, rev=rev
         )
+        _require_dvc_clone(clone)
         s3_targets = [
             (row_path, root.under(row_out or Path(row_path or '.').name))
             for row_path, row_out in targets
@@ -1355,3 +1376,18 @@ def _tally(results: List[Tuple[str, bool, str]], verbose: bool) -> Tuple[int, in
             if not ok:
                 print(f"  ✗ {relpath}: {message}")
     return written, failed
+
+
+def _require_dvc_clone(clone: Path) -> None:
+    """The source clone must be a DVC repository in its own right."""
+    try:
+        tmp_mod.require_dvc_root(clone)
+    except tmp_mod.TmpError as e:
+        raise GetError(str(e))
+    problem = utils.dvc_local_config_problem(clone)
+    if problem:
+        raise GetError(f"Refusing to use source clone {clone}: {problem}")
+    try:
+        utils.pin_clone_site_cache(clone)
+    except DTError as e:
+        raise GetError(str(e))

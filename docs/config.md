@@ -71,7 +71,7 @@ owner: swarbricklab
 secrets:
   backend: gcp
   gcp:
-    project: swarbrick-secrets
+    project: my-gcp-project
 YAML
 
 # Them:
@@ -100,7 +100,7 @@ equally be copied into place by hand. What the command adds over `cp`:
 $ dt config import lab-defaults.yaml
 lab-defaults.yaml -> user config (/home/alice/.config/dt/config.yaml)
   + secrets.backend      gcp
-  + secrets.gcp.project  swarbrick-secrets
+  + secrets.gcp.project  my-gcp-project
   ~ owner                mine -> swarbricklab
 
 Replace 1 existing value in user config? [y/N]: y

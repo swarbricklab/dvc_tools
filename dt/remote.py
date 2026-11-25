@@ -128,7 +128,11 @@ def init_remote_structure(
     failed = 0 if utils.set_group_writable(remote_dir, mode=mode) else 1
 
     # Create files/md5 structure with 00-ff subdirectories
-    failed += utils.create_md5_subdirs(remote_dir, verbose=verbose, mode=mode)
+    try:
+        failed += utils.create_md5_subdirs(remote_dir, verbose=verbose, mode=mode)
+    except OSError as e:
+        raise RemoteError(f"Cannot set up {remote_dir}: {e} "
+                          f"(a link or non-directory where a store directory belongs?)")
 
     if failed and verbose:
         # chmod needs ownership, so this is what happens when re-initialising
@@ -157,10 +161,14 @@ def configure_dvc_remote(
         remote_name: Name for the remote (defaults to project name)
         verbose: Print progress messages
     """
+    problem = utils.dvc_local_config_problem(repo_path)
+    if problem:
+        raise RemoteError(f"Refusing to write DVC config in {repo_path}: {problem}")
+
     project_name = remote_name or remote_dir.name
     
     # Get SSH host from config
-    ssh_host = cfg.get_value('ssh.host')
+    ssh_host = cfg.get_own_value('ssh.host')
     
     if ssh_host:
         # Set up SSH remote as default
@@ -239,6 +247,10 @@ def configure_local_override(
         return None
 
     remote_name, local_path = result
+
+    problem = utils.dvc_local_config_problem(repo_path)
+    if problem:
+        raise RemoteError(f"Refusing to write DVC local config in {repo_path}: {problem}")
 
     if verbose:
         print(f"Configuring local remote from '{remote_name}': {local_path}")
@@ -506,7 +518,7 @@ def get_local_hosts() -> List[str]:
         pass
     
     # Configured SSH host (used for remote URLs)
-    ssh_host = cfg.get_value('ssh.host')
+    ssh_host = cfg.get_own_value('ssh.host')
     if ssh_host:
         hosts.append(ssh_host)
     

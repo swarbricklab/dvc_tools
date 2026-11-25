@@ -19,35 +19,35 @@ from dt.errors import DepsError
 # =============================================================================
 
 IMPORT_DVC = """\
-md5: ae51b2729e737c5819ff0113342d2549
+md5: 0123456789abcdef0123456789abcdef
 frozen: true
 deps:
 - path: data/final
   repo:
-    url: git@github.com:Swarbricklab/metadata.git
-    rev_lock: 9b0730c70709fb8d73b0a142ea27250821a3e1ac
+    url: git@github.com:Swarbricklab/data-repo.git
+    rev_lock: a1b2c3d4e5f60718293a4b5c6d7e8f9012345678
     rev: main
 outs:
-- md5: ace1a88c79ce2590e589c2bf9afb828a.dir
-  size: 1069722
+- md5: fedcba9876543210fedcba9876543210.dir
+  size: 1000000
   nfiles: 6
   hash: md5
   path: final
 """
 
 IMPORT_DVC_NO_REV = """\
-md5: 582944f71ceaba3d6f3c7db48ad15380
+md5: 1111222233334444555566667777aaaa
 frozen: true
 deps:
-- path: data/overview/samplesheets.csv
+- path: data/tables/index.csv
   repo:
-    url: git@github.com:Swarbricklab/projects.git
-    rev_lock: 1f0718c5c7c6e2166ec1ed2f696fcf7f9963bbdb
+    url: git@github.com:Swarbricklab/project-index.git
+    rev_lock: b2c3d4e5f60718293a4b5c6d7e8f901234567890
 outs:
-- md5: 12f8564770021cebb42afef20b226717
-  size: 163649
+- md5: 9999888877776666555544443333bbbb
+  size: 200000
   hash: md5
-  path: projects.csv
+  path: index.csv
 """
 
 PLAIN_DVC = """\
@@ -102,15 +102,15 @@ class TestNormalizeRepoId:
     """Repo identity is the join key for the whole graph."""
 
     @pytest.mark.parametrize('url', [
-        'git@github.com:Swarbricklab/metadata.git',
-        'git@github.com:swarbricklab/metadata',
-        'https://github.com/swarbricklab/metadata',
-        'https://github.com/Swarbricklab/metadata.git',
-        'https://github.com/swarbricklab/metadata.git/',
+        'git@github.com:Swarbricklab/data-repo.git',
+        'git@github.com:swarbricklab/data-repo',
+        'https://github.com/swarbricklab/data-repo',
+        'https://github.com/Swarbricklab/data-repo.git',
+        'https://github.com/swarbricklab/data-repo.git/',
     ])
     def test_github_spellings_collapse_to_one_id(self, url):
         """Real .dvc files mix casing and URL forms for the same repo."""
-        assert dvc_deps.normalize_repo_id(url) == 'github.com/swarbricklab/metadata'
+        assert dvc_deps.normalize_repo_id(url) == 'github.com/swarbricklab/data-repo'
 
     def test_unknown_host_preserves_path_case(self):
         """Only known case-insensitive hosts get their path lowercased."""
@@ -125,19 +125,19 @@ class TestNormalizeRepoId:
         assert dvc_deps.normalize_repo_id('') == ''
 
     def test_short_name_with_owner(self):
-        result = dvc_deps.normalize_repo_id('metadata', owner='swarbricklab')
-        assert result == 'github.com/swarbricklab/metadata'
+        result = dvc_deps.normalize_repo_id('data-repo', owner='swarbricklab')
+        assert result == 'github.com/swarbricklab/data-repo'
 
     @pytest.mark.parametrize('spec', [
-        'swarbricklab/metadata',
-        'Swarbricklab/Metadata',
-        'github.com/swarbricklab/metadata',
-        'swarbricklab/metadata/',
+        'swarbricklab/data-repo',
+        'Swarbricklab/Data-repo',
+        'github.com/swarbricklab/data-repo',
+        'swarbricklab/data-repo/',
     ])
     def test_bare_path_forms_from_command_line(self, spec):
         """owner/repo is what people type; it must not hit the sanitiser."""
         assert dvc_deps.normalize_repo_id(spec) \
-            == 'github.com/swarbricklab/metadata'
+            == 'github.com/swarbricklab/data-repo'
 
     def test_bare_path_with_explicit_host_is_preserved(self):
         assert dvc_deps.normalize_repo_id('gitlab.internal/Team/Proj') \
@@ -161,23 +161,23 @@ class TestParseImportRefs:
         assert len(imports) == 1
 
         ref = imports[0]
-        assert ref.repo_id == 'github.com/swarbricklab/metadata'
-        assert ref.repo_url == 'git@github.com:Swarbricklab/metadata.git'
+        assert ref.repo_id == 'github.com/swarbricklab/data-repo'
+        assert ref.repo_url == 'git@github.com:Swarbricklab/data-repo.git'
         assert ref.path == 'data/final'
         assert ref.out_path == 'final'
         assert ref.rev == 'main'
-        assert ref.rev_lock == '9b0730c70709fb8d73b0a142ea27250821a3e1ac'
+        assert ref.rev_lock == 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
         assert ref.is_directory is True
         assert ref.nfiles == 6
-        assert ref.size == 1069722
+        assert ref.size == 1000000
 
     def test_locked_rev_prefers_rev_lock(self):
         imports, _ = dvc_deps.parse_import_refs(IMPORT_DVC, 'a.dvc')
-        assert imports[0].locked_rev.startswith('9b0730c7')
+        assert imports[0].locked_rev.startswith('a1b2c3d4')
 
     def test_locked_rev_falls_back_to_rev(self):
         text = IMPORT_DVC.replace(
-            '    rev_lock: 9b0730c70709fb8d73b0a142ea27250821a3e1ac\n', ''
+            '    rev_lock: a1b2c3d4e5f60718293a4b5c6d7e8f9012345678\n', ''
         )
         imports, _ = dvc_deps.parse_import_refs(text, 'a.dvc')
         assert imports[0].locked_rev == 'main'
@@ -334,7 +334,7 @@ class TestGitScanning:
 
         imports, externals = dvc_deps.scan_imports(repo)
         assert len(imports) == 1
-        assert imports[0].repo_id == 'github.com/swarbricklab/metadata'
+        assert imports[0].repo_id == 'github.com/swarbricklab/data-repo'
         assert imports[0].ref is None
         assert externals == []
 
@@ -365,8 +365,8 @@ class TestGitScanning:
 
         imports, _ = dvc_deps.scan_imports(repo, ref='side')
         assert {i.repo_id for i in imports} == {
-            'github.com/swarbricklab/metadata',
-            'github.com/swarbricklab/projects',
+            'github.com/swarbricklab/data-repo',
+            'github.com/swarbricklab/project-index',
         }
         # Still on main, and side's file was never materialised.
         assert not (repo / 'b.dvc').exists()
@@ -423,11 +423,11 @@ class TestGitScanning:
 
         # The side-branch-only import is found without checking it out.
         assert sources == {
-            'github.com/swarbricklab/metadata',
-            'github.com/swarbricklab/projects',
+            'github.com/swarbricklab/data-repo',
+            'github.com/swarbricklab/project-index',
         }
         projects = next(e for e in edges
-                        if e.source == 'github.com/swarbricklab/projects')
+                        if e.source == 'github.com/swarbricklab/project-index')
         assert projects.refs == ['side']
 
     def test_scan_refs_dedups_identical_shas(self, tmp_path):
@@ -455,9 +455,9 @@ class TestGitScanning:
 
     def test_current_repo_id_from_origin(self, tmp_path):
         repo = _make_git_repo(
-            tmp_path / 'repo', origin_url='git@github.com:Swarbricklab/Portal.git'
+            tmp_path / 'repo', origin_url='git@github.com:Swarbricklab/Web-portal.git'
         )
-        assert dvc_deps.current_repo_id(repo) == 'github.com/swarbricklab/portal'
+        assert dvc_deps.current_repo_id(repo) == 'github.com/swarbricklab/web-portal'
 
     def test_current_repo_id_without_origin(self, tmp_path):
         repo = tmp_path / 'noremote'
@@ -490,7 +490,7 @@ class TestListImports:
         result = dvc_deps.list_imports(root=repo)
         assert result.target == 'github.com/org/target'
         assert [e.source for e in result.edges] == [
-            'github.com/swarbricklab/metadata',
+            'github.com/swarbricklab/data-repo',
         ]
         assert 's3' in result.externals
 

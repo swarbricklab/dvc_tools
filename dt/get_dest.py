@@ -59,7 +59,7 @@ def parse_s3_url(url: str) -> Tuple[str, str]:
     Raises:
         GetError: If *url* names no bucket.
     """
-    match = _S3_URL_RE.match(url)
+    match = _S3_URL_RE.fullmatch(url)
     if not match or not match.group(1):
         raise GetError(f"Malformed S3 URL: {url}")
     return match.group(1), (match.group(2) or '').strip('/')
@@ -280,7 +280,7 @@ class S3Dest:
         A mistyped profile is the common case and botocore's ``ProfileNotFound``
         traceback is not a useful thing to show for it. Worth noting the trap
         this cannot catch: a typo that lands on a *different real profile* --
-        ``~/.aws/credentials`` here contains both ``collab`` and ``collab`` --
+        ``~/.aws/credentials`` here contains both ``partner`` and ``partnr`` --
         raises nothing at all. That is what the printed identity is for.
         """
         boto3 = _require('boto3', 's3')

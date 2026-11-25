@@ -67,6 +67,40 @@ def get_config_paths() -> dict[str, Path]:
     return paths
 
 
+def _scope_usable(scope: str, root: Optional[Path] = None) -> bool:
+    """Repository scopes count only under a root this user owns; see
+    :func:`utils.is_trusted_root`."""
+    return scope not in ('project', 'local') or utils.is_trusted_root(
+        root if root is not None else utils.find_project_root())
+
+
+_warned_files: set = set()
+
+
+def _repo_file_ok(path: Path) -> bool:
+    """A repository-scope config file counts only if it belongs to this user
+    (not some other group member with write access to the clone)."""
+    try:
+        owner = os.lstat(path).st_uid
+    except OSError:
+        return False
+    if owner == os.geteuid():
+        return True
+    if str(path) not in _warned_files:
+        _warned_files.add(str(path))
+        import sys
+        print(f"Warning: ignoring {path}: it belongs to another user",
+              file=sys.stderr)
+    return False
+
+
+def _require_usable_scope(scope: str) -> None:
+    if not _scope_usable(scope):
+        from .errors import DTError
+        raise DTError(f"Refusing to change {scope} config: "
+                      f"{utils.find_project_root()} belongs to another user")
+
+
 def load_config() -> confuse.Configuration:
     """Load configuration from all scopes in precedence order.
     
@@ -75,12 +109,17 @@ def load_config() -> confuse.Configuration:
     """
     config = confuse.Configuration(APP_NAME, read=False)
     paths = get_config_paths()
+    root = paths['project'].parent.parent
     
     # Load in reverse precedence order (lowest first, so higher overrides)
+    repo_ok = _scope_usable('project', root)
     for scope in reversed(SCOPES):
         path = paths.get(scope)
-        if path and path.exists():
-            config.set_file(path)
+        if not (path and path.exists()):
+            continue
+        if scope in ('project', 'local') and not (repo_ok and _repo_file_ok(path)):
+            continue
+        config.set_file(path)
     
     return config
 
@@ -96,8 +135,10 @@ def load_scope_config(scope: str) -> dict:
     """
     paths = get_config_paths()
     path = paths.get(scope)
+    root = paths['project'].parent.parent
     
-    if path and path.exists():
+    if path and path.exists() and _scope_usable(scope, root) and (
+            scope not in ('project', 'local') or _repo_file_ok(path)):
         with open(path) as f:
             return yaml.safe_load(f) or {}
     return {}
@@ -152,6 +193,84 @@ def get_value(key: str, default: Any = None) -> Any:
         return default
 
 
+#: Scopes the user (or the site) controls; the others come with a repository.
+TRUSTED_SCOPES = ('user', 'system')
+REPO_SCOPES = ('local', 'project')
+
+_warned_overrides: set = set()
+
+
+def _scope_lookup(scope: str, key: str):
+    """``(True, value)`` if *scope* sets *key*, else ``(False, None)``."""
+    current = load_scope_config(scope)
+    for part in key.split('.'):
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def get_trusted_value(key: str, default: Any = None) -> Any:
+    """Get *key*, letting user and system config outrank the repository.
+
+    For settings that decide where the user's own identity or secrets are
+    sent, a value committed to a repository must not override the user's
+    or the site's. A repository value is used only where neither sets the
+    key; a differing one is reported and ignored.
+    """
+    value, _scope = get_trusted_value_with_scope(key, default)
+    return value
+
+
+def get_trusted_value_with_scope(key: str, default: Any = None):
+    """Like :func:`get_trusted_value`, also returning the scope it came from
+    (None when the default is used)."""
+    trusted = repo = None
+    for scope in TRUSTED_SCOPES:
+        found, value = _scope_lookup(scope, key)
+        if found and value is not None:
+            trusted = (value, scope)
+            break
+    for scope in REPO_SCOPES:
+        found, value = _scope_lookup(scope, key)
+        if found and value is not None:
+            repo = (value, scope)
+            break
+    if trusted is not None:
+        if repo is not None and repo[0] != trusted[0] and key not in _warned_overrides:
+            _warned_overrides.add(key)
+            import sys
+            print(f"Warning: ignoring {key}={repo[0]!r} from {repo[1]} config; "
+                  f"using {trusted[0]!r} from {trusted[1]} config",
+                  file=sys.stderr)
+        return trusted
+    if repo is not None:
+        return repo
+    return default, None
+
+
+def get_own_value(key: str, default: Any = None) -> Any:
+    """Get *key* from user or system config only.
+
+    For settings that choose what software runs on the user's behalf, a
+    repository's value is ignored (with a one-time warning), even when
+    neither the user nor the site sets the key.
+    """
+    value = get_value(key)
+    scopes = scopes_defining(key)
+    if scopes and scopes[0] in REPO_SCOPES:
+        trusted = [s for s in scopes if s in TRUSTED_SCOPES]
+        if key not in _warned_overrides:
+            _warned_overrides.add(key)
+            import sys
+            print(f"Warning: ignoring {key} from {scopes[0]} config "
+                  f"(set it in user or system config)", file=sys.stderr)
+        if not trusted:
+            return default
+        found, value = _scope_lookup(trusted[0], key)
+    return default if value is None else value
+
+
 def _assign(data: dict, key: str, value: Any) -> None:
     """Write *value* at the dot-separated *key* inside *data*, creating parents."""
     parts = key.split('.')
@@ -189,6 +308,7 @@ def set_values(values: dict, scope: str = 'user') -> None:
             :func:`set_value`)
         scope: One of 'local', 'project', 'user', 'system'
     """
+    _require_usable_scope(scope)
     paths = get_config_paths()
     path = paths[scope]
 
@@ -202,6 +322,12 @@ def set_values(values: dict, scope: str = 'user') -> None:
 
     for key, value in values.items():
         _assign(data, key, value)
+
+    # Repository-scope files live under .dt, which repository content could
+    # have committed as (or filled with) links; never write through one.
+    if scope in ('project', 'local'):
+        utils.dt_subdir(root=path.parent.parent)
+        utils.refuse_link(path)
 
     # Ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,6 +347,7 @@ def unset_value(key: str, scope: str = 'user') -> bool:
     Returns:
         True if key was found and removed, False otherwise
     """
+    _require_usable_scope(scope)
     paths = get_config_paths()
     path = paths[scope]
     
@@ -498,6 +625,7 @@ def add_list_value(key: str, value: str, scope: str = 'local') -> bool:
     Returns:
         True if added, False if already exists in that scope
     """
+    _require_usable_scope(scope)
     paths = get_config_paths()
     path = paths[scope]
     
@@ -551,6 +679,7 @@ def remove_list_value(key: str, value: str, scope: str = 'local') -> bool:
     Returns:
         True if removed, False if not found
     """
+    _require_usable_scope(scope)
     paths = get_config_paths()
     path = paths[scope]
     

@@ -1,6 +1,7 @@
 """Unit tests for dt.remote_verify module."""
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -315,6 +316,33 @@ class TestBadReport:
     def test_load_missing_returns_none(self, tmp_path):
         assert rv.load_bad_report(tmp_path / "nope.json") is None
 
+    def test_report_write_leaves_planted_links_alone(self, tmp_path):
+        import os, stat
+        remote = tmp_path / "remote"
+        (remote / "files" / "md5").mkdir(parents=True)
+        ledger = remote / rv.LEDGER_DIRNAME
+        ledger.mkdir()
+        mine = tmp_path / "mine.txt"
+        mine.write_text("keep")
+        mine.chmod(0o600)
+        os.symlink(mine, ledger / f'.{rv.BAD_REPORT_FILENAME}.tmp')
+        rep = {'report_version': 2, 'bad': [], 'incomplete': []}
+        assert rv.write_bad_report(remote, rep) is True
+        assert mine.read_text() == "keep"
+        assert stat.S_IMODE(mine.stat().st_mode) == 0o600
+        assert not (ledger / rv.BAD_REPORT_FILENAME).is_symlink()
+
+    def test_ledger_write_leaves_planted_links_alone(self, tmp_path):
+        import os
+        ledger = tmp_path / "ledger"
+        ledger.mkdir()
+        mine = tmp_path / "mine.txt"
+        mine.write_text("keep")
+        os.symlink(mine, ledger / '.ab.json.tmp')
+        assert rv._write_prefix_ledger(ledger, 'ab', {'x': [1, 2]}) is True
+        assert mine.read_text() == "keep"
+        assert rv._load_prefix_ledger(ledger, 'ab') == {'x': [1, 2]}
+
 
 # =============================================================================
 # recheck_entries (issue #152)
@@ -372,14 +400,14 @@ class TestRecheck:
         entries = [{'path': rel, 'expected_md5': good, 'actual_md5': None,
                     'status': rv.STATUS_MISMATCH}]
 
-        real_stat = Path.stat
+        real_lstat = os.lstat
 
-        def fake_stat(self, *a, **k):
-            if self.name == good[2:]:
+        def fake_lstat(p, *a, **k):
+            if str(p).endswith(good[2:]):
                 raise OSError(errno.EACCES, "Permission denied")
-            return real_stat(self, *a, **k)
+            return real_lstat(p, *a, **k)
 
-        with patch.object(Path, "stat", fake_stat):
+        with patch("dt.remote_verify.os.lstat", side_effect=fake_lstat):
             totals, still_bad, _inc, _ = rv.recheck_entries(remote, entries)
 
         assert totals['bad'] == 1
@@ -749,3 +777,65 @@ class TestNoEgressCliFlag:
         assert result.exit_code == 1, result.output
         assert "no-egress" in result.output
         assert "Bad:      1" in result.output
+
+
+class TestVerifyStaysInsideRemote:
+    """Nothing outside the remote is hashed or described in the report."""
+
+    def _private(self, tmp_path):
+        secret = tmp_path / 'home' / 'secret.txt'
+        secret.parent.mkdir()
+        secret.write_bytes(b'hunter2\n')
+        return secret
+
+    def _mentions(self, entries, secret):
+        size = secret.stat().st_size
+        digest = md5_file(secret)
+        return [e for e in entries
+                if e.get('actual_md5') == digest or e.get('size_bytes') == size]
+
+    def test_planted_blob_link_is_reported_not_hashed(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        secret = self._private(tmp_path)
+        link = remote / 'files' / 'md5' / good[:2] / ('f' * 30)
+        link.symlink_to(secret)
+        _totals, bad, _inc, _ = rv.verify_remote(remote, jobs=1)
+        assert {'path': str(link.relative_to(remote)), 'status': rv.STATUS_SYMLINK} in bad
+        assert self._mentions(bad, secret) == []
+
+    def test_linked_prefix_dir_is_not_entered(self, tmp_path):
+        remote = tmp_path / 'remote'
+        _place_blob(remote, b'data\n')
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (outside / ('e' * 30)).write_bytes(b'private\n')
+        (remote / 'files' / 'md5' / 'ee').symlink_to(outside)
+        _totals, bad, _inc, _ = rv.verify_remote(remote, jobs=1)
+        assert {'path': 'files/md5/ee', 'status': rv.STATUS_SYMLINK} in bad
+        assert not any(e.get('actual_md5') for e in bad)
+
+    @pytest.mark.parametrize('rel', ['../home/secret.txt', '/etc/passwd',
+                                     'files/md5/ab/../../../../home/secret.txt',
+                                     'files/md5/ab/..', 'notaprefix/x'])
+    def test_recheck_ignores_paths_outside_layout(self, tmp_path, rel):
+        remote = tmp_path / 'remote'
+        _place_blob(remote, b'data\n')
+        secret = self._private(tmp_path)
+        if rel.startswith('../home'):
+            rel = '../home/secret.txt'
+        entries = [{'path': rel, 'expected_md5': 'a' * 32, 'status': rv.STATUS_MISMATCH}]
+        totals, still_bad, _inc, _ = rv.recheck_entries(remote, entries)
+        assert still_bad == [] and totals['objects'] == 0
+        assert self._mentions(still_bad, secret) == []
+
+    def test_recheck_reports_linked_blob_without_hashing(self, tmp_path):
+        remote = tmp_path / 'remote'
+        good = _place_blob(remote, b'data\n')
+        secret = self._private(tmp_path)
+        rel = f'files/md5/{good[:2]}/{"d" * 30}'
+        (remote / rel).symlink_to(secret)
+        entries = [{'path': rel, 'expected_md5': good[:2] + 'd' * 30,
+                    'status': rv.STATUS_MISMATCH}]
+        _t, still_bad, _inc, _ = rv.recheck_entries(remote, entries)
+        assert still_bad == [{'path': rel, 'status': rv.STATUS_SYMLINK}]

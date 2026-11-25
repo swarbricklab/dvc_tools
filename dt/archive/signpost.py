@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from .. import utils
 from ..errors import ArchiveError
 from .manifest import ArchiveManifest, manifest_path
 
@@ -99,7 +100,7 @@ def write_signpost(
         'backend_dir': manifest.backend_dir,
         'source_layout': manifest.source_layout,
         'source_remote': manifest.source_remote,
-        'git_url': manifest.git_url,
+        'git_url': utils.strip_url_credentials(manifest.git_url),
         'git_ref': manifest.git_ref,
         'manifest_in_repo': f'.dt/archives/{manifest.archive_name}.yaml',
         'pruned_at': pruned_at,
@@ -107,13 +108,9 @@ def write_signpost(
     }
 
     target = source_remote / SIGNPOST_FILENAME
-    tmp = target.with_suffix(target.suffix + '.tmp')
     target.parent.mkdir(parents=True, exist_ok=True)
-    with open(tmp, 'w') as f:
-        f.write(_comment_block())
-        f.write('\n')
-        yaml.safe_dump(body, f, default_flow_style=False, sort_keys=False)
-    tmp.rename(target)
+    utils.write_text_atomic(target, _comment_block() + '\n' + yaml.safe_dump(
+        body, default_flow_style=False, sort_keys=False))
     return target
 
 
@@ -146,7 +143,7 @@ def detect(remote_path: Path) -> Optional[ArchiveSignpost]:
         backend_dir=str(data.get('backend_dir', '')),
         source_layout=str(data.get('source_layout', '')),
         source_remote=str(data.get('source_remote', '')),
-        git_url=str(data.get('git_url', '')),
+        git_url=utils.strip_url_credentials(data.get('git_url', '')),
         git_ref=str(data.get('git_ref', '')),
         manifest_in_repo=str(data.get('manifest_in_repo', '')),
         pruned_at=str(data.get('pruned_at', '')),
@@ -200,7 +197,7 @@ def format_message(signpost: ArchiveSignpost) -> str:
         f"  manifest in git: {signpost.manifest_in_repo}",
     ]
     if signpost.git_url:
-        lines.append(f"  origin repo:     {signpost.git_url}")
+        lines.append(f"  origin repo:     {utils.strip_url_credentials(signpost.git_url)}")
     lines.append("")
     lines.append("To restore the data, run:")
     lines.append(f"  dt remote archive restore {signpost.archive_name}")

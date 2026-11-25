@@ -120,6 +120,26 @@ def format_size(size_bytes: int, human_readable: bool = True) -> str:
 # DVC cache utilities
 # =============================================================================
 
+#: Transports git may use when dt hands it a URL or remote that came from a
+#: repository (import sources, origins of scratch clones, dependency scans).
+GIT_NET_PROTOCOLS = 'https:http:ssh:git:file'
+
+
+def git_net_env(prompt: bool = False) -> dict:
+    """Environment for git commands that reach a repository-supplied URL.
+
+    Limits git to the ordinary transports (no ``ext::``/``fd::`` or other
+    remote helpers, whatever the user's git config allows). Unless *prompt*
+    (for commands the user runs at a terminal), it also keeps git from
+    waiting on a terminal prompt.
+    """
+    env = dict(os.environ)
+    env['GIT_ALLOW_PROTOCOL'] = GIT_NET_PROTOCOLS
+    if not prompt:
+        env['GIT_TERMINAL_PROMPT'] = '0'
+    return env
+
+
 def get_cache_dir() -> Optional[Path]:
     """Get the primary DVC cache directory.
     
@@ -173,6 +193,35 @@ def get_cache_root() -> Optional[Path]:
     return cache_root_from_odb_path(cache_dir)
 
 
+_MD5_OID = re.compile(r'[0-9a-f]{32}(?:\.dir)?')
+
+
+def is_md5_oid(oid: Any) -> bool:
+    """True for a DVC md5 object id: 32 lowercase hex, optional ``.dir``."""
+    return isinstance(oid, str) and bool(_MD5_OID.fullmatch(oid))
+
+
+def oid_path_parts(oid: str, strict: bool = True) -> Tuple[str, str]:
+    """Split an object id into its ``(prefix, filename)`` cache path parts.
+
+    With ``strict`` the id must be an md5 object id (see :func:`is_md5_oid`).
+    Either way each part must be a single, ordinary path component.
+
+    Raises:
+        ValueError: For an id that can't safely name a cache object.
+    """
+    if strict and not is_md5_oid(oid):
+        raise ValueError(f"invalid object id: {oid!r}")
+    if not isinstance(oid, str):
+        raise ValueError(f"invalid object id: {oid!r}")
+    base, suffix = (oid[:-4], '.dir') if oid.endswith('.dir') else (oid, '')
+    prefix, rest = base[:2], base[2:] + suffix
+    for part in (prefix, rest):
+        if not part or part in ('.', '..') or any(c in part for c in '/\\\0'):
+            raise ValueError(f"invalid object id: {oid!r}")
+    return prefix, rest
+
+
 def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
     """Convert a file hash to its cache file path.
     
@@ -186,14 +235,85 @@ def hash_to_cache_path(cache_dir: Path, file_hash: str) -> Path:
     Returns:
         Path to the cache file
     """
-    # Handle .dir suffix
-    hash_clean = file_hash.replace('.dir', '')
-    prefix = hash_clean[:2]
-    suffix = hash_clean[2:]
-    if file_hash.endswith('.dir'):
-        suffix += '.dir'
-    
+    # Not every output hash is an md5 (e.g. etags), so only require that the
+    # id maps to ordinary path components inside cache_dir.
+    prefix, suffix = oid_path_parts(file_hash, strict=False)
     return cache_dir / prefix / suffix
+
+
+def read_dir_entries(cache_dir: Path, dir_hash: str) -> Optional[list]:
+    """Entries of the ``.dir`` manifest *dir_hash* in *cache_dir*, or None.
+
+    Only a manifest whose content matches its id is read (a shared cache can
+    be written by others), and only entries naming a valid md5 object are
+    returned.
+    """
+    import json
+    from . import cache_ops
+    if not is_md5_oid(dir_hash) or not dir_hash.endswith('.dir'):
+        return None
+    raw = cache_ops.read_dir_manifest(hash_to_cache_path(cache_dir, dir_hash), dir_hash)
+    if raw is None:
+        return None
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    return [e for e in entries
+            if isinstance(e, dict) and is_md5_oid(e.get('md5'))]
+
+
+def write_text_atomic(path: Path, text: str, mode: int = 0o644) -> None:
+    """Replace *path* with *text* via a private temporary file beside it.
+
+    The temporary name is random and created exclusively without following
+    links (safe in a directory other users can write), given *mode*, then
+    renamed over *path* relative to the same directory.
+    """
+    import secrets
+    path = Path(path)
+    dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    tmp = f'.{path.name}.{secrets.token_hex(8)}.tmp'
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=dfd)
+        try:
+            view = memoryview(text.encode())
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        os.rename(tmp, path.name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(dfd)
+
+
+def strip_url_credentials(url: Any) -> str:
+    """*url* without any ``user:password@`` part (scp-style ``user@host:``
+    git addresses carry no secret and are kept)."""
+    import urllib.parse
+    url = '' if url is None else str(url).strip()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme and '@' in parts.netloc:
+            host = parts.netloc.rsplit('@', 1)[1]
+            url = urllib.parse.urlunsplit(parts._replace(netloc=host))
+    except ValueError:
+        pass
+    # Whatever the parser made of it: after a scheme, nothing up to an '@'
+    # survives (a password may hold characters the parser splits on).
+    if '@' in url and re.match(r'^[A-Za-z][\w+.-]*:', url):
+        url = re.sub(r'^([A-Za-z][\w+.-]*:/*)[^@]*@', r'\1', url, count=1)
+    return url
 
 
 def oid_to_path(file_hash: str) -> Optional[Path]:
@@ -497,6 +617,157 @@ def is_repo_import(dvc_path: Path, repo: Optional[Any] = None) -> bool:
         return False
 
 
+# A git revision: commit id, branch/tag name, or simple rev expression
+# (``HEAD~1``, ``v1^{commit}``). Must not start with '-'; no whitespace or ':'.
+_GIT_REV_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./@{}^~+#=,-]*')
+
+
+def is_valid_git_rev(rev: Any) -> bool:
+    """True if ``rev`` is a well-formed git revision name."""
+    return (
+        isinstance(rev, str)
+        and len(rev) <= 255
+        and bool(_GIT_REV_RE.fullmatch(rev))
+        and '..' not in rev
+    )
+
+
+def is_valid_repo_path(path: Any) -> bool:
+    """True if ``path`` is a usable repo-relative path argument."""
+    return (
+        isinstance(path, str)
+        and bool(path)
+        and not path.startswith('-')
+        and not any(ord(c) < 32 for c in path)
+    )
+
+
+def _find_dvc_root(start: Path) -> Optional[Path]:
+    """Nearest ancestor of ``start`` (inclusive) containing ``.dvc``, as DVC finds it."""
+    cur = Path(os.path.abspath(start))
+    for d in (cur, *cur.parents):
+        if os.path.lexists(d / '.dvc'):
+            return d
+    return None
+
+
+def dvc_local_config_problem(repo_path: Optional[Path] = None) -> Optional[str]:
+    """Why ``dvc ... --local`` writes in ``repo_path`` would be unsafe, or None.
+
+    DVC writes ``.dvc/config.local`` (and files under ``.dvc/tmp``) by path,
+    so these must be ordinary, untracked files inside the repository:
+    ``.dvc`` and ``.dvc/tmp`` real directories, ``.dvc/config.local`` absent
+    or a regular file, no links directly under ``.dvc/tmp``, and none of them
+    tracked in git. ``repo_path`` defaults to the DVC root above the cwd.
+    """
+    import stat as stat_mod
+
+    if repo_path is None:
+        root = _find_dvc_root(Path.cwd())
+        if root is None:
+            return None  # not in a DVC repo; the dvc command itself will report it
+    else:
+        root = Path(repo_path)
+    dvc_dir = root / '.dvc'
+    try:
+        st = os.lstat(dvc_dir)
+    except FileNotFoundError:
+        return None
+    if not stat_mod.S_ISDIR(st.st_mode):
+        return f"{dvc_dir} is not a directory"
+
+    project_cfg = dvc_dir / 'config'
+    if os.path.lexists(project_cfg) and (
+            os.path.islink(project_cfg) or not os.path.isfile(project_cfg)):
+        return f"{project_cfg} is not a regular file"
+
+    local = dvc_dir / 'config.local'
+    try:
+        st = os.lstat(local)
+        if not stat_mod.S_ISREG(st.st_mode):
+            return f"{local} is not a regular file"
+        if st.st_nlink > 1:
+            return f"{local} has multiple hard links"
+    except FileNotFoundError:
+        pass
+
+    tmp = dvc_dir / 'tmp'
+    try:
+        st = os.lstat(tmp)
+    except FileNotFoundError:
+        st = None
+    if st is not None:
+        if not stat_mod.S_ISDIR(st.st_mode):
+            return f"{tmp} is not a directory"
+        # DVC writes its lock/state files directly in .dvc/tmp.
+        for entry in os.scandir(tmp):
+            if entry.is_symlink():
+                return f"{entry.path} is a link"
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    if os.path.isdir(root / '.git') and not os.path.islink(root / '.git'):
+        where = [f'--git-dir={root / ".git"}', f'--work-tree={root}']
+    else:
+        # Worktree (.git is a file) or a DVC subdir project inside a larger
+        # repo: let git find it. No repository at all (dvc init --no-scm)
+        # means nothing can be tracked.
+        where = ['-C', str(root)]
+        try:
+            probe = subprocess.run(['git', *where, 'rev-parse', '--git-dir'],
+                                   capture_output=True, text=True, env=env)
+        except FileNotFoundError:
+            probe = None
+        if probe is not None and probe.returncode != 0 and \
+                'not a git repository' in probe.stderr:
+            return None
+    try:
+        tracked = subprocess.run(
+            ['git', *where, '-c', 'core.fsmonitor=false',
+             'ls-files', '-z', '--', '.dvc/config.local', '.dvc/tmp'],
+            capture_output=True, text=True, env=env, cwd=str(root),
+        )
+    except FileNotFoundError:
+        return "git is not available to check tracked DVC files"
+    if tracked.returncode != 0:
+        if 'dubious ownership' in tracked.stderr:
+            return _not_own_clone_hint(root)
+        return f"could not check tracked files: {tracked.stderr.strip()}"
+    if tracked.stdout.strip('\0'):
+        names = ', '.join(tracked.stdout.strip('\0').split('\0')[:3])
+        return (f"the repository tracks DVC local state ({names}); "
+                f"remove it from git (git rm --cached) first")
+    return None
+
+
+def _not_own_clone_hint(root: Path) -> str:
+    """Message for a repository that belongs to another user."""
+    try:
+        import pwd
+        owner = pwd.getpwuid(os.stat(root).st_uid).pw_name
+    except (OSError, KeyError):
+        owner = 'another user'
+    return (f"{root} belongs to {owner}, not you. dt works only in your own "
+            f"clone of a project; make one with `dt clone <repository>`.")
+
+
+def pin_clone_site_cache(clone_path: Path) -> None:
+    """Keep DVC's site cache for a source clone inside the clone.
+
+    A source repo's committed ``.dvc/config`` could otherwise set
+    ``core.site_cache_dir`` to any path; the local setting takes precedence.
+    Callers must have checked :func:`dvc_local_config_problem` first.
+    """
+    site = Path(clone_path) / '.dvc' / 'tmp' / 'site-cache'
+    result = subprocess.run(
+        ['dvc', 'config', '--local', 'core.site_cache_dir', str(site)],
+        cwd=clone_path, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        from .errors import DTError
+        raise DTError(f"Could not configure source clone {clone_path}: "
+                      f"{result.stderr.strip() or result.stdout.strip()}")
+
+
 def get_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict[str, Any]]:
     """Extract import information from a .dvc file.
     
@@ -505,9 +776,11 @@ def get_import_info(dvc_path: Path, repo: Optional[Any] = None) -> Optional[Dict
     Args:
         dvc_path: Path to the .dvc file.
         repo: Optional DVC Repo object.
-        
+
     Returns:
         Dictionary with 'url', 'rev', and 'path' keys, or None if not an import.
+        Values are returned as written; check them with :func:`is_valid_git_rev`
+        / :func:`is_valid_repo_path` before handing them to a subprocess.
     """
     try:
         dvc_file = load_dvc_file(dvc_path, repo)
@@ -936,11 +1209,21 @@ def set_group_writable(
         mode = shared_dir_mode()
         if not setgid:
             mode &= ~0o2000
+    # Only a real directory at exactly this path (a link there is followed
+    # only if it is this user's own, as for store roots), changed through
+    # the handle that was checked -- never whatever a planted link names.
+    from . import perms
     try:
-        os.chmod(path, mode)
-        return True
-    except (PermissionError, OSError):
+        fd = perms._open_root(Path(path))
+    except OSError:
         return False
+    try:
+        perms._fchmod_path_fd(fd, mode)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
 
 
 def create_md5_subdirs(
@@ -966,25 +1249,108 @@ def create_md5_subdirs(
     if mode is None:
         mode = shared_dir_mode()
 
-    files_md5 = parent_dir / "files" / "md5"
-    files_md5.mkdir(parents=True, exist_ok=True)
-    failed = 0 if set_group_writable(files_md5, mode=mode) else 1
+    return create_prefix_tree(Path(parent_dir), ('files', 'md5'), mode,
+                              verbose=verbose)
 
-    if verbose:
-        print(f"Creating files/md5 subdirectories under {parent_dir}")
 
-    for i in range(256):
-        subdir = files_md5 / f"{i:02x}"
-        subdir.mkdir(exist_ok=True)
-        if not set_group_writable(subdir, mode=mode):
-            failed += 1
+def create_prefix_tree(parent_dir: Path, parts: Tuple[str, ...], mode: int,
+                       verbose: bool = False) -> int:
+    """Create ``parent_dir/<parts...>/{00..ff}`` with *mode* on each new or
+    existing directory below the root.
 
+    Every component is created and opened relative to its parent without
+    following a link, and its mode is set through that handle, so a link
+    planted anywhere in a shared store is never followed.
+
+    Returns:
+        Number of prefix directories that could not be set up (e.g. a link
+        at that name).
+
+    Raises:
+        OSError: If the root or one of *parts* is not a real directory.
+    """
+    from . import perms
+
+    def _shared_subdir(dir_fd: int, name: str) -> Tuple[int, bool]:
+        try:
+            os.mkdir(name, 0o700, dir_fd=dir_fd)
+        except FileExistsError:
+            pass
+        fd = os.open(name, perms._DIR_FLAGS, dir_fd=dir_fd)
+        try:
+            perms._fchmod_path_fd(fd, mode)
+            return fd, True
+        except OSError:
+            return fd, False
+
+    failed = 0
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    fd = perms._open_root(parent_dir)
+    try:
+        for part in parts:
+            nfd, ok = _shared_subdir(fd, part)
+            failed += 0 if ok else 1
+            os.close(fd)
+            fd = nfd
+        if verbose:
+            print(f"Creating {'/'.join(parts)} subdirectories under {parent_dir}")
+        for i in range(256):
+            try:
+                pfd, ok = _shared_subdir(fd, f"{i:02x}")
+                os.close(pfd)
+                failed += 0 if ok else 1
+            except OSError:
+                failed += 1  # e.g. a link planted at the prefix name
+    finally:
+        os.close(fd)
     return failed
 
 
 # =============================================================================
 # Project root discovery
 # =============================================================================
+
+_warned_untrusted: Set[str] = set()
+_trusted_cache: Dict[Tuple[str, int], bool] = {}
+
+
+def is_trusted_root(path: Path) -> bool:
+    """Whether ``path`` may serve as this user's project root.
+
+    Each person works in their own clone, so the directory, and its
+    ``.git`` / ``.dvc`` entry if present, must belong to this user. A root
+    that does not exist yet (about to be created by this user) qualifies.
+    """
+    euid = os.geteuid()
+    key = (os.path.abspath(str(path)), euid)
+    if key in _trusted_cache:
+        return _trusted_cache[key]
+    try:
+        trusted = os.stat(path).st_uid == euid
+        for marker in ('.git', '.dvc'):
+            if trusted:
+                try:
+                    trusted = os.lstat(Path(path) / marker).st_uid == euid
+                except FileNotFoundError:
+                    pass
+    except FileNotFoundError:
+        trusted = True
+    except OSError:
+        trusted = False
+    if not trusted:
+        _note_untrusted(Path(path))
+    _trusted_cache[key] = trusted
+    return trusted
+
+
+def _note_untrusted(path: Path) -> None:
+    key = str(path)
+    if key not in _warned_untrusted:
+        _warned_untrusted.add(key)
+        import sys
+        print(f"dt: ignoring {path} as a project: it belongs to another user "
+              f"(work in your own clone)", file=sys.stderr)
+
 
 def find_dvc_root(start: Optional[Path] = None) -> Optional[Path]:
     """Find the DVC project root using DVC internals.
@@ -1034,6 +1400,9 @@ def find_git_root(start: Optional[Path] = None) -> Optional[Path]:
 
 def find_project_root(start: Optional[Path] = None) -> Path:
     """Find the project root (git root preferred, then DVC root, then cwd).
+
+    This locates the root only; whether dt may read its ``.dt`` config or
+    keep state there is :func:`is_trusted_root`'s question.
     
     Args:
         start: Starting path for the search. Defaults to cwd.
@@ -1068,10 +1437,54 @@ def get_dt_dir(create: bool = True) -> Path:
         Path to the .dt directory.
     """
     root = find_project_root()
+    _require_trusted_root(root)
     dt_dir = root / '.dt'
+    _require_real_dir(dt_dir)
     if create:
         dt_dir.mkdir(parents=True, exist_ok=True)
     return dt_dir
+
+
+def _require_trusted_root(root: Path) -> None:
+    """Refuse to keep dt state under a directory another user controls."""
+    if not is_trusted_root(root):
+        from .errors import DTError
+        raise DTError(f"Refusing to use {root}/.dt: {root} belongs to another "
+                      f"user (work in your own clone)")
+
+
+def _require_real_dir(path: Path) -> None:
+    """Refuse ``path`` if something other than a real directory is there."""
+    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isdir(path)):
+        from .errors import DTError
+        raise DTError(f"Refusing to use {path}: it must be a real directory "
+                      f"in the repository, not a link")
+
+
+def refuse_link(path: Path) -> None:
+    """Refuse to write ``path`` if it is a link or not a regular file."""
+    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isfile(path)):
+        from .errors import DTError
+        raise DTError(f"Refusing to write {path}: it must be a regular file "
+                      f"in the repository, not a link")
+
+
+def dt_subdir(*parts: str, root: Optional[Path] = None, create: bool = True) -> Path:
+    """``<root>/.dt/<parts...>``, every component a real directory.
+
+    Repository content can commit links under ``.dt``; this never follows
+    one. ``root`` defaults to the project root.
+    """
+    base = Path(root if root is not None else find_project_root())
+    _require_trusted_root(base)
+    cur = base / '.dt'
+    for part in (None, *parts):
+        if part is not None:
+            cur = cur / part
+        _require_real_dir(cur)
+        if create:
+            cur.mkdir(exist_ok=True)
+    return cur
 
 
 # Entries that must appear in .dt/.gitignore.
@@ -1097,10 +1510,17 @@ def ensure_dt_gitignore(repo_path: Optional[Path] = None) -> Path:
     """
     if repo_path is None:
         repo_path = find_project_root()
+    _require_trusted_root(Path(repo_path))
     dt_dir = repo_path / '.dt'
-    dt_dir.mkdir(parents=True, exist_ok=True)
-
     gitignore = dt_dir / '.gitignore'
+    if os.path.islink(dt_dir) or os.path.islink(gitignore) or (
+            os.path.lexists(gitignore) and not os.path.isfile(gitignore)):
+        from .errors import DTError
+        raise DTError(
+            f"Refusing to write {gitignore}: .dt and .dt/.gitignore must be "
+            f"a regular directory and file in the repository"
+        )
+    dt_dir.mkdir(parents=True, exist_ok=True)
 
     if gitignore.exists():
         existing = gitignore.read_text()
@@ -1499,6 +1919,7 @@ def ensure_dvcignore(repo_path: Optional[Path] = None) -> Tuple[Path, bool]:
     if repo_path is None:
         repo_path = find_project_root()
     dvcignore = Path(repo_path) / '.dvcignore'
+    refuse_link(dvcignore)
 
     existing = dvcignore.read_text() if dvcignore.exists() else ''
     if DVCIGNORE_GITIGNORE_PATTERN in {l.strip() for l in existing.splitlines()}:

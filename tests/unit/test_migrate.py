@@ -316,6 +316,18 @@ class TestMigrateDirectoryOutput:
         assert result['hash'] == 'md5'
         assert result['md5'].endswith('.dir')
 
+    def test_refuses_manifest_not_matching_its_hash(self, tmp_path):
+        a_md5 = hashlib.md5(b'aaa').hexdigest()
+        genuine = utils.build_dir_manifest([{'md5': a_md5, 'relpath': 'a.txt'}])
+        dir_hash = hashlib.md5(genuine).hexdigest() + '.dir'
+        forged = utils.build_dir_manifest([{'md5': a_md5, 'relpath': 'other.txt'}])
+        cache_root = tmp_path / 'cache'
+        _make_cache_file(cache_root, dir_hash, forged, v3=True, is_dir=True)
+        _make_cache_file(cache_root, a_md5, b'aaa', v3=True)
+        with pytest.raises(migrate.MigrateError, match='does not match its hash'):
+            migrate.migrate_directory_output(
+                {'md5': dir_hash, 'size': 3, 'nfiles': 1, 'path': 'd'}, cache_root)
+
     def test_keeps_hash_when_manifest_not_found(self, tmp_path):
         """When .dir manifest not in cache, keeps existing hash and adds hash field."""
         cache_root = tmp_path / 'cache'

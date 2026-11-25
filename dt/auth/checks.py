@@ -3,12 +3,14 @@
 import getpass
 import json
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from .. import utils
 from .endpoints import Endpoint, classify_url, discover_endpoints
 
 
@@ -204,10 +206,14 @@ def _check_ssh_remote_dir(
     Returns a :class:`CheckResult` on failure/warning, or *None* when the
     directory is fully accessible (caller should report its own PASS).
     """
+    if host.startswith('-'):
+        return None
+    # ssh hands the command line to the remote shell, which parses it again.
+    quoted = shlex.quote(remote_path)
     try:
         result = subprocess.run(
             ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
-             host, 'test', '-d', remote_path, '-a', '-r', remote_path],
+             '--', host, 'test', '-d', quoted, '-a', '-r', quoted],
             capture_output=True,
             text=True,
             timeout=15,
@@ -224,7 +230,7 @@ def _check_ssh_remote_dir(
     try:
         exists_result = subprocess.run(
             ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
-             host, 'test', '-e', remote_path],
+             '--', host, 'test', '-e', quoted],
             capture_output=True,
             text=True,
             timeout=15,
@@ -274,19 +280,17 @@ def _check_ssh(ep: Endpoint, verbose: bool = False) -> CheckResult:
         return result
 
     url = ep.url.strip()
-    if url.startswith('ssh://'):
-        netloc = url[6:].split('/')[0]
-        host = netloc.split('@')[-1]
-    elif '@' in url and ':' in url:
-        host = url.split('@')[1].split(':')[0]
-    else:
-        host = url
+    from .ssh import _extract_ssh_host, is_valid_ssh_host
+    host = _extract_ssh_host(url) if ('://' in url or ':' in url) else url
+    if not is_valid_ssh_host(host):
+        return CheckResult(endpoint=ep, status=STATUS_FAIL,
+                           summary=f'not a usable SSH host: {url!r}')
 
     # -- Part 1: SSH host connectivity ------------------------------------
     try:
         result_proc = subprocess.run(
             ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
-             host],
+             '--', host],
             capture_output=True,
             text=True,
             timeout=10,
@@ -414,7 +418,7 @@ def _resolve_s3_remote_settings(ep: Endpoint) -> Tuple[Optional[str], Optional[s
     if endpoint_url is None:
         try:
             from .. import config as cfg
-            endpoint_url = cfg.get_value('secrets.default_endpointurl') or None
+            endpoint_url = cfg.get_trusted_value('secrets.default_endpointurl') or None
         except Exception:
             pass
 
@@ -615,7 +619,8 @@ def _check_git(ep: Endpoint) -> CheckResult:
     """Check a git endpoint via ``git ls-remote``."""
     try:
         result = subprocess.run(
-            ['git', 'ls-remote', '--exit-code', ep.url],
+            ['git', 'ls-remote', '--exit-code', '--', ep.url],
+            env=utils.git_net_env(), stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0:
@@ -997,6 +1002,16 @@ def _check_dvc_remote_impl(ep: Endpoint, remote_name: str,
     except Exception:
         return None
 
+    # Only probe through DVC when the repo it opened (the current directory)
+    # gives this remote the URL being checked; otherwise fall back to the
+    # plain check of ep.url.
+    try:
+        dvc_url = repo.config['remote'][remote_name].get('url')
+    except Exception:
+        return None
+    if isinstance(dvc_url, str) and dvc_url != ep.url:
+        return None
+
     try:
         odb = repo.cloud.get_remote_odb(remote_name)
     except Exception as exc:
@@ -1110,7 +1125,8 @@ def _try_check(ep: Endpoint, verbose: bool = False,
     # non-interactive shell it blocks indefinitely on a username/password
     # prompt (issue #190). Fall back to the bounded _check_ssh (BatchMode +
     # ConnectTimeout) whenever stdin is not a tty.
-    use_dvc_native = bool(remote_name) and ' of ' not in ep.source
+    use_dvc_native = (bool(remote_name) and ' of ' not in ep.source
+                      and not ep.other_repo)
     if ep.type == 'ssh' and not sys.stdin.isatty():
         use_dvc_native = False
 

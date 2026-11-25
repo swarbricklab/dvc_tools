@@ -3,6 +3,8 @@
 Generates tree.txt (file listing) and dag.md (pipeline DAG) summaries.
 """
 
+import os
+import secrets
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -31,13 +33,77 @@ def get_output_dir(output_dir: Optional[str] = None) -> Path:
         Path to the output directory
     """
     if output_dir:
-        return Path(output_dir)
+        # The user's own choice: anywhere, as given (relative to here).
+        return Path.cwd() / output_dir
     
-    configured = cfg.get_value('summary.output_dir')
+    configured, scope = cfg.get_trusted_value_with_scope('summary.output_dir')
     if configured:
-        return Path(configured)
+        path = Path(str(configured))
+        # A repository's own config may only name a place inside it.
+        if scope in cfg.REPO_SCOPES:
+            if path.is_absolute() or '..' in path.parts:
+                raise SummaryError(
+                    f"summary.output_dir from {scope} config must be a relative path "
+                    f"inside the project: {configured!r} (use --out to choose another)")
+            return path
+        return Path.cwd() / path
     
     return Path(DEFAULT_OUTPUT_DIR)
+
+
+def _write_report(out_dir: Path, filename: str, text: str) -> Path:
+    """Write *text* to ``out_dir/filename``.
+
+    A relative ``out_dir`` is walked from the current directory one
+    component at a time without following links (creating what is missing),
+    and the file is a fresh private temporary renamed into place -- so a
+    link committed at ``docs`` or ``docs/tree.txt`` is never written
+    through. An absolute ``out_dir`` (given with ``--out``) is used as is.
+    """
+    if '/' in filename or filename in ('', '.', '..'):
+        raise SummaryError(f"Invalid output file name {filename!r}")
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if out_dir.is_absolute():
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dfd = os.open(out_dir, flags)
+        parts = []
+    else:
+        dfd = os.open('.', flags)
+        parts = [p for p in out_dir.parts if p not in ('', '.')]
+    try:
+        for part in parts:
+            if part == '..':
+                raise SummaryError(f"Refusing output directory {out_dir}")
+            try:
+                os.mkdir(part, 0o777, dir_fd=dfd)
+            except FileExistsError:
+                pass
+            try:
+                nfd = os.open(part, flags | os.O_NOFOLLOW, dir_fd=dfd)
+            except OSError as e:
+                raise SummaryError(f"Refusing to write under {out_dir}: {part} "
+                                   f"is not a real directory ({e})")
+            os.close(dfd)
+            dfd = nfd
+        tmp = f'.{filename}.{secrets.token_hex(8)}.tmp'
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o666, dir_fd=dfd)
+        try:
+            with os.fdopen(fd, 'w') as f:
+                fd = None
+                f.write(text)
+            os.rename(tmp, filename, src_dir_fd=dfd, dst_dir_fd=dfd)
+        except BaseException:
+            if fd is not None:
+                os.close(fd)
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dfd)
+    return out_dir / filename
 
 
 def generate_tree(
@@ -64,7 +130,6 @@ def generate_tree(
         raise SummaryError(str(e))
     
     out_dir = get_output_dir(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / filename
     
     if verbose:
@@ -79,7 +144,7 @@ def generate_tree(
     if result.returncode != 0:
         raise SummaryError(f"Failed to generate tree: {result.stderr}")
     
-    out_path.write_text(result.stdout)
+    _write_report(out_dir, filename, result.stdout)
     
     if verbose:
         print(f"  Written to {out_path}")
@@ -111,7 +176,6 @@ def generate_dag(
         raise SummaryError(str(e))
     
     out_dir = get_output_dir(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / filename
     
     if verbose:
@@ -126,7 +190,7 @@ def generate_dag(
     if result.returncode != 0:
         raise SummaryError(f"Failed to generate DAG: {result.stderr}")
     
-    out_path.write_text(result.stdout)
+    _write_report(out_dir, filename, result.stdout)
     
     if verbose:
         print(f"  Written to {out_path}")
@@ -165,7 +229,6 @@ def generate_repo_dag(
     from .errors import DepsError
 
     out_dir = get_output_dir(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / filename
 
     if verbose:
@@ -184,7 +247,7 @@ def generate_repo_dag(
     if graph.gaps:
         body += ["", "```", repo_graph_render.format_gaps(graph), "```"]
 
-    out_path.write_text("\n".join(body) + "\n")
+    _write_report(out_dir, filename, "\n".join(body) + "\n")
 
     if verbose:
         print(f"  Written to {out_path}")

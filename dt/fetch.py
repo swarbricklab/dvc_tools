@@ -16,6 +16,7 @@ This is the "dt" equivalent of `dvc fetch`, but works with local caches
 
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -235,6 +236,15 @@ def categorize_stages(
 # Fetch Plan: Hash-based fetch model
 # =============================================================================
 
+def _usable_hash(h: str, stage_name: Optional[str] = None) -> bool:
+    """Only md5 object ids name cache objects; report and skip anything else."""
+    if utils.is_md5_oid(h):
+        return True
+    where = f" in {stage_name}" if stage_name else ""
+    print(f"Warning: skipping invalid object id{where}: {h!r}")
+    return False
+
+
 @dataclass
 class SourceGroup:
     """Group of hashes to fetch from a single source cache."""
@@ -247,7 +257,9 @@ class SourceGroup:
     hash_paths: Dict[str, str] = field(default_factory=dict)
     
     def add_hash(self, h: str, stage_name: str = None, path: str = None) -> None:
-        """Add a hash to fetch from this source."""
+        """Add a hash to fetch from this source (malformed ids are skipped)."""
+        if not _usable_hash(h, stage_name):
+            return
         self.hashes.add(h)
         if stage_name:
             self.hash_stages[h] = stage_name
@@ -257,6 +269,8 @@ class SourceGroup:
     def add_hashes_with_paths(self, hash_path_pairs: List[Tuple[str, str]], stage_name: str = None) -> None:
         """Add multiple hashes with their paths to fetch from this source."""
         for h, path in hash_path_pairs:
+            if not _usable_hash(h, stage_name):
+                continue
             self.hashes.add(h)
             if stage_name:
                 self.hash_stages[h] = stage_name
@@ -338,6 +352,25 @@ def _create_source_cache_db(source_path: Path):
     return LocalHashFileDB(local_fs, cache_path, tmp_dir=source_path / "tmp")
 
 
+def _parse_dir_manifest(raw: bytes) -> Optional[List[Tuple[str, str]]]:
+    """``(md5, relpath)`` pairs from ``.dir`` manifest bytes, or None."""
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    children: List[Tuple[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        child_hash = entry.get('md5')
+        relpath = entry.get('relpath', '')
+        if child_hash:
+            children.append((child_hash, relpath))
+    return children
+
+
 def _read_dir_manifest_from_path(
     dir_hash: str,
     source_cache: Path,
@@ -364,25 +397,14 @@ def _read_dir_manifest_from_path(
         and parsed (possibly empty for a genuinely empty directory), or
         ``None`` if the manifest blob could not be found or read.
     """
-    manifest_path = cache_ops.find_source_file(dir_hash, source_cache)
-    if manifest_path is None:
+    if cache_ops.find_source_file(dir_hash, source_cache) is None:
         return None
-    try:
-        entries = json.loads(manifest_path.read_text())
-    except (OSError, ValueError):
+    raw = cache_ops.find_dir_manifest(dir_hash, source_cache)
+    if raw is None:
+        print(f"Warning: .dir manifest {dir_hash} in {source_cache} is unreadable "
+              f"or does not match its name; ignored")
         return None
-    if not isinstance(entries, list):
-        return None
-
-    children: List[Tuple[str, str]] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        child_hash = entry.get('md5')
-        relpath = entry.get('relpath', '')
-        if child_hash:
-            children.append((child_hash, relpath))
-    return children
+    return _parse_dir_manifest(raw)
 
 
 def _expand_dir_hash(
@@ -396,7 +418,7 @@ def _expand_dir_hash(
 
     First tries to read the ``.dir`` manifest directly from the source
     cache/remote root (``source_path``), checking both the v3 and legacy v2
-    layouts (issue #195). Falls back to DVC's ``Tree.load()`` against an
+    layouts (issue #195). Falls back to reading it from an
     object database (e.g. the destination cache) when the manifest isn't
     present at the source.
 
@@ -411,8 +433,8 @@ def _expand_dir_hash(
     Returns:
         List of (hash, path) tuples for child files.
     """
-    from dvc_data.hashfile.tree import Tree
-    from dvc_data.hashfile.hash_info import HashInfo
+    if not utils.is_md5_oid(dir_hash):
+        return []
 
     child_files = []
     loaded = False  # True once any source successfully loaded the manifest
@@ -433,23 +455,26 @@ def _expand_dir_hash(
             if child_files:
                 return child_files
 
-    # 2. Fall back to Tree.load against an object database (source_db, then
+    # 2. Fall back to the object databases (source_db, then
     #    the destination/fallback db for a manifest only present downstream).
     for db in [source_db, fallback_db]:
         if db is None:
             continue
         try:
-            hi = HashInfo("md5", dir_hash)
-            tree = Tree.load(db, hi)
+            raw = cache_ops.read_dir_manifest(Path(db.oid_to_path(dir_hash)), dir_hash)
+        except Exception:
+            raw = None
+        manifest = _parse_dir_manifest(raw) if raw is not None else None
+        if manifest is None:
+            continue
+        try:
             loaded = True
-            for key, (meta, hash_info) in tree.iteritems():
-                # key is a tuple of path components, e.g., ('subdir', 'file.txt')
-                rel_path = '/'.join(key) if key else ''
+            for child_hash, rel_path in manifest:
                 if base_path:
                     full_path = f"{base_path}/{rel_path}" if rel_path else base_path
                 else:
                     full_path = rel_path
-                child_files.append((hash_info.value, full_path))
+                child_files.append((child_hash, full_path))
             # Successfully loaded from this db, return early
             if child_files:
                 return child_files
@@ -918,7 +943,7 @@ def fetch_from_plan(
     if verbose:
         try:
             idx_len = len(idx)
-            print(f"  Cache index: {idx_len} entries ({idx._db_dir})")
+            print(f"  Cache index: {idx_len} entries ({idx.path})")
         except Exception:
             print("  Cache index: new (will be created)")
     
@@ -1418,6 +1443,7 @@ def _dvc_fetch_from_remote(
     """
     cmd = ['dvc', 'fetch', '-r', remote_name]
     if targets:
+        cmd.append('--')
         cmd.extend(targets)
 
     if verbose:
@@ -1481,7 +1507,7 @@ def _fetch_dir_only_from_remote(
     for stage in all_stages:
         hash_paths, is_v2 = _collect_hashes_from_stage(stage)
         for h, _path in hash_paths:
-            if h.endswith('.dir'):
+            if h.endswith('.dir') and _usable_hash(h, stage.addressing):
                 if is_v2:
                     v2_dir_hashes.append(h)
                 else:
@@ -1555,6 +1581,29 @@ def _fetch_dir_only_from_remote(
         # Verify expected hashes actually landed in local cache.
         still_missing = [h for h in to_fetch if not local_odb.exists(h)]
         n_missing = len(still_missing)
+
+        # Keep only .dir objects whose content matches their id, each as
+        # this cache's own copy (not a link back to the remote's file).
+        for h in to_fetch:
+            if h in still_missing:
+                continue
+            try:
+                obj_path = Path(local_odb.oid_to_path(h))
+            except Exception:
+                continue
+            if not os.path.lexists(obj_path):
+                continue
+            raw = cache_ops.read_dir_manifest(obj_path, h)
+            if raw is not None and cache_ops.place_dir_object(obj_path, h, raw) is not None:
+                continue
+            print(f"Warning: .dir manifest {h} from '{remote_name}' does not "
+                  f"match its name; removed")
+            try:
+                os.unlink(obj_path)
+            except OSError:
+                pass
+            n_ok = max(0, n_ok - 1)
+            n_fail += 1
 
         if verbose:
             print(f"    Transferred: {n_ok}, Failed: {n_fail}")
@@ -1693,7 +1742,7 @@ def _stage_outputs_fully_cached(
     dest_db = None
     for out in outs:
         md5 = out.get('md5')
-        if not md5:
+        if not md5 or not utils.is_md5_oid(md5):
             return False
         dest = cache_ops.get_cache_file_path(md5, cache_root, use_v3_layout=True)
         if not dest.exists():
@@ -1712,6 +1761,8 @@ def _stage_outputs_fully_cached(
                 # An empty manifest is unusual; treat as not-cached to be safe.
                 return False
             for child_hash, _child_path in children:
+                if not utils.is_md5_oid(child_hash):
+                    return False
                 child_dest = cache_ops.get_cache_file_path(
                     child_hash, cache_root, use_v3_layout=True
                 )
@@ -1798,6 +1849,11 @@ def _recover_import_via_source_clone(
     from . import tmp as tmp_mod
     from . import import_data as import_mod
 
+    if not utils.is_valid_git_rev(rev_lock):
+        return (False, f"invalid import revision: {rev_lock!r}")
+    if not utils.is_valid_repo_path(source_path):
+        return (False, f"invalid import path: {source_path!r}")
+
     try:
         # Clone (or reuse) the source repo checked out at the pinned rev.
         clone_path = tmp_mod.clone_repo(url, refresh=False, verbose=False, rev=rev_lock)
@@ -1810,7 +1866,7 @@ def _recover_import_via_source_clone(
     except Exception as e:
         return (False, f"could not configure source clone cache: {e}")
 
-    cmd = ['dvc', 'fetch', source_path]
+    cmd = ['dvc', 'fetch', '--', source_path]
     if verbose:
         print(f"  Running (in source clone): {' '.join(cmd)}")
 
@@ -1902,6 +1958,11 @@ def _run_repo_import_network_fetch(
     url = import_info.get('url') if import_info else None
     source_path = import_info.get('path') if import_info else None
 
+    if not utils.is_valid_git_rev(rev_lock):
+        return (False, f"invalid import revision in {stage_path}: {rev_lock!r}")
+    if source_path is not None and not utils.is_valid_repo_path(source_path):
+        return (False, f"invalid import path in {stage_path}: {source_path!r}")
+
     # Parse the .dvc file once and resolve the destination cache up front so
     # the cache-presence check and both fetch attempts can share the result.
     # If the file can't be read here (e.g. unit tests mock import_info but
@@ -1932,7 +1993,8 @@ def _run_repo_import_network_fetch(
 
             # Ensure the specific commit is available in the (possibly shallow) clone
             subprocess.run(
-                ['git', 'fetch', '--depth', '1', 'origin', rev_lock],
+                ['git', 'fetch', '--depth', '1', '--end-of-options', 'origin', rev_lock],
+                env=utils.git_net_env(), stdin=subprocess.DEVNULL,
                 cwd=clone_path,
                 capture_output=True,
             )
@@ -1941,7 +2003,7 @@ def _run_repo_import_network_fetch(
                 print(f"  git show {rev_lock[:8]}:{source_path}")
 
             show = subprocess.run(
-                ['git', 'show', f'{rev_lock}:{source_path}'],
+                ['git', 'show', '--end-of-options', f'{rev_lock}:{source_path}'],
                 cwd=clone_path,
                 capture_output=True,
             )
@@ -1956,9 +2018,10 @@ def _run_repo_import_network_fetch(
                     return (False, "Could not resolve primary cache location")
 
                 dest = cache_ops.get_cache_file_path(expected_md5, Path(_cache_base), use_v3_layout=True)
-                if not dest.exists():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(show.stdout)
+                try:
+                    cache_ops.write_object(dest, show.stdout)
+                except OSError as e:
+                    return (False, f"cannot write cache object: {e}")
                 return (True, "Fetched via git show (network)")
             # else: file not in git at this rev — fall through to dvc update
         except Exception as e:
@@ -1998,7 +2061,7 @@ def _run_repo_import_network_fetch(
 
     rev_was_set = _snapshot_repo_rev_keys(dvc_data)
 
-    cmd = ['dvc', 'update', '--rev', rev_lock, str(stage_path)]
+    cmd = ['dvc', 'update', '--rev', rev_lock, '--', str(stage_path)]
     if verbose:
         print(f"  Running: {' '.join(cmd)}")
 
@@ -2033,7 +2096,7 @@ def _run_dvc_fetch(dvc_path: Path, verbose: bool = False) -> Tuple[bool, str]:
     Returns:
         Tuple of (success, message).
     """
-    cmd = ['dvc', 'fetch', str(dvc_path)]
+    cmd = ['dvc', 'fetch', '--', str(dvc_path)]
     if verbose:
         print(f"  Running: {' '.join(cmd)}")
 
@@ -2085,10 +2148,8 @@ def _fetch_url_import(
             md5 = outs[0].get('md5', '')
             if md5:
                 primary_cache = utils.get_cache_dir()
-                if primary_cache:
-                    hash_clean = md5.replace('.dir', '')
-                    suffix = '.dir' if md5.endswith('.dir') else ''
-                    cache_file = primary_cache / hash_clean[:2] / (hash_clean[2:] + suffix)
+                if primary_cache and utils.is_md5_oid(md5):
+                    cache_file = utils.hash_to_cache_path(primary_cache, md5)
                     if cache_file.exists():
                         return (True, "Already in cache (URL import)")
     
@@ -2106,7 +2167,7 @@ def _fetch_url_import(
         print(f"  URL import from: {source_url}")
         print(f"  Running: dvc update {dvc_path}")
     
-    cmd = ['dvc', 'update', str(dvc_path)]
+    cmd = ['dvc', 'update', '--', str(dvc_path)]
     
     try:
         result = subprocess.run(

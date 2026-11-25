@@ -23,6 +23,16 @@ from dt.errors import GetError
 # Link type resolution
 # =============================================================================
 
+@pytest.fixture(autouse=True)
+def _clone_is_dvc_repo(request):
+    """clone_repo is mocked in these tests; skip the source-clone DVC check
+    (except in tests marked ``real_dvc_check``)."""
+    if request.node.get_closest_marker('real_dvc_check'):
+        yield
+        return
+    with patch('dt.get._require_dvc_clone'):
+        yield
+
 class TestResolveLinkTypes:
     """Which link types dt get will attempt, in order."""
 
@@ -134,8 +144,22 @@ class TestListSourceFiles:
 
         cmd = run.call_args[0][0]
         assert '--show-hash' in cmd and '-R' in cmd and '--json' in cmd
-        assert cmd[-2:] == ['--rev', 'abc123']
+        assert cmd[cmd.index('--rev') + 1] == 'abc123'
+        assert cmd.index('--rev') < cmd.index('--')
         assert 'data/fq/SMP01-A' in cmd
+
+    @pytest.mark.parametrize('relpath,md5', [
+        ('../../.bashrc', 'a' * 32),
+        ('/etc/x', 'a' * 32),
+        ('a//b', 'a' * 32),
+        ('ok\nname', 'a' * 32),
+        ('fine', 'not-a-hash'),
+    ])
+    def test_refuses_unusable_entries(self, tmp_path, relpath, md5):
+        listing = [{'path': relpath, 'md5': md5, 'size': 1, 'isout': False, 'isdir': False}]
+        with patch.object(get_mod.subprocess, 'run', return_value=_dvc_list_json(listing)):
+            with pytest.raises(get_mod.GetError, match='unusable'):
+                get_mod.list_source_files(tmp_path, 'data/x')
 
     def test_skips_the_dir_entry_itself(self, tmp_path):
         """The .dir output is metadata, not a file to place."""
@@ -799,7 +823,7 @@ class TestRemoteFallback:
 
         cmd = run.call_args[0][0]
         assert cmd[:2] == ['dvc', 'get']
-        assert cmd[2] == str(clone)
+        assert cmd[cmd.index('--') + 1] == str(clone)
         assert 'data/fq/S1/R1.fq' in cmd
         assert '--jobs' in cmd and '4' in cmd
         assert written == 1 and 'downloaded' in note
@@ -818,7 +842,8 @@ class TestRemoteFallback:
              patch.object(get_mod.subprocess, 'run', side_effect=fake_run) as run:
             get_mod.fetch_via_remote(tmp_path / 'c', 'p', dest, rev='v1.0')
 
-        assert ['--rev', 'v1.0'] == run.call_args[0][0][-2:]
+        cmd = run.call_args[0][0]
+        assert cmd[cmd.index('--rev') + 1] == 'v1.0'
 
     def test_download_failure_is_reported(self, tmp_path):
         failed = MagicMock(
@@ -1096,3 +1121,15 @@ class TestResumeOnRemotePath:
              patch.object(get_mod.subprocess, 'run', side_effect=fake_run):
             with pytest.raises(GetError, match='CHECKSUM MISMATCH after download'):
                 get_mod.fetch_via_remote(clone, 'p', dest, check=True)
+
+
+@pytest.mark.real_dvc_check
+class TestSourceCloneMustBeDvcRepo:
+    def test_clone_without_dvc_dir_is_refused(self, tmp_path):
+        from dt import get as get_mod
+        clone = tmp_path / 'clone'
+        clone.mkdir()
+        with pytest.raises(get_mod.GetError, match='not a DVC repository'):
+            get_mod._require_dvc_clone(clone)
+        (clone / '.dvc').mkdir()
+        get_mod._require_dvc_clone(clone)

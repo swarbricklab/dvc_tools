@@ -9,14 +9,17 @@ This directory contains the GitHub Actions workflows for `dvc_tools`.
 
 ## Architecture (deploy.yml)
 
-1. **`publish` job** — runs on a self-hosted `qxub-runner` at NCI.
+1. **`publish` job** — runs on a self-hosted runner (label from the `RUNNER_LABEL` repository variable).
    - Authenticates to GCP via Workload Identity Federation (org-level secrets `WIF_PROVIDER`, `SERVICE_ACCOUNT`, `PROJECT_ID`).
    - Resolves the runner's OS Login POSIX username (different SA → different username).
    - Installs absconda from `main` and configures it via `absconda config set` (no committed `absconda.yaml`).
-   - Calls `absconda publish --file conda/dt.yaml ...`. Absconda generates a Dockerfile internally from the conda env spec, uploads the build context to the GCE builder VM (`absconda-builder`) over an IAP tunnel, runs `docker build`, and pushes to GHCR.
-   - Full build log is uploaded as the `publish-log-<version>` artifact.
-   - Full build log is uploaded as the `publish-log-<version>` artifact.
-2. **`deploy` job** — also runs on the qxub-runner; pulls the image on a NCI compute node via `qxub exec --mod absconda -- absconda deploy`, which materialises the conda env into `/opt/conda/envs/dt` and writes Singularity shim wrappers + a TCL modulefile.
+   - Calls `absconda publish --file conda/dt.yaml ...`. Absconda generates a Dockerfile internally from the conda env spec, uploads the build context to a GCE builder VM over an IAP tunnel, runs `docker build`, and pushes to GHCR.
+   - Build output is shown in a collapsed group in the job log.
+2. **`deploy` job** — also runs on the self-hosted runner; pulls the image on a NCI compute node via `qxub exec --mod absconda -- absconda deploy`, which materialises the conda env into `/opt/conda/envs/dt` and writes Singularity shim wrappers + a TCL modulefile.
+
+## Configuration
+
+Deployment-specific values are repository secrets so they are masked in public run logs: `REMOTE_BUILDER_NAME`, `REMOTE_BUILDER_HOST`, `REMOTE_BUILDER_WORKSPACE`, `GCP_REGION`, `GCP_ZONE`, `QXUB_VENV`, and `GHCR_TOKEN_SECRET` / `GHCR_USERNAME_SECRET` (the Secret Manager secret names holding the GHCR PAT and its username), and `NCI_SCRATCH_ROOT` (the project's `/scratch/<project>` directory, used for the Singularity cache) (plus the org-level `WIF_PROVIDER`, `SERVICE_ACCOUNT`, `PROJECT_ID`, and `USER_NAME`). The runner label is the repository variable `RUNNER_LABEL` (`runs-on` cannot read secrets).
 
 ## Operational notes / learnings
 
@@ -25,20 +28,20 @@ These are non-obvious things we hit while bringing the pipeline up. Keep this li
 - **Org-level secrets.** `WIF_PROVIDER`, `SERVICE_ACCOUNT`, `PROJECT_ID` are organisation-level (`swarbricklab`) and shared with the `absconda` repo. Both repos therefore authenticate as the same SA and share builder permissions.
 - **Two GCP identities are involved.** The runner's *attached* SA (used for `gcloud auth list` defaults on the runner VM) is distinct from the *WIF-impersonated* SA the workflow runs as. Only the WIF SA needs IAM bindings on the builder; ignore the attached one when debugging permissions.
 - **IAP tunnel race.** `gcloud compute instances start ... done` returns when the GCE control plane sees the VM as `RUNNING`, but `sshd` inside the guest is not yet listening. The first IAP tunnel attempt right after a cold start fails with `ssh: exit 255` / `4003: failed to connect to backend`. The publish job mitigates this with a "Pre-warm builder SSH" step that polls `gcloud compute ssh ... --command=true` for up to ~2.5 min before invoking absconda.
-- **Builder workspace permissions.** Absconda uploads its build context to `<workspace>/<name>-<timestamp>-<rand>.tar.gz` on the builder. The workspace dir (`/var/lib/absconda` on `absconda-builder`) must be writable by **every** OS Login user that publishes from CI. We set it to `chmod 1777` (sticky, world-writable). Filenames are timestamp-randomised so collisions are not a concern at our team size.
+- **Builder workspace permissions.** The builder's workspace dir must be writable by every OS Login user that publishes from CI.
 - **`env/` is a default Python `.gitignore` entry.** The conda env spec lives in `conda/dt.yaml` for that reason — never use `env/`.
 - **`absconda generate > Dockerfile` corrupts long lines on absconda < 0.2.6.** `Console.print` hard-wraps at the detected terminal width when stdout is redirected, snapping long `RUN` lines mid-shell. We sidestep this entirely by using `absconda publish --file conda/dt.yaml` (no Dockerfile is committed). (See [absconda#50](https://github.com/swarbricklab/absconda/pull/50).)
 - **`pip install --user` and PATH.** Self-hosted runners do not have `~/.local/bin` on `$PATH`. After `pip install --user`, append the user-base bin dir to `$GITHUB_PATH` explicitly.
-- **Publish log artifact.** The build is verbose (~1.5k lines). It is captured to `build-logs/publish-<version>.log`, wrapped in an Actions log group, and uploaded as a workflow artifact for 30 days — pull it from the run page when diagnosing build failures.
+- **Publish log.** The build is verbose (~1.5k lines), so it is wrapped in a collapsed Actions log group. It is not uploaded as an artifact: secret masking does not apply to artifact contents.
 - **pip wheel cache traps unpinned `git+https://` deps.** The conda env spec installs `dvc_tools` and `qxub` from git URLs. pip's wheel cache keys on URL only, so on a warm builder every subsequent build silently reuses whichever SHA was built first (we hit this when 0.5.9 still reported `dt --version` 0.5.3). The "Pin git deps to commit SHAs" step rewrites both URLs to include `@<sha>` before passing the spec to absconda — this both invalidates the cache and guarantees the image contains the same code as the workflow run.
-- **Singularity GHCR auth requires persistent credentials, not just env vars.** `absconda deploy` calls `singularity pull docker://ghcr.io/...` without explicit `--docker-username`/`--docker-password` flags, relying instead on `SINGULARITY_DOCKER_*` env vars. In practice, NCI's singularity ignores these in favour of credentials stored in `~/.singularity/remote.yaml`. The qxub-runner is **not** an NCI host (it SSHes into `gadi` via the alias in its `~/.ssh/config`), so the deploy job:
-  1. fetches the GHCR PAT from Secret Manager and writes it to a `chmod 600` file under `$RUNNER_TEMP`;
-  2. `scp`s it to `gadi:~/.dt-ci-ghcr-token-<run_id>` (the same `gadi` alias qxub uses);
-  3. runs `singularity remote login docker://ghcr.io` inside `qxub exec --mod singularity` on a compute node, reading the token from `$HOME/.dt-ci-ghcr-token-<run_id>`; and
-  4. removes both the local and remote files in an `if: always()` cleanup step.
+- **Singularity GHCR auth requires persistent credentials, not just env vars.** `absconda deploy` calls `singularity pull docker://ghcr.io/...` without explicit `--docker-username`/`--docker-password` flags, relying instead on `SINGULARITY_DOCKER_*` env vars. In practice, NCI's singularity ignores these in favour of credentials saved by `singularity remote login`. The runner is **not** an NCI host (it reaches NCI over SSH), so the deploy job:
+  1. fetches the GHCR PAT from Secret Manager and stages it as a short-lived, owner-only file;
+  2. copies it to NCI over the same SSH route qxub uses;
+  3. runs `singularity remote login docker://ghcr.io` inside `qxub exec --mod singularity` on a compute node; and
+  4. removes the staged files in an `if: always()` cleanup step.
 
-  The token never appears on the `qsub` command line or in `qstat -f` output. To rotate the PAT, update `absconda-github-token` and `absconda-github-username` in Secret Manager — no manual `singularity remote login` needed.
-- **GHCR username is `swarbricklab-bot`, not the org name.** `SINGULARITY_DOCKER_USERNAME` must be a real GitHub user account that owns the PAT, not the org name (`swarbricklab`). The username is stored in the `absconda-github-username` secret. The bot account (`swarbricklab-bot`) must have Write access on the `ghcr.io/swarbricklab/dt` package (Packages → dt → Package settings → Manage access).
+  The token never appears on the `qsub` command line or in `qstat -f` output. To rotate the PAT, update the Secret Manager secrets named by `GHCR_TOKEN_SECRET` and `GHCR_USERNAME_SECRET` — no manual `singularity remote login` needed.
+- **GHCR username is a bot user, not the org name.** `SINGULARITY_DOCKER_USERNAME` must be a real GitHub user account that owns the PAT, not the org name. The username is stored in the Secret Manager secret named by `GHCR_USERNAME_SECRET`. That account must have Write access on the `ghcr.io/swarbricklab/dt` package (Packages → dt → Package settings → Manage access).
 
 ## Open questions
 

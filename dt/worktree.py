@@ -93,6 +93,10 @@ def add(
     
     # Configure DVC cache in the new worktree
     if cache_dir:
+        problem = utils.dvc_local_config_problem(worktree_path)
+        if problem:
+            raise WorktreeError(
+                f"Refusing to write DVC local config in {worktree_path}: {problem}")
         if verbose:
             print(f"Configuring DVC cache in worktree...")
         
@@ -138,7 +142,7 @@ def add(
     
     result = subprocess.run(
         ['git', 'submodule', 'update', '--init', '--recursive'],
-        cwd=worktree_path,
+        cwd=worktree_path, env=utils.git_net_env(), stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
     )

@@ -1134,7 +1134,7 @@ class TestResolveS3RemoteSettings:
                       source="DVC remote 'gadi' of chromium (default)")
         # No local .dvc/config match, so the profile comes from the source repo.
         with patch('dt.auth.credentials._get_project_s3_remotes', return_value={}), \
-             patch('dt.config.get_value', return_value=None):
+             patch('dt.config.get_trusted_value', return_value=None):
             endpoint_url, profile = _resolve_s3_remote_settings(ep)
         assert profile == 'chromium'
 
@@ -1143,20 +1143,20 @@ class TestResolveS3RemoteSettings:
         to secrets.default_endpointurl — otherwise boto3 hits real AWS S3 and
         every R2 bucket false-fails as unreachable (issue #190)."""
         ep = Endpoint(type='s3', url='s3://demo-chromium',
-                      source="DVC remote 'gadi' of demo_chromium (default)")
+                      source="DVC remote 'gadi' of example_chromium (default)")
         with patch('dt.auth.credentials._get_project_s3_remotes', return_value={}), \
-             patch('dt.config.get_value',
+             patch('dt.config.get_trusted_value',
                    return_value='https://acct.r2.cloudflarestorage.com'):
             endpoint_url, profile = _resolve_s3_remote_settings(ep)
         assert endpoint_url == 'https://acct.r2.cloudflarestorage.com'
-        assert profile == 'demo_chromium'
+        assert profile == 'example_chromium'
 
     def test_local_endpoint_not_overridden_by_default(self):
         """A remote whose own config supplies an endpoint keeps it — the
         default fallback only fills the gap."""
         ep = Endpoint(type='s3', url='s3://bucket', source="DVC remote 'cloud'")
         with patch('dt.auth.checks._get_dvc_remote_config') as mock_cfg, \
-             patch('dt.config.get_value', return_value='https://DEFAULT'):
+             patch('dt.config.get_trusted_value', return_value='https://DEFAULT'):
             mock_cfg.side_effect = lambda name, key: {
                 'endpointurl': 'https://OWN', 'profile': 'myrepo',
             }.get(key)
@@ -1321,6 +1321,31 @@ class TestExtractRemoteName:
 class TestCheckDvcRemote:
     """Tests for _check_dvc_remote_impl."""
 
+    def test_remote_missing_from_current_repo_falls_back(self):
+        ep = Endpoint(type='s3', url='s3://b/p', source="DVC remote 'x'")
+        mock_repo = MagicMock()
+        mock_repo.config = {'remote': {}}
+        assert _check_dvc_remote_impl(ep, 'x', _repo_factory=lambda: mock_repo) is None
+
+    def test_other_repo_endpoint_skips_dvc_probe(self):
+        from dt.auth import checks
+        ep = Endpoint(type='s3', url='s3://b/p', source="DVC remote 'x'",
+                      other_repo=True)
+        with patch.object(checks, '_check_dvc_remote') as probe, \
+             patch.dict(checks._CHECKERS, {'s3': lambda e: 'plain'}):
+            assert checks._try_check(ep) == 'plain'
+        probe.assert_not_called()
+
+    def test_other_repos_remote_is_not_probed(self):
+        ep = Endpoint(type='ssh', url='ssh://approved.example.org/data',
+                      source="DVC remote 'storage'")
+        mock_repo = MagicMock()
+        mock_repo.config = {'remote': {'storage': {'url': 'ssh://other.example.org/x'}}}
+        result = _check_dvc_remote_impl(ep, 'storage',
+                                        _repo_factory=lambda: mock_repo)
+        assert result is None
+        mock_repo.cloud.get_remote_odb.assert_not_called()
+
     def test_pass_when_reachable(self):
         ep = Endpoint(type='s3', url='s3://bucket/prefix',
                       source="DVC remote 'cloud'")
@@ -1361,7 +1386,7 @@ class TestCheckDvcRemote:
         """An empty-but-valid S3/R2 bucket warns rather than falsely failing
         with a 'Check remote URL' hint (issue #150)."""
         ep = Endpoint(type='s3', url='s3://demo-xenium',
-                      source="DVC remote 'demo_xenium'")
+                      source="DVC remote 'example_xenium'")
         mock_odb = MagicMock()
         # exists() is False for an empty bucket (key-listing probe finds nothing)
         mock_odb.fs.exists.return_value = False
@@ -1372,7 +1397,7 @@ class TestCheckDvcRemote:
         mock_repo = MagicMock()
         mock_repo.cloud.get_remote_odb.return_value = mock_odb
 
-        result = _check_dvc_remote_impl(ep, 'demo_xenium',
+        result = _check_dvc_remote_impl(ep, 'example_xenium',
                                         _repo_factory=lambda: mock_repo)
         assert result.status == STATUS_WARN
         assert 'empty' in result.summary
@@ -1383,7 +1408,7 @@ class TestCheckDvcRemote:
         """Empty sub-prefix in an existing bucket: prefix ls fails, bucket root
         ls succeeds -> still WARN, not FAIL (issue #150)."""
         ep = Endpoint(type='s3', url='s3://demo-xenium/data',
-                      source="DVC remote 'demo_xenium'")
+                      source="DVC remote 'example_xenium'")
         mock_odb = MagicMock()
         mock_odb.fs.exists.return_value = False
 
@@ -1397,7 +1422,7 @@ class TestCheckDvcRemote:
         mock_repo = MagicMock()
         mock_repo.cloud.get_remote_odb.return_value = mock_odb
 
-        result = _check_dvc_remote_impl(ep, 'demo_xenium',
+        result = _check_dvc_remote_impl(ep, 'example_xenium',
                                         _repo_factory=lambda: mock_repo)
         assert result.status == STATUS_WARN
 
@@ -2026,7 +2051,7 @@ class TestSendRequest:
         )
 
     @patch('dt.auth.request.send_request_slack')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_explicit_slack(self, mock_cfg, mock_send_slack):
         mock_cfg.side_effect = lambda k: {
             'auth.slack_webhook': 'https://hooks.slack.com/xxx',
@@ -2036,7 +2061,7 @@ class TestSendRequest:
         assert 'Slack' in msg
 
     @patch('dt.auth.request.send_request_email')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_explicit_email(self, mock_cfg, mock_send_email):
         mock_cfg.side_effect = lambda k: {
             'auth.admin_email': 'admin@test.com',
@@ -2045,14 +2070,14 @@ class TestSendRequest:
         mock_send_email.assert_called_once()
         assert 'admin@test.com' in msg
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_explicit_slack_no_config_raises(self, mock_cfg):
         from dt.errors import AuthError
         mock_cfg.side_effect = KeyError('not found')
         with pytest.raises(AuthError, match='Slack webhook not configured'):
             send_request(self._make_req(), method='slack')
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_explicit_email_no_config_raises(self, mock_cfg):
         from dt.errors import AuthError
         mock_cfg.side_effect = KeyError('not found')
@@ -2060,7 +2085,7 @@ class TestSendRequest:
             send_request(self._make_req(), method='email')
 
     @patch('dt.auth.request.send_request_slack')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_auto_prefers_slack(self, mock_cfg, mock_send_slack):
         mock_cfg.side_effect = lambda k: {
             'auth.slack_webhook': 'https://hooks.slack.com/xxx',
@@ -2071,7 +2096,7 @@ class TestSendRequest:
         assert 'Slack' in msg
 
     @patch('dt.auth.request.send_request_email')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_auto_falls_back_to_email(self, mock_cfg, mock_send_email):
         def cfg_side(k):
             if k == 'auth.slack_webhook':
@@ -2084,7 +2109,7 @@ class TestSendRequest:
         mock_send_email.assert_called_once()
         assert 'admin@test.com' in msg
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.request.own_config_value')
     def test_auto_no_config_raises(self, mock_cfg):
         from dt.errors import AuthError
         mock_cfg.side_effect = KeyError('not found')
@@ -2116,7 +2141,7 @@ class TestIdentity:
 class TestGetIdentities:
     """Tests for get_identities (config-based)."""
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.identity.own_config_value')
     @patch('dt.auth.getpass.getuser', return_value='alice')
     def test_always_includes_nci_username(self, mock_user, mock_cfg):
         mock_cfg.side_effect = KeyError('not set')
@@ -2126,7 +2151,7 @@ class TestGetIdentities:
         assert ids[0].value == 'alice'
         assert ids[0].source == 'detected'
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.identity.own_config_value')
     @patch('dt.auth.getpass.getuser', return_value='alice')
     def test_reads_config_values(self, mock_user, mock_cfg):
         def cfg_side(k):
@@ -2148,7 +2173,7 @@ class TestGetIdentities:
         assert systems['GitHub user'] == 'alice-gh'
         assert systems['GitHub teams'] == 'data-team, ops'
 
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.identity.own_config_value')
     @patch('dt.auth.getpass.getuser', return_value='bob')
     def test_skips_empty_values(self, mock_user, mock_cfg):
         def cfg_effect(k):
@@ -2357,7 +2382,7 @@ class TestSaveDetectedIdentities:
     """Tests for save_detected_identities."""
 
     @patch('dt.auth.cfg.set_value')
-    @patch('dt.auth.cfg.get_value', side_effect=KeyError)
+    @patch('dt.auth.cfg.load_scope_config', side_effect=KeyError)
     def test_saves_new_values(self, mock_get, mock_set):
         detected = [
             Identity('NCI username', 'alice', 'detected'),  # should skip
@@ -2373,9 +2398,9 @@ class TestSaveDetectedIdentities:
         assert calls[1] == (('auth.gcp_email', 'a@gcp.com'), {'scope': 'user'})
 
     @patch('dt.auth.cfg.set_value')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.cfg.load_scope_config')
     def test_skips_matching_values(self, mock_get, mock_set):
-        mock_get.return_value = 'alice-gh'
+        mock_get.return_value = {'auth': {'github_user': 'alice-gh'}}
         detected = [
             Identity('GitHub user', 'alice-gh', 'detected via gh api'),
         ]
@@ -2384,9 +2409,9 @@ class TestSaveDetectedIdentities:
         mock_set.assert_not_called()
 
     @patch('dt.auth.cfg.set_value')
-    @patch('dt.auth.cfg.get_value')
+    @patch('dt.auth.cfg.load_scope_config')
     def test_updates_changed_values(self, mock_get, mock_set):
-        mock_get.return_value = 'old-name'
+        mock_get.return_value = {'auth': {'github_user': 'old-name'}}
         detected = [
             Identity('GitHub user', 'new-name', 'detected via gh api'),
         ]
@@ -2961,17 +2986,17 @@ class TestResolveRepoUrl:
         assert url == 'https://github.com/org/repo'
 
     @patch('dt.auth.tmp_mod.resolve_repository_url',
-           return_value='git@github.com:swarbricklab/demo_study.git')
+           return_value='git@github.com:swarbricklab/projx.git')
     def test_short_name_resolved(self, mock_resolve):
-        url = resolve_repo_url('demo_study')
-        assert url == 'git@github.com:swarbricklab/demo_study.git'
-        mock_resolve.assert_called_once_with('demo_study')
+        url = resolve_repo_url('projx')
+        assert url == 'git@github.com:swarbricklab/projx.git'
+        mock_resolve.assert_called_once_with('projx')
 
     @patch('dt.auth.tmp_mod.resolve_repository_url',
            side_effect=Exception("no owner configured"))
     def test_short_name_no_owner_raises(self, mock_resolve):
         with pytest.raises(Exception, match='no owner'):
-            resolve_repo_url('demo_study')
+            resolve_repo_url('projx')
 
 
 class TestTeamsWithShortNames:
@@ -3091,14 +3116,14 @@ class TestGetSecretBackendAuthCheck:
            return_value=('unauthenticated', None))
     @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
            return_value=False)
-    @patch('dt.config.get_value')
+    @patch('dt.config.get_trusted_value_with_scope')
     def test_raises_when_not_authenticated(self, mock_get_value, mock_adc, mock_gcloud):
         from dt.auth.credentials import _get_secret_backend
-        mock_get_value.side_effect = lambda k: {
+        mock_get_value.side_effect = lambda k, *a: ({
             'secrets.backend': 'gcp',
             'secrets.gcp.project': 'my-project',
             'secrets.prefix': 'dvc-remote-',
-        }.get(k)
+        }.get(k), 'system')
         with pytest.raises(AuthError, match="gcloud auth login"):
             _get_secret_backend()
 
@@ -3106,15 +3131,15 @@ class TestGetSecretBackendAuthCheck:
            return_value=('timeout', None))
     @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
            return_value=False)
-    @patch('dt.config.get_value')
+    @patch('dt.config.get_trusted_value_with_scope')
     def test_timeout_does_not_blame_the_user(self, mock_get_value, mock_adc, mock_gcloud):
         """A slow filesystem is not a missing login; don't send them to re-auth."""
         from dt.auth.credentials import _get_secret_backend
-        mock_get_value.side_effect = lambda k: {
+        mock_get_value.side_effect = lambda k, *a: ({
             'secrets.backend': 'gcp',
             'secrets.gcp.project': 'my-project',
             'secrets.prefix': 'dvc-remote-',
-        }.get(k)
+        }.get(k), 'system')
         with pytest.raises(AuthError) as exc:
             _get_secret_backend()
         assert 'did not respond' in str(exc.value)
@@ -3124,14 +3149,14 @@ class TestGetSecretBackendAuthCheck:
            return_value=('ok', 'user@example.com'))
     @patch('dt.secrets.gcp.GCPSecretBackend._has_adc_credentials',
            return_value=False)
-    @patch('dt.config.get_value')
+    @patch('dt.config.get_trusted_value_with_scope')
     def test_passes_when_gcloud_authenticated(self, mock_get_value, mock_adc, mock_gcloud):
         from dt.auth.credentials import _get_secret_backend
-        mock_get_value.side_effect = lambda k: {
+        mock_get_value.side_effect = lambda k, *a: ({
             'secrets.backend': 'gcp',
             'secrets.gcp.project': 'my-project',
             'secrets.prefix': 'dvc-remote-',
-        }.get(k)
+        }.get(k), 'system')
         backend = _get_secret_backend()
         assert backend is not None
 
@@ -3303,13 +3328,13 @@ class TestParseSSHConfig:
             "    User git\n"
             "\n"
             "Host gadi.nci.org.au\n"
-            "    User ab1234\n"
+            "    User xy1234\n"
             "    ForwardAgent yes\n"
         )
         hosts = _parse_ssh_config(config_file)
         assert len(hosts) == 2
         assert hosts['github.com']['User'] == 'git'
-        assert hosts['gadi.nci.org.au']['User'] == 'ab1234'
+        assert hosts['gadi.nci.org.au']['User'] == 'xy1234'
 
     def test_comments_ignored(self, tmp_path):
         config_file = tmp_path / 'config'
@@ -3370,14 +3395,14 @@ class TestWriteSSHConfigStanza:
         key_path = Path('/home/user/.ssh/id_ed25519')
 
         _write_ssh_config_stanza(
-            host='gadi.nci.org.au', user='ab1234',
+            host='gadi.nci.org.au', user='xy1234',
             identity_file=key_path, config_path=config_file,
         )
 
         content = config_file.read_text()
         assert 'Host github.com' in content
         assert 'Host gadi.nci.org.au' in content
-        assert 'User ab1234' in content
+        assert 'User xy1234' in content
 
     def test_no_user(self, tmp_path):
         config_file = tmp_path / 'config'
@@ -3555,10 +3580,25 @@ class TestKeyAcceptedByHost:
 class TestSSHSetup:
     """Tests for ssh_setup orchestration."""
 
+    @patch('dt.auth.ssh._ensure_ssh_dir')
+    @patch('dt.auth.ssh._write_ssh_config_stanza')
+    @patch('dt.auth.ssh.check_endpoints')
+    @patch('dt.auth.ssh.discover_endpoints')
+    def test_new_hosts_need_agreement(self, mock_discover, mock_check,
+                                      mock_write, mock_ssh_dir, tmp_path):
+        mock_discover.return_value = [
+            Endpoint(type='ssh', url='ssh://u@new.example.org/p', source='t')]
+        with patch('dt.auth.setup.sys.stdin.isatty', return_value=False):
+            results = ssh_setup(config_file=tmp_path / 'cfg', verbose=False)
+        assert results == []
+        mock_write.assert_not_called()
+        mock_check.assert_not_called()
+        mock_ssh_dir.assert_not_called()
+
     @patch('dt.auth.ssh.check_endpoints')
     @patch('dt.auth.ssh.discover_endpoints', return_value=[])
     def test_no_endpoints(self, mock_discover, mock_check):
-        results = ssh_setup(verbose=False)
+        results = ssh_setup(add_new_hosts=True, verbose=False)
         assert results == []
 
     @patch('dt.auth.ssh._key_accepted_by_host', return_value=True)
@@ -3584,7 +3624,7 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(config_file=config_file, verbose=False)
+        results = ssh_setup(add_new_hosts=True, config_file=config_file, verbose=False)
         assert len(results) == 1
         assert results[0].already_ok is True
 
@@ -3614,7 +3654,7 @@ class TestSSHSetup:
         mock_deploy.return_value = True
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username=None, config_file=config_file, verbose=False,
         )
 
@@ -3656,7 +3696,7 @@ class TestSSHSetup:
         mock_copy_id.return_value = True
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username='alice', config_file=config_file, verbose=False,
         )
 
@@ -3693,7 +3733,7 @@ class TestSSHSetup:
         mock_copy_id.return_value = True
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username='user', config_file=config_file, verbose=False,
         )
 
@@ -3726,7 +3766,7 @@ class TestSSHSetup:
         mock_gen_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username='user', config_file=config_file, verbose=False,
         )
 
@@ -3759,8 +3799,8 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
-            username='ab1234', config_file=config_file, verbose=False,
+        results = ssh_setup(add_new_hosts=True, 
+            username='xy1234', config_file=config_file, verbose=False,
         )
 
         assert len(results) == 1
@@ -3800,7 +3840,7 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username=None, config_file=config_file, verbose=False,
         )
 
@@ -3837,7 +3877,7 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username='user', config_file=config_file, verbose=False,
         )
 
@@ -3871,7 +3911,7 @@ class TestSSHSetup:
         mock_find_key.return_value = key_path
 
         config_file = tmp_path / 'ssh_config'
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username=None, config_file=config_file, verbose=False,
         )
 
@@ -3910,7 +3950,7 @@ class TestSSHSetup:
 
         config_file = tmp_path / 'ssh_config'
         # No username — but should NOT prompt since only forge hosts
-        results = ssh_setup(
+        results = ssh_setup(add_new_hosts=True, 
             username=None, config_file=config_file, verbose=False,
         )
 
@@ -3934,3 +3974,155 @@ class TestKeyHasPassphrase:
         assert 'ssh-keygen' in call_args
         assert '-P' in call_args
         assert '' in call_args
+
+
+class TestCheckArgumentsStayArguments:
+    """Endpoint values from project files are passed only as arguments."""
+
+    def test_git_url_follows_option_end(self):
+        ep = Endpoint(type='git', url='--upload-pack=x', source='import source (a)')
+        with patch('subprocess.run', return_value=MagicMock(returncode=2, stderr='')) as run:
+            _check_git(ep)
+        cmd = run.call_args[0][0]
+        assert cmd.index('--') < cmd.index('--upload-pack=x')
+
+    def test_ssh_path_is_quoted_for_remote_shell(self):
+        with patch('subprocess.run', return_value=MagicMock(returncode=0)) as run:
+            _check_ssh_remote_dir('host', '/x;touch y')
+        cmd = run.call_args[0][0]
+        assert cmd[cmd.index('--') + 1] == 'host'
+        assert "'/x;touch y'" in cmd
+        assert '/x;touch y' not in cmd
+
+    def test_ssh_host_must_not_look_like_an_option(self):
+        with patch('subprocess.run') as run:
+            assert _check_ssh_remote_dir('-oProxyCommand=x', '/p') is None
+        run.assert_not_called()
+
+
+
+class TestRequestDestinationIsTheUsers:
+    """Where an access request goes is not a repository's to decide."""
+
+    def test_repo_scope_destination_is_ignored(self, capsys):
+        from dt.auth.identity import own_config_value
+        with patch('dt.config.get_trusted_value_with_scope',
+                   return_value=('https://evil.example/hook', 'project')):
+            assert own_config_value('auth.slack_webhook') is None
+        assert 'ignoring auth.slack_webhook' in capsys.readouterr().err
+
+    def test_user_scope_destination_is_used(self):
+        from dt.auth.identity import own_config_value
+        with patch('dt.config.get_trusted_value_with_scope',
+                   return_value=('https://hooks.slack.com/x', 'system')):
+            assert own_config_value('auth.slack_webhook') == 'https://hooks.slack.com/x'
+
+    @pytest.mark.parametrize('url', ['http://hooks.slack.com/x', 'file:///etc/passwd',
+                                     'https:///nohost', 'ftp://x/y'])
+    def test_webhook_must_be_https(self, url):
+        from dt.auth.request import send_request_slack
+        from dt.errors import AuthError
+        req = AccessRequest(user='a', project='p', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('urllib.request.urlopen') as op:
+            with pytest.raises(AuthError, match='https'):
+                send_request_slack(req, url)
+            op.assert_not_called()
+
+    @pytest.mark.parametrize('addr', ['-oX@y.z', 'a@b.c\nBcc: x@y.z', 'a@b.c, d@e.f',
+                                      'a b@c.d', 'nobody', 'a@b.cc\n'])
+    def test_email_must_be_one_address(self, addr):
+        from dt.auth.request import send_request_email
+        from dt.errors import AuthError
+        req = AccessRequest(user='a', project='p', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('subprocess.run') as run:
+            with pytest.raises(AuthError, match='single e-mail'):
+                send_request_email(req, addr)
+            run.assert_not_called()
+
+    def test_slack_message_names_host(self):
+        from dt.auth.request import send_request
+        req = AccessRequest(user='a', project='p', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('dt.auth.request.own_config_value',
+                   side_effect=lambda k: 'https://hooks.slack.com/x' if k == 'auth.slack_webhook' else None), \
+             patch('dt.auth.request.send_request_slack'):
+            assert 'hooks.slack.com' in send_request(req, method='slack')
+
+    def test_names_cannot_add_mail_headers(self):
+        from dt.auth.request import send_request_email
+        req = AccessRequest(user='a', project='x\nBcc: evil@e.org', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('shutil.which', return_value='/usr/sbin/sendmail'), \
+             patch('subprocess.run', return_value=MagicMock(returncode=0)) as run:
+            send_request_email(req, 'admin@example.org')
+        message = run.call_args.kwargs['input']
+        headers = message.split('\n\n', 1)[0].splitlines()
+        assert not any(h.startswith('Bcc:') for h in headers)
+        assert headers[0] == 'To: admin@example.org'
+
+    def test_mail_fallback_ends_options(self):
+        from dt.auth.request import send_request_email
+        req = AccessRequest(user='a', project='p', platform_name='h',
+                            dt_version='v', request_date='d')
+        with patch('shutil.which', side_effect=lambda n: None if n == 'sendmail' else '/bin/mail'), \
+             patch('subprocess.run', return_value=MagicMock(returncode=0)) as run:
+            send_request_email(req, 'admin@example.org')
+        cmd = run.call_args.args[0]
+        assert cmd[-2:] == ['--', 'admin@example.org']
+
+
+class TestSshConfigOnlyGetsPlainNames:
+    @pytest.mark.parametrize('url', [
+        'ssh://evil\nHost *\n  ProxyCommand touch /tmp/x@host/p',
+        'ssh://user@ho st/p', 'ssh://user@*/p', 'ssh://user@-oProxy/p',
+        'u@h\n  ProxyCommand x:p',
+    ])
+    def test_extraction_rejects_injection(self, url):
+        from dt.auth.ssh import _extract_ssh_host, _extract_ssh_user
+        host, user = _extract_ssh_host(url), _extract_ssh_user(url)
+        assert host is None or '\n' not in host and ' ' not in host and '*' not in host
+        assert user is None or '\n' not in user
+
+    @pytest.mark.parametrize('host,user', [
+        ('h\nHost *', None), ('*', None), ('-oX', None), ('h', 'u\n  ProxyCommand x'),
+        ('h', 'u ser'), ('h', '#c'),
+    ])
+    def test_stanza_writer_refuses_and_leaves_file(self, tmp_path, host, user):
+        from dt.auth.ssh import _write_ssh_config_stanza
+        cfg_file = tmp_path / 'config'
+        cfg_file.write_text('Host keep\n')
+        with pytest.raises(ValueError):
+            _write_ssh_config_stanza(host, user, tmp_path / 'id', cfg_file)
+        assert cfg_file.read_text() == 'Host keep\n'
+
+    def test_plain_names_are_written(self, tmp_path):
+        from dt.auth.ssh import _write_ssh_config_stanza
+        cfg_file = tmp_path / 'config'
+        _write_ssh_config_stanza('gadi.nci.org.au', 'ab1234', tmp_path / 'id', cfg_file)
+        assert 'Host gadi.nci.org.au' in cfg_file.read_text()
+
+    def test_bad_username_never_reaches_ssh(self, tmp_path):
+        from dt.auth import setup as setup_mod
+        ep = Endpoint(type='ssh', url='ssh://gadi.nci.org.au/g/data/x', source='remote')
+        with patch('subprocess.run') as run, \
+             patch.object(setup_mod, '_ensure_ssh_dir'), \
+             patch.object(setup_mod, '_find_existing_key', return_value=tmp_path / 'id'):
+            out = setup_mod._do_ssh_setup(
+                endpoints=[ep], host_configs={},
+                default_username='-oProxyCommand=touch${IFS}/tmp/pwn',
+                ssh_config_file=tmp_path / 'config', verbose=False,
+                add_new_hosts=True)
+        assert out == []
+        run.assert_not_called()
+        assert not (tmp_path / 'config').exists()
+
+    @pytest.mark.parametrize('url', ['ssh://u@h:\nHost *\n ProxyCommand x/p', 'ssh://-oX/p'])
+    def test_check_ssh_refuses_unparseable_hosts(self, url):
+        from dt.auth.checks import _check_ssh
+        ep = Endpoint(type='ssh', url=url, source='remote')
+        with patch('subprocess.run') as run:
+            result = _check_ssh(ep)
+        run.assert_not_called()
+        assert result.status == 'fail'

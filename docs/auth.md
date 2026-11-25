@@ -55,7 +55,7 @@ dt auth list --type s3 --type gs
 dt auth list --repo git@github.com:org/data-repo.git
 
 # Use a short name (requires: dt config set owner <github-org>)
-dt auth list --repo demo_study
+dt auth list --repo projx
 ```
 
 ### Sources scanned
@@ -213,7 +213,7 @@ dt auth check --type filesystem --type ssh --type s3 --type gs
 dt auth check --repo git@github.com:org/data-repo.git
 
 # Use a short name
-dt auth check --repo demo_study
+dt auth check --repo projx
 ```
 
 ### Ownership info for failed subdirectories
@@ -401,10 +401,16 @@ With `--send`, the request is delivered directly:
 
 Auto-detect (`--send` with no argument) tries Slack first, then email.
 
+Both destinations, and the stored identities (`auth.github_user`,
+`auth.gcp_email`, ...), are read from user or system config only; a value in a
+repository's `.dt` config is ignored with a warning. The webhook must be an
+`https` URL and the address a single e-mail address. The confirmation names
+the webhook host or the address the request went to.
+
 ### Configuration for --send
 
 ```bash
-# Slack webhook (system scope recommended)
+# Slack webhook (system or user scope)
 dt config set --system auth.slack_webhook 'https://hooks.slack.com/services/T.../B.../xxx'
 
 # Admin email (system or user scope)
@@ -477,13 +483,13 @@ Repository arguments accept a **full URL** or a **short name** (resolved via the
 dt auth teams repo git@github.com:org/data-repo.git
 
 # Same, using a short name
-dt auth teams repo demo_study
+dt auth teams repo projx
 
 # List teams that alice belongs to in the org
 dt auth teams user alice --org myorg
 
 # Grant a team push access to a repo (short name or full URL)
-dt auth teams add-to-repo data-team demo_study
+dt auth teams add-to-repo data-team projx
 
 # Grant read-only access
 dt auth teams add-to-repo data-readers git@github.com:org/repo.git --permission pull
@@ -517,13 +523,18 @@ dt auth setup [-u USERNAME] [--config FILE] [--ssh-config FILE] [--repo URL] [-v
 | `--config FILE` | YAML config file with per-host usernames (must exist) |
 | `--ssh-config FILE` | SSH config file path (default: `~/.ssh/config`) |
 | `--repo URL` | Set up access to a remote repository instead of the current directory's project (cloned to a temp dir). Accepts a full URL or a short name. |
+| `--add-ssh-hosts` | Add hosts named by the project's remotes to the SSH config without asking |
 | `-v, --verbose` | Show detailed progress |
 
 ### What it does
 
 `dt auth setup` discovers all endpoints the project uses (same as `dt auth list`), then:
 
-1. **SSH / git endpoints** — reuses an existing key (`~/.ssh/id_ed25519`, `id_rsa`, or `id_ecdsa`) or generates a passphrase-less `~/.ssh/id_ed25519` pair, appends a `Host` stanza to `~/.ssh/config` for any host that doesn't already have one, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts, `gh ssh-key add` for `github.com`, `glab ssh-key add` for `gitlab.com`). Where `ssh-copy-id` is not installed — as in the containerised `module load dt` image, which ships `ssh` without it — the key is appended to the remote `authorized_keys` over plain `ssh` instead
+1. **SSH / git endpoints** — reuses an existing key (`~/.ssh/id_ed25519`, `id_rsa`, or `id_ecdsa`) or generates a passphrase-less `~/.ssh/id_ed25519` pair, appends a `Host` stanza to `~/.ssh/config` for any host that doesn't already have one, tests connectivity, and deploys the public key to any host that fails the check (via `ssh-copy-id` for plain SSH hosts, `gh ssh-key add` for `github.com`, `glab ssh-key add` for `gitlab.com`). Where `ssh-copy-id` is not installed — as in the containerised `module load dt` image, which ships `ssh` without it — the key is appended to the remote `authorized_keys` over plain `ssh` instead.
+   A host that is in neither the SSH config nor the `--config` file is listed
+   first, and is set up only if you agree. When there is no terminal to ask
+   (or you answer no) those hosts are left out and named in the report; pass
+   `--add-ssh-hosts` to add them without asking
 2. **S3 endpoints** — fetches credentials from the configured secret manager and installs them as a profile in `~/.aws/credentials` / `~/.aws/config` (one profile per repo, named after the repo)
 
 If S3 endpoints exist but GCP authentication is unavailable, the credential
@@ -581,7 +592,7 @@ For non-interactive operation, provide a `--config` YAML file:
 ```yaml
 hosts:
   gadi-dm.nci.org.au:
-    username: ab1234
+    username: xy1234
   github.com:
     # forge host — no username needed
 ```
@@ -598,7 +609,7 @@ hosts:
 dt auth setup
 
 # Provide a default SSH username
-dt auth setup -u ab1234
+dt auth setup -u xy1234
 
 # Fully non-interactive with a config file
 dt auth setup --config hosts.yaml
@@ -708,7 +719,7 @@ also clears any legacy `access_key_id` / `secret_access_key` entries from
 
 ```bash
 dt auth credentials uninstall                  # all
-dt auth credentials uninstall --repo demo_wgs # only this repo's profile
+dt auth credentials uninstall --repo example_wgs # only this repo's profile
 dt auth credentials uninstall --remote cloud   # only legacy global keys for this remote
 ```
 
@@ -784,20 +795,37 @@ differed from a not-found would let anyone probe which secrets exist.
 So the first thing to check is not the grant but the project:
 
 ```bash
-dt config get secrets.gcp.project        # which project dt is asking
+dt auth credentials list                 # names the project dt is asking
 gcloud secrets list --project=<that>     # what is actually in it
 ```
 
-`secrets.gcp.project` resolves through system, user, and repo scope in that
-order of increasing precedence, so a personal override in
-`~/.config/dt/config.yaml` silently wins over the group's system config. Two
-people on the same machine can therefore be querying different projects, and
-an access grant made against the wrong one never takes effect no matter how
-many times it is repeated. Check the resolved value in the environment that is
-failing, not in your own.
+`secrets.gcp.project` resolves user scope first, then system scope; a value
+in the repository's `.dt/config.yaml` / `.dt/config.local.yaml` is used only
+when neither sets it (a differing repository value is reported and ignored).
+The same holds for `secrets.backend`, `secrets.prefix`, `secrets.gcp.locations`
+and `secrets.default_endpointurl`. A personal override in
+`~/.config/dt/config.yaml` therefore wins over the group's system config. Two
+people on the same machine can be querying different projects, and an access
+grant made against the wrong one never takes effect no matter how many times
+it is repeated. Check the resolved value in the environment that is failing,
+not in your own.
+
+When only the repository names the secret store, `dt auth setup` (and the
+setup `dt clone` runs) skips credential install, and `dt auth credentials
+install|migrate|set` refuse it; once you have checked the repository's config,
+pass `--allow-repo-store`. A repository `secrets.prefix` is ignored when the
+project comes from your own or the site config.
 
 ### Security
 
+- dt records the secret each profile came from (`dt_source` in
+  `~/.aws/credentials`) and only replaces or removes profiles it installed from
+  that same secret. It never writes the `default` profile. To take over an
+  existing profile of the same name, pass `--replace` with the repo name to
+  `dt auth credentials install` / `migrate`. A profile installed by an older
+  dt is adopted when it already holds the secret's key. Profiles defined only
+  in `~/.aws/config` with settings beyond `region`/`output` (SSO, roles,
+  endpoints) are left alone.
 - `~/.aws/credentials` and `~/.aws/config` are written with `600` permissions
   (owner only). Both honour the standard `AWS_SHARED_CREDENTIALS_FILE` /
   `AWS_CONFIG_FILE` environment overrides.

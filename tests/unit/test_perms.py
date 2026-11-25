@@ -249,7 +249,7 @@ class TestFix:
         report = perms.scan(root)
         assert report.findings
 
-        with patch('os.chmod', side_effect=PermissionError(1, 'Operation not permitted')):
+        with patch('dt.perms.os.fchmod', side_effect=PermissionError(1, 'Operation not permitted')):
             perms.fix(report)
 
         assert report.fixed == []
@@ -259,7 +259,7 @@ class TestFix:
     def test_mkdir_failure_is_reported(self, tmp_path):
         root = _mkstore(tmp_path / 's', n_prefixes=100)
         report = perms.scan(root)
-        with patch('pathlib.Path.mkdir',
+        with patch('dt.perms.os.mkdir',
                    side_effect=PermissionError(13, 'Permission denied')):
             perms.fix(report)
         assert all(m.failure for m in report.missing)
@@ -468,8 +468,209 @@ class TestCli:
 
     def test_fix_exits_nonzero_when_something_cannot_be_fixed(self, tmp_path):
         root = _mkstore(tmp_path / 's', n_prefixes=4, mode=0o2750)
-        with patch('os.chmod',
+        with patch('dt.perms.os.fchmod',
                    side_effect=PermissionError(1, 'Operation not permitted')):
             result = self._run(['remote', 'perms', '--path', str(root),
                                 '--fix'])
         assert result.exit_code != 0
+
+
+
+class TestLinksAndModes:
+    """Links in a shared store are never followed; repairs only add bits."""
+
+    def _private(self, tmp_path):
+        d = tmp_path / 'private'
+        d.mkdir()
+        os.chmod(d, 0o700)
+        return d
+
+    def test_prefix_named_link_is_reported_not_chmodded(self, tmp_path):
+        root = _mkstore(tmp_path / 's', n_prefixes=4)
+        private = self._private(tmp_path)
+        (root / 'files' / 'md5' / 'ff').symlink_to(private)
+        report = perms.scan(root)
+        assert root / 'files' / 'md5' / 'ff' in report.links
+        perms.fix(report)
+        assert stat.S_IMODE(os.stat(private).st_mode) == 0o700
+
+    def test_v2_prefix_and_runs_links_are_not_followed(self, tmp_path):
+        root = tmp_path / 's'
+        root.mkdir()
+        os.chmod(root, 0o3770)
+        (root / 'ab').mkdir()
+        private = self._private(tmp_path)
+        (root / 'cd').symlink_to(private)
+        (root / 'runs').symlink_to(private)
+        report = perms.scan(root)
+        perms.fix(report)
+        assert stat.S_IMODE(os.stat(private).st_mode) == 0o700
+        assert root / 'runs' in report.links
+
+    def test_missing_prefix_is_not_adopted(self, tmp_path):
+        root = _mkstore(tmp_path / 's', n_prefixes=4)
+        report = perms.scan(root)
+        victim = report.missing[0].path
+        private = self._private(tmp_path)
+        victim.symlink_to(private)  # swapped in between scan and fix
+        perms.fix(report)
+        assert stat.S_IMODE(os.stat(private).st_mode) == 0o700
+        m = next(m for m in report.missing if m.path == victim)
+        assert not m.created and 'already exists' in m.failure
+
+    def test_swap_between_scan_and_fix_is_refused(self, tmp_path):
+        root = _mkstore(tmp_path / 's', n_prefixes=4, mode=0o2750)
+        report = perms.scan(root)
+        target = next(f for f in report.findings if f.rel.endswith('00'))
+        private = self._private(tmp_path)
+        os.rename(target.path, tmp_path / 'moved')
+        target.path.symlink_to(private)
+        perms.fix(report)
+        assert stat.S_IMODE(os.stat(private).st_mode) == 0o700
+        assert target.failure
+
+    @pytest.mark.parametrize('sticky,allow_other', [(True, False), (True, True)])
+    def test_only_missing_bits_are_added(self, tmp_path, sticky, allow_other):
+        root = _mkstore(tmp_path / 's', n_prefixes=4, mode=0o2770)
+        report = perms.scan(root, sticky=sticky, allow_other=allow_other)
+        perms.fix(report)
+        for f in report.findings:
+            assert stat.S_IMODE(os.stat(f.path).st_mode) == 0o3770
+
+    def test_symlinked_store_under_root_is_skipped(self, tmp_path):
+        from dt import tmp_sweep
+        base = tmp_path / 'remotes'
+        base.mkdir()
+        real = _mkstore(base / 'real', n_prefixes=2)
+        other = _mkstore(tmp_path / 'someone-elses', n_prefixes=2)
+        (base / 'link').symlink_to(other)
+        labels = [p for _l, p in tmp_sweep.enumerate_stores([base])]
+        assert labels == [real]
+
+
+class TestWalkStaysInsideStore:
+    """Swaps of the root or an intermediate directory never redirect --fix."""
+
+    def _private_store(self, tmp_path):
+        """A victim-owned private dir laid out like a DVC store."""
+        v = tmp_path / 'victim'
+        for d in ('files/md5/ab',):
+            (v / d).mkdir(parents=True)
+        for d in (v, v / 'files', v / 'files' / 'md5', v / 'files' / 'md5' / 'ab'):
+            os.chmod(d, 0o700)
+        return v
+
+    def _modes(self, d):
+        return {str(p): stat.S_IMODE(os.lstat(p).st_mode) for p in [d, *d.rglob('*')]}
+
+    def test_intermediate_swap_after_scan_is_refused(self, tmp_path):
+        root = _mkstore(tmp_path / 's', n_prefixes=4, mode=0o2750)
+        victim = self._private_store(tmp_path)
+        before = self._modes(victim)
+        report = perms.scan(root)
+        os.rename(root / 'files', tmp_path / 'moved')
+        (root / 'files').symlink_to(victim / 'files')
+        perms.fix(report)
+        assert self._modes(victim) == before
+        assert all(not f.fixed for f in report.findings if f.rel.startswith('files'))
+
+    def test_root_swapped_after_scan_is_refused(self, tmp_path):
+        root = _mkstore(tmp_path / 's', n_prefixes=4, mode=0o2750)
+        report = perms.scan(root)
+        os.rename(root, tmp_path / 'old')
+        _mkstore(root, n_prefixes=4, mode=0o2750)  # a different directory now
+        perms.fix(report)
+        assert 'changed since it was scanned' in report.error
+        assert not report.fixed
+
+    def test_missing_prefix_not_created_through_swapped_parent(self, tmp_path):
+        root = _mkstore(tmp_path / 's', n_prefixes=4)
+        victim = self._private_store(tmp_path)
+        report = perms.scan(root)
+        assert report.missing
+        os.rename(root / 'files', tmp_path / 'moved')
+        (root / 'files').symlink_to(victim / 'files')
+        perms.fix(report)
+        assert sorted(p.name for p in (victim / 'files' / 'md5').iterdir()) == ['ab']
+        assert not any(m.created for m in report.missing)
+
+    def test_link_owned_by_another_user_at_root_is_refused(self, tmp_path):
+        target = _mkstore(tmp_path / 'real', n_prefixes=2)
+        link = tmp_path / 'store'
+        link.symlink_to(target)
+        real_lstat = os.lstat
+
+        def fake_lstat(p, *a, **k):
+            st = real_lstat(p, *a, **k)
+            if str(p) == str(link):
+                fields = list(st)
+                fields[4] = os.geteuid() + 1
+                return os.stat_result(fields)
+            return st
+
+        with patch('dt.perms.os.lstat', side_effect=fake_lstat):
+            report = perms.scan(link)
+        assert report.error and 'another user' in report.error
+
+    def test_own_root_link_still_works(self, tmp_path):
+        target = _mkstore(tmp_path / 'real', n_prefixes=2)
+        link = tmp_path / 'store'
+        link.symlink_to(target)
+        assert perms.scan(link).error is None
+
+    def test_files_md5_link_is_reported_even_without_other_layout(self, tmp_path):
+        root = tmp_path / 's'
+        (root / 'files').mkdir(parents=True)
+        (root / 'files' / 'md5').symlink_to(tmp_path)
+        report = perms.scan(root)
+        assert root / 'files' / 'md5' in report.links
+
+    def test_links_make_fix_exit_nonzero(self, tmp_path):
+        from click.testing import CliRunner
+        from dt.cli import cli
+        root = _mkstore(tmp_path / 's', n_prefixes=4)
+        (root / 'files' / 'md5' / 'ff').symlink_to(tmp_path)
+        result = CliRunner().invoke(cli, ['remote', 'perms', '--path', str(root), '--fix'])
+        assert result.exit_code != 0
+        assert 'symbolic link' in result.output
+
+
+class TestUnreadableDirectories:
+    """Directories this user cannot read are still inspected or reported."""
+
+    def test_owned_prefix_without_read_is_found_and_fixed(self, tmp_path):
+        root = _mkstore(tmp_path / 's', n_prefixes=4)
+        p = root / 'files' / 'md5' / '01'
+        os.chmod(p, 0o300)
+        try:
+            report = perms.scan(root)
+            f = next(f for f in report.findings if f.path == p)
+            assert 'not group-writable' in f.issues
+            perms.fix(report)
+            assert f.fixed
+            assert stat.S_IMODE(os.stat(p).st_mode) & 0o3770 == 0o3770
+        finally:
+            os.chmod(p, 0o3770)
+
+    def test_unsearchable_base_is_reported_not_crashing(self, tmp_path):
+        root = _mkstore(tmp_path / 's', n_prefixes=4)
+        md5 = root / 'files' / 'md5'
+        os.chmod(md5, 0o2660)  # readable but not searchable
+        try:
+            report = perms.scan(root)  # must not raise
+            assert report.inaccessible or report.findings
+        finally:
+            os.chmod(md5, 0o3770)
+
+    def test_inaccessible_makes_summary_and_exit_reflect_it(self, tmp_path):
+        from click.testing import CliRunner
+        from dt.cli import cli
+        root = _mkstore(tmp_path / 's', n_prefixes=4)
+        md5 = root / 'files' / 'md5'
+        os.chmod(md5, 0o2660)
+        try:
+            result = CliRunner().invoke(cli, ['remote', 'perms', '--path', str(root), '--fix'])
+        finally:
+            os.chmod(md5, 0o3770)
+        assert result.exit_code != 0
+        assert 'All directories match' not in result.output

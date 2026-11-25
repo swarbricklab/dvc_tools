@@ -47,6 +47,7 @@ import json
 import os
 import shutil
 import subprocess
+import stat
 import sys
 import threading
 import time
@@ -76,11 +77,13 @@ from .manifest import (
     LAYOUT_FOLDER_PER_PREFIX,
     SUPPORTED_SOURCE_LAYOUTS,
     archives_dir,
+    is_plain_name,
     list_manifests,
     load_manifest,
     manifest_path,
     now_iso,
     save_manifest,
+    require_plain_name,
     sidecar_name,
 )
 from . import registry as _registry
@@ -148,6 +151,21 @@ SENTINEL_SUFFIX = STAGED_SENTINEL_SUFFIX
 # Helpers: configuration / environment
 # --------------------------------------------------------------------------- #
 
+
+def _own_setting(key: str):
+    """*key* from user or system config; a repository's own value for where
+    archives are staged or stored is ignored (with a warning)."""
+    value = cfg.get_value(key)
+    scopes = cfg.scopes_defining(key)
+    if scopes and scopes[0] in cfg.REPO_SCOPES:
+        trusted = cfg.get_trusted_value(key)
+        if trusted is None or not any(s in cfg.TRUSTED_SCOPES for s in scopes):
+            print(f"Warning: ignoring {key} from {scopes[0]} config "
+                  f"(set it in user or system config)", file=sys.stderr)
+            return None
+        return trusted
+    return value
+
 def resolve_staging_dir(staging_dir: Optional[str]) -> Path:
     """Resolve the staging directory using the agreed precedence.
 
@@ -156,7 +174,7 @@ def resolve_staging_dir(staging_dir: Optional[str]) -> Path:
     """
     if staging_dir:
         return Path(staging_dir).expanduser().resolve()
-    configured = cfg.get_value('archive.staging_dir')
+    configured = _own_setting('archive.staging_dir')
     if configured:
         return Path(str(configured)).expanduser().resolve()
     raise ArchiveError(
@@ -244,7 +262,7 @@ def default_backend_root() -> str:
 
     Reads ``archive.backend_root`` config, else ``'dt-archive'``.
     """
-    configured = cfg.get_value('archive.backend_root')
+    configured = _own_setting('archive.backend_root')
     if configured:
         return str(configured).rstrip('/')
     return 'dt-archive'
@@ -308,10 +326,10 @@ def detect_source_layout(remote_dir: Path) -> str:
     """
     files_md5 = remote_dir / 'files' / 'md5'
     has_v3 = False
-    if files_md5.is_dir():
+    if _real_dir(remote_dir / 'files') and _real_dir(files_md5):
         try:
             for p in files_md5.iterdir():
-                if p.is_dir() and _is_hex_prefix(p.name):
+                if _real_dir(p) and _is_hex_prefix(p.name):
                     has_v3 = True
                     break
         except OSError:
@@ -319,7 +337,7 @@ def detect_source_layout(remote_dir: Path) -> str:
     has_v2 = False
     try:
         for p in remote_dir.iterdir():
-            if p.is_dir() and _is_hex_prefix(p.name):
+            if _real_dir(p) and _is_hex_prefix(p.name):
                 has_v2 = True
                 break
     except OSError:
@@ -337,39 +355,47 @@ def detect_source_layout(remote_dir: Path) -> str:
     )
 
 
+def _real_dir(p: Path) -> bool:
+    """A directory at ``p`` itself, not a link to one."""
+    return p.is_dir() and not p.is_symlink()
+
+
 def _enumerate_prefix_dirs(
-    remote_dir: Path, layout: str,
+    remote_dir: Path, layout: str, include_links: bool = False,
 ) -> List[Tuple[str, Path]]:
     """Return ``[(manifest_key, dir_path), ...]`` for the given layout.
 
     Pure layouts use bare 2-char hex keys (``'00'`` … ``'ff'``); mixed
     uses prefixed keys (``'v3-00'``, ``'v2-00'``) to disambiguate.
+
+    Only real directories are returned: a link in a shared remote could
+    point anywhere. ``include_links=True`` also returns linked prefix
+    entries (for callers that report them).
     """
+    def ok(p: Path) -> bool:
+        if not _is_hex_prefix(p.name):
+            return False
+        return (p.is_symlink() if include_links else False) or _real_dir(p)
+
     if layout == LAYOUT_DVC_V3:
         base = remote_dir / 'files' / 'md5'
-        if not base.is_dir():
+        if not (_real_dir(remote_dir / 'files') and _real_dir(base)):
             raise ArchiveError(
                 f"No files/md5 directory found at {base}. "
                 f"Is {remote_dir} actually a DVC v3 remote?"
             )
-        return [
-            (p.name, p) for p in sorted(base.iterdir())
-            if p.is_dir() and _is_hex_prefix(p.name)
-        ]
+        return [(p.name, p) for p in sorted(base.iterdir()) if ok(p)]
     if layout == LAYOUT_DVC_V2:
-        return [
-            (p.name, p) for p in sorted(remote_dir.iterdir())
-            if p.is_dir() and _is_hex_prefix(p.name)
-        ]
+        return [(p.name, p) for p in sorted(remote_dir.iterdir()) if ok(p)]
     if layout == LAYOUT_DVC_MIXED:
         entries: List[Tuple[str, Path]] = []
         v3_base = remote_dir / 'files' / 'md5'
-        if v3_base.is_dir():
+        if _real_dir(remote_dir / 'files') and _real_dir(v3_base):
             for p in sorted(v3_base.iterdir()):
-                if p.is_dir() and _is_hex_prefix(p.name):
+                if ok(p):
                     entries.append((f'v3-{p.name}', p))
         for p in sorted(remote_dir.iterdir()):
-            if p.is_dir() and _is_hex_prefix(p.name):
+            if ok(p):
                 entries.append((f'v2-{p.name}', p))
         return entries
     raise ArchiveError(
@@ -400,27 +426,57 @@ def _key_to_paths(key: str, layout: str) -> Tuple[str, str]:
     raise ArchiveError(f"Unknown source layout {layout!r}")
 
 
-def _scan_one_prefix(p: Path) -> Tuple[int, int]:
-    """Worker for :func:`scan_prefixes`. Returns ``(n_objects, bytes)``."""
-    n = 0
-    size_sum = 0
+_OBJECT_NAME_RE = None
+
+
+def _is_object_name(name: str) -> bool:
+    import re
+    global _OBJECT_NAME_RE
+    if _OBJECT_NAME_RE is None:
+        _OBJECT_NAME_RE = re.compile(r'[0-9a-f]{30}(\.dir)?')
+    return _OBJECT_NAME_RE.fullmatch(name) is not None
+
+
+def _prefix_entries(prefix_dir: Path) -> Tuple[List[Tuple[str, int]], List[str]]:
+    """``([(object_name, size), ...], [problem, ...])`` for one prefix dir.
+
+    Entries are classified without following links: only regular files with
+    DVC-object names are archived; links, subdirectories and other names are
+    problems (a shared remote can hold others' links to anything).
+    """
+    objects: List[Tuple[str, int]] = []
+    problems: List[str] = []
     try:
-        with os.scandir(p) as it:
+        fd = os.open(prefix_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as e:
+        return objects, [f"{prefix_dir}: {e}"]
+    try:
+        with os.scandir(fd) as it:
             for entry in it:
-                # follow_symlinks=True so counts/sizes match what the archive
-                # tar captures (it runs with --dereference): a symlink to a real
-                # blob is counted as that blob at its target size; a dangling
-                # symlink is neither a file nor stat-able and is skipped here,
-                # just as tar --dereference would fail on it downstream.
-                if entry.is_file(follow_symlinks=True):
-                    n += 1
-                    try:
-                        size_sum += entry.stat(follow_symlinks=True).st_size
-                    except OSError:
-                        continue
-    except OSError:
-        pass
-    return n, size_sum
+                if entry.name.endswith('.tmp'):
+                    continue  # an unfinished upload, as elsewhere
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                import stat as stat_mod
+                if stat_mod.S_ISREG(st.st_mode) and _is_object_name(entry.name):
+                    objects.append((entry.name, st.st_size))
+                else:
+                    kind = ('link' if stat_mod.S_ISLNK(st.st_mode) else
+                            'directory' if stat_mod.S_ISDIR(st.st_mode) else
+                            'not an object' if stat_mod.S_ISREG(st.st_mode) else 'special')
+                    problems.append(f"{prefix_dir / entry.name} ({kind})")
+    finally:
+        os.close(fd)
+    return objects, problems
+
+
+def _scan_one_prefix(p: Path) -> Tuple[int, int]:
+    """Worker for :func:`scan_prefixes`. Returns ``(n_objects, bytes)``
+    over exactly the entries the archive will contain."""
+    objects, _problems = _prefix_entries(p)
+    return len(objects), sum(size for _name, size in objects)
 
 
 def scan_prefixes(
@@ -437,6 +493,14 @@ def scan_prefixes(
     ``stats[key] = (n_objects, total_bytes)``.
     """
     entries = _enumerate_prefix_dirs(remote_dir, layout)
+    linked = [str(p) for _k, p in
+              _enumerate_prefix_dirs(remote_dir, layout, include_links=True)
+              if p.is_symlink()]
+    if linked:
+        raise ArchiveError(
+            f"{len(linked)} blob prefix director{'ies are' if len(linked) != 1 else 'y is a'} "
+            f"symbolic link{'s' if len(linked) != 1 else ''} (e.g. {linked[0]}); "
+            f"replace them with real directories before archiving.")
     n_jobs = jobs if jobs and jobs > 0 else default_scan_jobs()
 
     if progress:
@@ -639,12 +703,27 @@ def _load_sentinel(sentinel: Path) -> Optional[Dict]:
     return data
 
 
+def _require_private_staging(staging: Path) -> None:
+    """A per-archive staging directory must be this user's own and not
+    writable by others (it may sit under a shared staging root)."""
+    import stat as stat_mod
+    try:
+        fd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as e:
+        raise ArchiveError(f"Staging directory {staging} is not usable: {e}")
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid():
+            raise ArchiveError(f"Staging directory {staging} belongs to another user")
+        if st.st_mode & (stat_mod.S_IWGRP | stat_mod.S_IWOTH):
+            os.fchmod(fd, stat_mod.S_IMODE(st.st_mode) & ~0o022)
+    finally:
+        os.close(fd)
+
+
 def _write_sentinel(sentinel: Path, data: Dict) -> None:
-    """Atomic sentinel write: tmp then rename."""
-    tmp = sentinel.with_suffix(sentinel.suffix + '.tmp')
-    with open(tmp, 'w') as f:
-        json.dump(data, f)
-    tmp.rename(sentinel)
+    """Atomic sentinel write: private tmp then rename."""
+    utils.write_text_atomic(sentinel, json.dumps(data), mode=0o600)
 
 
 # --------------------------------------------------------------------------- #
@@ -666,12 +745,12 @@ def _save_qxub_job_config(
     command lines and re-derives nothing in the worker.
     """
     config_path = staging / QXUB_JOB_CONFIG_FILENAME
-    config_path.write_text(json.dumps({
+    utils.write_text_atomic(config_path, json.dumps({
         'source_remote': str(source_remote),
         'compress': compress,
         'layout': layout,
         'n_objects_by_prefix': {p: n for p, (n, _) in stats.items()},
-    }))
+    }), mode=0o600)
     return config_path
 
 
@@ -747,8 +826,8 @@ def _archive_qxub_config() -> Dict[str, str]:
         or cfg.get_value('qxub.walltime', DEFAULT_STAGE_WALLTIME)
     )
     return {
-        'env':      str(cfg.get_value('archive.qxub_env')
-                        or cfg.get_value('qxub.env', 'dt')),
+        'env':      str(cfg.get_own_value('archive.qxub_env')
+                        or cfg.get_own_value('qxub.env', 'dt')),
         'queue':    str(cfg.get_value('archive.qxub_queue')
                         or cfg.get_value('qxub.queue', 'normal')),
         'walltime': _normalize_walltime(walltime_raw),
@@ -861,6 +940,7 @@ def build_prefix_tarball(
     remote = Path(remote_dir)
     staging = Path(staging_dir)
     staging.mkdir(parents=True, exist_ok=True)
+    _require_private_staging(staging)
 
     member_path, base = _key_to_paths(prefix_key, layout)
     ext = _COMPRESSION_EXT[compress]
@@ -873,20 +953,35 @@ def build_prefix_tarball(
     # the .done.json sentinel is the source of truth, not the presence of
     # a .tar file on disk.
     for p in (target, target_tmp, sentinel):
-        if p.exists():
+        if os.path.lexists(p):  # a dangling link too
             p.unlink()
 
-    # --dereference: follow symlinks and archive the *content* they point at,
-    # never the link itself. A remote should only ever hold real blobs, but a
-    # misconfigured/legacy remote can contain symlinked objects (e.g. a .dir
-    # planted by an older `dt update`); without this, tar would bake those
-    # links into the archive, where they dangle on restore. If a symlink is
-    # dangling, tar fails loudly here rather than archiving a broken link.
-    cmd = ['tar', '-C', str(remote), '-cf', str(target_tmp), '--dereference']
+    # Archive exactly the regular object files found (without following
+    # links) -- never a link's target: a shared remote can hold others' links
+    # to anything the archiver can read. tar gets the explicit list, does not
+    # recurse and does not dereference, so an entry swapped for a link after
+    # this check is stored as a link (and refused on restore), not followed.
+    objects, problems = _prefix_entries(remote / member_path)
+    if problems:
+        raise ArchiveError(
+            f"Refusing to archive prefix {prefix_key}: {len(problems)} entr"
+            f"{'y is' if len(problems) == 1 else 'ies are'} not plain DVC objects:\n  "
+            + '\n  '.join(problems[:20])
+            + ('\n  ...' if len(problems) > 20 else ''))
+    list_path = staging / f".{filename}.members"
+    utils.write_text_atomic(
+        list_path, ''.join(f"{member_path}/{name}\0" for name, _ in objects), mode=0o600)
+    cmd = ['tar', '-C', str(remote), '-cf', str(target_tmp),
+           '--no-recursion', '--null', '-T', str(list_path)]
     cmd.extend(_COMPRESSION_TAR_FLAGS[compress])
-    cmd.append(member_path)
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        try:
+            list_path.unlink()
+        except OSError:
+            pass
     if result.returncode != 0:
         if target_tmp.exists():
             target_tmp.unlink()
@@ -1012,6 +1107,24 @@ def stage_archive(
     prefix_keys, stats = scan_prefixes(
         source_remote, source_layout, progress=True,
     )
+    # Before anything is built: links, subdirectories or other names inside
+    # the blob tree are not archived silently.
+    problems: List[str] = []
+    for _key, pdir in _enumerate_prefix_dirs(source_remote, source_layout,
+                                             include_links=True):
+        if pdir.is_symlink():
+            problems.append(f"{pdir} (link)")
+        else:
+            problems.extend(_prefix_entries(pdir)[1])
+    if problems:
+        raise ArchiveError(
+            f"Refusing to archive {source_remote}: {len(problems)} entr"
+            f"{'y' if len(problems) == 1 else 'ies'} in the blob tree "
+            f"{'is' if len(problems) == 1 else 'are'} not plain DVC objects:\n  "
+            + '\n  '.join(problems[:20])
+            + ('\n  ...' if len(problems) > 20 else '')
+            + "\nRemove or replace them (a link is usually left by an older tool), "
+              "then retry.")
     extras = scan_extras(source_remote, source_layout, progress=True)
     total_objects = sum(n for n, _ in stats.values())
     total_bytes = sum(b for _, b in stats.values())
@@ -1037,7 +1150,7 @@ def stage_archive(
 
     staging_root = resolve_staging_dir(staging_dir)
     staging_root.mkdir(parents=True, exist_ok=True)
-    staging = staging_root / name
+    staging = staging_root / require_plain_name(name)
     _check_jobfs_headroom(staging_root, total_bytes, force=force, verbose=verbose)
 
     bdir = backend_dir or _default_backend_dir(name, source_remote)
@@ -1072,7 +1185,8 @@ def stage_archive(
             created_at=now_iso(),
             created_by=_current_user(),
             git_ref=_git_ref(repo_root),
-            git_url=git_url if git_url is not None else _git_url(repo_root),
+            git_url=utils.strip_url_credentials(
+                git_url if git_url is not None else _git_url(repo_root)),
             dt_version=_dt_version(),
         )
         return CreateResult(manifest=manifest, manifest_path=target_manifest)
@@ -1080,9 +1194,11 @@ def stage_archive(
     # Prepare staging dir.
     if staging.exists():
         if force:
+            _require_private_staging(staging)
             shutil.rmtree(staging)
-            staging.mkdir(parents=True)
+            staging.mkdir(parents=True, mode=0o700)
         elif resume:
+            _require_private_staging(staging)
             print(
                 f"Resume: reusing existing staging dir {staging}",
                 flush=True,
@@ -1094,7 +1210,7 @@ def stage_archive(
                 f"or --force to start over."
             )
     else:
-        staging.mkdir(parents=True)
+        staging.mkdir(parents=True, mode=0o700)
         if resume:
             print(
                 f"Resume: no prior staging dir at {staging}, starting fresh",
@@ -1106,7 +1222,12 @@ def stage_archive(
     if resume:
         for sentinel in staging.glob(f'*{STAGED_SENTINEL_SUFFIX}'):
             data = _load_sentinel(sentinel)
-            if not data:
+            # Only a sentinel for a prefix being archived, naming the tar dt
+            # would have written for it, counts; anything else is re-staged.
+            if not data or data.get('prefix') not in prefix_keys:
+                continue
+            _member, base = _key_to_paths(data['prefix'], source_layout)
+            if data.get('filename') != f"{base}.tar{_COMPRESSION_EXT[compress]}":
                 continue
             tar_file = staging / data['filename']
             try:
@@ -1172,7 +1293,7 @@ def stage_archive(
                 _member, base = _key_to_paths(key, source_layout)
                 expected = staging / f"{base}.tar{ext}{STAGED_SENTINEL_SUFFIX}"
                 data = _load_sentinel(expected) if expected.exists() else None
-                if not data:
+                if not data or data.get('filename') != f"{base}.tar{ext}":
                     missing.append(key)
                     continue
                 inner_tars[key] = InnerTar(
@@ -1279,7 +1400,8 @@ def stage_archive(
             created_at=now_iso(),
             created_by=_current_user(),
             git_ref=_git_ref(repo_root),
-            git_url=git_url if git_url is not None else _git_url(repo_root),
+            git_url=utils.strip_url_credentials(
+                git_url if git_url is not None else _git_url(repo_root)),
             dt_version=_dt_version(),
         )
         path_written = save_manifest(manifest, repo_root=repo_root)
@@ -1338,7 +1460,10 @@ def deposit_archive(
 
     be = backend_override if backend_override is not None else get_backend(manifest.backend)
     staging_root = resolve_staging_dir(staging_dir)
+    require_plain_name(name)
     staging = staging_root / name
+    if staging.is_dir():
+        _require_private_staging(staging)
     if not staging.is_dir():
         raise ArchiveError(
             f"Staging directory {staging} not found. Has stage been run?"
@@ -1452,6 +1577,9 @@ def deposit_archive(
         # Upload the sidecar last — its presence is what marks the
         # archive complete.
         local_manifest = manifest_path(name, repo_root=repo_root)
+        # Rewrite it first so a manifest staged by an older dt goes up with
+        # its origin URL cleaned.
+        save_manifest(manifest, repo_root=repo_root)
         sidecar = bdir + sidecar_name(name)
         print(f"Deposit: uploading sidecar {sidecar}", flush=True)
         be.put_file(local_manifest, sidecar)
@@ -1699,6 +1827,7 @@ def restore_archive(
     backend_override: Optional[ArchiveBackend] = None,
     repo_root: Optional[Path] = None,
     verbose: bool = False,
+    confirm_callback=None,
 ) -> List[Path]:
     """Restore from an archive.
 
@@ -1710,7 +1839,8 @@ def restore_archive(
     If ``to_path`` is not given, defaults to the manifest's recorded
     ``source_remote`` — i.e. restores the data back to the directory it
     came from. Useful after :func:`prune_archive` left an
-    ``ARCHIVED.yaml`` signpost there.
+    ``ARCHIVED.yaml`` signpost there. That path comes from the manifest,
+    so the user has to type it back before anything is written there.
 
     Returns a list of paths written under ``to_path``.
     """
@@ -1731,7 +1861,12 @@ def restore_archive(
                 f"Archive '{name}' has no source_remote recorded — "
                 f"pass --to <path> explicitly."
             )
-        to_path = Path(manifest.source_remote)
+        to_path = _manifest_remote_path(manifest, 'restore into')
+        _require_project_remote(to_path, repo_root, 'restore into')
+        _refuse_project_cache(to_path, repo_root, 'restore into')
+        _confirm_named_target(
+            name, to_path, 'restore into', confirm_callback,
+            hint="pass --to <path> to choose where to restore")
         if verbose:
             print(
                 f"  no --to given; restoring to manifest.source_remote: "
@@ -1756,13 +1891,21 @@ def restore_archive(
     # leave it alone (the archive is still the canonical copy of
     # everything the user didn't ask for).
     stale_signpost = to_path / _signpost.SIGNPOST_FILENAME
-    if stale_signpost.is_file():
-        try:
-            stale_signpost.unlink()
+    try:
+        root_fd = os.open(str(to_path), _OPEN_DIR)
+    except OSError:
+        return written
+    try:
+        st = os.stat(_signpost.SIGNPOST_FILENAME, dir_fd=root_fd,
+                     follow_symlinks=False)
+        if stat.S_ISREG(st.st_mode):
+            os.unlink(_signpost.SIGNPOST_FILENAME, dir_fd=root_fd)
             if verbose:
                 print(f"  removed stale signpost {stale_signpost}", flush=True)
-        except OSError:
-            pass
+    except OSError:
+        pass
+    finally:
+        os.close(root_fd)
     return written
 
 
@@ -1833,15 +1976,353 @@ def _tar_decompress_flag(compression: str) -> List[str]:
     return []
 
 
+_BLOB_NAME_RE = None
+
+
 def _extract_inner(local_tar: Path, to_path: Path, compression: str,
-                   members: Optional[List[str]] = None) -> None:
-    decompress = _tar_decompress_flag(compression)
-    cmd = ['tar', '-xf', str(local_tar), '-C', str(to_path)] + decompress
-    if members:
-        cmd.extend(members)
-    rc = subprocess.run(cmd).returncode
-    if rc != 0:
-        raise ArchiveError(f"tar extraction failed for {local_tar.name}")
+                   key: str, layout: str,
+                   members: Optional[List[str]] = None) -> List[Path]:
+    """Extract the blobs of inner tar *key* into *to_path*.
+
+    Only regular files named like DVC objects inside that key's own prefix
+    directory (``files/md5/<xx>/<hex>`` or ``<xx>/<hex>``) whose content
+    matches their name are written; anything else in the tar -- other
+    paths, links, devices, mismatching content -- is skipped and reported.
+    An object already present is left as it is. Directories are entered
+    without following links and files are written through private
+    temporaries renamed into place.
+    """
+    import re
+    import tarfile
+    global _BLOB_NAME_RE
+    if _BLOB_NAME_RE is None:
+        _BLOB_NAME_RE = re.compile(r'[0-9a-f]{30}(\.dir)?')
+    member_dir, _base = _key_to_paths(key, layout)
+    dir_parts = member_dir.split('/')
+    prefix = dir_parts[-1]
+    if not _is_hex_prefix(prefix):
+        raise ArchiveError(f"Unexpected prefix {prefix!r} in archive key {key!r}")
+    if compression not in _COMPRESSION_EXT:
+        raise ArchiveError(f"Unknown compression {compression!r}")
+    allowed_dirs = {'/'.join(dir_parts[:i]) for i in range(1, len(dir_parts) + 1)}
+    wanted = set(members) if members else None
+
+    proc = None
+    if compression == 'zstd':
+        try:
+            proc = subprocess.Popen(['zstd', '-dc', '--', str(local_tar)],
+                                    stdout=subprocess.PIPE)
+        except OSError as e:
+            raise ArchiveError(f"Cannot run zstd for {local_tar.name}: {e}")
+    written: List[Path] = []
+    skipped: List[str] = []
+    dir_fd = None
+    ok = False
+    try:
+        if proc is not None:
+            tf = tarfile.open(fileobj=proc.stdout, mode='r|')
+        else:
+            tf = tarfile.open(str(local_tar),
+                              mode='r|gz' if compression == 'gzip' else 'r|')
+        with tf:
+            for m in tf:
+                name = m.name.rstrip('/')
+                if m.isdir() and name in allowed_dirs:
+                    continue
+                parent, _, leaf = name.rpartition('/')
+                if not (m.isreg() and parent == member_dir
+                        and _BLOB_NAME_RE.fullmatch(leaf)):
+                    skipped.append(f"{m.name} (not an object of prefix {prefix})")
+                    continue
+                if wanted is not None and name not in wanted:
+                    continue
+                if dir_fd is None:
+                    dir_fd = _open_blob_dir(to_path, dir_parts)
+                expected = prefix + leaf[:30]
+                v2 = layout == LAYOUT_DVC_V2 or key.startswith('v2-')
+                result = _write_blob(dir_fd, leaf, tf.extractfile(m), m, expected,
+                                     dos2unix=v2)
+                if result == 'mismatch':
+                    skipped.append(f"{m.name} (content does not match its name)")
+                elif result == 'written':
+                    written.append(to_path / name)
+                if wanted is not None:
+                    wanted.discard(name)
+                    if not wanted:
+                        break
+        ok = True
+    except (tarfile.TarError, OSError) as e:
+        raise ArchiveError(f"tar extraction failed for {local_tar.name}: {e}")
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
+        if proc is not None:
+            proc.stdout.close()
+            if ok:
+                if proc.wait() != 0 and wanted is None:
+                    raise ArchiveError(f"zstd failed for {local_tar.name}")
+            else:
+                proc.kill()
+                proc.wait()
+    if skipped:
+        print(f"Warning: {local_tar.name}: skipped {len(skipped)} entr"
+              f"{'y' if len(skipped) == 1 else 'ies'}:\n  "
+              + '\n  '.join(skipped[:20])
+              + ('\n  ...' if len(skipped) > 20 else ''), file=sys.stderr)
+    return written
+
+
+def _open_blob_dir(to_path: Path, parts: List[str]) -> int:
+    """Open ``to_path/<parts>``, creating missing parts, never following a link."""
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    fd = os.open(to_path, flags | os.O_NOFOLLOW)
+    try:
+        for part in parts:
+            try:
+                os.mkdir(part, 0o777, dir_fd=fd)
+            except FileExistsError:
+                pass
+            nfd = os.open(part, flags | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _current_umask() -> int:
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('Umask:'):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError):
+        pass
+    return 0o022
+
+
+def _write_blob(dir_fd: int, name: str, fobj, member, expected_md5: str,
+                dos2unix: bool = False) -> str:
+    """Write one object; ``'written'``, ``'exists'`` or ``'mismatch'``.
+
+    The bytes go to a private temporary file and are hashed on the way; only
+    content that matches the object's name is renamed into place, and an
+    object already there is never replaced. With *dos2unix* (DVC 2 objects)
+    content whose CRLF-normalised md5 matches also counts.
+    """
+    import hashlib
+    import secrets
+    try:
+        os.lstat(name, dir_fd=dir_fd)
+        return 'exists'
+    except FileNotFoundError:
+        pass
+    tmp = f'.{name}.{secrets.token_hex(8)}.tmp'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 0o600, dir_fd=dir_fd)
+    try:
+        digest = hashlib.md5()
+        d2u = hashlib.md5() if dos2unix else None
+        carry = b''
+        try:
+            while True:
+                chunk = fobj.read(1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                if d2u is not None:
+                    data = carry + chunk
+                    carry = b'\r' if data.endswith(b'\r') else b''
+                    if carry:
+                        data = data[:-1]
+                    d2u.update(data.replace(b'\r\n', b'\n'))
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(fd, view):]
+            if d2u is not None and carry:
+                d2u.update(carry)
+            os.fchmod(fd, 0o444 & ~_current_umask())
+            os.utime(fd, (member.mtime, member.mtime))
+        finally:
+            os.close(fd)
+        if expected_md5 not in (digest.hexdigest(),
+                                (d2u.hexdigest() if d2u is not None else None)):
+            os.unlink(tmp, dir_fd=dir_fd)
+            return 'mismatch'
+        try:
+            os.link(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd,
+                    follow_symlinks=False)
+        except FileExistsError:
+            return 'exists'
+        finally:
+            os.unlink(tmp, dir_fd=dir_fd)
+        return 'written'
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+
+
+def _require_tar_digest(local: Path, inner: InnerTar) -> None:
+    """A downloaded inner tar must be the one the manifest recorded."""
+    if inner.sha256 and sha256_of_file(local) != inner.sha256:
+        raise ArchiveError(
+            f"{local.name} does not match the checksum recorded in the manifest")
+
+
+def _manifest_remote_path(manifest: ArchiveManifest, action: str) -> Path:
+    """The manifest's ``source_remote`` as the one absolute, resolved path
+    that every later check and file operation uses."""
+    raw = os.path.expanduser(str(manifest.source_remote or ''))
+    if not raw or not os.path.isabs(raw):
+        raise ArchiveError(
+            f"Refusing to {action} {manifest.source_remote!r}: the archive "
+            f"manifest's source_remote is not an absolute path.")
+    return Path(os.path.realpath(raw))
+
+
+_OPEN_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
+
+
+def _dir_identity(st) -> Tuple[int, int]:
+    if not stat.S_ISDIR(st.st_mode):
+        raise ArchiveError("not a directory")
+    return (st.st_dev, st.st_ino)
+
+
+def _require_same_dir(path: Path, expect: Tuple[int, int]) -> None:
+    """*path* must still be the directory that was checked."""
+    try:
+        same = _dir_identity(os.lstat(path)) == expect
+    except (OSError, ArchiveError):
+        same = False
+    if not same:
+        raise ArchiveError(
+            f"Refusing to continue: {path} changed while it was being checked.")
+
+
+_MAX_PRUNE_DEPTH = 8
+
+
+def _remove_tree_under(root: Path, parts, expect=None) -> None:
+    """Delete ``root/<parts...>`` and everything in it, reaching each
+    directory through a handle opened without following links, so a link
+    planted anywhere below *root* cannot redirect the delete. With
+    *expect*, *root* must still be that ``(st_dev, st_ino)``."""
+    *parents, last = parts
+    fd = os.open(str(root), _OPEN_DIR)
+    try:
+        if expect is not None and _dir_identity(os.fstat(fd)) != expect:
+            raise ArchiveError(
+                f"Refusing to continue: {root} changed while it was being checked.")
+        for part in parents:
+            nfd = os.open(part, _OPEN_DIR, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        _remove_entry_tree(fd, last)
+    finally:
+        os.close(fd)
+
+
+def _remove_entry_tree(parent_fd: int, name: str, depth: int = 0) -> None:
+    if depth > _MAX_PRUNE_DEPTH:
+        raise OSError(f"directories nested deeper than a DVC remote's at {name!r}")
+    fd = os.open(name, _OPEN_DIR, dir_fd=parent_fd)
+    try:
+        with os.scandir(fd) as it:
+            entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
+        for entry, is_dir in entries:
+            if is_dir:
+                _remove_entry_tree(fd, entry, depth + 1)
+            else:
+                os.unlink(entry, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _same_path(a, b) -> bool:
+    return (os.path.realpath(os.path.expanduser(str(a)))
+            == os.path.realpath(os.path.expanduser(str(b))))
+
+
+def _confirm_named_target(name: str, target: Path, action: str,
+                          confirm_callback, hint: str) -> None:
+    """Have the user type *target* (taken from the manifest) back."""
+    prompt = (f"Archive '{name}' names {target} as its source remote.\n"
+              f"Type that path to {action} it: ")
+    if confirm_callback is not None:
+        response = confirm_callback(prompt)
+    else:
+        if not sys.stdin.isatty():
+            raise ArchiveError(
+                f"Refusing to {action} {target} without confirmation: {hint}.")
+        try:
+            response = input(prompt)
+        except EOFError:
+            response = ''
+    response = (response or '').strip()
+    if not response or not _same_path(response, target):
+        raise ArchiveError(f"Aborted: the path typed is not {target}.")
+
+
+def _refuse_project_cache(target: Path, repo_root: Optional[Path],
+                          action: str) -> None:
+    """*target* must not be (or hold, or sit inside) the project's own
+    DVC cache."""
+    root = Path(repo_root or utils.find_project_root())
+    try:
+        from dvc.repo import Repo
+        with Repo(str(root), uninitialized=True) as repo:
+            odb = repo.cache.local.path
+    except Exception as exc:
+        if not (root / '.dvc').exists():
+            return  # not a DVC project: no cache of its own
+        raise ArchiveError(
+            f"Refusing to {action} {target}: could not read this project's "
+            f"DVC cache location ({exc}).")
+    if not odb:
+        return
+    cache = os.path.realpath(utils.cache_root_from_odb_path(Path(odb)))
+    path = os.path.realpath(os.path.expanduser(str(target)))
+    if (path == cache or path.startswith(cache + os.sep)
+            or cache.startswith(path + os.sep)):
+        raise ArchiveError(
+            f"Refusing to {action} {target}: it overlaps this project's DVC "
+            f"cache ({cache}).")
+
+
+def _require_project_remote(source_remote: Path, repo_root: Optional[Path],
+                            action: str) -> None:
+    """*source_remote* (from a committed manifest) must be one of this
+    project's configured local DVC remotes before dt writes or deletes
+    there on its own say-so."""
+    from .. import remote as remote_mod
+    root = Path(repo_root or utils.find_project_root())
+    target = os.path.realpath(os.path.expanduser(str(source_remote)))
+    try:
+        remotes = remote_mod.list_remotes(repo_path=root)
+    except Exception:
+        remotes = []
+    for _name, url, *_rest in remotes:
+        url = str(url)
+        if url.startswith('file://'):
+            url = url[len('file://'):]
+        if '://' in url:
+            continue
+        path = Path(os.path.expanduser(url))
+        if not path.is_absolute():
+            path = root / '.dvc' / path
+        if os.path.realpath(path) == target:
+            return
+    raise ArchiveError(
+        f"Refusing to {action} {source_remote}: the archive manifest names it, "
+        f"but it is not one of this project's DVC remotes. "
+        + ("Pass --to <path> to choose where to restore." if action == 'restore into'
+           else "Check the manifest and the project's remotes."))
 
 
 def _restore_full(manifest: ArchiveManifest, be: ArchiveBackend,
@@ -1857,9 +2338,11 @@ def _restore_full(manifest: ArchiveManifest, be: ArchiveBackend,
             if verbose:
                 print(f"  fetching {remote_path}")
             be.get_file(remote_path, local)
+            _require_tar_digest(local, inner)
             if verbose:
                 print(f"  extracting {inner.filename}")
-            _extract_inner(local, to_path, manifest.compression)
+            _extract_inner(local, to_path, manifest.compression,
+                           prefix, manifest.source_layout or LAYOUT_DVC_V3)
             local.unlink(missing_ok=True)
             written.append(to_path / 'files' / 'md5' / prefix)
     return written
@@ -1880,9 +2363,11 @@ def _restore_prefix(manifest: ArchiveManifest, be: ArchiveBackend,
             if verbose:
                 print(f"  fetching {remote_path}")
             be.get_file(remote_path, local)
+            _require_tar_digest(local, inner)
             if verbose:
                 print(f"  extracting {inner.filename}")
-            _extract_inner(local, to_path, manifest.compression)
+            _extract_inner(local, to_path, manifest.compression,
+                           key, manifest.source_layout or LAYOUT_DVC_V3)
             local.unlink(missing_ok=True)
             # Restored path depends on this key's layout.
             if (manifest.source_layout == LAYOUT_DVC_MIXED
@@ -1913,11 +2398,13 @@ def _restore_single_object(manifest: ArchiveManifest, be: ArchiveBackend,
             if verbose:
                 print(f"  fetching {remote_path}")
             be.get_file(remote_path, local)
+            _require_tar_digest(local, inner)
             if verbose:
                 print(f"  extracting {entry}")
             try:
                 _extract_inner(
-                    local, to_path, manifest.compression, members=[entry],
+                    local, to_path, manifest.compression,
+                    key, manifest.source_layout or LAYOUT_DVC_V3, members=[entry],
                 )
             except ArchiveError as e:
                 last_error = e
@@ -1937,6 +2424,34 @@ def _restore_single_object(manifest: ArchiveManifest, be: ArchiveBackend,
 # prune
 # --------------------------------------------------------------------------- #
 
+def _uncovered_prefixes(source_remote: Path, layout: str,
+                        inner_tars: Dict[str, InnerTar]) -> List[str]:
+    """Non-empty blob prefix directories with no matching inner tar."""
+    missing: List[str] = []
+
+    def _check(base: Path, keys: List[str], label: str) -> None:
+        if not base.is_dir():
+            return
+        for p in sorted(base.iterdir()):
+            if not (_is_hex_prefix(p.name) and p.is_dir()):
+                continue
+            try:
+                empty = not any(os.scandir(p))
+            except OSError:
+                empty = False
+            if not empty and not any(k.format(p.name) in inner_tars for k in keys):
+                missing.append(f"{label}{p.name}")
+
+    if layout == LAYOUT_DVC_V3:
+        _check(source_remote / 'files' / 'md5', ['{}'], 'files/md5/')
+    elif layout == LAYOUT_DVC_V2:
+        _check(source_remote, ['{}'], '')
+    elif layout == LAYOUT_DVC_MIXED:
+        _check(source_remote / 'files' / 'md5', ['v3-{}'], 'files/md5/')
+        _check(source_remote, ['v2-{}'], '')
+    return missing
+
+
 def prune_archive(
     name: str,
     *,
@@ -1945,6 +2460,7 @@ def prune_archive(
     backend_override: Optional[ArchiveBackend] = None,
     repo_root: Optional[Path] = None,
     confirm_callback=None,
+    source: Optional[Path] = None,
 ) -> PruneResult:
     """Delete ``<source_remote>/files/md5/`` after verifying the archive.
 
@@ -1953,21 +2469,39 @@ def prune_archive(
     - The source remote has files outside ``files/md5/`` (extras).
 
     ``--force`` bypasses the extras check (NOT the verify check).
-    ``--yes`` suppresses the interactive confirm.
+    ``--yes`` suppresses the interactive confirm. The remote's path comes
+    from the manifest, so the user names it too: ``source`` (``--source``)
+    must be that path, or, without it, the path is typed at a prompt that
+    ``--yes`` does not skip.
     """
     manifest = load_manifest(name, repo_root=repo_root)
-    source_remote = Path(manifest.source_remote)
+    source_remote = _manifest_remote_path(manifest, 'prune')
     layout = manifest.source_layout or LAYOUT_DVC_V3
+    try:
+        root_id = _dir_identity(os.lstat(source_remote))
+    except OSError as exc:
+        raise ArchiveError(f"Nothing to prune: cannot read {source_remote} ({exc})")
+    _require_project_remote(source_remote, repo_root, 'prune')
+    _refuse_project_cache(source_remote, repo_root, 'prune')
+    if source is not None:
+        if not _same_path(source, source_remote):
+            raise ArchiveError(
+                f"Refusing to prune: --source {source} is not the remote "
+                f"archive '{name}' was made from ({source_remote}).")
+    else:
+        _confirm_named_target(
+            name, source_remote, 'prune', confirm_callback,
+            hint="pass --source <path> naming the remote to prune")
 
     # Identify what to delete based on the source layout.
     prune_targets: List[Path] = []
     if layout in (LAYOUT_DVC_V3, LAYOUT_DVC_MIXED):
         files_md5 = source_remote / 'files' / 'md5'
-        if files_md5.is_dir():
+        if _real_dir(files_md5.parent) and _real_dir(files_md5):
             prune_targets.append(files_md5)
     if layout in (LAYOUT_DVC_V2, LAYOUT_DVC_MIXED):
         for p in source_remote.iterdir() if source_remote.is_dir() else []:
-            if p.is_dir() and _is_hex_prefix(p.name):
+            if _is_hex_prefix(p.name) and _real_dir(p):
                 prune_targets.append(p)
 
     if not prune_targets:
@@ -1987,6 +2521,27 @@ def prune_archive(
         raise ArchiveError(
             f"Refusing to prune: archive '{name}' did not verify.\n  {details}"
         )
+
+    if not manifest.inner_tars:
+        raise ArchiveError(f"Refusing to prune: archive '{name}' lists no inner tars")
+    # Every non-empty prefix on disk must have its own inner tar, holding
+    # (at least) as many objects as are there now.
+    _keys, disk_stats = scan_prefixes(source_remote, layout)
+    short = [f"{k} ({n} on disk, {manifest.inner_tars[k].n_objects} archived)"
+             for k, (n, _b) in sorted(disk_stats.items())
+             if k in manifest.inner_tars and n > manifest.inner_tars[k].n_objects]
+    if short:
+        raise ArchiveError(
+            f"Refusing to prune: objects on disk are not all in archive '{name}' "
+            f"(pushed since it was made?): {', '.join(short[:10])}"
+            f"{' ...' if len(short) > 10 else ''}")
+    uncovered = _uncovered_prefixes(source_remote, layout, manifest.inner_tars)
+    if uncovered:
+        raise ArchiveError(
+            f"Refusing to prune: {len(uncovered)} prefix director"
+            f"{'y' if len(uncovered) == 1 else 'ies'} under {source_remote} "
+            f"have no inner tar in archive '{name}': "
+            f"{', '.join(uncovered[:10])}{' ...' if len(uncovered) > 10 else ''}")
 
     extras = scan_extras(source_remote, layout)
     if extras and not force:
@@ -2028,6 +2583,7 @@ def prune_archive(
 
     # Drop the signpost BEFORE rmtree so anyone who lists the remote
     # mid-delete sees the explanation rather than an empty-ish dir.
+    _require_same_dir(source_remote, root_id)
     signpost_path = _signpost.write_signpost(
         source_remote, manifest,
         pruned_by=_current_user(),
@@ -2035,8 +2591,16 @@ def prune_archive(
     )
     print(f"Wrote signpost {signpost_path}", flush=True)
 
-    for target in prune_targets:
-        shutil.rmtree(target)
+    try:
+        for target in prune_targets:
+            _remove_tree_under(source_remote,
+                               target.relative_to(source_remote).parts,
+                               expect=root_id)
+    except (OSError, RecursionError) as exc:
+        raise ArchiveError(
+            f"Prune stopped part-way through deleting under {source_remote} "
+            f"({exc}); the signpost is in place and the archive is intact. "
+            f"Check the directory, then rerun prune.")
     repo = repo_root or utils.find_project_root()
     _registry.record_pruned(name, repo, now_iso())
     return PruneResult(

@@ -7,6 +7,7 @@ file:// URLs, which exercises the actual clone/scan path without network access.
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -430,3 +431,58 @@ class TestRendering:
     def test_render_text_rejects_unknown_direction(self):
         with pytest.raises(ValueError, match='Unknown direction'):
             repo_graph_render.render_text(self._graph(), direction='sideways')
+
+
+class TestPinnedRevisionsAreNotOptions:
+    @pytest.mark.parametrize('rev', ['--upload-pack=touch /tmp/x', '-c', '@{-1}', ':/x'])
+    def test_option_shaped_rev_never_reaches_git(self, tmp_path, monkeypatch, rev):
+        calls = []
+        monkeypatch.setattr(repo_graph.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(repo_graph.dvc_deps, 'resolve_ref',
+                            lambda r, p: calls.append(['resolve', r]))
+        assert repo_graph._ensure_rev(tmp_path, rev) is False
+        assert calls == []
+
+    def test_fetch_ends_options_before_the_rev(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(repo_graph.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(repo_graph.dvc_deps, 'resolve_ref', lambda r, p: None)
+        repo_graph._ensure_rev(tmp_path, 'abc123')
+        [cmd] = calls
+        assert cmd.index('--end-of-options') < cmd.index('abc123')
+
+
+class TestRenderedIdsStayLabels:
+    EVIL = 'h/o/x"];click n0 href "javascript:alert(1)";%%<img src=x>'
+
+    def test_mermaid_label_escapes(self):
+        from dt.repo_graph_render import _mermaid_text
+        out = _mermaid_text(self.EVIL)
+        assert '"' not in out and ';' not in out.replace('#34;', '').replace('#59;', '') \
+            .replace('#60;', '').replace('#62;', '').replace('#38;', '').replace('#35;', '')
+        assert '<' not in out
+
+    def test_dot_id_escapes_quotes(self):
+        from dt.repo_graph_render import _dot_id
+        out = _dot_id('a"b\\c')
+        assert out == '"a\\"b\\\\c"'
+
+
+class TestCloneDirectoryStaysInside:
+    @pytest.mark.parametrize('repo_id', ['../../outside', 'host/../../x/y', '/abs/x/y',
+                                         'a/b/c/d/e'])
+    def test_clone_path_is_inside_clones_root(self, tmp_path, monkeypatch, repo_id):
+        calls = []
+        clones = tmp_path / '.dt' / 'tmp' / 'clones'
+        clones.mkdir(parents=True)
+        monkeypatch.setattr(repo_graph.tmp_mod, 'get_tmp_dir', lambda: clones)
+        monkeypatch.setattr(repo_graph.subprocess, 'run',
+                            lambda cmd, **kw: calls.append(cmd) or
+                            subprocess.CompletedProcess(cmd, 1, '', 'x'))
+        repo_graph._clone_or_refresh('file:///somewhere', repo_id)
+        for cmd in calls:
+            if 'clone' in cmd:
+                target = Path(cmd[-1]).resolve()
+                assert clones.resolve() in target.parents

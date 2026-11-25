@@ -12,11 +12,13 @@ to ``.dvc/config.local`` via ``dvc config --local core.site_cache_dir``.
 
 DVC itself creates the per-repo subdirectory hierarchy
 (``repo/<sha256>/...``) inside the configured directory, so the resolved
-path is simply ``{root}/{name}`` where ``name`` defaults to the project
-name.
+path is ``{root}/{user}/{name}`` where ``name`` defaults to the project
+name. The per-user level keeps each user's state out of reach of others
+sharing the root.
 """
 
 import os
+import pwd
 import stat
 import subprocess
 from pathlib import Path
@@ -37,12 +39,262 @@ CONFIG_KEY_ROOT = 'site_cache.root'
 CONFIG_KEY_ENABLED = 'site_cache.enabled'
 
 
-# Directory mode used when dt creates a per-repo site_cache subdirectory:
-# rwxrwsr-x — group-writable with the setgid bit so children inherit the
-# parent's group ownership. The setgid bit propagates only group ownership,
-# not the write bit, so files created inside still rely on a sensible
-# umask (0002) and/or default ACLs on the parent.
-SHARED_DIR_MODE = 0o2775
+# Opt-in for a workspace deliberately shared by several users: the per-repo
+# dir is then group-writable (never other-writable).
+CONFIG_KEY_GROUP_SHARED = 'site_cache.group_shared'
+
+# The per-repo dir is private to its owner unless group sharing is opted into.
+PRIVATE_DIR_MODE = 0o700
+GROUP_DIR_MODE = 0o2770
+# The per-user level under a shared root: never writable by anyone else.
+PRIVATE_USER_DIR_MODE = 0o700
+GROUP_USER_DIR_MODE = 0o2750
+
+
+def _current_user() -> str:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        raise SiteCacheError(f"Cannot determine user name for uid {os.geteuid()}")
+
+
+# Keys that decide where the state dir lives and who can write it. They are
+# per-user settings, so they are read only from user/system config (or the
+# CLI), not from repo-level config.
+_TRUSTED_SCOPES = ('user', 'system')
+
+
+def _trusted_config(key: str, default=None):
+    for scope in _TRUSTED_SCOPES:
+        node = cfg.load_scope_config(scope)
+        for part in key.split('.'):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node is not None:
+            return node
+    if cfg.get_value(key) is not None:
+        print(f"note: ignoring {key} from project/local dt config; "
+              f"set it with 'dt config set {key} ...' (user scope) instead")
+    return default
+
+
+def _group_shared() -> bool:
+    value = _trusted_config(CONFIG_KEY_GROUP_SHARED, default=False)
+    if isinstance(value, str):
+        return value.strip().lower() in ('true', '1', 'yes', 'on')
+    return bool(value)
+
+
+def _abs(path) -> Path:
+    """Absolute, normalised path WITHOUT following symlinks."""
+    return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _other_write_bits(shared: bool) -> int:
+    return stat.S_IWOTH | (0 if shared else stat.S_IWGRP)
+
+
+def _strip_acls(path: Path) -> None:
+    """Best-effort removal of (default) ACLs that would re-widen access."""
+    try:
+        subprocess.run(['setfacl', '-b', '--', str(path)],
+                       capture_output=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
+def _configured_root(root: Optional[str]) -> Optional[Path]:
+    value = root or _trusted_config(CONFIG_KEY_ROOT)
+    return _abs(value) if value else None
+
+
+def _check_symlinks(path: Path, trusted_uids: set) -> None:
+    """Refuse a path containing a symlink owned by another user."""
+    for comp in (path, *path.parents):
+        try:
+            st = comp.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(st.st_mode) and st.st_uid not in trusted_uids | {0}:
+            raise SiteCacheError(
+                f"Refusing site_cache_dir {path}: {comp} is a symlink owned by "
+                f"another user (uid {st.st_uid})."
+            )
+
+
+def _check_ancestors(
+    path: Path, shared: bool, trusted_uids: set, start: Path, verbose: bool = True,
+) -> None:
+    """Check the parent chain of ``path``.
+
+    Walk up the real (symlink-resolved) chain from ``start`` and require each
+    directory to be owned by an allowed uid and not writable by other users
+    unless sticky. The walk stops at the first root-owned directory:
+    system/site-managed directories are outside dt's control, so if one of
+    those is itself open to renames we can only warn.
+    """
+    bad = _other_write_bits(shared)
+    real = Path(os.path.realpath(start))
+    for parent in (real, *real.parents):
+        try:
+            pst = parent.stat()
+        except OSError as e:
+            raise SiteCacheError(f"Cannot inspect {parent}: {e}")
+        if pst.st_uid == 0:
+            if (verbose and (pst.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+                    and not (pst.st_mode & stat.S_ISVTX)):
+                print(f"note: {parent} (system-managed) lets other users rename "
+                      f"entries in it, so dt cannot fully protect {path}. "
+                      f"Ask the system administrators to set its sticky bit.")
+            return
+        if pst.st_uid not in trusted_uids:
+            raise SiteCacheError(
+                f"Refusing site_cache_dir {path}: parent {parent} is owned by another "
+                f"user (uid {pst.st_uid})."
+            )
+        if (pst.st_mode & bad) and not (pst.st_mode & stat.S_ISVTX):
+            raise SiteCacheError(
+                f"Refusing site_cache_dir {path}: {parent} is writable by other users "
+                f"without the sticky bit.\n"
+                f"  Fix (as its owner): chmod +t {parent}"
+            )
+
+
+def _ensure_owned_dir(
+    path: Path, mode: int, shared: bool, verbose: bool, check_contents: bool = False,
+) -> None:
+    """Create ``path`` with ``mode``, or require an existing one to be a real
+    directory owned by the caller and set it to ``mode``.
+
+    With ``check_contents`` (the state dir itself), an existing dir is only
+    adopted if everything already in it is private to the caller.
+    """
+    try:
+        path.mkdir(mode=mode)
+        created = True
+    except FileExistsError:
+        created = False
+    if not created:
+        st = path.lstat()
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+            raise SiteCacheError(
+                f"Refusing {path}: it is not a directory owned by you. "
+                f"Remove it or choose another path with --site-cache-path."
+            )
+        if check_contents and not shared and not _tree_is_private(path, check_top=False):
+            raise SiteCacheError(
+                f"Refusing {path}: it contains files not private to you. "
+                f"It is a rebuildable cache: "
+                f"remove it (rm -rf {path}) and re-run."
+            )
+        if verbose and st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            print(f"Tightening permissions on {path} (was {stat.filemode(st.st_mode)})")
+    os.chmod(path, mode)
+    if not shared:
+        _strip_acls(path)
+
+
+def _prepare_dir(
+    site_cache_dir: Path,
+    verbose: bool = True,
+    root: Optional[str] = None,
+) -> Path:
+    """Create or validate the per-repo site_cache dir; return its real path.
+
+    The dir (and, under a shared root, the ``{root}/{user}`` level) is
+    created owned by the caller with a private mode — group-only if
+    ``site_cache.group_shared`` is set. An existing dir is adopted only if the
+    caller owns it. Symlinks owned by other users, and parent directories
+    writable by others without the sticky bit, are refused.
+
+    Raises:
+        SiteCacheError: If the dir is unsafe to use.
+    """
+    shared = _group_shared()
+    mode = GROUP_DIR_MODE if shared else PRIVATE_DIR_MODE
+    user_mode = GROUP_USER_DIR_MODE if shared else PRIVATE_USER_DIR_MODE
+
+    trusted_uids = {os.geteuid()}
+    root_path = _configured_root(root)
+    if root_path is not None:
+        root_path = Path(os.path.realpath(root_path))
+        try:
+            trusted_uids.add(root_path.stat().st_uid)
+        except OSError:
+            pass
+
+    try:
+        # Only allowed symlinks may appear in the literal path; after that it
+        # is safe to work on the real path.
+        _check_symlinks(_abs(site_cache_dir), trusted_uids)
+        site_cache_dir = Path(os.path.realpath(_abs(site_cache_dir)))
+        under_root = root_path is not None and root_path in site_cache_dir.parents
+        if under_root:
+            _check_shared_perms(root_path, verbose=verbose)
+
+        # Refuse an unsafe parent chain before creating anything under it.
+        # Under a configured root, start at the root: the caller's own dirs
+        # below it are created/fixed next and re-checked at the end.
+        if under_root and root_path.exists():
+            start = root_path
+        else:
+            start = next(p for p in site_cache_dir.parents if p.exists())
+        _check_ancestors(site_cache_dir, shared, trusted_uids, start, verbose=False)
+
+        user_dir = site_cache_dir.parent
+        if under_root and user_dir.parent == root_path and user_dir.name == _current_user():
+            if not root_path.exists():
+                # A root dt creates itself is private; a shared root has to be
+                # set up deliberately (see docs/index.md).
+                root_path.parent.mkdir(parents=True, exist_ok=True)
+                root_path.mkdir(mode=0o700, exist_ok=True)
+            _ensure_owned_dir(user_dir, user_mode, shared, verbose)
+        else:
+            user_dir.mkdir(parents=True, exist_ok=True)
+
+        _ensure_owned_dir(site_cache_dir, mode, shared, verbose, check_contents=True)
+        _check_ancestors(site_cache_dir, shared, trusted_uids,
+                         site_cache_dir.parent, verbose=verbose)
+    except OSError as e:
+        raise SiteCacheError(f"Cannot set up site_cache_dir {site_cache_dir}: {e}")
+    return site_cache_dir
+
+
+def _tree_is_private(path: Path, check_top: bool = True) -> bool:
+    """True if ``path`` and everything under it is owned by the caller and
+    not writable by anyone else (so its contents can be trusted).
+
+    ``check_top=False`` skips the top dir's own mode (the caller is about to
+    tighten it) but still requires it to be a real, caller-owned directory.
+    """
+    uid = os.geteuid()
+    open_bits = stat.S_IWGRP | stat.S_IWOTH
+    try:
+        st = path.lstat()
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+            return False
+        if check_top and (st.st_mode & open_bits or _has_default_acl(path)):
+            return False
+        for dirpath, dirnames, filenames in os.walk(path):
+            for name in dirnames + filenames:
+                st = os.lstat(os.path.join(dirpath, name))
+                if st.st_uid != uid or st.st_mode & open_bits:
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def describe_risk(path: Path) -> Optional[str]:
+    """Return a warning if a configured site_cache_dir is not private."""
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    if st.st_uid != os.geteuid():
+        return f"{path} is owned by another user (uid {st.st_uid})"
+    if st.st_mode & _other_write_bits(_group_shared()):
+        return f"{path} is writable by other users ({stat.filemode(st.st_mode)})"
+    return None
 
 
 def _has_default_acl(path: Path) -> Optional[bool]:
@@ -70,12 +322,13 @@ def _has_default_acl(path: Path) -> Optional[bool]:
 
 
 def _check_shared_perms(parent: Path, verbose: bool = True) -> None:
-    """Warn if ``parent`` looks unsuitable for shared use.
+    """Warn if ``parent`` (the site_cache root) looks unsuitable for shared use.
 
-    Checks the setgid bit, group-write bit, and (best effort) the
-    presence of a default ACL granting group rwx. All findings are
-    emitted as warnings; nothing is fatal, because solo users may
-    legitimately keep a private site_cache.
+    A shared root must let each user create their own per-repo subdir
+    (group-writable) without letting them rename anyone else's
+    (sticky bit). A default ACL granting group write is flagged because it
+    would make new per-repo state writable by the whole group. All findings
+    are warnings; nothing is fatal.
     """
     if not verbose or not parent.exists():
         return
@@ -85,13 +338,10 @@ def _check_shared_perms(parent: Path, verbose: bool = True) -> None:
         return
 
     warnings = []
-    if not (st.st_mode & stat.S_ISGID):
-        warnings.append("missing setgid bit (new subdirs won't inherit the group)")
-    if not (st.st_mode & stat.S_IWGRP):
-        warnings.append("not group-writable")
-    acl_ok = _has_default_acl(parent)
-    if acl_ok is False:
-        warnings.append("no default ACL granting group rwx (new files will follow each user's umask)")
+    if (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)) and not (st.st_mode & stat.S_ISVTX):
+        warnings.append("writable by others without the sticky bit (users can replace each other's dirs)")
+    if _has_default_acl(parent):
+        warnings.append("default ACL grants group write (new per-repo state would be group-writable)")
 
     if not warnings:
         return
@@ -99,12 +349,10 @@ def _check_shared_perms(parent: Path, verbose: bool = True) -> None:
     print(f"warning: {parent} may not be suitable as a shared site_cache root:")
     for w in warnings:
         print(f"  - {w}")
-    print("  To enable shared use, run (as the directory owner):")
+    print("  Recommended setup (as the directory owner):")
     print(f"    chgrp <project-group> {parent}")
-    print(f"    chmod 2775 {parent}")
-    print(f"    setfacl    -m u::rwx,g::rwx,o::rx {parent}")
-    print(f"    setfacl -d -m u::rwx,g::rwx,o::rx {parent}")
-    print("  Each user should also set 'umask 0002' before running dt/dvc.")
+    print(f"    chmod 3775 {parent}        # setgid + sticky")
+    print(f"    setfacl -k {parent}        # drop any default ACL")
 
 
 
@@ -129,7 +377,7 @@ def resolve_path(
 
     Resolution order:
       1. ``site_cache_path`` — complete path override.
-      2. ``{site_cache_root}/{name}`` — root from arg or
+      2. ``{site_cache_root}/{user}/{name}`` — root from arg or
          ``site_cache.root`` config; name defaults to project name.
 
     Args:
@@ -144,9 +392,9 @@ def resolve_path(
         SiteCacheError: If no root can be determined.
     """
     if site_cache_path:
-        return Path(site_cache_path).expanduser().resolve()
+        return _abs(site_cache_path)
 
-    root = site_cache_root or cfg.get_value(CONFIG_KEY_ROOT)
+    root = site_cache_root or _trusted_config(CONFIG_KEY_ROOT)
     if not root:
         raise SiteCacheError(
             "site_cache root not configured.\n"
@@ -156,7 +404,9 @@ def resolve_path(
         )
 
     project_name = name or utils.get_project_name()
-    return (Path(root).expanduser() / project_name).resolve()
+    if not project_name or project_name in ('.', '..') or '/' in project_name:
+        raise SiteCacheError(f"Invalid project name for site_cache_dir: {project_name!r}")
+    return _abs(root) / _current_user() / project_name
 
 
 def get_current(repo_path: Optional[Path] = None) -> Optional[Path]:
@@ -191,11 +441,14 @@ def apply_to_repo(
     repo_path: Path,
     site_cache_dir: Path,
     verbose: bool = True,
+    site_cache_root: Optional[str] = None,
 ) -> None:
     """Write ``core.site_cache_dir`` to ``.dvc/config.local``.
 
-    Creates the directory if needed. The setting is written with
-    ``--local`` so it is workspace-specific (and gitignored by DVC).
+    Creates the directory if needed (private to the caller, or to the group
+    when ``site_cache.group_shared`` is set) and refuses an existing directory
+    that the caller cannot trust. The setting is written with ``--local`` so it is
+    workspace-specific (and gitignored by DVC).
 
     Args:
         repo_path: DVC repo root.
@@ -203,26 +456,13 @@ def apply_to_repo(
         verbose: Print progress messages.
 
     Raises:
-        SiteCacheError: If ``dvc config`` fails.
+        SiteCacheError: If the directory is unsafe or ``dvc config`` fails.
     """
-    site_cache_dir = Path(site_cache_dir).expanduser().resolve()
+    problem = utils.dvc_local_config_problem(repo_path)
+    if problem:
+        raise SiteCacheError(f"Refusing to write DVC local config in {repo_path}: {problem}")
 
-    # Warn about the parent (= site_cache.root) before we touch anything;
-    # most permission problems originate there.
-    _check_shared_perms(site_cache_dir.parent, verbose=verbose)
-
-    # Create the per-repo dir with group-writable + setgid so peers can
-    # read/write and inherit the parent's group. mkdir's mode is masked
-    # by umask, so chmod explicitly afterwards (only when we created the
-    # dir — leave existing dirs untouched to avoid surprising the user).
-    created = not site_cache_dir.exists()
-    site_cache_dir.mkdir(parents=True, mode=SHARED_DIR_MODE, exist_ok=True)
-    if created:
-        try:
-            os.chmod(site_cache_dir, SHARED_DIR_MODE)
-        except OSError as e:
-            if verbose:
-                print(f"warning: could not chmod {site_cache_dir} to 2775: {e}")
+    site_cache_dir = _prepare_dir(site_cache_dir, verbose=verbose, root=site_cache_root)
 
     if verbose:
         print(f"Configuring DVC site_cache_dir: {site_cache_dir}")
@@ -274,7 +514,7 @@ def init_site_cache(
     # silently using DVC's default rather than aborting the whole
     # init/clone. This is the most common case for users who haven't
     # opted in yet.
-    if not site_cache_path and not (site_cache_root or cfg.get_value(CONFIG_KEY_ROOT)):
+    if not site_cache_path and not (site_cache_root or _trusted_config(CONFIG_KEY_ROOT)):
         if verbose:
             print(
                 "Skipping site_cache_dir setup "
@@ -284,7 +524,7 @@ def init_site_cache(
 
     repo_path = repo_path or Path.cwd()
     target = resolve_path(name, site_cache_root, site_cache_path)
-    apply_to_repo(repo_path, target, verbose=verbose)
+    apply_to_repo(repo_path, target, verbose=verbose, site_cache_root=site_cache_root)
     return target
 
 
@@ -292,6 +532,7 @@ def migrate(
     target: Path,
     repo_path: Optional[Path] = None,
     verbose: bool = True,
+    site_cache_root: Optional[str] = None,
 ) -> Path:
     """Copy the current site_cache_dir contents to ``target`` and switch DVC.
 
@@ -314,7 +555,9 @@ def migrate(
     import shutil
 
     repo_path = repo_path or Path.cwd()
-    target = Path(target).expanduser().resolve()
+
+    # Validate/create the target before copying anything into it.
+    target = _prepare_dir(target, verbose=verbose, root=site_cache_root)
 
     current = get_current(repo_path)
     if current is None:
@@ -330,13 +573,23 @@ def migrate(
         if verbose:
             print(f"site_cache_dir already set to {target}; nothing to do.")
         return target
+    elif not _tree_is_private(current):
+        # Only private contents are copied; the index is a rebuildable
+        # cache, so otherwise start empty.
+        if verbose:
+            print(f"Not copying {current}: it is not private to you. "
+                  f"DVC will rebuild the index.")
     else:
         if verbose:
             print(f"Copying {current} -> {target}")
         try:
-            shutil.copytree(current, target, dirs_exist_ok=True)
+            shutil.copytree(current, target, symlinks=True, dirs_exist_ok=True)
         except OSError as e:
             raise SiteCacheError(f"Failed to copy site_cache_dir: {e}")
+        finally:
+            # copytree copies the source dir's mode onto the target.
+            os.chmod(target, GROUP_DIR_MODE if _group_shared() else PRIVATE_DIR_MODE)
 
-    apply_to_repo(repo_path, target, verbose=verbose)
+    # Re-validates (and re-tightens: copytree copies the source dir's mode).
+    apply_to_repo(repo_path, target, verbose=verbose, site_cache_root=site_cache_root)
     return target

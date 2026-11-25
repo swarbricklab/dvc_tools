@@ -8,7 +8,7 @@ YAML config format::
 
     hosts:
       gadi-dm.nci.org.au:
-        username: ab1234
+        username: xy1234
       github.com:
         # forge — no username needed
 
@@ -22,7 +22,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -32,7 +32,7 @@ import yaml
 from ..errors import AuthError
 from ._helpers import _extract_repo_name_from_url, _short_repo_name
 from .checks import STATUS_FAIL, check_endpoints
-from .credentials import install_credentials
+from .credentials import install_credentials, secret_store_set_by_repo
 from .endpoints import (
     Endpoint,
     classify_url,
@@ -53,6 +53,7 @@ from .ssh import (
     _key_accepted_by_host,
     _key_has_passphrase,
     _write_ssh_config_stanza,
+    is_valid_ssh_user,
 )
 
 
@@ -120,6 +121,9 @@ class SetupReport:
     #: failure told users their repo had no S3 remote when it plainly did,
     #: and invited them to dismiss the real error printed underneath.
     credentials_skip_reason: Optional[str] = None
+    #: Hosts from the project's remotes that were not added to the SSH
+    #: config because the user did not agree to it.
+    ssh_hosts_skipped: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
 
@@ -129,6 +133,7 @@ def auth_setup(
     ssh_config_file: Optional[Path] = None,
     repo_url: Optional[str] = None,
     verbose: bool = False,
+    add_ssh_hosts: Optional[bool] = None,
 ) -> SetupReport:
     """Combined SSH + credentials setup driven by endpoint discovery.
 
@@ -149,6 +154,10 @@ def auth_setup(
             shallow-cloned to a temp dir purely to read its config, so
             this works from anywhere and without cloning it for real.
         verbose: Print progress.
+        add_ssh_hosts: Whether hosts named by the project's remotes that
+            are not yet in the SSH config (nor in ``config_path``) may be
+            added to it and given the key. ``None`` lists them and asks
+            when stdin is a terminal, and leaves them out otherwise.
 
     Returns:
         :class:`SetupReport` summarising what was done.
@@ -168,10 +177,19 @@ def auth_setup(
     # -- 2. Discover ALL endpoints -----------------------------------------
     if verbose:
         print("\nDiscovering endpoints ...")
+    # Answers about hosts not yet in the SSH config, shared between the
+    # import-source scan below and the SSH setup step, so each is asked once
+    # and none is contacted before the user agrees.
+    decisions: Dict[str, bool] = {}
+    may_contact = contact_gate(host_configs, ssh_config_file, add_ssh_hosts,
+                               decisions)
+
     if repo_url:
-        all_endpoints = discover_endpoints_from_repo(repo_url, verbose=verbose)
+        all_endpoints = discover_endpoints_from_repo(
+            repo_url, verbose=verbose, may_contact=may_contact)
     else:
-        all_endpoints = discover_endpoints(verbose=verbose)
+        all_endpoints = discover_endpoints(verbose=verbose,
+                                           may_contact=may_contact)
 
     # Flatten including children
     flat_eps: List[Endpoint] = []
@@ -207,6 +225,9 @@ def auth_setup(
                 default_username=username,
                 ssh_config_file=ssh_config_file,
                 verbose=verbose,
+                add_new_hosts=add_ssh_hosts,
+                skipped_hosts=report.ssh_hosts_skipped,
+                decisions=decisions,
             )
             report.ssh_results = ssh_results
         except Exception as exc:
@@ -219,7 +240,13 @@ def auth_setup(
             print("\nNo SSH/git endpoints found — skipping SSH setup.")
 
     # -- 4. Credential install (if needed) ---------------------------------
-    if has_s3:
+    if has_s3 and secret_store_set_by_repo():
+        report.skipped_credentials = True
+        report.credentials_skip_reason = (
+            "the secret store is set only by this repository's config; "
+            "check it, then run `dt auth credentials install --allow-repo-store`")
+        print(f"Skipping credential install: {report.credentials_skip_reason}")
+    elif has_s3:
         if verbose:
             print("\n--- S3 credential setup ---")
         try:
@@ -233,7 +260,8 @@ def auth_setup(
                     verbose=verbose,
                 )
             else:
-                report.credentials_installed = install_credentials(verbose=verbose)
+                report.credentials_installed = install_credentials(
+                    verbose=verbose, may_contact=may_contact)
         except AuthError as exc:
             report.errors.append(f"Credential install error: {exc}")
             if verbose:
@@ -331,12 +359,74 @@ def _prompt_username(host: str) -> str:
     return click.prompt(f"SSH username for {host}", type=str)
 
 
+def _ssh_target(url: str):
+    """How git would reach *url*: ``('local', None)``, ``('https', None)``,
+    ``('ssh', host)``, or ``('unknown', None)`` for anything else."""
+    s = str(url).strip()
+    if s.startswith(('https://', 'http://')):
+        return 'https', None
+    if s.startswith('file://') or s.startswith('/'):
+        return 'local', None
+    if '://' not in s and '::' not in s and ':' not in s.split('/', 1)[0]:
+        return 'local', None
+    if s.startswith('ssh://') or '://' not in s:
+        host = _extract_ssh_host(s)
+        if host:
+            return 'ssh', host
+    return 'unknown', None
+
+
+def contact_gate(host_configs: Dict, ssh_config_file: Path,
+                 add_new_hosts: Optional[bool], decisions: Dict[str, bool]):
+    """A ``url -> bool`` check for whether a repository URL may be fetched.
+
+    Local paths and https URLs are fine. An SSH host already in the SSH
+    config (or the ``--config`` file) is fine; any other host is asked about
+    once (see :func:`_approve_new_hosts`), with the answer kept in
+    *decisions*. A URL whose host cannot be made out is asked about as is,
+    and never fetched without a yes.
+    """
+    def may_contact(url: str) -> bool:
+        kind, host = _ssh_target(url)
+        if kind in ('local', 'https'):
+            return True
+        if kind == 'ssh' and (host in host_configs
+                              or _host_in_ssh_config(host, ssh_config_file)):
+            return True
+        key = host if kind == 'ssh' else str(url)
+        if key not in decisions:
+            decisions[key] = _approve_new_hosts(
+                [key], ssh_config_file, add_new_hosts)
+        return decisions[key]
+    return may_contact
+
+
+def _approve_new_hosts(hosts: List[str], ssh_config_file: Path,
+                       add_new_hosts: Optional[bool]) -> bool:
+    """Ask before adding *hosts* to the SSH config and deploying the key."""
+    if add_new_hosts is not None:
+        return add_new_hosts
+    listing = '\n'.join(f"  {h}" for h in hosts)
+    if not sys.stdin.isatty():
+        print(f"Not adding these hosts from the project's remotes to "
+              f"{ssh_config_file}:\n{listing}\n"
+              f"Rerun with --add-ssh-hosts to add them.")
+        return False
+    print(f"The project's remotes name these hosts, which are not in "
+          f"{ssh_config_file}:\n{listing}")
+    return click.confirm("Add them to your SSH config and set up your key "
+                         "for them?", default=False)
+
+
 def _do_ssh_setup(
     endpoints: List[Endpoint],
     host_configs: Dict[str, HostConfig],
     default_username: Optional[str],
     ssh_config_file: Path,
     verbose: bool,
+    add_new_hosts: Optional[bool] = None,
+    skipped_hosts: Optional[List[str]] = None,
+    decisions: Optional[Dict[str, bool]] = None,
 ) -> List[SSHSetupResult]:
     """SSH setup that honours the YAML host configs."""
 
@@ -362,6 +452,24 @@ def _do_ssh_setup(
     if not all_hosts:
         return []
 
+    # Hosts the user has not set up yet are added only with their say-so;
+    # the list comes from the project's remotes, not from the user.
+    decisions = {} if decisions is None else decisions
+    new_hosts = [h for h in all_hosts
+                 if h not in host_configs
+                 and not _host_in_ssh_config(h, ssh_config_file)]
+    undecided = [h for h in new_hosts if h not in decisions]
+    if undecided:
+        agreed = _approve_new_hosts(undecided, ssh_config_file, add_new_hosts)
+        decisions.update({h: agreed for h in undecided})
+    refused = [h for h in new_hosts if not decisions[h]]
+    for host in refused:
+        del all_hosts[host]
+    if skipped_hosts is not None:
+        skipped_hosts.extend(refused)
+    if not all_hosts:
+        return []
+
     # Resolve usernames (config file > CLI --username > URL > prompt)
     host_users: Dict[str, str] = {}
     for host, ep in all_hosts.items():
@@ -377,6 +485,15 @@ def _do_ssh_setup(
                 host_users[host] = url_user
             else:
                 host_users[host] = _prompt_username(host)
+
+    # Only a plain login name is ever passed to ssh or written to the config.
+    for host in list(host_users):
+        if not is_valid_ssh_user(host_users[host]):
+            print(f"  \u26a0 Skipping {host}: unusable SSH username {host_users[host]!r}")
+            del host_users[host]
+            del all_hosts[host]
+    if not all_hosts:
+        return []
 
     # Ensure ~/.ssh and keypair
     _ensure_ssh_dir(verbose=verbose)
@@ -398,13 +515,18 @@ def _do_ssh_setup(
     stanzas_written: Dict[str, bool] = {}
     for host in all_hosts:
         if not _host_in_ssh_config(host, ssh_config_file):
-            _write_ssh_config_stanza(
-                host=host,
-                user=host_users[host],
-                identity_file=key_path,
-                config_path=ssh_config_file,
-                verbose=verbose,
-            )
+            try:
+                _write_ssh_config_stanza(
+                    host=host,
+                    user=host_users[host],
+                    identity_file=key_path,
+                    config_path=ssh_config_file,
+                    verbose=verbose,
+                )
+            except ValueError as exc:
+                print(f"  \u26a0 {exc}; SSH config left unchanged for it")
+                stanzas_written[host] = False
+                continue
             stanzas_written[host] = True
         else:
             stanzas_written[host] = False
@@ -412,8 +534,15 @@ def _do_ssh_setup(
                 print(f"  SSH config stanza for {host} already exists \u2014 skipping")
 
     # Check connectivity
+    # Only hosts that are being set up are contacted.
+    def _kept(ep: Endpoint) -> bool:
+        return (ep.type in ssh_git_types
+                and _extract_ssh_host(ep.url) in all_hosts)
+
+    check_eps = [replace(ep, children=[c for c in ep.children if _kept(c)])
+                 for ep in ssh_eps if _kept(ep)]
     results_check = check_endpoints(
-        endpoints=ssh_eps,
+        endpoints=check_eps,
         type_filter=ssh_git_types,
         verbose=False,
     )
@@ -481,6 +610,9 @@ def format_setup_report(report: SetupReport) -> str:
             lines.append(f"  {icon} {r.host}: {r.message}")
     elif report.skipped_ssh:
         lines.append("\nNo SSH/git endpoints — SSH setup skipped.")
+    if report.ssh_hosts_skipped:
+        lines.append("\nNot added to SSH config (rerun with --add-ssh-hosts): "
+                     + ', '.join(report.ssh_hosts_skipped))
 
     if report.credentials_installed:
         lines.append(click.style("\nCredentials:", bold=True))

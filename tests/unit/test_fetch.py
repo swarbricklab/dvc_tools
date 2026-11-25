@@ -10,6 +10,7 @@ Organized by the new fetch flow:
 """
 
 import os
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from dt import cache_ops
 from dt import fetch
 from dt import import_data
 from dt import utils
@@ -191,6 +193,14 @@ class TestCategorizeStages:
 # Fetch Plan Tests
 # =============================================================================
 
+@pytest.fixture
+def _any_hash_ok():
+    """Plan-bookkeeping tests use placeholder hashes; skip id validation."""
+    with patch('dt.fetch._usable_hash', return_value=True):
+        yield
+
+
+@pytest.mark.usefixtures('_any_hash_ok')
 class TestSourceGroup:
     """Tests for SourceGroup dataclass."""
     
@@ -219,6 +229,7 @@ class TestSourceGroup:
         assert len(group.hashes) == 1
 
 
+@pytest.mark.usefixtures('_any_hash_ok')
 class TestFetchPlan:
     """Tests for FetchPlan dataclass."""
     
@@ -279,6 +290,7 @@ class TestFetchPlan:
         assert any('No local source: 2' in line for line in lines)
 
 
+@pytest.mark.usefixtures('_any_hash_ok')
 class TestBuildFetchPlan:
     """Tests for build_fetch_plan function."""
     
@@ -458,24 +470,42 @@ class TestExpandDirHash:
         mock_db = MagicMock()
 
         with patch('dvc_data.hashfile.tree.Tree.load', side_effect=Exception("Not found")):
-            result = fetch._expand_dir_hash('abc123.dir', mock_db)
+            result = fetch._expand_dir_hash('0123456789abcdef0123456789abcdef.dir', mock_db)
 
         assert result == []
         out = capsys.readouterr().out
-        assert 'could not read .dir manifest abc123.dir' in out
+        assert 'could not read .dir manifest 0123456789abcdef0123456789abcdef.dir' in out
 
-    def test_no_warning_for_genuinely_empty_dir(self, capsys):
+    def test_no_warning_for_genuinely_empty_dir(self, tmp_path, capsys):
         """An empty-but-readable manifest does not warn."""
-        mock_db = MagicMock()
-        empty_tree = MagicMock()
-        empty_tree.iteritems.return_value = []
+        dir_hash = hashlib.md5(b'[]').hexdigest() + '.dir'
+        path = tmp_path / dir_hash
+        path.write_bytes(b'[]')
+        db = MagicMock()
+        db.oid_to_path.return_value = str(path)
 
-        with patch('dvc_data.hashfile.tree.Tree.load', return_value=empty_tree):
-            result = fetch._expand_dir_hash('abc123.dir', mock_db)
+        result = fetch._expand_dir_hash(dir_hash, db)
 
         assert result == []
         out = capsys.readouterr().out
         assert 'could not read' not in out
+
+    def test_db_manifest_must_match_its_name(self, tmp_path):
+        """A db copy whose content differs is skipped for the next db."""
+        good = [{'md5': 'a' * 32, 'relpath': 'a.txt'}]
+        raw = json.dumps(good).encode()
+        dir_hash = hashlib.md5(raw).hexdigest() + '.dir'
+        other = tmp_path / 'other'
+        other.write_bytes(json.dumps(good + [{'md5': 'c' * 32, 'relpath': 'x'}]).encode())
+        same = tmp_path / 'same'
+        same.write_bytes(raw)
+        first, second = MagicMock(), MagicMock()
+        first.oid_to_path.return_value = str(other)
+        second.oid_to_path.return_value = str(same)
+
+        result = fetch._expand_dir_hash(dir_hash, first, fallback_db=second)
+
+        assert result == [('a' * 32, 'a.txt')]
 
 
 def _stage_blob(root, md5, content, layout):
@@ -503,15 +533,18 @@ class TestLegacyLayoutDirManifest:
     """Resolving legacy-layout (<ab>/<rest>) .dir manifests and their
     children from pure-v2, pure-v3 and mixed-layout sources (issue #195)."""
 
-    DIR_HASH = 'd41d8cd98f00b204e9800998ecf8427e.dir'
     CHILD_A = 'a' * 32
     CHILD_B = 'b' * 32
+    MANIFEST = [
+        {'md5': CHILD_A, 'relpath': 'a.txt'},
+        {'md5': CHILD_B, 'relpath': 'sub/b.txt'},
+    ]
+    # Named by its content hash, as a real .dir object is.
+    DIR_HASH = hashlib.md5(json.dumps(MANIFEST).encode()).hexdigest() + '.dir'
+    EMPTY_DIR_HASH = hashlib.md5(b'[]').hexdigest() + '.dir'
 
     def _manifest(self):
-        return [
-            {'md5': self.CHILD_A, 'relpath': 'a.txt'},
-            {'md5': self.CHILD_B, 'relpath': 'sub/b.txt'},
-        ]
+        return list(self.MANIFEST)
 
     def _expected(self):
         return sorted([(self.CHILD_A, 'a.txt'), (self.CHILD_B, 'sub/b.txt')])
@@ -530,8 +563,23 @@ class TestLegacyLayoutDirManifest:
         assert fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path) is None
 
     def test_read_manifest_empty_dir_returns_empty_list(self, tmp_path):
-        _stage_blob(tmp_path, self.DIR_HASH, [], 'v2')
-        assert fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path) == []
+        _stage_blob(tmp_path, self.EMPTY_DIR_HASH, [], 'v2')
+        assert fetch._read_dir_manifest_from_path(self.EMPTY_DIR_HASH, tmp_path) == []
+
+    @pytest.mark.parametrize('layout', ['v2', 'v3'])
+    def test_manifest_not_matching_its_name_is_ignored(self, tmp_path, capsys, layout):
+        changed = self._manifest() + [{'md5': 'c' * 32, 'relpath': 'x'}]
+        _stage_blob(tmp_path, self.DIR_HASH, changed, layout)
+        assert fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path) is None
+        assert 'does not match its name' in capsys.readouterr().out
+
+    def test_matching_copy_in_other_layout_is_used(self, tmp_path):
+        changed = self._manifest() + [{'md5': 'c' * 32, 'relpath': 'x'}]
+        _stage_blob(tmp_path, self.DIR_HASH, changed, 'v3')
+        _stage_blob(tmp_path, self.DIR_HASH, self._manifest(), 'v2')
+        children = fetch._read_dir_manifest_from_path(self.DIR_HASH, tmp_path)
+        assert ('c' * 32, 'x') not in children
+        assert (self.CHILD_A, 'a.txt') in children
 
     def test_expand_resolves_legacy_manifest_when_db_cannot(self, tmp_path, capsys):
         """A mixed source: the object DB is rooted at files/md5 (v3) and so
@@ -907,7 +955,7 @@ class TestPopulateCacheFile:
     
     def test_single_file_cached_via_hardlink(self, cache_dirs):
         """Single file is cached using hardlink."""
-        md5 = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
+        md5 = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
         
         source_dir = Path(cache_dirs['source']) / 'files' / 'md5' / md5[:2]
         source_dir.mkdir(parents=True)
@@ -962,7 +1010,7 @@ class TestPopulateCacheFile:
 
     def test_dvc_v2_layout_fallback(self, cache_dirs):
         """Falls back to DVC v2 layout for source."""
-        md5 = 'v2layout1234567890abcdef12345678'
+        md5 = 'abcdef0123456789abcdef0123456789'
         
         source_dir = Path(cache_dirs['source']) / md5[:2]
         source_dir.mkdir(parents=True)
@@ -978,6 +1026,73 @@ class TestPopulateCacheFile:
         assert result is True
         dest_file = Path(cache_dirs['dest']) / 'files' / 'md5' / md5[:2] / md5[2:]
         assert dest_file.exists()
+
+
+class TestPopulateDirObject:
+    """.dir objects are stored as checked copies of the source's bytes."""
+
+    MANIFEST = [{'md5': 'a' * 32, 'relpath': 'a.txt'}]
+    RAW = json.dumps(MANIFEST).encode()
+    DIR_HASH = hashlib.md5(RAW).hexdigest() + '.dir'
+
+    def _dest(self, root):
+        h = self.DIR_HASH[:-4]
+        return Path(root) / 'files' / 'md5' / h[:2] / (h[2:] + '.dir')
+
+    @pytest.mark.parametrize('cache_type', [None, 'symlink', 'hardlink'])
+    def test_dir_object_is_copied(self, tmp_path, cache_type):
+        src = _stage_blob(tmp_path / 'src', self.DIR_HASH, self.MANIFEST, 'v3')
+        result = cache_ops.populate_cache_file(
+            md5=self.DIR_HASH, source_cache=str(tmp_path / 'src'),
+            dest_cache=str(tmp_path / 'dst'), cache_type=cache_type)
+        dest = self._dest(tmp_path / 'dst')
+        assert result is True
+        assert not dest.is_symlink()
+        assert dest.stat().st_ino != src.stat().st_ino
+        assert dest.read_bytes() == self.RAW
+
+    @pytest.mark.parametrize('existing', ['symlink', 'hardlink', 'other'])
+    def test_existing_dest_is_replaced_with_own_copy(self, tmp_path, existing):
+        src = _stage_blob(tmp_path / 'src', self.DIR_HASH, self.MANIFEST, 'v3')
+        dest = self._dest(tmp_path / 'dst')
+        dest.parent.mkdir(parents=True)
+        if existing == 'symlink':
+            dest.symlink_to(src)
+        elif existing == 'hardlink':
+            os.link(src, dest)
+        else:
+            dest.write_bytes(b'[]')
+        result = cache_ops.populate_cache_file(
+            md5=self.DIR_HASH, source_cache=str(tmp_path / 'src'),
+            dest_cache=str(tmp_path / 'dst'))
+        assert result is True
+        assert not dest.is_symlink()
+        assert dest.stat().st_nlink == 1
+        assert dest.read_bytes() == self.RAW
+
+    def test_good_existing_dest_is_kept(self, tmp_path):
+        _stage_blob(tmp_path / 'src', self.DIR_HASH, self.MANIFEST, 'v3')
+        dest = self._dest(tmp_path / 'dst')
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(self.RAW)
+        result = cache_ops.populate_cache_file(
+            md5=self.DIR_HASH, source_cache=str(tmp_path / 'src'),
+            dest_cache=str(tmp_path / 'dst'))
+        assert result is False
+
+    def test_oversized_manifest_is_not_read(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cache_ops, 'MAX_DIR_MANIFEST_BYTES', 4)
+        src = _stage_blob(tmp_path, self.DIR_HASH, self.MANIFEST, 'v3')
+        assert cache_ops.read_dir_manifest(src, self.DIR_HASH) is None
+
+    def test_changed_dir_object_is_not_stored(self, tmp_path):
+        _stage_blob(tmp_path / 'src', self.DIR_HASH,
+                    self.MANIFEST + [{'md5': 'c' * 32, 'relpath': 'x'}], 'v3')
+        result = cache_ops.populate_cache_file(
+            md5=self.DIR_HASH, source_cache=str(tmp_path / 'src'),
+            dest_cache=str(tmp_path / 'dst'))
+        assert result is None
+        assert not os.path.lexists(self._dest(tmp_path / 'dst'))
 
 
 class TestBuildDirManifest:
@@ -1367,7 +1482,7 @@ class TestRunDvcFetch:
         assert 'network' in message
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
-        assert cmd == ['dvc', 'fetch', str(dvc_file)]
+        assert cmd == ['dvc', 'fetch', '--', str(dvc_file)]
     
     def test_failed_fetch(self, tmp_path):
         """Failed dvc fetch returns failure with error."""
@@ -1405,6 +1520,29 @@ class TestRunRepoImportNetworkFetch:
         stage.path = str(tmp_path / dvc_filename)
         stage.is_repo_import = True
         return stage
+
+    @pytest.mark.parametrize('rev,path', [
+        ('--upload-pack=x', 'data.csv'),
+        ('-ofoo', 'data.csv'),
+        ('dead beef', 'data.csv'),
+        ('deadbeef', '-r'),
+    ])
+    def test_rejects_malformed_import_metadata(self, tmp_path, rev, path):
+        """A malformed rev/path fails the stage before any subprocess runs."""
+        stage = self._make_stage(tmp_path)
+        import_info = {'url': 'git@github.com:org/repo.git', 'rev': rev, 'path': path}
+
+        with patch('dt.fetch.utils.get_import_info', return_value=import_info), \
+             patch('dt.fetch._run_dvc_fetch') as mock_fetch, \
+             patch('dt.tmp.clone_repo') as mock_clone, \
+             patch('subprocess.run') as mock_run:
+            success, message = fetch._run_repo_import_network_fetch(stage, update=True)
+
+        assert success is False
+        assert 'invalid import' in message
+        mock_run.assert_not_called()
+        mock_clone.assert_not_called()
+        mock_fetch.assert_not_called()
 
     def test_default_materialises_via_dvc_fetch_no_mutation(self, tmp_path):
         """Default (no --update): pull via dvc fetch; never run mutating dvc update."""
@@ -1534,8 +1672,20 @@ class TestRecoverImportViaSourceClone:
         mock_cfg.assert_called_once_with(clone_path, '/my/cache')
         # dvc fetch runs inside the clone, targeting the source path.
         cmd = mock_run.call_args[0][0]
-        assert cmd == ['dvc', 'fetch', 'data/dir']
+        assert cmd == ['dvc', 'fetch', '--', 'data/dir']
         assert mock_run.call_args.kwargs.get('cwd') == clone_path
+
+    @pytest.mark.parametrize('rev,path', [('-x', 'data/dir'), ('deadbeef', '--all')])
+    def test_rejects_malformed_args(self, rev, path):
+        """Malformed rev/path never reach clone_repo or dvc fetch."""
+        with patch('dt.tmp.clone_repo') as mock_clone, \
+             patch('subprocess.run') as mock_run:
+            success, msg = fetch._recover_import_via_source_clone(
+                'git@github.com:org/repo.git', path, rev, '/my/cache'
+            )
+        assert success is False
+        mock_clone.assert_not_called()
+        mock_run.assert_not_called()
 
     def test_failure_when_source_fetch_fails(self, tmp_path):
         """A failing dvc fetch in the clone returns failure, not an exception."""
@@ -1583,7 +1733,7 @@ class TestFetchUrlImport:
     def test_already_in_cache_returns_success(self, dvc_project):
         """URL import already in cache returns success without running dvc update."""
         cache = dvc_project['cache']
-        md5 = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
+        md5 = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
         
         # Create cache file (in files/md5 subdirectory)
         cache_dir = cache / 'files' / 'md5' / md5[:2]
@@ -1627,7 +1777,7 @@ class TestFetchUrlImport:
         assert 's3://bucket/data.csv' in message
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
-        assert cmd == ['dvc', 'update', str(dvc_file)]
+        assert cmd == ['dvc', 'update', '--', str(dvc_file)]
     
     def test_failed_update(self, dvc_project):
         """Failed dvc update returns failure with error."""
@@ -1732,8 +1882,7 @@ class TestFetchRemoteOption:
         with patch('dt.remote.list_remotes', return_value=[('myremote', '/data/cache', True)]), \
              patch('dt.remote.extract_local_path', return_value='/data/cache'), \
              patch('pathlib.Path.exists', return_value=True), \
-             patch('dt.fetch.fetch', return_value=[]) as mock_fetch, \
-             patch('dt.index.is_auto_sync_enabled', return_value=False):
+             patch('dt.fetch.fetch', return_value=[]) as mock_fetch:
             result = runner.invoke(cli, ['fetch', '-r', 'myremote'])
             assert result.exit_code == 0, result.output
             mock_fetch.assert_called_once()
@@ -1745,8 +1894,7 @@ class TestFetchRemoteOption:
         from dt.cli import cli
 
         runner = CliRunner()
-        with patch('dt.remote.list_remotes', return_value=[('other', '/x', False)]), \
-             patch('dt.index.is_auto_sync_enabled', return_value=False):
+        with patch('dt.remote.list_remotes', return_value=[('other', '/x', False)]):
             result = runner.invoke(cli, ['fetch', '-r', 'nope'])
             assert result.exit_code != 0
             assert "not found" in result.output
@@ -1760,7 +1908,6 @@ class TestFetchRemoteOption:
         runner = CliRunner()
         with patch('dt.remote.list_remotes', return_value=[('s3remote', 's3://bucket/path', False)]), \
              patch('dt.remote.extract_local_path', return_value=None), \
-             patch('dt.index.is_auto_sync_enabled', return_value=False), \
              patch('dt.fetch.fetch', return_value=[]) as mock_fetch:
             result = runner.invoke(cli, ['fetch', '-r', 's3remote'])
             assert result.exit_code == 0, result.output
@@ -1777,7 +1924,6 @@ class TestFetchRemoteOption:
         with patch('dt.remote.list_remotes', return_value=[('gone', '/no/such/path', False)]), \
              patch('dt.remote.extract_local_path', return_value='/no/such/path'), \
              patch('pathlib.Path.exists', return_value=False), \
-             patch('dt.index.is_auto_sync_enabled', return_value=False), \
              patch('dt.fetch.fetch', return_value=[]) as mock_fetch:
             result = runner.invoke(cli, ['fetch', '-r', 'gone'])
             assert result.exit_code == 0, result.output
@@ -1790,10 +1936,9 @@ class TestFetchRemoteOption:
         from dt.cli import cli
 
         runner = CliRunner()
-        with patch('dt.index.is_auto_sync_enabled', return_value=False):
-            result = runner.invoke(cli, ['fetch', '-r', 'myremote', '--source', '/tmp'])
-            assert result.exit_code != 0
-            assert "Cannot use --remote and --source together" in result.output
+        result = runner.invoke(cli, ['fetch', '-r', 'myremote', '--source', '/tmp'])
+        assert result.exit_code != 0
+        assert "Cannot use --remote and --source together" in result.output
 
 
 # =============================================================================
@@ -1827,7 +1972,7 @@ class TestDvcFetchFromRemote:
         with patch('subprocess.run', return_value=completed) as mock_run:
             _dvc_fetch_from_remote('myremote', targets=['data.dvc', 'model.dvc'])
             cmd = mock_run.call_args[0][0]
-            assert cmd == ['dvc', 'fetch', '-r', 'myremote', 'data.dvc', 'model.dvc']
+            assert cmd == ['dvc', 'fetch', '-r', 'myremote', '--', 'data.dvc', 'model.dvc']
 
     def test_failure(self):
         """Non-zero exit code returns failure."""
@@ -1900,7 +2045,7 @@ class TestFetchDirOnlyFromRemote:
         """All .dir hashes already in local cache returns early."""
         from dt.fetch import _fetch_dir_only_from_remote
 
-        stage = self._make_stage('data.dvc', ['abc123.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -1917,7 +2062,7 @@ class TestFetchDirOnlyFromRemote:
         from dt.fetch import _fetch_dir_only_from_remote
         from dvc_data.hashfile.hash_info import HashInfo
 
-        stage = self._make_stage('data.dvc', ['abc123.dir', 'def456.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir', 'dddddddddddddddddddddddddddddddd.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -1925,7 +2070,7 @@ class TestFetchDirOnlyFromRemote:
         mock_repo.cloud.get_remote_odb.return_value = MagicMock()
 
         mock_result = MagicMock()
-        mock_result.transferred = {HashInfo('md5', 'abc123.dir'), HashInfo('md5', 'def456.dir')}
+        mock_result.transferred = {HashInfo('md5', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'), HashInfo('md5', 'dddddddddddddddddddddddddddddddd.dir')}
         mock_result.failed = set()
 
         mock_local_odb = mock_repo.cache.local
@@ -1944,7 +2089,7 @@ class TestFetchDirOnlyFromRemote:
         from dt.fetch import _fetch_dir_only_from_remote
         from dvc_data.hashfile.hash_info import HashInfo
 
-        stage = self._make_stage('data.dvc', ['abc123.dir', 'def456.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir', 'dddddddddddddddddddddddddddddddd.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -1952,12 +2097,12 @@ class TestFetchDirOnlyFromRemote:
         mock_repo.cloud.get_remote_odb.return_value = MagicMock()
 
         mock_result = MagicMock()
-        mock_result.transferred = {HashInfo('md5', 'abc123.dir')}
-        mock_result.failed = {HashInfo('md5', 'def456.dir')}
+        mock_result.transferred = {HashInfo('md5', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir')}
+        mock_result.failed = {HashInfo('md5', 'dddddddddddddddddddddddddddddddd.dir')}
 
         mock_local_odb = mock_repo.cache.local
-        # abc123.dir transferred OK, def456.dir failed
-        mock_local_odb.exists.side_effect = lambda h: h == 'abc123.dir'
+        # aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir transferred OK, dddddddddddddddddddddddddddddddd.dir failed
+        mock_local_odb.exists.side_effect = lambda h: h == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'
 
         with patch('dvc.repo.Repo', return_value=mock_repo), \
              patch('dt.fetch._hash_in_odb', return_value=False), \
@@ -1966,11 +2111,60 @@ class TestFetchDirOnlyFromRemote:
             assert results[0][1] is False
             assert 'error' in results[0][2]
 
+    @pytest.mark.parametrize('content_ok', [True, False])
+    def test_landed_dir_objects_are_checked(self, tmp_path, content_ok):
+        """A landed .dir is kept only as its own copy, and only if it matches."""
+        from dt.fetch import _fetch_dir_only_from_remote
+        from dvc_data.hashfile.hash_info import HashInfo
+
+        raw = json.dumps([{'md5': 'a' * 32, 'relpath': 'a'}]).encode()
+        h = hashlib.md5(raw).hexdigest() + '.dir'
+        remote_file = tmp_path / 'remote_obj'
+        remote_file.write_bytes(raw if content_ok else raw + b' ')
+        landed = tmp_path / 'cache' / h
+        landed.parent.mkdir()
+        landed.symlink_to(remote_file)
+
+        stage = self._make_stage('data.dvc', [h])
+        cat = self._make_categorization([stage])
+        mock_repo = MagicMock()
+        local_odb = mock_repo.cache.local
+        local_odb.exists.return_value = True
+        local_odb.oid_to_path.return_value = str(landed)
+        mock_result = MagicMock()
+        mock_result.transferred = {HashInfo('md5', h)}
+        mock_result.failed = set()
+
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dt.fetch._hash_in_odb', return_value=False), \
+             patch('dvc_data.hashfile.transfer.transfer', return_value=mock_result):
+            results = _fetch_dir_only_from_remote('myremote', cat)
+
+        assert results[0][1] is content_ok
+        if content_ok:
+            assert not landed.is_symlink()
+            assert landed.read_bytes() == raw
+        else:
+            assert not os.path.lexists(landed)
+
+    def test_forged_dir_ids_never_reach_the_cache(self):
+        """An id that is not an md5 object never becomes a path."""
+        from dt.fetch import _fetch_dir_only_from_remote
+        stage = self._make_stage('data.dvc', ['ab/home/victim/notes.dir', '../../etc/x.dir'])
+        cat = self._make_categorization([stage])
+        mock_repo = MagicMock()
+        with patch('dvc.repo.Repo', return_value=mock_repo), \
+             patch('dvc_data.hashfile.transfer.transfer') as transfer:
+            results = _fetch_dir_only_from_remote('myremote', cat)
+        transfer.assert_not_called()
+        mock_repo.cache.local.oid_to_path.assert_not_called()
+        assert 'No .dir' in results[0][2]
+
     def test_remote_open_error(self):
         """Error opening remote ODB reported cleanly."""
         from dt.fetch import _fetch_dir_only_from_remote
 
-        stage = self._make_stage('data.dvc', ['abc123.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -1987,7 +2181,7 @@ class TestFetchDirOnlyFromRemote:
         """Hash not on remote is detected via post-transfer verification."""
         from dt.fetch import _fetch_dir_only_from_remote
 
-        stage = self._make_stage('data.dvc', ['abc123.dir'])
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'])
         cat = self._make_categorization([stage])
 
         mock_repo = MagicMock()
@@ -2015,7 +2209,7 @@ class TestFetchDirOnlyFromRemote:
         from dt.fetch import _fetch_dir_only_from_remote
         from dvc_data.hashfile.hash_info import HashInfo
 
-        stage = self._make_stage('data.dvc', ['abc123.dir'],
+        stage = self._make_stage('data.dvc', ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir'],
                                  hash_name='md5-dos2unix')
         cat = self._make_categorization([stage])
 
@@ -2026,7 +2220,7 @@ class TestFetchDirOnlyFromRemote:
         mock_repo.cloud.get_remote_odb.return_value = mock_remote_odb
 
         mock_result = MagicMock()
-        mock_result.transferred = {HashInfo('md5', 'abc123.dir')}
+        mock_result.transferred = {HashInfo('md5', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir')}
         mock_result.failed = set()
 
         # After transfer, hash exists in legacy local cache
@@ -2055,9 +2249,9 @@ class TestFetchDirOnlyFromRemote:
         from dt.fetch import _fetch_dir_only_from_remote
         from dvc_data.hashfile.hash_info import HashInfo
 
-        v2_stage = self._make_stage('old.dvc', ['v2hash.dir'],
+        v2_stage = self._make_stage('old.dvc', ['22222222222222222222222222222222.dir'],
                                     hash_name='md5-dos2unix')
-        v3_stage = self._make_stage('new.dvc', ['v3hash.dir'],
+        v3_stage = self._make_stage('new.dvc', ['33333333333333333333333333333333.dir'],
                                     hash_name='md5')
         cat = self._make_categorization([v2_stage, v3_stage])
 
@@ -2101,3 +2295,15 @@ class TestFetchDirOnlyFromRemote:
             # transfer called twice with different ODB pairs
             assert mock_transfer.call_count == 2
 
+
+
+
+class TestPlanSkipsInvalidObjectIds:
+    def test_unsafe_ids_are_not_added(self, capsys):
+        g = fetch.SourceGroup(source_path=Path('/src'), source_name='src')
+        good = 'a' * 32
+        for h in ('ab/../../x', '../../etc', 'A' * 32, good, good[:31] + 'g'):
+            g.add_hash(h, stage_name='s.dvc')
+        g.add_hashes_with_paths([('..' + 'a' * 30, 'p'), ('b' * 32 + '.dir', 'q')])
+        assert g.hashes == {good, 'b' * 32 + '.dir'}
+        assert 'skipping invalid object id' in capsys.readouterr().out
