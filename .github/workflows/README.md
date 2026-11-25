@@ -5,7 +5,7 @@ This directory contains the GitHub Actions workflows for `dvc_tools`.
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
 | [`version-check.yml`](version-check.yml) | PR to `main` | Block merges where `pyproject.toml` and `dt/__init__.py` disagree, or where the version has not been bumped relative to the merge target. |
-| [`deploy.yml`](deploy.yml) | Merge to `main` (or `workflow_dispatch`) | Build the `dt` conda environment as an OCI image (`ghcr.io/swarbricklab/dt:<version>`) on a GCP remote builder via [absconda](https://github.com/swarbricklab/absconda), then deploy that image to NCI as a Singularity environment module via [qxub](https://github.com/swarbricklab/qxub). |
+| [`deploy.yml`](deploy.yml) | Push to `main`, i.e. a merged PR (or `workflow_dispatch`) | Build the `dt` conda environment as an OCI image (`ghcr.io/swarbricklab/dt:<version>`) on a GCP remote builder via [absconda](https://github.com/swarbricklab/absconda), then deploy that image to NCI as a Singularity environment module via [qxub](https://github.com/swarbricklab/qxub). |
 
 ## Architecture (deploy.yml)
 
