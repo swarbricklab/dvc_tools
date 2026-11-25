@@ -9,13 +9,13 @@ This directory contains the GitHub Actions workflows for `dvc_tools`.
 
 ## Architecture (deploy.yml)
 
-1. **`publish` job** — runs on a self-hosted runner (label from the `RUNNER_LABEL` repository variable).
+1. **`publish` job** — runs on a GitHub-hosted runner (`ubuntu-latest`); it needs nothing from NCI.
    - Authenticates to GCP via Workload Identity Federation (org-level secrets `WIF_PROVIDER`, `SERVICE_ACCOUNT`, `PROJECT_ID`).
    - Resolves the runner's OS Login POSIX username (different SA → different username).
    - Installs absconda from `main` and configures it via `absconda config set` (no committed `absconda.yaml`).
    - Calls `absconda publish --file conda/dt.yaml ...`. Absconda generates a Dockerfile internally from the conda env spec, uploads the build context to a GCE builder VM over an IAP tunnel, runs `docker build`, and pushes to GHCR.
    - Build output is shown in a collapsed group in the job log.
-2. **`deploy` job** — also runs on the self-hosted runner; pulls the image on a NCI compute node via `qxub exec --mod absconda -- absconda deploy`, which materialises the conda env into `/opt/conda/envs/dt` and writes Singularity shim wrappers + a TCL modulefile.
+2. **`deploy` job** — runs on the self-hosted runner (label from the `RUNNER_LABEL` repository variable), which reaches NCI over SSH; pulls the image on a NCI compute node via `qxub exec --mod absconda -- absconda deploy`, which materialises the conda env into `/opt/conda/envs/dt` and writes Singularity shim wrappers + a TCL modulefile.
 
 ## Configuration
 
@@ -31,7 +31,7 @@ These are non-obvious things we hit while bringing the pipeline up. Keep this li
 - **Builder workspace permissions.** The builder's workspace dir must be writable by every OS Login user that publishes from CI.
 - **`env/` is a default Python `.gitignore` entry.** The conda env spec lives in `conda/dt.yaml` for that reason — never use `env/`.
 - **`absconda generate > Dockerfile` corrupts long lines on absconda < 0.2.6.** `Console.print` hard-wraps at the detected terminal width when stdout is redirected, snapping long `RUN` lines mid-shell. We sidestep this entirely by using `absconda publish --file conda/dt.yaml` (no Dockerfile is committed). (See [absconda#50](https://github.com/swarbricklab/absconda/pull/50).)
-- **`pip install --user` and PATH.** Self-hosted runners do not have `~/.local/bin` on `$PATH`. After `pip install --user`, append the user-base bin dir to `$GITHUB_PATH` explicitly.
+- **`pip install --user` and PATH.** The runner does not have `~/.local/bin` on `$PATH`, and its system Python refuses `--user` installs (PEP 668), so `publish` uses `actions/setup-python` first. After `pip install --user`, append the user-base bin dir to `$GITHUB_PATH` explicitly.
 - **Publish log.** The build is verbose (~1.5k lines), so it is wrapped in a collapsed Actions log group. It is not uploaded as an artifact: secret masking does not apply to artifact contents.
 - **pip wheel cache traps unpinned `git+https://` deps.** The conda env spec installs `dvc_tools` and `qxub` from git URLs. pip's wheel cache keys on URL only, so on a warm builder every subsequent build silently reuses whichever SHA was built first (we hit this when 0.5.9 still reported `dt --version` 0.5.3). The "Pin git deps to commit SHAs" step rewrites both URLs to include `@<sha>` before passing the spec to absconda — this both invalidates the cache and guarantees the image contains the same code as the workflow run.
 - **Singularity GHCR auth requires persistent credentials, not just env vars.** `absconda deploy` calls `singularity pull docker://ghcr.io/...` without explicit `--docker-username`/`--docker-password` flags, relying instead on `SINGULARITY_DOCKER_*` env vars. In practice, NCI's singularity ignores these in favour of credentials saved by `singularity remote login`. The runner is **not** an NCI host (it reaches NCI over SSH), so the deploy job:
